@@ -7,7 +7,14 @@ Use it when you want Marrow to detect the local agent/runtime environment and wi
 ```bash
 npx @getmarrow/install --dry-run
 npx @getmarrow/install --yes
+npx @getmarrow/install doctor
 ```
+
+## What's New in v0.1.1
+
+- `doctor` / `--doctor` checks whether Marrow is active without writing files.
+- Generated SDK passive runtime enables workflow gates and value summaries by default.
+- Doctor output reports missing env, missing hooks/config, self-test state, and recommended fix.
 
 ## What It Detects
 
@@ -51,6 +58,12 @@ Skip self-test:
 
 ```bash
 npx @getmarrow/install --yes --no-self-test
+```
+
+Doctor check:
+
+```bash
+MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install doctor
 ```
 
 ## Trust Model

@@ -24,6 +24,9 @@ test('parseArgs defaults to dry-run unless --yes is passed', () => {
   assert.equal(write.mode, 'sdk');
   assert.equal(write.yes, true);
   assert.equal(write.agentId, 'codex');
+
+  const doctor = parseArgs(['doctor']);
+  assert.equal(doctor.doctor, true);
 });
 
 test('parseArgs marks --key for process-list warning', () => {
@@ -104,9 +107,34 @@ test('install --yes writes passive runtime and instructions idempotently', async
   const settings = JSON.parse(fs.readFileSync(path.join(dir, '.claude', 'settings.json'), 'utf8'));
 
   assert.match(runtime, /createPassiveRuntime/);
+  assert.match(runtime, /useWorkflowGate/);
+  assert.match(runtime, /MARROW_PASSIVE_VALUE_REPORT !== 'false'/);
   assert.equal((agents.match(/marrow:passive-start/g) || []).length, 1);
   assert.ok(settings.hooks.PostToolUse);
   assert.ok(settings.hooks.UserPromptSubmit);
+});
+
+test('doctor mode never writes files and reports missing env/hooks', async () => {
+  const dir = tempDir();
+  fs.writeFileSync(path.join(dir, 'package.json'), '{}');
+  fs.writeFileSync(path.join(dir, 'AGENTS.md'), '# Agents\n');
+
+  const report = await install({
+    cwd: dir,
+    mode: 'both',
+    yes: true,
+    dryRun: false,
+    doctor: true,
+    selfTest: false,
+    apiKey: '',
+    baseUrl: 'https://api.getmarrow.ai',
+    agentId: '',
+  });
+
+  assert.equal(report.writeMode, 'doctor');
+  assert.equal(fs.existsSync(path.join(dir, '.marrow', 'passive-runtime.mjs')), false);
+  assert.deepEqual(report.doctor.missingEnv, ['MARROW_API_KEY']);
+  assert.ok(report.doctor.missingHooks.length > 0);
 });
 
 test('install auto mode does not create Claude settings when Claude is not detected', async () => {
