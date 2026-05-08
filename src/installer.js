@@ -11,6 +11,7 @@ function parseArgs(argv) {
     cwd: process.cwd(),
     yes: false,
     dryRun: false,
+    doctor: false,
     mode: 'auto',
     apiKey: process.env.MARROW_API_KEY || '',
     baseUrl: process.env.MARROW_BASE_URL || DEFAULT_BASE_URL,
@@ -23,6 +24,7 @@ function parseArgs(argv) {
     const arg = argv[i];
     if (arg === '--yes' || arg === '-y') options.yes = true;
     else if (arg === '--dry-run') options.dryRun = true;
+    else if (arg === '--doctor' || arg === 'doctor' || arg === 'check') options.doctor = true;
     else if (arg === '--json') options.json = true;
     else if (arg === '--no-self-test') options.selfTest = false;
     else if (arg === '--self-test') options.selfTest = true;
@@ -56,11 +58,13 @@ function usage() {
   return `Usage:
   npx @getmarrow/install --dry-run
   npx @getmarrow/install --yes
+  npx @getmarrow/install doctor
   npx @getmarrow/install --mcp --yes
   npx @getmarrow/install --sdk --yes
 
 Options:
   --dry-run          Print planned changes without writing
+  --doctor           Check install health without writing
   --yes, -y          Write detected config files
   --mode <mode>      auto, mcp, sdk, both, or md
   --key <key>        Marrow API key for self-test. Prefer MARROW_API_KEY because CLI args can appear in process listings.
@@ -163,8 +167,9 @@ if (apiKey && !globalThis.__MARROW_PASSIVE_RUNTIME__) {
   });
 
   const runtime = marrow.createPassiveRuntime({
-    includeValueReport: process.env.MARROW_PASSIVE_VALUE_REPORT === 'true',
+    includeValueReport: process.env.MARROW_PASSIVE_VALUE_REPORT !== 'false',
     valueReportPeriod: process.env.MARROW_VALUE_REPORT_PERIOD || '7d',
+    useWorkflowGate: process.env.MARROW_WORKFLOW_GATE !== 'false',
   });
 
   runtime.install();
@@ -179,6 +184,8 @@ MARROW_BASE_URL=${DEFAULT_BASE_URL}
 MARROW_FLEET_AGENT_ID=agent-or-fleet-id
 MARROW_ENFORCEMENT_MODE=auto
 MARROW_PASSIVE_BRIEF=auto
+MARROW_PASSIVE_VALUE_REPORT=true
+MARROW_WORKFLOW_GATE=true
 `;
 }
 
@@ -337,7 +344,7 @@ function applyPlan(plan, options) {
 
     const changed = before !== after;
     changes.push({ path: write.path, label: write.label, changed });
-    if (changed && options.yes && !options.dryRun) {
+    if (changed && options.yes && !options.dryRun && !options.doctor) {
       fs.mkdirSync(path.dirname(write.path), { recursive: true });
       fs.writeFileSync(write.path, after);
     }
@@ -432,6 +439,14 @@ function printReport(report) {
     process.stdout.write(`- health: ${report.selfTest.health || 'unknown'}\n`);
   }
 
+  if (report.writeMode === 'doctor') {
+    process.stdout.write('\nDoctor:\n');
+    process.stdout.write(`- Marrow active: ${report.doctor.active ? 'yes' : 'no'}\n`);
+    process.stdout.write(`- missing env: ${report.doctor.missingEnv.length ? report.doctor.missingEnv.join(', ') : 'none'}\n`);
+    process.stdout.write(`- missing hooks/config: ${report.doctor.missingHooks.length ? report.doctor.missingHooks.join('; ') : 'none'}\n`);
+    if (report.doctor.recommendedFix) process.stdout.write(`- recommended fix: ${report.doctor.recommendedFix}\n`);
+  }
+
   if (report.writeMode === 'dry-run') {
     process.stdout.write('\nRun with --yes to write these changes.\n');
   }
@@ -447,7 +462,7 @@ function printReport(report) {
 async function install(options) {
   const detection = detectEnvironment(options.cwd);
   const plan = buildPlan(detection, options);
-  const writeMode = options.yes && !options.dryRun ? 'write' : 'dry-run';
+  const writeMode = options.doctor ? 'doctor' : options.yes && !options.dryRun ? 'write' : 'dry-run';
   const changes = applyPlan(plan, options);
   const selfTest = await runSelfTest(options).catch((error) => ({
     skipped: false,
@@ -469,6 +484,12 @@ async function install(options) {
       mcpConfig: detection.mcpConfig,
     },
     changes,
+    doctor: {
+      active: Boolean(!selfTest.skipped && selfTest.active),
+      missingEnv: options.apiKey ? [] : ['MARROW_API_KEY'],
+      missingHooks: changes.filter((change) => change.changed).map((change) => change.label),
+      recommendedFix: selfTest.recommended_fix || (!options.apiKey ? 'Set MARROW_API_KEY, then run npx @getmarrow/install doctor.' : null),
+    },
     selfTest,
     warnings: options.keyFromArg
       ? ['Avoid --key in shared shells because command-line arguments can be visible in process listings. Prefer MARROW_API_KEY in your environment or secret manager.']
