@@ -1,0 +1,33 @@
+{
+  "name": "@getmarrow/install",
+  "version": "0.1.0",
+  "description": "Universal installer for Marrow passive agent setup.",
+  "bin": {
+    "marrow-install": "bin/marrow-install.js"
+  },
+  "main": "src/installer.js",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "marrow",
+    "mcp",
+    "installer",
+    "passive-runtime"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/getmarrow/marrow-install.git"
+  },
+  "license": "MIT",
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}
