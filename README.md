@@ -11,6 +11,27 @@ npx @getmarrow/install --repair
 npx @getmarrow/install doctor
 ```
 
+## What's New in v0.1.14
+
+v0.1.14 adds adaptive governance mode recommendations without silent auto-switching.
+
+- `npx @getmarrow/install govern` now detects project signals such as `package.json`, deploy/publish scripts, `wrangler` config, GitHub workflows, migrations, Cursor/Codex/Claude files, and MCP config.
+- When `MARROW_API_KEY` is present, the TUI asks Marrow for a recommended mode: `passive`, `pilot`, or `enforce`.
+- The TUI shows the exact reasons, confidence, and selected command before the user applies anything.
+- User choice is explicit. Marrow logs whether the recommendation was accepted or overridden, but it does not silently switch modes.
+- Policy profiles are supported by the backend/SDK/MCP so businesses can define rules like local=passive, staging=pilot, production deploys=enforce.
+
+Example recommendation:
+
+```text
+Recommended mode: pilot
+Reason:
+- Node project detected
+- Cloudflare Worker detected
+- GitHub workflow detected
+- No owner approval policy configured yet
+```
+
 ## What's New in v0.1.13
 
 v0.1.13 turns `npx @getmarrow/install govern` into an interactive terminal setup flow when run in a real TTY.

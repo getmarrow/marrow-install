@@ -105,6 +105,71 @@ function inferSurfaces(text) {
   return [...surfaces];
 }
 
+function safeJsonFile(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function detectProjectSignals(cwd = process.cwd()) {
+  const packageJsonPath = path.join(cwd, 'package.json');
+  const packageJson = safeJsonFile(packageJsonPath);
+  const packageScripts = packageJson?.scripts && typeof packageJson.scripts === 'object'
+    ? Object.keys(packageJson.scripts)
+    : [];
+  const signals = new Set();
+  const frameworks = new Set();
+  const configFiles = [];
+
+  const addFile = (relative, signal) => {
+    if (fs.existsSync(path.join(cwd, relative))) {
+      configFiles.push(relative);
+      signals.add(signal);
+    }
+  };
+
+  if (packageJson) {
+    signals.add('package_json');
+    if (packageJson.dependencies?.['@cloudflare/workers-types'] || packageJson.devDependencies?.['wrangler'] || packageJson.dependencies?.['hono']) {
+      frameworks.add('cloudflare-workers');
+    }
+  }
+  addFile('wrangler.toml', 'wrangler_config');
+  addFile('wrangler.json', 'wrangler_config');
+  addFile('wrangler.jsonc', 'wrangler_config');
+  addFile('.github/workflows', 'github_actions');
+  addFile('Dockerfile', 'container');
+  addFile('docker-compose.yml', 'container');
+  addFile('terraform', 'terraform');
+  addFile('migrations', 'database_migrations');
+  addFile('prisma', 'database_migrations');
+  addFile('drizzle', 'database_migrations');
+  addFile('AGENTS.md', 'agent_instructions');
+  addFile('CLAUDE.md', 'agent_instructions');
+  addFile('.mcp.json', 'mcp_config');
+  addFile('.cursor', 'cursor_project');
+
+  for (const script of packageScripts) {
+    if (/\b(deploy|publish|release|migrate|migration|smoke|check|test)\b/i.test(script)) {
+      signals.add(`script:${script.toLowerCase()}`);
+    }
+  }
+
+  return {
+    name: packageJson?.name || path.basename(cwd),
+    key: packageJson?.name || path.basename(cwd),
+    type: packageJson ? 'node' : fs.existsSync(path.join(cwd, 'pyproject.toml')) ? 'python' : 'workspace',
+    frameworks: [...frameworks],
+    signals: [...signals],
+    package_scripts: packageScripts.slice(0, 30),
+    config_files: configFiles.slice(0, 30),
+  };
+}
+
 function isRisky(text, type) {
   return HIGH_RISK_TERMS.test(`${type || ''} ${text || ''}`);
 }
@@ -277,6 +342,51 @@ async function preflightRuntime(options, action, type, commandText) {
       policy: options.policy,
       governed: true,
     },
+  });
+}
+
+async function recommendGovernanceMode(options, project = detectProjectSignals()) {
+  if (!options.apiKey) {
+    return {
+      ok: false,
+      skipped: true,
+      reason: 'MARROW_API_KEY missing',
+      project,
+      exact_fix: 'export MARROW_API_KEY=mrw_live_... && npx @getmarrow/install govern',
+    };
+  }
+  const action = 'configure Marrow governance mode for this project';
+  return requestJson(options, 'POST', '/v1/agent/mode/recommend', {
+    project,
+    workflow: {
+      action,
+      type: 'setup',
+      branch: process.env.GITHUB_REF_NAME || process.env.BRANCH_NAME || '',
+      environment: process.env.NODE_ENV || process.env.MARROW_GOVERN_PROFILE || options.profile,
+    },
+    agent: {
+      id: options.agentId,
+      role: 'setup',
+    },
+  });
+}
+
+async function recordGovernanceModeSelection(options, state) {
+  if (!options.apiKey || !state.recommendation?.recommended_mode) return null;
+  const selected = selectedGovernanceMode(state.modes[state.modeIndex]);
+  return requestJson(options, 'POST', '/v1/agent/mode/recommend', {
+    project: state.project,
+    workflow: {
+      action: 'selected Marrow governance mode for this project',
+      type: 'setup',
+      environment: process.env.NODE_ENV || process.env.MARROW_GOVERN_PROFILE || options.profile,
+    },
+    agent: {
+      id: options.agentId,
+      role: 'setup',
+    },
+    selected_mode: selected,
+    selection_source: selected === state.recommendation.recommended_mode ? 'accepted' : 'overridden',
   });
 }
 
@@ -473,6 +583,7 @@ function detectHarnesses(cwd = process.cwd()) {
 
 function governPanel(options) {
   const rows = detectHarnesses();
+  const project = detectProjectSignals();
   const agentId = displayText(options.agentId, 80);
   const profile = displayText(options.profile, 80);
   const policy = displayText(options.policy, 24);
@@ -487,6 +598,13 @@ function governPanel(options) {
     '',
     'Detected harnesses:',
     ...rows.map((row, index) => `  ${index + 1}. ${row.detected ? '[x]' : '[ ]'} ${row.name}  ${row.command}`),
+    '',
+    'Detected project signals:',
+    `  project=${project.name} type=${project.type}`,
+    `  signals=${project.signals.length ? project.signals.join(', ') : 'none'}`,
+    options.apiKey
+      ? '  recommendation: run interactive TUI or use --json status for live mode recommendation.'
+      : '  recommendation: export MARROW_API_KEY to get an account/fleet-backed mode recommendation.',
     '',
     'Recommended first commands:',
     `  npx @getmarrow/install run --agent ${shellQuoteDisplay(options.agentId)} --profile production --policy enforce -- codex`,
@@ -521,6 +639,13 @@ function governModes() {
   ];
 }
 
+function selectedGovernanceMode(mode) {
+  if (!mode) return 'pilot';
+  if (mode.id === 'passive') return 'passive';
+  if (mode.id === 'enforce') return 'enforce';
+  return 'pilot';
+}
+
 function commandForSelection(state, options) {
   const harness = state.harnesses[state.harnessIndex] || state.harnesses[0];
   const mode = state.modes[state.modeIndex] || state.modes[0];
@@ -535,12 +660,15 @@ function commandForSelection(state, options) {
 function buildGovernState(options, cwd = process.cwd()) {
   const harnesses = detectHarnesses(cwd);
   const firstDetected = harnesses.findIndex((harness) => harness.detected);
+  const project = detectProjectSignals(cwd);
   return {
     cursor: 0,
     harnesses,
     harnessIndex: firstDetected >= 0 ? firstDetected : 0,
     modes: governModes(),
     modeIndex: 0,
+    project,
+    recommendation: null,
     status: '',
     lastResult: '',
     confirmingSetup: false,
@@ -579,8 +707,12 @@ function renderGovernTui(state, options) {
     },
     {
       label: 'Mode',
-      value: mode.label,
-      hint: mode.description,
+      value: state.recommendation?.recommended_mode
+        ? `${mode.label}  recommended: ${state.recommendation.recommended_mode}`
+        : mode.label,
+      hint: state.recommendation?.reasons?.length
+        ? state.recommendation.reasons.slice(0, 2).join('; ')
+        : mode.description,
     },
     {
       label: 'Run passive setup + self-test',
@@ -616,6 +748,7 @@ function renderGovernTui(state, options) {
     '+------------------------------------------------------------+',
     '',
     `Agent: ${displayText(options.agentId, 36)}   Profile: ${displayText(options.profile, 24)}   API key: ${options.apiKey ? 'present' : 'missing'}`,
+    `Project: ${displayText(state.project?.name || 'workspace', 36)}   Signals: ${displayText((state.project?.signals || []).slice(0, 4).join(', ') || 'none', 52)}`,
     '',
     'Navigation: Up/Down move   Left/Right change   Enter select',
     'Exit: q, Esc, or Ctrl+C',
@@ -633,6 +766,12 @@ function renderGovernTui(state, options) {
   if (state.lastResult) {
     lines.push('');
     lines.push(displayText(state.lastResult, 500));
+  }
+  if (state.recommendation?.recommended_mode) {
+    lines.push('');
+    lines.push(`Recommended mode: ${state.recommendation.recommended_mode}  confidence=${Math.round((state.recommendation.confidence || 0) * 100)}%`);
+    for (const reason of (state.recommendation.reasons || []).slice(0, 5)) lines.push(`- ${displayText(reason, 110)}`);
+    lines.push('Apply by selecting Mode or printing the command; Marrow does not auto-switch modes silently.');
   }
   return lines.join('\n');
 }
@@ -703,6 +842,20 @@ async function runGovernInteractive(options, input = process.stdin, output = pro
   }
 
   const state = buildGovernState(options);
+  try {
+    const recommendation = await recommendGovernanceMode(options, state.project);
+    if (recommendation?.recommended_mode) {
+      state.recommendation = recommendation;
+      const recommendationModeId = recommendation.recommended_mode === 'pilot' ? 'warn' : recommendation.recommended_mode;
+      const modeIndex = state.modes.findIndex((mode) => mode.id === recommendationModeId);
+      if (modeIndex >= 0) state.modeIndex = modeIndex;
+      state.status = 'Governance recommendation loaded. Review before applying.';
+    } else if (recommendation?.skipped) {
+      state.status = `${recommendation.reason}. ${recommendation.exact_fix}`;
+    }
+  } catch (error) {
+    state.status = `Recommendation unavailable: ${error instanceof Error ? error.message : String(error)}`;
+  }
   readline.emitKeypressEvents(input);
   input.setRawMode(true);
   output.write('\x1b[?25l');
@@ -782,6 +935,7 @@ async function runGovernInteractive(options, input = process.stdin, output = pro
               state.status = 'Gate check complete.';
               state.confirmingSetup = false;
             } else if (state.cursor === 5) {
+              await recordGovernanceModeSelection(options, state).catch(() => null);
               cleanup();
               output.write(`\n${commandForSelection(state, options)}\n`);
               resolve();
@@ -847,6 +1001,9 @@ module.exports = {
   inferSurfaces,
   commandForSelection,
   buildGovernState,
+  detectProjectSignals,
+  recommendGovernanceMode,
+  recordGovernanceModeSelection,
   gateDecision,
   shouldBlock,
   governPanel,
