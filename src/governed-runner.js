@@ -3,9 +3,11 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const readline = require('node:readline');
 
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const HIGH_RISK_TERMS = /\b(deploy|prod|production|publish|release|merge|migration|migrate|secret|token|key|cloudflare|wrangler|npm publish|gh pr merge|git push|terraform apply|kubectl apply|delete|destroy|drop)\b/i;
+const GOVERN_TUI_ROW_COUNT = 7;
 function usage() {
   return `Usage:
   npx @getmarrow/install run --agent deploy-agent -- npm test
@@ -14,13 +16,14 @@ function usage() {
   npx @getmarrow/install proof --decision-id <id> --success --summary "smoke passed"
   npx @getmarrow/install status
   npx @getmarrow/install govern
+  npx @getmarrow/install govern --no-interactive
 
 Commands:
   run       Run a command through Marrow pre-action gate and automatic outcome closure
   gate      Check Marrow runtime/gate for an action without running a command
   proof     Commit an outcome/proof for an existing decision
   status    Read /v1/agent/status
-  govern    Print a TUI-style setup panel for configuring governed agent runs
+  govern    Interactive setup TUI when run in a terminal; text panel in CI/non-TTY
 
 Options:
   --agent <id>            Agent identity. Defaults to MARROW_FLEET_AGENT_ID, MARROW_AGENT_ID, or local user
@@ -36,6 +39,8 @@ Options:
   --base-url <url>        Marrow API base URL
   --key <key>             Marrow API key. Prefer MARROW_API_KEY
   --json                  Print machine-readable result after completion
+  --interactive           Force interactive govern TUI when possible
+  --no-interactive        Print govern panel instead of opening the TUI
 `;
 }
 
@@ -55,11 +60,26 @@ function redact(value) {
 
 function shellQuote(value) {
   const text = String(value || '');
-  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(text) ? text : JSON.stringify(text);
+  if (!text) return "''";
+  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(text) ? text : `'${text.replace(/'/g, "'\\''")}'`;
 }
 
 function redactedCommand(command) {
   return command.map((part) => shellQuote(redact(part))).join(' ');
+}
+
+function displayText(value, maxLength = 120) {
+  const text = redact(String(value || ''))
+    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, '')
+    .replace(/\u009d[^\u0007\u009c]*(?:\u0007|\u009c|\u001b\\)/g, '')
+    .replace(/[\u001b\u009b][[\]()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '')
+    .replace(/[\t\r\n]+/g, ' ')
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, '');
+  return text.length > maxLength ? `${text.slice(0, maxLength - 3)}...` : text;
+}
+
+function shellQuoteDisplay(value) {
+  return shellQuote(displayText(value, 240));
 }
 
 function inferType(text) {
@@ -104,6 +124,7 @@ function parseBaseOptions(argv, startIndex = 0) {
     proofFile: '',
     type: '',
     action: '',
+    interactive: null,
   };
   let i = startIndex;
   for (; i < argv.length; i += 1) {
@@ -128,6 +149,8 @@ function parseBaseOptions(argv, startIndex = 0) {
       options.apiKey = argv[++i] || options.apiKey;
       options.keyFromArg = true;
     } else if (arg === '--json') options.json = true;
+    else if (arg === '--interactive') options.interactive = true;
+    else if (arg === '--no-interactive') options.interactive = false;
     else if (arg === '--help' || arg === '-h') options.help = true;
     else if (arg.startsWith('--')) throw new Error(`Unknown option: ${arg}`);
     else break;
@@ -439,8 +462,10 @@ function detectHarnesses(cwd = process.cwd()) {
   const candidates = [
     { name: 'Codex', command: 'codex', detected: fs.existsSync(path.join(cwd, 'AGENTS.md')) || fs.existsSync(path.join(os.homedir(), '.codex')) },
     { name: 'Claude Code', command: 'claude -p', detected: fs.existsSync(path.join(cwd, 'CLAUDE.md')) || fs.existsSync(path.join(os.homedir(), '.claude.json')) },
+    { name: 'Cursor', command: 'cursor', detected: fs.existsSync(path.join(cwd, '.cursor')) || fs.existsSync(path.join(os.homedir(), '.cursor')) },
     { name: 'OpenCode', command: 'opencode', detected: fs.existsSync(path.join(cwd, 'opencode.json')) || fs.existsSync(path.join(os.homedir(), '.opencode')) },
     { name: 'OpenClaw', command: 'openclaw agent', detected: fs.existsSync(path.join(os.homedir(), '.openclaw')) },
+    { name: 'CI script', command: 'npm test', detected: fs.existsSync(path.join(cwd, 'package.json')) },
     { name: 'Custom command', command: '<your-agent-command>', detected: true },
   ];
   return candidates;
@@ -448,12 +473,15 @@ function detectHarnesses(cwd = process.cwd()) {
 
 function governPanel(options) {
   const rows = detectHarnesses();
+  const agentId = displayText(options.agentId, 80);
+  const profile = displayText(options.profile, 80);
+  const policy = displayText(options.policy, 24);
   const lines = [
     'Marrow Governed Runner',
     '',
-    `Agent:  ${options.agentId}`,
-    `Profile: ${options.profile}`,
-    `Policy:  ${options.policy}`,
+    `Agent:  ${agentId}`,
+    `Profile: ${profile}`,
+    `Policy:  ${policy}`,
     '',
     'Choose where your agent runs. Marrow governs the action before it executes.',
     '',
@@ -461,13 +489,326 @@ function governPanel(options) {
     ...rows.map((row, index) => `  ${index + 1}. ${row.detected ? '[x]' : '[ ]'} ${row.name}  ${row.command}`),
     '',
     'Recommended first commands:',
-    `  npx @getmarrow/install run --agent ${options.agentId} --profile production --policy enforce -- codex`,
+    `  npx @getmarrow/install run --agent ${shellQuoteDisplay(options.agentId)} --profile production --policy enforce -- codex`,
     `  npx @getmarrow/install run --agent deploy-agent --type deploy --policy enforce -- wrangler deploy`,
     `  npx @getmarrow/install gate "deploy production worker after tests pass"`,
     '',
     'Protected by default: deploy, merge, publish, migrations, secrets, keys, production actions.',
   ];
   return lines.join('\n');
+}
+
+function governModes() {
+  return [
+    {
+      id: 'passive',
+      label: 'Passive setup',
+      description: 'Install passive MCP/SDK/agent instructions, then run the installer self-test.',
+      policy: 'warn',
+    },
+    {
+      id: 'warn',
+      label: 'Governed pilot',
+      description: 'Wrap commands with Marrow, show gates, but do not block execution.',
+      policy: 'warn',
+    },
+    {
+      id: 'enforce',
+      label: 'Governed enforce',
+      description: 'Wrap risky commands and fail closed when Marrow blocks or requires owner approval.',
+      policy: 'enforce',
+    },
+  ];
+}
+
+function commandForSelection(state, options) {
+  const harness = state.harnesses[state.harnessIndex] || state.harnesses[0];
+  const mode = state.modes[state.modeIndex] || state.modes[0];
+  if (mode.id === 'passive') {
+    return 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install --yes';
+  }
+  const command = harness.command === '<your-agent-command>' ? '<your-command>' : harness.command;
+  const renderedCommand = command.split(/\s+/).filter(Boolean).map(shellQuote).join(' ');
+  return `MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --agent ${shellQuoteDisplay(options.agentId)} --profile ${shellQuoteDisplay(options.profile)} --policy ${shellQuoteDisplay(mode.policy)} -- ${renderedCommand}`;
+}
+
+function buildGovernState(options, cwd = process.cwd()) {
+  const harnesses = detectHarnesses(cwd);
+  const firstDetected = harnesses.findIndex((harness) => harness.detected);
+  return {
+    cursor: 0,
+    harnesses,
+    harnessIndex: firstDetected >= 0 ? firstDetected : 0,
+    modes: governModes(),
+    modeIndex: 0,
+    status: '',
+    lastResult: '',
+    confirmingSetup: false,
+    running: false,
+  };
+}
+
+function renderOptionBox(row, active) {
+  const contentWidth = 86;
+  const borderWidth = contentWidth + 2;
+  const marker = active ? '>' : ' ';
+  const borderChar = active ? '=' : '-';
+  const labelText = `[${displayText(row.label, 36)}]`;
+  const labelVisible = labelText.padEnd(38, ' ');
+  const label = `\x1b[47m\x1b[30m${labelText}\x1b[0m${' '.repeat(Math.max(0, 38 - labelText.length))}`;
+  const value = displayText(row.value, contentWidth - 39);
+  const firstLineVisible = `${labelVisible}${value}`;
+  const firstLine = `${label}${value}${' '.repeat(Math.max(0, contentWidth - firstLineVisible.length))}`;
+  const hint = displayText(row.hint, contentWidth);
+  return [
+    `${marker} +${borderChar.repeat(borderWidth)}+`,
+    `${marker} | ${firstLine} |`,
+    `${marker} | ${hint.padEnd(contentWidth, ' ')} |`,
+    `${marker} +${borderChar.repeat(borderWidth)}+`,
+  ];
+}
+
+function renderGovernTui(state, options) {
+  const harness = state.harnesses[state.harnessIndex] || state.harnesses[0];
+  const mode = state.modes[state.modeIndex] || state.modes[0];
+  const rows = [
+    {
+      label: 'Harness',
+      value: `${harness.name}${harness.detected ? ' detected' : ' not detected'} (${harness.command})`,
+      hint: 'Left/right changes the harness.',
+    },
+    {
+      label: 'Mode',
+      value: mode.label,
+      hint: mode.description,
+    },
+    {
+      label: 'Run passive setup + self-test',
+      value: state.confirmingSetup ? 'Press Enter again to run installer --yes' : 'writes local config after confirmation',
+      hint: 'Uses the existing installer path and self-test.',
+    },
+    {
+      label: 'Check Marrow status',
+      value: options.apiKey ? 'ready' : 'needs MARROW_API_KEY',
+      hint: 'Calls GET /v1/agent/status.',
+    },
+    {
+      label: 'Test before-action gate',
+      value: options.apiKey ? 'ready' : 'needs MARROW_API_KEY',
+      hint: 'Calls POST /v1/agent/runtime for a deploy-like action.',
+    },
+    {
+      label: 'Show command and exit',
+      value: 'Print selected command',
+      hint: 'Prints the command for this selection.',
+    },
+    {
+      label: 'Exit',
+      value: 'Return to shell',
+      hint: 'Press Enter, q, Esc, or Ctrl+C to leave setup.',
+    },
+  ];
+  const lines = [
+    '\x1b[2J\x1b[H',
+    '+------------------------------------------------------------+',
+    '| Marrow Governed Setup                                      |',
+    '| Passive agent governance for day-one use                   |',
+    '+------------------------------------------------------------+',
+    '',
+    `Agent: ${displayText(options.agentId, 36)}   Profile: ${displayText(options.profile, 24)}   API key: ${options.apiKey ? 'present' : 'missing'}`,
+    '',
+    'Navigation: Up/Down move   Left/Right change   Enter select',
+    'Exit: q, Esc, or Ctrl+C',
+    '',
+  ];
+  rows.forEach((row, index) => {
+    lines.push(...renderOptionBox(row, index === state.cursor), '');
+  });
+  lines.push('Recommended command:');
+  lines.push(`  ${commandForSelection(state, options)}`);
+  if (state.status) {
+    lines.push('');
+    lines.push(`Status: ${displayText(state.status, 120)}`);
+  }
+  if (state.lastResult) {
+    lines.push('');
+    lines.push(displayText(state.lastResult, 500));
+  }
+  return lines.join('\n');
+}
+
+function canUseInteractive(options, input = process.stdin, output = process.stdout) {
+  if (options.interactive === false) return false;
+  if (options.interactive === true) return Boolean(input.isTTY && output.isTTY);
+  return Boolean(input.isTTY && output.isTTY);
+}
+
+function waitForAnyKey(input = process.stdin) {
+  return new Promise((resolve) => {
+    const onKey = () => {
+      input.off('keypress', onKey);
+      resolve();
+    };
+    input.on('keypress', onKey);
+  });
+}
+
+async function runSetupSelfTest(options, input, output) {
+  if (!options.apiKey) {
+    return 'MARROW_API_KEY is missing. Create a key in your Marrow account, export it, then rerun setup.';
+  }
+  const binPath = path.resolve(__dirname, '..', 'bin', 'marrow-install.js');
+  output.write('\x1b[2J\x1b[HRunning Marrow passive setup and self-test...\n\n');
+  if (input.setRawMode) input.setRawMode(false);
+  const result = await runChild([process.execPath, binPath, '--yes'], {
+    ...process.env,
+    MARROW_API_KEY: options.apiKey,
+    MARROW_BASE_URL: options.baseUrl,
+    MARROW_FLEET_AGENT_ID: options.agentId,
+  });
+  output.write('\nPress any key to return to Marrow Governed Setup.');
+  if (input.setRawMode) input.setRawMode(true);
+  await waitForAnyKey(input);
+  return result.exitCode === 0
+    ? 'Marrow passive setup completed. Self-test output above is the source of truth.'
+    : `Marrow passive setup exited with code ${result.exitCode}. Review the output above.`;
+}
+
+async function runStatusCheck(options) {
+  if (!options.apiKey) return 'MARROW_API_KEY is missing. Status check skipped.';
+  const status = await statusOnly({ options });
+  const coverage = status.capture_coverage || {};
+  const closure = status.auto_outcome_closure || {};
+  const active = status.enabled ?? status.active ?? true;
+  const missed = Array.isArray(status.missed_hooks) && status.missed_hooks.length
+    ? ` missed hooks: ${status.missed_hooks.join(', ')}`
+    : '';
+  return `Marrow status: ${active ? 'active' : 'inactive'}; coverage=${coverage.status || coverage.summary || 'reported'}; outcomes=${closure.status || closure.summary || 'reported'}${missed}`;
+}
+
+async function runGateCheck(options) {
+  if (!options.apiKey) return 'MARROW_API_KEY is missing. Gate check skipped.';
+  const runtime = await preflightRuntime(options, 'deploy production worker after tests pass', 'deploy', 'wrangler deploy');
+  const decision = gateDecision(runtime);
+  const proof = decision.proofPack?.required
+    ? ` Proof required${decision.proofPack.missing?.length ? `; missing ${decision.proofPack.missing.join(', ')}` : ''}.`
+    : '';
+  return `Gate: ${decision.decision}${decision.required ? ' required' : ''}.${decision.exactNextAction ? ` Next: ${decision.exactNextAction}` : ''}${proof}`;
+}
+
+async function runGovernInteractive(options, input = process.stdin, output = process.stdout) {
+  if (!canUseInteractive(options, input, output)) {
+    output.write(`${governPanel(options)}\n`);
+    return;
+  }
+
+  const state = buildGovernState(options);
+  readline.emitKeypressEvents(input);
+  input.setRawMode(true);
+  output.write('\x1b[?25l');
+
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    if (input.setRawMode) input.setRawMode(false);
+    output.write('\x1b[?25h');
+  };
+
+  const render = () => {
+    output.write(renderGovernTui(state, options));
+  };
+
+  render();
+  let keyHandler;
+  try {
+    await new Promise((resolve) => {
+      keyHandler = async (str, key = {}) => {
+        if (state.running) return;
+        if (key.ctrl && key.name === 'c') {
+          cleanup();
+          resolve();
+          return;
+        }
+        if (key.name === 'q' || key.name === 'escape' || str === 'q') {
+          cleanup();
+          resolve();
+          return;
+        }
+        if (key.name === 'up') {
+          state.cursor = (state.cursor + GOVERN_TUI_ROW_COUNT - 1) % GOVERN_TUI_ROW_COUNT;
+          state.confirmingSetup = false;
+          render();
+        } else if (key.name === 'down') {
+          state.cursor = (state.cursor + 1) % GOVERN_TUI_ROW_COUNT;
+          state.confirmingSetup = false;
+          render();
+        } else if (key.name === 'left' || key.name === 'right') {
+          const direction = key.name === 'right' ? 1 : -1;
+          if (state.cursor === 0) state.harnessIndex = (state.harnessIndex + direction + state.harnesses.length) % state.harnesses.length;
+          if (state.cursor === 1) state.modeIndex = (state.modeIndex + direction + state.modes.length) % state.modes.length;
+          state.confirmingSetup = false;
+          render();
+        } else if (key.name === 'return') {
+          state.running = true;
+          try {
+            if (state.cursor === 0) {
+              state.harnessIndex = (state.harnessIndex + 1) % state.harnesses.length;
+              state.status = 'Harness selected.';
+              state.confirmingSetup = false;
+            } else if (state.cursor === 1) {
+              state.modeIndex = (state.modeIndex + 1) % state.modes.length;
+              state.status = 'Mode selected.';
+              state.confirmingSetup = false;
+            } else if (state.cursor === 2) {
+              if (!state.confirmingSetup) {
+                state.confirmingSetup = true;
+                state.status = 'Confirm passive setup.';
+              } else {
+                state.lastResult = await runSetupSelfTest(options, input, output);
+                state.status = 'Passive setup attempted.';
+                state.confirmingSetup = false;
+              }
+            } else if (state.cursor === 3) {
+              state.status = 'Checking Marrow status...';
+              render();
+              state.lastResult = await runStatusCheck(options);
+              state.status = 'Status check complete.';
+              state.confirmingSetup = false;
+            } else if (state.cursor === 4) {
+              state.status = 'Testing before-action gate...';
+              render();
+              state.lastResult = await runGateCheck(options);
+              state.status = 'Gate check complete.';
+              state.confirmingSetup = false;
+            } else if (state.cursor === 5) {
+              cleanup();
+              output.write(`\n${commandForSelection(state, options)}\n`);
+              resolve();
+              return;
+            } else if (state.cursor === 6) {
+              cleanup();
+              resolve();
+              return;
+            }
+          } catch (error) {
+            state.lastResult = `Error: ${error instanceof Error ? error.message : String(error)}`;
+            state.status = 'Action failed.';
+            state.confirmingSetup = false;
+          } finally {
+            state.running = false;
+            if (!cleaned) render();
+          }
+        }
+      };
+      input.on('keypress', keyHandler);
+    });
+  } finally {
+    if (keyHandler) input.off('keypress', keyHandler);
+    if (input.pause) input.pause();
+    cleanup();
+    output.write('\n');
+  }
 }
 
 async function runCli(argv) {
@@ -487,7 +828,7 @@ async function runCli(argv) {
   else if (parsed.command === 'proof') result = await proofOnly(parsed);
   else if (parsed.command === 'status') result = await statusOnly(parsed);
   else if (parsed.command === 'govern') {
-    process.stdout.write(`${governPanel(parsed.options)}\n`);
+    await runGovernInteractive(parsed.options);
     return;
   }
 
@@ -504,12 +845,19 @@ module.exports = {
   redactedCommand,
   inferType,
   inferSurfaces,
+  commandForSelection,
+  buildGovernState,
   gateDecision,
   shouldBlock,
   governPanel,
+  renderGovernTui,
+  canUseInteractive,
   runGoverned,
   gateOnly,
   proofOnly,
   statusOnly,
+  runStatusCheck,
+  runGateCheck,
+  runGovernInteractive,
   runCli,
 };

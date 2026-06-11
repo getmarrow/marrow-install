@@ -11,6 +11,20 @@ npx @getmarrow/install --repair
 npx @getmarrow/install doctor
 ```
 
+## What's New in v0.1.13
+
+v0.1.13 turns `npx @getmarrow/install govern` into an interactive terminal setup flow when run in a real TTY.
+
+- Select Codex, Claude Code, Cursor, OpenCode, OpenClaw, CI scripts, or a custom command with arrow keys.
+- Choose passive setup, governed pilot mode, or governed enforce mode.
+- Run passive setup + self-test from the TUI after explicit confirmation.
+- Check Marrow status and test the before-action gate from the same screen.
+- Print the exact command for the selected harness/mode so users know what to run next.
+- Exit cleanly with `q`, `Esc`, or `Ctrl+C`.
+- CI/non-TTY usage remains stable with `npx @getmarrow/install govern --no-interactive`.
+
+This keeps Marrow passive-first: install once, verify Marrow is active, then let agents use the runtime/gate path automatically for risky work.
+
 ## What's New in v0.1.12
 
 v0.1.12 adds the Marrow governed runner for businesses that want agent governance without replacing their existing harness.
@@ -30,6 +44,12 @@ Preview the detected harnesses and protected command examples:
 
 ```bash
 npx @getmarrow/install govern
+```
+
+In a real terminal, this opens the interactive setup flow. In CI or scripts, use:
+
+```bash
+npx @getmarrow/install govern --no-interactive
 ```
 
 Run a harmless command through Marrow:
