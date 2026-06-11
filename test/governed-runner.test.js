@@ -1,14 +1,20 @@
 const assert = require('node:assert/strict');
+const { PassThrough, Writable } = require('node:stream');
 const test = require('node:test');
 
 const {
   gateDecision,
   governPanel,
+  buildGovernState,
+  canUseInteractive,
+  commandForSelection,
   inferSurfaces,
   inferType,
   parseArgs,
   redact,
   redactedCommand,
+  renderGovernTui,
+  runGovernInteractive,
   shouldBlock,
 } = require('../src/governed-runner');
 
@@ -79,7 +85,135 @@ test('governPanel presents harness selection without becoming a model host', () 
   assert.match(panel, /Marrow Governed Runner/);
   assert.match(panel, /Codex/);
   assert.match(panel, /Claude Code/);
+  assert.match(panel, /Cursor/);
+  assert.match(panel, /CI script/);
   assert.match(panel, /Custom command/);
   assert.match(panel, /Marrow governs the action before it executes/);
   assert.match(panel, /npx @getmarrow\/install run --agent codex-bob/);
+});
+
+test('govern interactive options are parsed and non-tty stays text-safe', () => {
+  const interactive = parseArgs(['govern', '--interactive']);
+  assert.equal(interactive.options.interactive, true);
+
+  const nonInteractive = parseArgs(['govern', '--no-interactive']);
+  assert.equal(nonInteractive.options.interactive, false);
+
+  assert.equal(canUseInteractive({ interactive: false }, { isTTY: true }, { isTTY: true }), false);
+  assert.equal(canUseInteractive({ interactive: true }, { isTTY: false }, { isTTY: true }), false);
+  assert.equal(canUseInteractive({ interactive: null }, { isTTY: true }, { isTTY: true }), true);
+});
+
+test('govern TUI render shows passive and governed commands', () => {
+  const options = {
+    agentId: 'codex-bob',
+    profile: 'production',
+    policy: 'enforce',
+    apiKey: 'mrw_live_placeholder',
+  };
+  const state = buildGovernState(options, process.cwd());
+  const passiveCommand = commandForSelection(state, options);
+  assert.match(passiveCommand, /npx @getmarrow\/install --yes/);
+
+  state.modeIndex = 2;
+  const governedCommand = commandForSelection(state, options);
+  assert.match(governedCommand, /npx @getmarrow\/install run --agent codex-bob/);
+  assert.match(governedCommand, /--policy enforce/);
+
+  const screen = renderGovernTui(state, options);
+  assert.match(screen, /Marrow Governed Setup/);
+  assert.match(screen, /Exit: q, Esc, or Ctrl\+C/);
+  assert.match(screen, /\[Run passive setup \+ self-test\]/);
+  assert.match(screen, /\[Test before-action gate\]/);
+  assert.match(screen, /\[Exit\]/);
+  assert.match(screen, /Return to shell/);
+  assert.match(screen, /Recommended command:/);
+});
+
+test('govern generated commands shell-quote dynamic arguments', () => {
+  const options = {
+    agentId: 'codex; echo injected',
+    profile: 'prod $(whoami)',
+    policy: 'enforce',
+    apiKey: '',
+  };
+  const state = buildGovernState(options, process.cwd());
+  state.modeIndex = 2;
+
+  const command = commandForSelection(state, options);
+  assert.match(command, /--agent 'codex; echo injected'/);
+  assert.match(command, /--profile 'prod \$\(whoami\)'/);
+  assert.doesNotMatch(command, /--agent codex; echo injected --profile prod \$\(whoami\)/);
+
+  state.harnessIndex = state.harnesses.findIndex((harness) => harness.name === 'Custom command');
+  const customCommand = commandForSelection(state, options);
+  assert.match(customCommand, /-- '<your-command>'$/);
+});
+
+test('govern generated commands strip terminal control characters from display args', () => {
+  const options = {
+    agentId: `codex${String.fromCharCode(27)}[31m-red\nnext${String.fromCharCode(0x9d)}0;c1${String.fromCharCode(0x9c)}`,
+    profile: `prod\tstage${String.fromCharCode(27)}]0;bad${String.fromCharCode(7)}${String.fromCharCode(0x9d)}1;c1${String.fromCharCode(0x9c)}`,
+    policy: 'enforce',
+    apiKey: '',
+  };
+  const state = buildGovernState(options, process.cwd());
+  state.modeIndex = 2;
+
+  const command = commandForSelection(state, options);
+  assert.doesNotMatch(command, /[\x00-\x1f\x7f-\x9f]/);
+  assert.match(command, /--agent 'codex-red next'/);
+  assert.match(command, /--profile 'prod stage'/);
+});
+
+test('govern rendered output strips terminal control characters', () => {
+  const options = {
+    agentId: `codex${String.fromCharCode(27)}[31m-red${String.fromCharCode(0x9d)}0;bad${String.fromCharCode(7)}`,
+    profile: `prod${String.fromCharCode(27)}]0;bad${String.fromCharCode(7)}${String.fromCharCode(0x9d)}1;c1${String.fromCharCode(0x9c)}`,
+    policy: 'enforce',
+    apiKey: '',
+  };
+  const state = buildGovernState(options, process.cwd());
+  state.modeIndex = 2;
+
+  const interactive = renderGovernTui(state, options);
+  const panel = governPanel(options);
+  assert.doesNotMatch(interactive, /[\x07\x9c\x9d]/);
+  assert.doesNotMatch(panel, /[\x1b\x07\x9b-\x9d]/);
+
+  const recommended = interactive.split('Recommended command:')[1];
+  assert.doesNotMatch(recommended, /[\x1b\x07\x9b-\x9d]/);
+  assert.match(panel, /Agent:\s+codex-red/);
+  assert.match(panel, /--agent codex-red/);
+});
+
+test('govern TUI exit row does not redraw after cleanup', async () => {
+  const input = new PassThrough();
+  input.isTTY = true;
+  input.setRawMode = () => {};
+
+  let output = '';
+  const stdout = new Writable({
+    write(chunk, encoding, callback) {
+      output += chunk.toString();
+      callback();
+    },
+  });
+  stdout.isTTY = true;
+
+  const run = runGovernInteractive({
+    agentId: 'codex-bob',
+    profile: 'production',
+    policy: 'enforce',
+    apiKey: '',
+    interactive: true,
+  }, input, stdout);
+
+  await new Promise((resolve) => setImmediate(resolve));
+  for (let i = 0; i < 6; i += 1) input.emit('keypress', '', { name: 'down' });
+  input.emit('keypress', '', { name: 'return' });
+  await run;
+
+  const afterCursorRestore = output.slice(output.lastIndexOf('\x1b[?25h') + '\x1b[?25h'.length);
+  assert.doesNotMatch(afterCursorRestore, /Marrow Governed Setup/);
 });
