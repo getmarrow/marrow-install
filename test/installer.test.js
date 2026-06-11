@@ -8,7 +8,9 @@ const {
   buildPlan,
   detectEnvironment,
   install,
+  inspectNpmTokenConfig,
   parseArgs,
+  runSelfTest,
 } = require('../src/installer');
 
 function tempDir() {
@@ -27,6 +29,10 @@ test('parseArgs defaults to dry-run unless --yes is passed', () => {
 
   const doctor = parseArgs(['doctor']);
   assert.equal(doctor.doctor, true);
+
+  const repair = parseArgs(['--repair']);
+  assert.equal(repair.repair, true);
+  assert.equal(repair.yes, true);
 });
 
 test('parseArgs marks --key for process-list warning', () => {
@@ -107,11 +113,106 @@ test('install --yes writes passive runtime and instructions idempotently', async
   const settings = JSON.parse(fs.readFileSync(path.join(dir, '.claude', 'settings.json'), 'utf8'));
 
   assert.match(runtime, /createPassiveRuntime/);
+  assert.match(runtime, /useAgentRuntime/);
   assert.match(runtime, /useWorkflowGate/);
+  assert.match(runtime, /requireOutcomeClosure/);
   assert.match(runtime, /MARROW_PASSIVE_VALUE_REPORT !== 'false'/);
   assert.equal((agents.match(/marrow:passive-start/g) || []).length, 1);
   assert.ok(settings.hooks.PostToolUse);
   assert.ok(settings.hooks.UserPromptSubmit);
+});
+
+test('doctor detects npm token config mismatches without leaking token values', async () => {
+  const dir = tempDir();
+  const home = tempDir();
+  fs.mkdirSync(path.join(home, '.openclaw', 'credentials'), { recursive: true });
+  fs.writeFileSync(path.join(home, '.openclaw', '.env'), 'NPM_TOKEN=npm_new_secret_123456789\n');
+  fs.writeFileSync(path.join(home, '.npmrc'), '//registry.npmjs.org/:_authToken=npm_old_secret_123456789\n', { mode: 0o600 });
+
+  const originalHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const report = await install({
+      cwd: dir,
+      mode: 'md',
+      yes: false,
+      dryRun: true,
+      doctor: true,
+      selfTest: false,
+      apiKey: 'mrw_test_key',
+      baseUrl: 'https://api.getmarrow.ai',
+      agentId: '',
+    });
+
+    const text = JSON.stringify(report);
+    assert.equal(report.configDiagnostics.npm_token.mismatch, true);
+    assert.equal(report.configDiagnostics.npm_token.repairable, true);
+    assert.doesNotMatch(text, /npm_new_secret|npm_old_secret/);
+    assert.match(report.doctor.recommendedFix, /--repair/);
+  } finally {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+  }
+});
+
+test('repair syncs npmrc token from active OpenClaw token source', async () => {
+  const dir = tempDir();
+  const home = tempDir();
+  fs.mkdirSync(path.join(home, '.openclaw'), { recursive: true });
+  fs.writeFileSync(path.join(home, '.openclaw', '.env'), 'NPM_TOKEN=npm_new_secret_123456789\n');
+  fs.writeFileSync(path.join(home, '.npmrc'), 'prefix=/tmp/npm\n//registry.npmjs.org/:_authToken=npm_old_secret_123456789\n', { mode: 0o600 });
+  fs.chmodSync(path.join(home, '.npmrc'), 0o644);
+
+  const originalHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const report = await install({
+      cwd: dir,
+      mode: 'md',
+      yes: true,
+      repair: true,
+      dryRun: false,
+      selfTest: false,
+      apiKey: 'mrw_test_key',
+      baseUrl: 'https://api.getmarrow.ai',
+      agentId: '',
+    });
+    const npmrc = fs.readFileSync(path.join(home, '.npmrc'), 'utf8');
+    const npmrcMode = fs.statSync(path.join(home, '.npmrc')).mode & 0o777;
+    const backupMode = fs.statSync(path.join(home, '.npmrc.marrow-backup')).mode & 0o777;
+    const diagnostics = inspectNpmTokenConfig();
+
+    assert.equal(report.configRepairs[0].type, 'npm_token_npmrc_sync');
+    assert.equal(report.configRepairs[0].changed, true);
+    assert.match(npmrc, /prefix=\/tmp\/npm/);
+    assert.match(npmrc, /npm_new_secret_123456789/);
+    assert.equal(npmrcMode, 0o600);
+    assert.equal(backupMode, 0o600);
+    assert.equal(diagnostics.safe.npm_token.mismatch, false);
+  } finally {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+  }
+});
+
+test('repair dry-run remains dry-run and does not write files', async () => {
+  const dir = tempDir();
+  fs.writeFileSync(path.join(dir, 'package.json'), '{}');
+
+  const report = await install({
+    cwd: dir,
+    mode: 'sdk',
+    yes: true,
+    repair: true,
+    dryRun: true,
+    selfTest: false,
+    apiKey: '',
+    baseUrl: 'https://api.getmarrow.ai',
+    agentId: '',
+  });
+
+  assert.equal(report.writeMode, 'dry-run');
+  assert.equal(fs.existsSync(path.join(dir, '.marrow', 'passive-runtime.mjs')), false);
 });
 
 test('doctor mode never writes files and reports missing env/hooks', async () => {
@@ -137,6 +238,52 @@ test('doctor mode never writes files and reports missing env/hooks', async () =>
   assert.ok(report.doctor.missingHooks.length > 0);
 });
 
+test('repair mode writes config and reports self-test remediation state', async () => {
+  const dir = tempDir();
+  fs.writeFileSync(path.join(dir, 'package.json'), '{}');
+  fs.writeFileSync(path.join(dir, 'AGENTS.md'), '# Agents\n');
+
+  const report = await install({
+    cwd: dir,
+    mode: 'both',
+    yes: true,
+    repair: true,
+    dryRun: false,
+    selfTest: false,
+    apiKey: '',
+    baseUrl: 'https://api.getmarrow.ai',
+    agentId: '',
+  });
+
+  assert.equal(report.writeMode, 'repair');
+  assert.equal(fs.existsSync(path.join(dir, '.marrow', 'passive-runtime.mjs')), true);
+  assert.equal(report.remediation.attempted, true);
+  assert.equal(report.remediation.fixedConfig, true);
+});
+
+test('doctor reports likely env files when MARROW_API_KEY is not loaded', async () => {
+  const dir = tempDir();
+  fs.mkdirSync(path.join(dir, '.marrow'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.marrow', 'env'), 'MARROW_API_KEY=mrw_live_placeholder\n');
+
+  const report = await install({
+    cwd: dir,
+    mode: 'md',
+    yes: false,
+    dryRun: true,
+    selfTest: true,
+    apiKey: '',
+    baseUrl: 'https://api.getmarrow.ai',
+    agentId: '',
+  });
+
+  assert.equal(report.selfTest.skipped, true);
+  assert.match(report.selfTest.exact_fix, /--repair/);
+  assert.ok(report.doctor.envHints.some((hint) => hint.endsWith(path.join('.marrow', 'env'))));
+  assert.match(report.doctor.recommendedFix, /trusted secret storage/);
+  assert.doesNotMatch(report.doctor.recommendedFix, /set -a;\s*\./);
+});
+
 test('install auto mode does not create Claude settings when Claude is not detected', async () => {
   const dir = tempDir();
   fs.writeFileSync(path.join(dir, 'package.json'), '{}');
@@ -155,4 +302,61 @@ test('install auto mode does not create Claude settings when Claude is not detec
 
   assert.equal(fs.existsSync(path.join(dir, '.claude', 'settings.json')), false);
   assert.equal(fs.existsSync(path.join(dir, '.mcp.json')), true);
+});
+
+test('self-test returns first five-minute value signal and proof', async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async (url) => {
+    const href = String(url);
+    if (href.endsWith('/v1/agent/think')) {
+      return new Response(JSON.stringify({ data: { decision_id: 'dec_install_value' } }), { status: 200 });
+    }
+    if (href.endsWith('/v1/agent/commit')) {
+      return new Response(JSON.stringify({ data: { ok: true } }), { status: 200 });
+    }
+    if (href.endsWith('/v1/agent/status')) {
+      return new Response(JSON.stringify({ data: {
+        ok: true,
+        enabled: true,
+        health: 'healthy',
+        capture_coverage: { decisions: true, tools: 'detected', commands: 'detected', deploys: 'unknown', publishes: 'unknown' },
+        auto_outcome_closure: { state: 'active' },
+      } }), { status: 200 });
+    }
+    if (href.endsWith('/v1/agent/runtime')) {
+      return new Response(JSON.stringify({ data: {
+        ok: true,
+        exact_next_action: 'Use the safe deploy playbook before continuing.',
+        before_you_act: 'Before continuing, reuse the safe deploy lesson.',
+      } }), { status: 200 });
+    }
+    if (href.includes('/v1/analytics/agent-performance')) {
+      return new Response(JSON.stringify({ data: {
+        avoided_mistakes: 1,
+        reused_winning_decisions: 2,
+        prevented_bad_actions: 1,
+        token_time_saved_estimate: { estimated_tokens_saved: 6600, estimated_minutes_saved: 46 },
+        agent_reliability_score: 0.91,
+      } }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ error: 'unexpected url' }), { status: 404 });
+  };
+
+  try {
+    const result = await runSelfTest({
+      selfTest: true,
+      apiKey: 'mrw_test_key',
+      baseUrl: 'https://api.getmarrow.ai',
+      agentId: 'installer-test',
+    });
+    assert.equal(result.first_value_signal.active, true);
+    assert.match(result.first_value_signal.headline, /Marrow active/);
+    assert.ok(result.first_value_signal.captured.includes('decisions'));
+    assert.ok(result.first_value_signal.captured.includes('tools'));
+    assert.match(result.first_value_signal.first_lesson, /safe deploy lesson/);
+    assert.ok(result.first_value_signal.value_proof.some((line) => line.includes('avoided mistake')));
+    assert.equal(result.performance_proof.estimated_tokens_saved, 6600);
+  } finally {
+    global.fetch = originalFetch;
+  }
 });
