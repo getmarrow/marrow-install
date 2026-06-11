@@ -1,4 +1,7 @@
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const { PassThrough, Writable } = require('node:stream');
 const test = require('node:test');
 
@@ -8,6 +11,7 @@ const {
   buildGovernState,
   canUseInteractive,
   commandForSelection,
+  detectProjectSignals,
   inferSurfaces,
   inferType,
   parseArgs,
@@ -92,6 +96,26 @@ test('governPanel presents harness selection without becoming a model host', () 
   assert.match(panel, /npx @getmarrow\/install run --agent codex-bob/);
 });
 
+test('detectProjectSignals finds deploy and Cloudflare project evidence', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-govern-signals-'));
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
+    name: 'marrow-api',
+    scripts: { deploy: 'wrangler deploy', test: 'vitest run' },
+    devDependencies: { wrangler: '^4.0.0' },
+  }));
+  fs.writeFileSync(path.join(dir, 'wrangler.toml'), 'name = "marrow-api"\n');
+  fs.mkdirSync(path.join(dir, '.github', 'workflows'), { recursive: true });
+
+  const signals = detectProjectSignals(dir);
+  assert.equal(signals.name, 'marrow-api');
+  assert.equal(signals.type, 'node');
+  assert.ok(signals.frameworks.includes('cloudflare-workers'));
+  assert.ok(signals.signals.includes('package_json'));
+  assert.ok(signals.signals.includes('wrangler_config'));
+  assert.ok(signals.signals.includes('github_actions'));
+  assert.ok(signals.signals.includes('script:deploy'));
+});
+
 test('govern interactive options are parsed and non-tty stays text-safe', () => {
   const interactive = parseArgs(['govern', '--interactive']);
   assert.equal(interactive.options.interactive, true);
@@ -112,6 +136,11 @@ test('govern TUI render shows passive and governed commands', () => {
     apiKey: 'mrw_live_placeholder',
   };
   const state = buildGovernState(options, process.cwd());
+  state.recommendation = {
+    recommended_mode: 'pilot',
+    confidence: 0.82,
+    reasons: ['Cloudflare Worker detected', 'No owner approval policy configured yet'],
+  };
   const passiveCommand = commandForSelection(state, options);
   assert.match(passiveCommand, /npx @getmarrow\/install --yes/);
 
@@ -128,6 +157,8 @@ test('govern TUI render shows passive and governed commands', () => {
   assert.match(screen, /\[Exit\]/);
   assert.match(screen, /Return to shell/);
   assert.match(screen, /Recommended command:/);
+  assert.match(screen, /Recommended mode: pilot/);
+  assert.match(screen, /Cloudflare Worker detected/);
 });
 
 test('govern generated commands shell-quote dynamic arguments', () => {
