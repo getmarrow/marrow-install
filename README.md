@@ -15,7 +15,7 @@ npx @getmarrow/install doctor
 
 v0.1.14 adds adaptive governance mode recommendations without silent auto-switching.
 
-- `npx @getmarrow/install govern` now detects project signals such as `package.json`, deploy/publish scripts, `wrangler` config, GitHub workflows, migrations, Cursor/Codex/Claude files, and MCP config.
+- `npx @getmarrow/install govern` now detects project signals such as `package.json`, deploy/publish scripts, platform config files, GitHub workflows, migrations, Cursor/Codex/Claude files, and MCP config.
 - When `MARROW_API_KEY` is present, the TUI asks Marrow for a recommended mode: `passive`, `pilot`, or `enforce`.
 - The TUI shows the exact reasons, confidence, and selected command before the user applies anything.
 - User choice is explicit. Marrow logs whether the recommendation was accepted or overridden, but it does not silently switch modes.
@@ -27,7 +27,7 @@ Example recommendation:
 Recommended mode: pilot
 Reason:
 - Node project detected
-- Cloudflare Worker detected
+- Edge service detected
 - GitHub workflow detected
 - No owner approval policy configured yet
 ```
@@ -82,7 +82,7 @@ MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --agent codex-prod --prof
 Gate a production action before the agent executes it:
 
 ```bash
-MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install gate "deploy production worker after tests pass"
+MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install gate "deploy production service after tests pass"
 ```
 
 Wrap a real deploy, publish, merge, or migration command only after the agent has the required proof:
@@ -93,7 +93,7 @@ MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run \
   --type deploy \
   --profile production \
   --policy enforce \
-  -- wrangler deploy
+  -- npm run deploy
 ```
 
 Use `--policy warn` for pilot mode and `--fail-open` only for non-production local workflows where Marrow should never block execution.
