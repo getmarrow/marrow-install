@@ -11,6 +11,16 @@ npx @getmarrow/install --repair
 npx @getmarrow/install doctor
 ```
 
+## What's New in v0.1.18
+
+v0.1.18 makes Marrow key loading more reliable for agents after install.
+
+- Installer, SDK passive runtime, and MCP hooks now all recognize the same key locations: process env, MCP/agent secret env, `.marrow/env`, `.marrow/env.local`, `.env`, `.env.local`, `~/.marrow/env`, and `~/.marrow/env.local`.
+- `MARROW_API_KEY` remains the canonical variable. `MARROW_KEY` is accepted as an alias for fleet runners and secret managers.
+- `npx @getmarrow/install doctor` now reports whether a key is loaded, where a likely key file exists, and the exact repair command without printing the key.
+- Generated `.marrow/passive-runtime.mjs` loads `.marrow/env` before deciding Marrow is missing, so agents keep logging even when the shell did not export the key.
+- Full keys are never printed in diagnostics. Keep `.marrow/env` out of git and set file permissions to owner-only when possible.
+
 ## What's New in v0.1.17
 
 v0.1.17 expands the Govern TUI harness addon coverage while preserving adaptive mode recommendations.
