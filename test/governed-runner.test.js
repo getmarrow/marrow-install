@@ -6,6 +6,7 @@ const { PassThrough, Writable } = require('node:stream');
 const test = require('node:test');
 
 const {
+  detectHarnesses,
   gateDecision,
   governPanel,
   buildGovernState,
@@ -90,10 +91,46 @@ test('governPanel presents harness selection without becoming a model host', () 
   assert.match(panel, /Codex/);
   assert.match(panel, /Claude Code/);
   assert.match(panel, /Cursor/);
-  assert.match(panel, /CI script/);
+  assert.match(panel, /Gemini CLI/);
+  assert.match(panel, /Grok CLI/);
+  assert.match(panel, /DeepSeek CLI/);
+  assert.match(panel, /Hermes/);
+  assert.match(panel, /GLM CLI/);
+  assert.match(panel, /Qwen CLI/);
+  assert.match(panel, /MCP-compatible client/);
+  assert.match(panel, /CI scripts/);
   assert.match(panel, /Custom command/);
   assert.match(panel, /Marrow governs the action before it executes/);
   assert.match(panel, /npx @getmarrow\/install run --agent codex-bob/);
+});
+
+test('detectHarnesses recognizes popular agent harness marker files', () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-'));
+  fs.mkdirSync(path.join(cwd, '.cursor'));
+  fs.writeFileSync(path.join(cwd, 'GEMINI.md'), '# Gemini agent notes\n');
+  fs.writeFileSync(path.join(cwd, 'GROK.md'), '# Grok agent notes\n');
+  fs.writeFileSync(path.join(cwd, 'DEEPSEEK.md'), '# DeepSeek agent notes\n');
+  fs.writeFileSync(path.join(cwd, 'HERMES.md'), '# Hermes agent notes\n');
+  fs.writeFileSync(path.join(cwd, 'GLM.md'), '# GLM agent notes\n');
+  fs.writeFileSync(path.join(cwd, 'QWEN.md'), '# Qwen agent notes\n');
+  fs.writeFileSync(path.join(cwd, '.mcp.json'), '{}\n');
+
+  const detected = detectHarnesses(cwd)
+    .filter((candidate) => candidate.detected)
+    .map((candidate) => candidate.name);
+
+  for (const name of [
+    'Cursor',
+    'Gemini CLI',
+    'Grok CLI',
+    'DeepSeek CLI',
+    'Hermes',
+    'GLM CLI',
+    'Qwen CLI',
+    'MCP-compatible client',
+  ]) {
+    assert.ok(detected.includes(name), `${name} should be detected`);
+  }
 });
 
 test('detectProjectSignals finds deploy and Cloudflare project evidence', () => {

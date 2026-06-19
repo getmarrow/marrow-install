@@ -568,14 +568,26 @@ async function statusOnly(parsed) {
   return requestJson(parsed.options, 'GET', '/v1/agent/status');
 }
 
+function existsAny(paths) {
+  return paths.some((candidate) => fs.existsSync(candidate));
+}
+
 function detectHarnesses(cwd = process.cwd()) {
+  const home = os.homedir();
   const candidates = [
-    { name: 'Codex', command: 'codex', detected: fs.existsSync(path.join(cwd, 'AGENTS.md')) || fs.existsSync(path.join(os.homedir(), '.codex')) },
-    { name: 'Claude Code', command: 'claude -p', detected: fs.existsSync(path.join(cwd, 'CLAUDE.md')) || fs.existsSync(path.join(os.homedir(), '.claude.json')) },
-    { name: 'Cursor', command: 'cursor', detected: fs.existsSync(path.join(cwd, '.cursor')) || fs.existsSync(path.join(os.homedir(), '.cursor')) },
-    { name: 'OpenCode', command: 'opencode', detected: fs.existsSync(path.join(cwd, 'opencode.json')) || fs.existsSync(path.join(os.homedir(), '.opencode')) },
-    { name: 'OpenClaw', command: 'openclaw agent', detected: fs.existsSync(path.join(os.homedir(), '.openclaw')) },
-    { name: 'CI script', command: 'npm test', detected: fs.existsSync(path.join(cwd, 'package.json')) },
+    { name: 'Codex', command: 'codex', detected: existsAny([path.join(cwd, 'AGENTS.md'), path.join(cwd, '.codex'), path.join(home, '.codex')]) },
+    { name: 'Claude Code', command: 'claude -p', detected: existsAny([path.join(cwd, 'CLAUDE.md'), path.join(cwd, '.claude'), path.join(home, '.claude.json')]) },
+    { name: 'Cursor', command: 'cursor', detected: existsAny([path.join(cwd, '.cursor'), path.join(cwd, '.cursor', 'mcp.json'), path.join(cwd, '.cursor', 'rules'), path.join(home, '.cursor')]) },
+    { name: 'Gemini CLI', command: 'gemini', detected: existsAny([path.join(cwd, 'GEMINI.md'), path.join(cwd, '.gemini'), path.join(home, '.gemini')]) },
+    { name: 'Grok CLI', command: 'grok', detected: existsAny([path.join(cwd, 'GROK.md'), path.join(cwd, '.grok'), path.join(home, '.grok')]) },
+    { name: 'DeepSeek CLI', command: 'deepseek', detected: existsAny([path.join(cwd, 'DEEPSEEK.md'), path.join(cwd, '.deepseek'), path.join(home, '.deepseek')]) },
+    { name: 'Hermes', command: 'hermes', detected: existsAny([path.join(cwd, 'HERMES.md'), path.join(cwd, 'hermes.json'), path.join(cwd, '.hermes'), path.join(home, '.hermes')]) },
+    { name: 'GLM CLI', command: 'glm', detected: existsAny([path.join(cwd, 'GLM.md'), path.join(cwd, '.glm'), path.join(home, '.glm')]) },
+    { name: 'Qwen CLI', command: 'qwen', detected: existsAny([path.join(cwd, 'QWEN.md'), path.join(cwd, '.qwen'), path.join(home, '.qwen')]) },
+    { name: 'OpenCode', command: 'opencode', detected: existsAny([path.join(cwd, 'opencode.json'), path.join(cwd, '.opencode'), path.join(home, '.opencode')]) },
+    { name: 'OpenClaw', command: 'openclaw agent', detected: existsAny([path.join(cwd, 'openclaw.json'), path.join(home, '.openclaw')]) },
+    { name: 'MCP-compatible client', command: '<mcp-client>', detected: existsAny([path.join(cwd, '.mcp.json'), path.join(cwd, '.cursor', 'mcp.json'), path.join(cwd, '.claude', 'settings.json')]) },
+    { name: 'CI scripts', command: 'npm test', detected: existsAny([path.join(cwd, '.github', 'workflows'), path.join(cwd, '.gitlab-ci.yml'), path.join(cwd, 'package.json')]) },
     { name: 'Custom command', command: '<your-agent-command>', detected: true },
   ];
   return candidates;
@@ -1001,6 +1013,7 @@ module.exports = {
   inferSurfaces,
   commandForSelection,
   buildGovernState,
+  detectHarnesses,
   detectProjectSignals,
   recommendGovernanceMode,
   recordGovernanceModeSelection,
