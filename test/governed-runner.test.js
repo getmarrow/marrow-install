@@ -94,9 +94,12 @@ test('governPanel presents harness selection without becoming a model host', () 
   assert.match(panel, /Gemini CLI/);
   assert.match(panel, /Grok CLI/);
   assert.match(panel, /DeepSeek CLI/);
+  assert.match(panel, /Minimax CLI/);
+  assert.match(panel, /Kimi CLI/);
   assert.match(panel, /Hermes/);
   assert.match(panel, /GLM CLI/);
   assert.match(panel, /Qwen CLI/);
+  assert.match(panel, /Cline/);
   assert.match(panel, /MCP-compatible client/);
   assert.match(panel, /CI scripts/);
   assert.match(panel, /Custom command/);
@@ -110,9 +113,12 @@ test('detectHarnesses recognizes popular agent harness marker files', () => {
   fs.writeFileSync(path.join(cwd, 'GEMINI.md'), '# Gemini agent notes\n');
   fs.writeFileSync(path.join(cwd, 'GROK.md'), '# Grok agent notes\n');
   fs.writeFileSync(path.join(cwd, 'DEEPSEEK.md'), '# DeepSeek agent notes\n');
+  fs.writeFileSync(path.join(cwd, 'MINIMAX.md'), '# Minimax agent notes\n');
+  fs.writeFileSync(path.join(cwd, 'KIMI.md'), '# Kimi agent notes\n');
   fs.writeFileSync(path.join(cwd, 'HERMES.md'), '# Hermes agent notes\n');
   fs.writeFileSync(path.join(cwd, 'GLM.md'), '# GLM agent notes\n');
   fs.writeFileSync(path.join(cwd, 'QWEN.md'), '# Qwen agent notes\n');
+  fs.mkdirSync(path.join(cwd, '.cline'));
   fs.writeFileSync(path.join(cwd, '.mcp.json'), '{}\n');
 
   const detected = detectHarnesses(cwd)
@@ -124,9 +130,12 @@ test('detectHarnesses recognizes popular agent harness marker files', () => {
     'Gemini CLI',
     'Grok CLI',
     'DeepSeek CLI',
+    'Minimax CLI',
+    'Kimi CLI',
     'Hermes',
     'GLM CLI',
     'Qwen CLI',
+    'Cline',
     'MCP-compatible client',
   ]) {
     assert.ok(detected.includes(name), `${name} should be detected`);
