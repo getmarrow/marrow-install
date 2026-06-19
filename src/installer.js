@@ -15,7 +15,7 @@ function parseArgs(argv) {
     doctor: false,
     repair: false,
     mode: 'auto',
-    apiKey: process.env.MARROW_API_KEY || '',
+    apiKey: process.env.MARROW_API_KEY || process.env.MARROW_KEY || '',
     baseUrl: process.env.MARROW_BASE_URL || DEFAULT_BASE_URL,
     agentId: process.env.MARROW_FLEET_AGENT_ID || process.env.MARROW_AGENT_ID || '',
     selfTest: true,
@@ -56,6 +56,12 @@ function parseArgs(argv) {
   if (!['auto', 'mcp', 'sdk', 'both', 'md'].includes(options.mode)) {
     throw new Error('--mode must be one of auto, mcp, sdk, both, md');
   }
+
+  const resolved = resolveMarrowKeyMaterial(options.cwd);
+  if (!options.apiKey && resolved.apiKey) options.apiKey = resolved.apiKey;
+  if (!options.agentId && resolved.agentId) options.agentId = resolved.agentId;
+  if (options.baseUrl === DEFAULT_BASE_URL && resolved.baseUrl) options.baseUrl = resolved.baseUrl;
+  if (!options.keySource && resolved.source) options.keySource = resolved.source;
 
   return options;
 }
@@ -157,8 +163,7 @@ function findLikelyEnvFiles(detection, env = process.env) {
     path.join(detection.root, '.marrow', 'env'),
     path.join(detection.root, '.marrow', 'env.local'),
     path.join(home, '.marrow', 'env'),
-    path.join(home, '.openclaw', 'credentials', 'marrow-mcp.env'),
-    path.join(home, '.openclaw', 'gateway.systemd.env'),
+    path.join(home, '.marrow', 'env.local'),
   ];
   return candidates.filter((filePath) => {
     if (!exists(filePath)) return false;
@@ -181,6 +186,36 @@ function readEnvVar(filePath, name) {
   const pattern = new RegExp(`^\\s*(?:export\\s+)?${name}\\s*=\\s*([^\\n#]+)`, 'm');
   const match = raw.match(pattern);
   return match ? stripQuotes(match[1]) : '';
+}
+
+function resolveMarrowKeyMaterial(cwd = process.cwd(), env = process.env) {
+  if (env.MARROW_API_KEY || env.MARROW_KEY) {
+    return {
+      apiKey: env.MARROW_API_KEY || env.MARROW_KEY,
+      baseUrl: env.MARROW_BASE_URL || DEFAULT_BASE_URL,
+      agentId: env.MARROW_FLEET_AGENT_ID || env.MARROW_AGENT_ID || '',
+      source: env.MARROW_API_KEY ? 'MARROW_API_KEY' : 'MARROW_KEY',
+    };
+  }
+
+  const detection = detectEnvironment(cwd, env);
+  for (const filePath of findLikelyEnvFiles(detection, env)) {
+    const apiKey = readEnvVar(filePath, 'MARROW_API_KEY') || readEnvVar(filePath, 'MARROW_KEY');
+    if (!apiKey) continue;
+    return {
+      apiKey,
+      baseUrl: readEnvVar(filePath, 'MARROW_BASE_URL') || env.MARROW_BASE_URL || DEFAULT_BASE_URL,
+      agentId: readEnvVar(filePath, 'MARROW_FLEET_AGENT_ID') || readEnvVar(filePath, 'MARROW_AGENT_ID') || env.MARROW_FLEET_AGENT_ID || env.MARROW_AGENT_ID || '',
+      source: filePath,
+    };
+  }
+
+  return {
+    apiKey: '',
+    baseUrl: env.MARROW_BASE_URL || DEFAULT_BASE_URL,
+    agentId: env.MARROW_FLEET_AGENT_ID || env.MARROW_AGENT_ID || '',
+    source: null,
+  };
 }
 
 function readFirstLineSecret(filePath) {
@@ -297,27 +332,79 @@ Required environment:
 
 - \`MARROW_API_KEY\`
 - Optional: \`MARROW_BASE_URL\`, \`MARROW_FLEET_AGENT_ID\`
+
+Key loading:
+
+- Prefer your shell, MCP secret store, or agent secret manager.
+- Marrow also auto-detects \`.marrow/env\`, \`.marrow/env.local\`, \`.env\`, \`.env.local\`, and \`~/.marrow/env\`.
+- Run \`npx @getmarrow/install doctor\` any time an agent says Marrow is missing or degraded.
 ${MARROW_BLOCK_END}`;
 }
 
 function passiveRuntimeSource() {
-  return `const apiKey = process.env.MARROW_API_KEY;
+  return `import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+
+function stripQuotes(value) {
+  const trimmed = String(value || '').trim();
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) return trimmed.slice(1, -1);
+  return trimmed;
+}
+
+function readEnvFile(filePath) {
+  if (!fs.existsSync(filePath)) return {};
+  const values = {};
+  const allowed = new Set(['MARROW_API_KEY', 'MARROW_KEY', 'MARROW_BASE_URL', 'MARROW_FLEET_AGENT_ID', 'MARROW_AGENT_ID', 'MARROW_SESSION_ID', 'MARROW_ENFORCEMENT_MODE', 'MARROW_PASSIVE_VALUE_REPORT', 'MARROW_VALUE_REPORT_PERIOD', 'MARROW_AGENT_RUNTIME', 'MARROW_WORKFLOW_GATE', 'MARROW_REQUIRE_OUTCOME_CLOSURE']);
+  for (const line of fs.readFileSync(filePath, 'utf8').split(/\\r?\\n/)) {
+    const match = line.match(/^\\s*(?:export\\s+)?([A-Z_][A-Z0-9_]*)\\s*=\\s*(.*?)\\s*$/);
+    if (!match) continue;
+    if (!allowed.has(match[1])) continue;
+    let value = match[2] || '';
+    const hashIndex = value.search(/\\s+#/);
+    if (hashIndex >= 0) value = value.slice(0, hashIndex);
+    values[match[1]] = stripQuotes(value);
+  }
+  return values;
+}
+
+function resolveMarrowEnv() {
+  if (process.env.MARROW_API_KEY || process.env.MARROW_KEY) return process.env;
+  const home = process.env.HOME || process.env.USERPROFILE || os.homedir();
+  const files = [];
+  let dir = process.cwd();
+  for (let depth = 0; depth < 8; depth += 1) {
+    files.push(path.join(dir, '.marrow', 'env'), path.join(dir, '.marrow', 'env.local'), path.join(dir, '.env'), path.join(dir, '.env.local'));
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  files.push(path.join(home, '.marrow', 'env'), path.join(home, '.marrow', 'env.local'));
+  for (const filePath of [...new Set(files)]) {
+    const values = readEnvFile(filePath);
+    if (values.MARROW_API_KEY || values.MARROW_KEY) return { ...process.env, ...values };
+  }
+  return process.env;
+}
+
+const marrowEnv = resolveMarrowEnv();
+const apiKey = marrowEnv.MARROW_API_KEY || marrowEnv.MARROW_KEY;
 if (apiKey && !globalThis.__MARROW_PASSIVE_RUNTIME__) {
   try {
     const { MarrowClient } = await import('@getmarrow/sdk');
     const marrow = new MarrowClient(apiKey, {
-      baseUrl: process.env.MARROW_BASE_URL,
-      agentId: process.env.MARROW_FLEET_AGENT_ID || process.env.MARROW_AGENT_ID,
-      sessionId: process.env.MARROW_SESSION_ID,
-      mode: process.env.MARROW_ENFORCEMENT_MODE || 'auto',
+      baseUrl: marrowEnv.MARROW_BASE_URL,
+      agentId: marrowEnv.MARROW_FLEET_AGENT_ID || marrowEnv.MARROW_AGENT_ID,
+      sessionId: marrowEnv.MARROW_SESSION_ID,
+      mode: marrowEnv.MARROW_ENFORCEMENT_MODE || 'auto',
     });
 
     const runtime = marrow.createPassiveRuntime({
-      includeValueReport: process.env.MARROW_PASSIVE_VALUE_REPORT !== 'false',
-      valueReportPeriod: process.env.MARROW_VALUE_REPORT_PERIOD || '7d',
-      useAgentRuntime: process.env.MARROW_AGENT_RUNTIME !== 'false',
-      useWorkflowGate: process.env.MARROW_WORKFLOW_GATE !== 'false',
-      requireOutcomeClosure: process.env.MARROW_REQUIRE_OUTCOME_CLOSURE !== 'false',
+      includeValueReport: marrowEnv.MARROW_PASSIVE_VALUE_REPORT !== 'false',
+      valueReportPeriod: marrowEnv.MARROW_VALUE_REPORT_PERIOD || '7d',
+      useAgentRuntime: marrowEnv.MARROW_AGENT_RUNTIME !== 'false',
+      useWorkflowGate: marrowEnv.MARROW_WORKFLOW_GATE !== 'false',
+      requireOutcomeClosure: marrowEnv.MARROW_REQUIRE_OUTCOME_CLOSURE !== 'false',
     });
 
     runtime.install();
@@ -325,6 +412,8 @@ if (apiKey && !globalThis.__MARROW_PASSIVE_RUNTIME__) {
   } catch {
     console.warn('[Marrow] passive runtime skipped: install @getmarrow/sdk or verify SDK initialization. Run npm install @getmarrow/sdk, then rerun npx @getmarrow/install --repair.');
   }
+} else if (!apiKey) {
+  console.warn('[Marrow] passive runtime skipped: MARROW_API_KEY missing. Put it in .marrow/env or run npx @getmarrow/install doctor for the exact fix.');
 }
 `;
 }
@@ -908,8 +997,8 @@ async function install(options) {
       missingHooks: changes.filter((change) => change.changed).map((change) => change.label),
       recommendedFix: configDiagnostics.npm_token.recommended_fix || selfTest.recommended_fix || (!options.apiKey
         ? envHints.length
-          ? `MARROW_API_KEY was found in a likely env file at ${envHints[0]}. Load that key from trusted secret storage, export only MARROW_API_KEY, then run npx @getmarrow/install --repair.`
-          : 'Set MARROW_API_KEY, then run npx @getmarrow/install --repair.'
+          ? `MARROW_API_KEY was found in ${envHints[0]} and can now be auto-loaded by Marrow SDK/MCP runtimes. Run npx @getmarrow/install --repair to refresh hooks and self-test.`
+          : 'Set MARROW_API_KEY or MARROW_KEY in your shell, MCP secret store, .marrow/env, or ~/.marrow/env, then run npx @getmarrow/install --repair.'
         : null),
     },
     remediation,
@@ -946,6 +1035,7 @@ module.exports = {
   runSelfTest,
   runCli,
   passiveRuntimeSource,
+  resolveMarrowKeyMaterial,
   inspectNpmTokenConfig,
   inspectSdkDependency,
   buildInstallValueMoment,
