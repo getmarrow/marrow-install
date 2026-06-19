@@ -11,16 +11,17 @@ npx @getmarrow/install --repair
 npx @getmarrow/install doctor
 ```
 
-## What's New in v0.1.16
+## What's New in v0.1.17
 
-v0.1.16 expands the Govern TUI harness addon coverage while preserving adaptive mode recommendations.
+v0.1.17 expands the Govern TUI harness addon coverage while preserving adaptive mode recommendations.
 
-- `npx @getmarrow/install govern` now shows first-class rows for Codex, Claude Code, Cursor, Gemini CLI, Grok CLI, DeepSeek CLI, Hermes, GLM CLI, Qwen CLI, OpenCode, OpenClaw, MCP-compatible clients, CI scripts, and custom commands.
+- `npx @getmarrow/install govern` now shows first-class rows for Codex, Claude Code, Cursor, Cline, Gemini CLI, Grok CLI, DeepSeek CLI, Minimax CLI, Kimi CLI, Hermes, GLM CLI, Qwen CLI, OpenCode, OpenClaw, MCP-compatible clients, CI scripts, and custom commands.
 - Marrow remains a thin governance layer. It does not replace your model or harness; it wraps the command your agent already runs with pre-action risk gates, proof requirements, and automatic outcome closure.
 - Detection stays recommendation-first. Marrow uses local config, instruction, CI, and MCP markers to suggest the safest path, then the user or owner accepts, overrides, or saves a policy profile.
+- Cursor is treated as a development workflow surface. Marrow can govern Cursor-backed code review, edits, tests, deploys, and release steps through MCP setup, project rules, or the governed command wrapper.
 - If a harness is not detected yet, use **Custom command** or `npx @getmarrow/install run -- <your-agent-command>` to govern it immediately.
 
-Business value: teams can add Marrow to the agent stack they already use instead of migrating to a new agent host. Codex, Claude Code, Cursor, Gemini, Grok, DeepSeek, Hermes, GLM, Qwen, OpenClaw, OpenCode, MCP clients, and CI scripts can all be brought under the same governance loop.
+Business value: teams can add Marrow to the agent stack they already use instead of migrating to a new agent host. Codex, Claude Code, Cursor, Cline, Gemini, Grok, DeepSeek, Minimax, Kimi/Moonshot, Hermes, GLM, Qwen, OpenClaw, OpenCode, MCP clients, and CI scripts can all be brought under the same governance loop.
 
 ## What's New in v0.1.14
 
@@ -170,7 +171,7 @@ Marrow should answer with `proceed`, `warn`, `block`, or `owner_approval_require
 - Codex/agent instruction files such as `AGENTS.md`
 - Claude Code settings and hooks
 - Cursor project folders
-- Gemini, Grok, DeepSeek, Hermes, GLM, and Qwen project marker files when present
+- Gemini, Grok, DeepSeek, Minimax, Kimi/Moonshot, Hermes, GLM, and Qwen project marker files when present
 - MCP config files
 - CI workflow/script markers
 - Node projects
