@@ -11,15 +11,15 @@ npx @getmarrow/install --repair
 npx @getmarrow/install doctor
 ```
 
-## What's New in v0.1.18
+## What's New in v0.1.19
 
-v0.1.18 makes Marrow key loading more reliable for agents after install.
+v0.1.19 makes Marrow doctor and release smoke stricter, so agents know exactly why logging is degraded.
 
-- Installer, SDK passive runtime, and MCP hooks now all recognize the same key locations: process env, MCP/agent secret env, `.marrow/env`, `.marrow/env.local`, `.env`, `.env.local`, `~/.marrow/env`, and `~/.marrow/env.local`.
-- `MARROW_API_KEY` remains the canonical variable. `MARROW_KEY` is accepted as an alias for fleet runners and secret managers.
-- `npx @getmarrow/install doctor` now reports whether a key is loaded, where a likely key file exists, and the exact repair command without printing the key.
-- Generated `.marrow/passive-runtime.mjs` loads `.marrow/env` before deciding Marrow is missing, so agents keep logging even when the shell did not export the key.
-- Full keys are never printed in diagnostics. Keep `.marrow/env` out of git and set file permissions to owner-only when possible.
+- `npx @getmarrow/install doctor --self-test` now validates: key found, key valid, account active, agent identity accepted, harmless write test created, and outcome closed.
+- Doctor reports exact failure reasons such as `missing_key`, `invalid_key`, `wrong_agent_id`, `network_blocked`, and `proof_required`.
+- Doctor warns when local `@getmarrow/install`, `@getmarrow/sdk`, or `@getmarrow/mcp` versions are behind the current release.
+- New `scripts/fresh-install-smoke.sh` verifies a clean temp install can load `.marrow/env`, run doctor, write a test event, and close the outcome.
+- Full keys are still never printed in diagnostics. Keep `.marrow/env` out of git and set file permissions to owner-only when possible.
 
 ## What's New in v0.1.17
 
@@ -232,6 +232,14 @@ Doctor check:
 ```bash
 MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install doctor
 ```
+
+Deep doctor with harmless write/outcome verification:
+
+```bash
+MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install doctor --self-test
+```
+
+Expected healthy output includes `key valid: yes`, `write test event: passed`, and `outcome closed: passed`.
 
 Repair missing hooks/config:
 

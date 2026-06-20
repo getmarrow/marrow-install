@@ -4,6 +4,9 @@ const os = require('node:os');
 const crypto = require('node:crypto');
 
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
+const INSTALLER_LATEST = '0.1.19';
+const SDK_LATEST = '3.7.35';
+const MCP_LATEST = '3.9.35';
 const MARROW_BLOCK_START = '<!-- marrow:passive-start -->';
 const MARROW_BLOCK_END = '<!-- marrow:passive-end -->';
 
@@ -77,14 +80,14 @@ function usage() {
 
 Options:
   --dry-run          Print planned changes without writing
-  --doctor           Check install health without writing
+  --doctor           Check install health; self-test writes and closes a harmless test event
   --repair           Write missing hooks/config, then run self-test and status check
   --yes, -y          Write detected config files
   --mode <mode>      auto, mcp, sdk, both, or md
   --key <key>        Marrow API key for self-test. Prefer MARROW_API_KEY because CLI args can appear in process listings.
   --base-url <url>   Marrow API base URL
   --agent-id <id>    Agent/fleet id for self-test headers
-  --no-self-test     Skip API smoke/self-test
+  --no-self-test     Skip API smoke/self-test for a read-only doctor check
 `;
 }
 
@@ -533,6 +536,82 @@ function inspectSdkDependency(detection) {
   };
 }
 
+function compareVersions(a, b) {
+  const left = String(a || '0.0.0').replace(/^[^\d]*/, '').split('.').map((part) => parseInt(part, 10) || 0);
+  const right = String(b || '0.0.0').replace(/^[^\d]*/, '').split('.').map((part) => parseInt(part, 10) || 0);
+  for (let i = 0; i < Math.max(left.length, right.length); i += 1) {
+    const x = left[i] || 0;
+    const y = right[i] || 0;
+    if (x > y) return 1;
+    if (x < y) return -1;
+  }
+  return 0;
+}
+
+function dependencyVersion(packageJson, packageName) {
+  for (const block of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
+    const value = packageJson?.[block]?.[packageName];
+    if (typeof value === 'string') return value;
+  }
+  return null;
+}
+
+function installedPackageVersion(root, packageName) {
+  const packageJsonPath = path.join(root, 'node_modules', ...packageName.split('/'), 'package.json');
+  try {
+    const raw = safeRead(packageJsonPath);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return typeof parsed.version === 'string' ? parsed.version : null;
+  } catch {
+    return null;
+  }
+}
+
+function inspectPackageVersions(detection) {
+  const rootPackage = safeRead(detection.paths.packageJson);
+  let packageJson = {};
+  try {
+    packageJson = rootPackage ? JSON.parse(rootPackage) : {};
+  } catch {
+    packageJson = {};
+  }
+  const versions = [
+    {
+      name: '@getmarrow/install',
+      installed: require('../package.json').version,
+      latest: INSTALLER_LATEST,
+      source: 'current installer',
+      update_command: 'npm install -g @getmarrow/install@latest',
+    },
+    {
+      name: '@getmarrow/sdk',
+      installed: installedPackageVersion(detection.root, '@getmarrow/sdk') || dependencyVersion(packageJson, '@getmarrow/sdk'),
+      latest: SDK_LATEST,
+      source: installedPackageVersion(detection.root, '@getmarrow/sdk') ? 'node_modules' : 'package.json',
+      update_command: 'npm install @getmarrow/sdk@latest',
+    },
+    {
+      name: '@getmarrow/mcp',
+      installed: installedPackageVersion(detection.root, '@getmarrow/mcp') || dependencyVersion(packageJson, '@getmarrow/mcp'),
+      latest: MCP_LATEST,
+      source: installedPackageVersion(detection.root, '@getmarrow/mcp') ? 'node_modules' : 'package.json',
+      update_command: 'npm install @getmarrow/mcp@latest',
+    },
+  ];
+  return versions.map((entry) => {
+    const normalized = entry.installed ? String(entry.installed).replace(/^[^\d]*/, '') : null;
+    const outdated = normalized ? compareVersions(normalized, entry.latest) < 0 : false;
+    return {
+      ...entry,
+      installed: normalized,
+      present: Boolean(normalized),
+      outdated,
+      warning: outdated ? `${entry.name} ${normalized} is older than ${entry.latest}.` : null,
+    };
+  });
+}
+
 function buildPlan(detection, options) {
   const mode = options.mode === 'auto'
     ? detection.node && (detection.claudeCode || detection.cursor || detection.codex || detection.openclaw)
@@ -637,9 +716,106 @@ async function requestJson(url, options) {
   }
   if (!res.ok) {
     const message = json.error || json.message || `HTTP ${res.status}`;
-    throw new Error(String(message));
+    const error = new Error(String(message));
+    error.status = res.status;
+    error.code = json.code || null;
+    error.details = json.details || null;
+    throw error;
   }
   return json.data || json;
+}
+
+function classifyDoctorFailure(error) {
+  const status = error?.status || 0;
+  const text = `${error?.code || ''} ${error?.message || error}`.toLowerCase();
+  if (status === 401 || /missing_key|invalid_key|unauthorized|invalid api key/.test(text)) return 'invalid_key';
+  if (status === 403 && /agent|bound|identity/.test(text)) return 'wrong_agent_id';
+  if (status === 403) return 'invalid_key';
+  if (status === 409 || /proof/.test(text)) return 'proof_required';
+  if (status === 429 || /rate limit|too many/.test(text)) return 'network_blocked';
+  if (status >= 500 || /timeout|network|fetch failed|econnreset|enotfound|eai_again/.test(text)) return 'network_blocked';
+  return 'unknown';
+}
+
+async function runDoctorValidation(options, selfTest) {
+  if (!options.apiKey) {
+    return {
+      key_found: false,
+      key_valid: false,
+      account_active: false,
+      agent_identity_accepted: false,
+      write_test_event: 'skipped',
+      outcome_closed: 'skipped',
+      failure_reason: 'missing_key',
+      exact_fix: 'Create an API key at https://getmarrow.ai/account, then put MARROW_API_KEY in .marrow/env and run npx @getmarrow/install doctor --self-test.',
+    };
+  }
+
+  if (selfTest && !selfTest.skipped && selfTest.active && !selfTest.error) {
+    return {
+      key_found: true,
+      key_valid: true,
+      account_active: true,
+      agent_identity_accepted: true,
+      write_test_event: 'passed',
+      outcome_closed: 'passed',
+      failure_reason: null,
+      decision_id: selfTest.decision_id,
+      exact_fix: null,
+    };
+  }
+
+  if (selfTest && selfTest.error) {
+    const reason = classifyDoctorFailure(selfTest);
+    return {
+      key_found: true,
+      key_valid: !['missing_key', 'invalid_key'].includes(reason),
+      account_active: !['missing_key', 'invalid_key'].includes(reason),
+      agent_identity_accepted: reason !== 'wrong_agent_id',
+      write_test_event: 'failed',
+      outcome_closed: 'failed',
+      failure_reason: reason,
+      exact_fix: reason === 'wrong_agent_id'
+        ? 'Set MARROW_FLEET_AGENT_ID/MARROW_AGENT_ID to the id bound to this key, then rerun doctor.'
+        : reason === 'network_blocked'
+        ? 'Retry from a network path that can reach api.getmarrow.ai, or reduce status polling if rate-limited.'
+        : 'Create/copy a live API key from the Marrow dashboard and update MARROW_API_KEY.',
+    };
+  }
+
+  const headers = { authorization: `Bearer ${options.apiKey}` };
+  if (options.agentId) headers['x-marrow-agent-id'] = options.agentId;
+  try {
+    const status = await requestJson(`${options.baseUrl.replace(/\/+$/, '')}/v1/agent/status`, { headers });
+    return {
+      key_found: true,
+      key_valid: true,
+      account_active: true,
+      agent_identity_accepted: true,
+      write_test_event: 'skipped',
+      outcome_closed: 'skipped',
+      failure_reason: null,
+      status_health: status.health || 'unknown',
+      status_failure_reasons: status.failure_reasons || [],
+      exact_fix: status.recommended_fix || status.diagnostics?.exact_fix || null,
+    };
+  } catch (error) {
+    const reason = classifyDoctorFailure(error);
+    return {
+      key_found: true,
+      key_valid: !['missing_key', 'invalid_key'].includes(reason),
+      account_active: !['missing_key', 'invalid_key'].includes(reason),
+      agent_identity_accepted: reason !== 'wrong_agent_id',
+      write_test_event: 'skipped',
+      outcome_closed: 'skipped',
+      failure_reason: reason,
+      exact_fix: reason === 'wrong_agent_id'
+        ? 'Set MARROW_FLEET_AGENT_ID/MARROW_AGENT_ID to the id bound to this key, then rerun doctor.'
+        : reason === 'network_blocked'
+        ? 'Check network access to api.getmarrow.ai and rerun doctor.'
+        : 'Create/copy a live API key from the Marrow dashboard and update MARROW_API_KEY.',
+    };
+  }
 }
 
 async function runSelfTest(options) {
@@ -927,6 +1103,24 @@ function printReport(report) {
     process.stdout.write(`- missing env: ${report.doctor.missingEnv.length ? report.doctor.missingEnv.join(', ') : 'none'}\n`);
     if (report.doctor.envHints.length) process.stdout.write(`- possible env files: ${report.doctor.envHints.join(', ')}\n`);
     process.stdout.write(`- missing hooks/config: ${report.doctor.missingHooks.length ? report.doctor.missingHooks.join('; ') : 'none'}\n`);
+    if (report.doctor.validation) {
+      const validation = report.doctor.validation;
+      process.stdout.write(`- key found: ${validation.key_found ? 'yes' : 'no'}\n`);
+      process.stdout.write(`- key valid: ${validation.key_valid ? 'yes' : 'no'}\n`);
+      process.stdout.write(`- account active: ${validation.account_active ? 'yes' : 'no'}\n`);
+      process.stdout.write(`- agent identity accepted: ${validation.agent_identity_accepted ? 'yes' : 'no'}\n`);
+      process.stdout.write(`- write test event: ${validation.write_test_event}\n`);
+      process.stdout.write(`- outcome closed: ${validation.outcome_closed}\n`);
+      if (validation.failure_reason) process.stdout.write(`- failure reason: ${validation.failure_reason}\n`);
+      if (validation.exact_fix) process.stdout.write(`- exact fix: ${validation.exact_fix}\n`);
+    }
+    if (report.packageVersions?.length) {
+      const outdated = report.packageVersions.filter((pkg) => pkg.outdated);
+      process.stdout.write(`- package versions: ${outdated.length ? 'updates recommended' : 'current'}\n`);
+      for (const pkg of outdated) {
+        process.stdout.write(`  - ${pkg.warning} Fix: ${pkg.update_command}\n`);
+      }
+    }
     if (report.doctor.recommendedFix) process.stdout.write(`- recommended fix: ${report.doctor.recommendedFix}\n`);
   }
 
@@ -949,6 +1143,7 @@ async function install(options) {
   const changes = applyPlan(plan, options);
   const configInspection = inspectNpmTokenConfig();
   const sdkDependency = inspectSdkDependency(detection);
+  const packageVersions = inspectPackageVersions(detection);
   const configDiagnostics = configInspection.safe;
   const configRepairs = options.repair && !options.dryRun && !options.doctor
     ? repairConfigDiagnostics(configDiagnostics)
@@ -958,7 +1153,11 @@ async function install(options) {
     skipped: false,
     active: false,
     error: error instanceof Error ? error.message : String(error),
+    status: error?.status || null,
+    code: error?.code || null,
+    details: error?.details || null,
   }));
+  const doctorValidation = await runDoctorValidation(options, selfTest);
   const changedConfig = changes.some((change) => change.changed) || configRepairs.some((repair) => repair.changed);
   const selfTestPassed = Boolean(!selfTest.skipped && selfTest.active && !selfTest.error);
   const remediation = options.repair
@@ -995,6 +1194,8 @@ async function install(options) {
       missingEnv: options.apiKey ? [] : ['MARROW_API_KEY'],
       envHints,
       missingHooks: changes.filter((change) => change.changed).map((change) => change.label),
+      validation: doctorValidation,
+      packageVersions,
       recommendedFix: configDiagnostics.npm_token.recommended_fix || selfTest.recommended_fix || (!options.apiKey
         ? envHints.length
           ? `MARROW_API_KEY was found in ${envHints[0]} and can now be auto-loaded by Marrow SDK/MCP runtimes. Run npx @getmarrow/install --repair to refresh hooks and self-test.`
@@ -1005,6 +1206,7 @@ async function install(options) {
     configDiagnostics,
     configRepairs,
     sdkDependency,
+    packageVersions,
     selfTest,
     warnings: options.keyFromArg
       ? ['Avoid --key in shared shells because command-line arguments can be visible in process listings. Prefer MARROW_API_KEY in your environment or secret manager.']
@@ -1038,5 +1240,7 @@ module.exports = {
   resolveMarrowKeyMaterial,
   inspectNpmTokenConfig,
   inspectSdkDependency,
+  inspectPackageVersions,
+  runDoctorValidation,
   buildInstallValueMoment,
 };
