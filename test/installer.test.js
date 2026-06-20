@@ -8,9 +8,11 @@ const {
   buildPlan,
   detectEnvironment,
   install,
+  inspectPackageVersions,
   inspectNpmTokenConfig,
   parseArgs,
   passiveRuntimeSource,
+  runDoctorValidation,
   runSelfTest,
 } = require('../src/installer');
 
@@ -370,6 +372,56 @@ test('install auto mode does not create Claude settings when Claude is not detec
 
   assert.equal(fs.existsSync(path.join(dir, '.claude', 'settings.json')), false);
   assert.equal(fs.existsSync(path.join(dir, '.mcp.json')), true);
+});
+
+test('doctor validation reports exact missing key failure', async () => {
+  const validation = await runDoctorValidation({
+    apiKey: '',
+    baseUrl: 'https://api.getmarrow.ai',
+    agentId: '',
+  }, { skipped: true, reason: 'missing MARROW_API_KEY' });
+
+  assert.equal(validation.key_found, false);
+  assert.equal(validation.key_valid, false);
+  assert.equal(validation.failure_reason, 'missing_key');
+  assert.match(validation.exact_fix, /MARROW_API_KEY/);
+});
+
+test('doctor validation confirms write test and outcome closure', async () => {
+  const validation = await runDoctorValidation({
+    apiKey: 'mrw_test_key',
+    baseUrl: 'https://api.getmarrow.ai',
+    agentId: 'agent-a',
+  }, {
+    skipped: false,
+    active: true,
+    decision_id: 'dec_doctor',
+  });
+
+  assert.equal(validation.key_found, true);
+  assert.equal(validation.key_valid, true);
+  assert.equal(validation.write_test_event, 'passed');
+  assert.equal(validation.outcome_closed, 'passed');
+  assert.equal(validation.decision_id, 'dec_doctor');
+});
+
+test('doctor package version warnings find old local SDK and MCP versions', () => {
+  const dir = tempDir();
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
+    dependencies: {
+      '@getmarrow/sdk': '^3.7.1',
+      '@getmarrow/mcp': '^3.9.1',
+    },
+  }));
+  const detection = detectEnvironment(dir, {});
+  const versions = inspectPackageVersions(detection);
+
+  const sdk = versions.find((pkg) => pkg.name === '@getmarrow/sdk');
+  const mcp = versions.find((pkg) => pkg.name === '@getmarrow/mcp');
+  assert.equal(sdk.outdated, true);
+  assert.equal(mcp.outdated, true);
+  assert.match(sdk.update_command, /@getmarrow\/sdk@latest/);
+  assert.match(mcp.update_command, /@getmarrow\/mcp@latest/);
 });
 
 test('self-test returns first five-minute value signal and proof', async () => {
