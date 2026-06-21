@@ -8,6 +8,7 @@ const readline = require('node:readline');
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const HIGH_RISK_TERMS = /\b(deploy|prod|production|publish|release|merge|migration|migrate|secret|token|key|cloudflare|wrangler|npm publish|gh pr merge|git push|terraform apply|kubectl apply|delete|destroy|drop)\b/i;
 const GOVERN_TUI_ROW_COUNT = 7;
+const FLEET_TUI_ROW_COUNT = 11;
 function usage() {
   return `Usage:
   npx @getmarrow/install run --agent deploy-agent -- npm test
@@ -17,6 +18,7 @@ function usage() {
   npx @getmarrow/install status
   npx @getmarrow/install govern
   npx @getmarrow/install govern --no-interactive
+  npx @getmarrow/install fleet
 
 Commands:
   run       Run a command through Marrow pre-action gate and automatic outcome closure
@@ -24,6 +26,7 @@ Commands:
   proof     Commit an outcome/proof for an existing decision
   status    Read /v1/agent/status
   govern    Interactive setup TUI when run in a terminal; text panel in CI/non-TTY
+  fleet     Fleet operator TUI for live agents, workflows, gates, proof debt, and exact fixes
 
 Options:
   --agent <id>            Agent identity. Defaults to MARROW_FLEET_AGENT_ID, MARROW_AGENT_ID, or local user
@@ -40,7 +43,7 @@ Options:
   --key <key>             Marrow API key. Prefer MARROW_API_KEY
   --json                  Print machine-readable result after completion
   --interactive           Force interactive govern TUI when possible
-  --no-interactive        Print govern panel instead of opening the TUI
+  --no-interactive        Print govern/fleet panel instead of opening the TUI
 `;
 }
 
@@ -265,7 +268,7 @@ function parseArgs(argv) {
     return { command, options };
   }
 
-  if (command === 'status' || command === 'govern') {
+  if (command === 'status' || command === 'govern' || command === 'fleet') {
     const parsed = parseBaseOptions(argv, 1);
     if (parsed.options.help) return { command: 'help' };
     return { command, options: parsed.options };
@@ -568,29 +571,282 @@ async function statusOnly(parsed) {
   return requestJson(parsed.options, 'GET', '/v1/agent/status');
 }
 
-function existsAny(paths) {
-  return paths.some((candidate) => fs.existsSync(candidate));
+async function optionalRequestJson(options, method, route, body) {
+  try {
+    return { ok: true, data: await requestJson(options, method, route, body) };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      status: error?.status || 0,
+      details: error?.details || null,
+    };
+  }
+}
+
+function firstDefined(...values) {
+  for (const value of values) {
+    if (value !== undefined && value !== null && value !== '') return value;
+  }
+  return undefined;
+}
+
+function numberValue(value, fallback = null) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) return Number(value);
+  return fallback;
+}
+
+function listValue(...values) {
+  for (const value of values) {
+    if (Array.isArray(value)) return value;
+  }
+  return [];
+}
+
+function statusLabel(value, fallback = 'unknown') {
+  if (typeof value === 'string' && value.trim()) return displayText(value, 80);
+  if (typeof value === 'boolean') return value ? 'ok' : 'warn';
+  return fallback;
+}
+
+function normalizeRecentDecisions(status, report, fleet) {
+  return listValue(
+    fleet.recent_decisions,
+    fleet.decisions,
+    report.recent_decisions,
+    report.decisions,
+    status.recent_decisions,
+    status.last_decisions,
+  ).slice(0, 5).map((decision) => {
+    if (typeof decision === 'string') return displayText(decision, 120);
+    return displayText(
+      firstDefined(
+        decision?.summary,
+        decision?.action,
+        decision?.type,
+        decision?.id,
+        decision?.decision_id,
+        JSON.stringify(decision || {}),
+      ),
+      120,
+    );
+  });
+}
+
+function normalizeAgents(report, fleet, status) {
+  return listValue(
+    fleet.agents,
+    fleet.live_agents,
+    fleet.active_agents,
+    report.agents,
+    report.active_agents,
+    status.agents,
+  ).slice(0, 20).map((agent) => {
+    if (typeof agent === 'string') return { id: displayText(agent, 80), status: 'active', role: '' };
+    return {
+      id: displayText(firstDefined(agent?.id, agent?.agent_id, agent?.name, agent?.key, 'agent'), 80),
+      status: displayText(firstDefined(agent?.status, agent?.health, agent?.state, 'active'), 40),
+      role: displayText(firstDefined(agent?.role, agent?.type, ''), 60),
+      last_seen_at: displayText(firstDefined(agent?.last_seen_at, agent?.last_event_at, agent?.updated_at, ''), 80),
+    };
+  });
+}
+
+function normalizeGates(status, report) {
+  const gateSource = status.gates || report.gates || {};
+  const gateValue = (name) => {
+    const value = firstDefined(
+      gateSource[name],
+      status[`${name}_gate`],
+      report[`${name}_gate`],
+      status[`${name}_status`],
+      report[`${name}_status`],
+    );
+    if (value && typeof value === 'object') {
+      return statusLabel(firstDefined(value.status, value.decision, value.enforcement_decision, value.state), 'unknown');
+    }
+    return statusLabel(value, 'unknown');
+  };
+  return {
+    deploy: gateValue('deploy'),
+    publish: gateValue('publish'),
+    merge: gateValue('merge'),
+  };
+}
+
+function normalizeFixCommands(status, capacity) {
+  const commands = [];
+  const add = (value, commandOnly = false) => {
+    const text = displayText(value || '', 240);
+    if (commandOnly && !/^(?:npx|npm|pnpm|yarn|node|export|MARROW_|curl|bash|sh)\b/.test(text)) return;
+    if (text && !commands.includes(text)) commands.push(text);
+  };
+  add(status.exact_fix);
+  add(status.recommended_fix);
+  add(status.next_action);
+  add(status.route_contract?.exact_fix);
+  add(status.auto_outcome_closure?.exact_fix);
+  add(status.capture_coverage?.exact_fix);
+  add(capacity.exact_next_action, true);
+  add(capacity.next_action, true);
+  if (listValue(status.missed_hooks, status.degraded_hooks).length) add('npx @getmarrow/install --repair');
+  if (status.auto_outcome_closure?.status === 'degraded') add('npx @getmarrow/install --repair');
+  return commands.slice(0, 6);
+}
+
+function normalizeFleetSnapshot(raw, options) {
+  const status = raw.status?.data || {};
+  const capacity = raw.capacity?.data || {};
+  const report = raw.report?.data || {};
+  const fleet = raw.fleet?.data || {};
+  const agents = normalizeAgents(report, fleet, status);
+  const liveAgents = numberValue(firstDefined(
+    fleet.live_agent_count,
+    fleet.active_agent_count,
+    fleet.fleet?.active_agents,
+    fleet.fleet?.total_agents,
+    report.live_agent_count,
+    report.active_agent_count,
+    report.fleet?.active_agents,
+    report.fleet?.total_agents,
+    status.live_agent_count,
+    status.active_agent_count,
+    agents.length || undefined,
+  ), agents.length || null);
+  const activeWorkflows = numberValue(firstDefined(
+    Array.isArray(fleet.active_workflows) ? fleet.active_workflows.length : undefined,
+    fleet.active_workflows,
+    fleet.active_workflow_count,
+    Array.isArray(report.active_workflows) ? report.active_workflows.length : undefined,
+    report.active_workflows,
+    report.active_workflow_count,
+    status.active_workflows,
+    status.active_workflow_count,
+    status.workflow_sessions?.active,
+  ), null);
+  const proofWaiting = numberValue(firstDefined(
+    status.proof_packs?.waiting,
+    status.proof_packs?.incomplete,
+    status.proof_pack_hygiene?.incomplete,
+    status.proof_pack_incomplete,
+    report.proof_packs?.waiting,
+    fleet.proof_packs?.waiting,
+  ), 0);
+  const failedStaleOutcomes = numberValue(firstDefined(
+    status.failed_stale_outcomes,
+    status.stale_outcomes,
+    status.auto_outcome_closure?.stale,
+    status.outcome_hygiene?.stale,
+    report.failed_outcomes,
+    fleet.failed_outcomes,
+  ), 0);
+  const missedHooks = listValue(status.missed_hooks, status.degraded_hooks, status.capture_coverage?.missed_hooks)
+    .map((hook) => displayText(typeof hook === 'string' ? hook : firstDefined(hook?.name, hook?.hook, JSON.stringify(hook)), 80))
+    .slice(0, 8);
+  const backpressure = capacity.current_backpressure || capacity.backpressure || capacity.scale_slo?.backpressure || {};
+  const backpressureStatus = statusLabel(firstDefined(
+    backpressure.status,
+    backpressure.level,
+    capacity.status,
+    capacity.scale_status,
+    capacity.agent_capacity?.status,
+  ), raw.capacity?.ok ? 'ok' : 'unknown');
+  const recentDecisions = normalizeRecentDecisions(status, report, fleet);
+  const gates = normalizeGates(status, report);
+  const fixCommands = normalizeFixCommands(status, capacity);
+  const errors = Object.entries(raw)
+    .filter(([, value]) => value && value.ok === false)
+    .map(([name, value]) => `${name}: ${displayText(value.error, 120)}`);
+
+  return {
+    ok: raw.status?.ok !== false,
+    generated_at: new Date().toISOString(),
+    agent_id: displayText(options.agentId, 80),
+    base_url: options.baseUrl,
+    live_agents: liveAgents,
+    active_workflows: activeWorkflows,
+    proof_waiting: proofWaiting,
+    failed_stale_outcomes: failedStaleOutcomes,
+    backpressure_status: backpressureStatus,
+    capacity_next_action: displayText(firstDefined(capacity.exact_next_action, capacity.next_action, capacity.failure_mode?.exact_next_action, ''), 180),
+    recent_decisions: recentDecisions,
+    degraded_hooks: missedHooks,
+    gates,
+    agents,
+    fix_commands: fixCommands.length ? fixCommands : ['npx @getmarrow/install doctor'],
+    source_errors: errors,
+  };
+}
+
+async function fleetSnapshot(options) {
+  if (!options.apiKey) {
+    return normalizeFleetSnapshot({
+      status: {
+        ok: false,
+        error: 'MARROW_API_KEY missing',
+        data: {
+          enabled: false,
+          missed_hooks: ['api_key'],
+          recommended_fix: 'export MARROW_API_KEY=mrw_live_... && npx @getmarrow/install fleet',
+        },
+      },
+      capacity: { ok: false, error: 'MARROW_API_KEY missing', data: {} },
+      report: { ok: false, error: 'MARROW_API_KEY missing', data: {} },
+      fleet: { ok: false, error: 'MARROW_API_KEY missing', data: {} },
+    }, options);
+  }
+  const [status, capacity, report, fleet] = await Promise.all([
+    optionalRequestJson(options, 'GET', '/v1/agent/status?fast=1'),
+    optionalRequestJson(options, 'GET', '/v1/agent/scale/capacity-contract'),
+    optionalRequestJson(options, 'GET', '/v1/agent/report'),
+    optionalRequestJson(options, 'GET', '/v1/fleet'),
+  ]);
+  return normalizeFleetSnapshot({ status, capacity, report, fleet }, options);
+}
+
+function fleetPanel(snapshot) {
+  const degraded = snapshot.degraded_hooks.length ? snapshot.degraded_hooks.join(', ') : 'none';
+  const recent = snapshot.recent_decisions.length ? snapshot.recent_decisions.map((item) => `  - ${item}`).join('\n') : '  - none reported yet';
+  const agents = snapshot.agents.length
+    ? snapshot.agents.slice(0, 5).map((agent) => `  - ${agent.id}${agent.role ? ` (${agent.role})` : ''}: ${agent.status}${agent.last_seen_at ? ` last_seen=${agent.last_seen_at}` : ''}`).join('\n')
+    : '  - no agent roster returned yet';
+  const fixes = snapshot.fix_commands.map((command) => `  - ${command}`).join('\n');
+  return [
+    'Marrow Fleet Operator',
+    '',
+    `Agent: ${snapshot.agent_id}`,
+    `Snapshot: ${snapshot.generated_at}`,
+    '',
+    `Live agents: ${snapshot.live_agents ?? 'unknown'}`,
+    `Active workflows: ${snapshot.active_workflows ?? 'unknown'}`,
+    `Risky actions waiting for proof: ${snapshot.proof_waiting}`,
+    `Failed/stale outcomes: ${snapshot.failed_stale_outcomes}`,
+    `Backpressure/capacity status: ${snapshot.backpressure_status}${snapshot.capacity_next_action ? ` - ${snapshot.capacity_next_action}` : ''}`,
+    `Degraded hooks: ${degraded}`,
+    `Deploy/publish/merge gates: deploy=${snapshot.gates.deploy} publish=${snapshot.gates.publish} merge=${snapshot.gates.merge}`,
+    '',
+    'Live agent roster:',
+    agents,
+    '',
+    'Recent decisions:',
+    recent,
+    '',
+    'Press Enter to inspect agent when run in an interactive terminal.',
+    'Copy exact fix command:',
+    fixes,
+    snapshot.source_errors.length ? ['', 'Partial data:', ...snapshot.source_errors.map((error) => `  - ${error}`)].join('\n') : '',
+  ].filter(Boolean).join('\n');
 }
 
 function detectHarnesses(cwd = process.cwd()) {
-  const home = os.homedir();
   const candidates = [
-    { name: 'Codex', command: 'codex', detected: existsAny([path.join(cwd, 'AGENTS.md'), path.join(cwd, '.codex'), path.join(home, '.codex')]) },
-    { name: 'Claude Code', command: 'claude -p', detected: existsAny([path.join(cwd, 'CLAUDE.md'), path.join(cwd, '.claude'), path.join(home, '.claude.json')]) },
-    { name: 'Cursor', command: 'cursor', detected: existsAny([path.join(cwd, '.cursor'), path.join(cwd, '.cursor', 'mcp.json'), path.join(cwd, '.cursor', 'rules'), path.join(home, '.cursor')]) },
-    { name: 'Gemini CLI', command: 'gemini', detected: existsAny([path.join(cwd, 'GEMINI.md'), path.join(cwd, '.gemini'), path.join(home, '.gemini')]) },
-    { name: 'Grok CLI', command: 'grok', detected: existsAny([path.join(cwd, 'GROK.md'), path.join(cwd, '.grok'), path.join(home, '.grok')]) },
-    { name: 'DeepSeek CLI', command: 'deepseek', detected: existsAny([path.join(cwd, 'DEEPSEEK.md'), path.join(cwd, '.deepseek'), path.join(home, '.deepseek')]) },
-    { name: 'Minimax CLI', command: 'minimax', detected: existsAny([path.join(cwd, 'MINIMAX.md'), path.join(cwd, '.minimax'), path.join(home, '.minimax')]) },
-    { name: 'Kimi CLI', command: 'kimi', detected: existsAny([path.join(cwd, 'KIMI.md'), path.join(cwd, 'MOONSHOT.md'), path.join(cwd, '.kimi'), path.join(cwd, '.moonshot'), path.join(home, '.kimi'), path.join(home, '.moonshot')]) },
-    { name: 'Hermes', command: 'hermes', detected: existsAny([path.join(cwd, 'HERMES.md'), path.join(cwd, 'hermes.json'), path.join(cwd, '.hermes'), path.join(home, '.hermes')]) },
-    { name: 'GLM CLI', command: 'glm', detected: existsAny([path.join(cwd, 'GLM.md'), path.join(cwd, '.glm'), path.join(home, '.glm')]) },
-    { name: 'Qwen CLI', command: 'qwen', detected: existsAny([path.join(cwd, 'QWEN.md'), path.join(cwd, '.qwen'), path.join(home, '.qwen')]) },
-    { name: 'Cline', command: 'cline', detected: existsAny([path.join(cwd, '.cline'), path.join(cwd, 'CLINE.md'), path.join(home, '.cline')]) },
-    { name: 'OpenCode', command: 'opencode', detected: existsAny([path.join(cwd, 'opencode.json'), path.join(cwd, '.opencode'), path.join(home, '.opencode')]) },
-    { name: 'OpenClaw', command: 'openclaw agent', detected: existsAny([path.join(cwd, 'openclaw.json'), path.join(home, '.openclaw')]) },
-    { name: 'MCP-compatible client', command: '<mcp-client>', detected: existsAny([path.join(cwd, '.mcp.json'), path.join(cwd, '.cursor', 'mcp.json'), path.join(cwd, '.claude', 'settings.json')]) },
-    { name: 'CI scripts', command: 'npm test', detected: existsAny([path.join(cwd, '.github', 'workflows'), path.join(cwd, '.gitlab-ci.yml'), path.join(cwd, 'package.json')]) },
+    { name: 'Codex', command: 'codex', detected: fs.existsSync(path.join(cwd, 'AGENTS.md')) || fs.existsSync(path.join(os.homedir(), '.codex')) },
+    { name: 'Claude Code', command: 'claude -p', detected: fs.existsSync(path.join(cwd, 'CLAUDE.md')) || fs.existsSync(path.join(os.homedir(), '.claude.json')) },
+    { name: 'Cursor', command: 'cursor', detected: fs.existsSync(path.join(cwd, '.cursor')) || fs.existsSync(path.join(os.homedir(), '.cursor')) },
+    { name: 'OpenCode', command: 'opencode', detected: fs.existsSync(path.join(cwd, 'opencode.json')) || fs.existsSync(path.join(os.homedir(), '.opencode')) },
+    { name: 'OpenClaw', command: 'openclaw agent', detected: fs.existsSync(path.join(os.homedir(), '.openclaw')) },
+    { name: 'CI script', command: 'npm test', detected: fs.existsSync(path.join(cwd, 'package.json')) },
     { name: 'Custom command', command: '<your-agent-command>', detected: true },
   ];
   return candidates;
@@ -791,6 +1047,112 @@ function renderGovernTui(state, options) {
   return lines.join('\n');
 }
 
+function buildFleetState(snapshot) {
+  return {
+    cursor: 0,
+    agentIndex: 0,
+    snapshot,
+    status: '',
+    lastResult: '',
+  };
+}
+
+function renderFleetTui(state) {
+  const snapshot = state.snapshot;
+  const selectedAgent = snapshot.agents[state.agentIndex] || { id: 'no agent returned', status: 'unknown', role: '' };
+  const degraded = snapshot.degraded_hooks.length ? snapshot.degraded_hooks.join(', ') : 'none';
+  const gateSummary = `deploy=${snapshot.gates.deploy} publish=${snapshot.gates.publish} merge=${snapshot.gates.merge}`;
+  const fixCommand = snapshot.fix_commands[0] || 'npx @getmarrow/install doctor';
+  const recent = snapshot.recent_decisions[0] || 'none reported yet';
+  const rows = [
+    {
+      label: 'Live agents',
+      value: `${snapshot.live_agents ?? 'unknown'} total; selected ${selectedAgent.id}`,
+      hint: 'Left/right changes the selected agent. Enter shows agent detail.',
+    },
+    {
+      label: 'Active workflows',
+      value: String(snapshot.active_workflows ?? 'unknown'),
+      hint: 'Current account-scoped workflow pressure from Marrow.',
+    },
+    {
+      label: 'Risky actions waiting for proof',
+      value: String(snapshot.proof_waiting),
+      hint: 'Deploy, publish, merge, migration, or sensitive actions waiting on proof packs.',
+    },
+    {
+      label: 'Failed/stale outcomes',
+      value: String(snapshot.failed_stale_outcomes),
+      hint: 'Outcome closure debt that can weaken fleet learning.',
+    },
+    {
+      label: 'Backpressure / capacity',
+      value: snapshot.backpressure_status,
+      hint: snapshot.capacity_next_action || 'Capacity contract loaded when available.',
+    },
+    {
+      label: 'Recent decisions',
+      value: recent,
+      hint: 'Latest fleet decision signal returned by Marrow.',
+    },
+    {
+      label: 'Degraded hooks',
+      value: degraded,
+      hint: degraded === 'none' ? 'No missing hooks reported.' : 'Repair hooks before trusting passive coverage.',
+    },
+    {
+      label: 'Deploy/publish/merge gates',
+      value: gateSummary,
+      hint: 'High-risk release surfaces should remain gated.',
+    },
+    {
+      label: 'Inspect agent',
+      value: selectedAgent.id,
+      hint: 'Press Enter to inspect agent.',
+    },
+    {
+      label: 'Copy exact fix command',
+      value: fixCommand,
+      hint: 'Press Enter to print this command back to the shell.',
+    },
+    {
+      label: 'Exit',
+      value: 'Return to shell',
+      hint: 'Press Enter, q, Esc, or Ctrl+C.',
+    },
+  ];
+  const lines = [
+    '\x1b[2J\x1b[H',
+    '+------------------------------------------------------------+',
+    '| Marrow Fleet Operator                                      |',
+    '| Live fleet health, proof debt, gates, and exact fixes       |',
+    '+------------------------------------------------------------+',
+    '',
+    `Agent: ${displayText(snapshot.agent_id, 36)}   Snapshot: ${displayText(snapshot.generated_at, 36)}`,
+    `API: ${displayText(snapshot.base_url, 60)}`,
+    '',
+    'Navigation: Up/Down move   Left/Right select agent   Enter inspect/print',
+    'Exit: q, Esc, or Ctrl+C',
+    '',
+  ];
+  rows.forEach((row, index) => {
+    lines.push(...renderOptionBox(row, index === state.cursor), '');
+  });
+  if (state.status) {
+    lines.push(`Status: ${displayText(state.status, 120)}`);
+  }
+  if (state.lastResult) {
+    lines.push('');
+    lines.push(displayText(state.lastResult, 700));
+  }
+  if (snapshot.source_errors.length) {
+    lines.push('');
+    lines.push('Partial data:');
+    for (const error of snapshot.source_errors.slice(0, 4)) lines.push(`- ${displayText(error, 120)}`);
+  }
+  return lines.join('\n');
+}
+
 function canUseInteractive(options, input = process.stdin, output = process.stdout) {
   if (options.interactive === false) return false;
   if (options.interactive === true) return Boolean(input.isTTY && output.isTTY);
@@ -980,6 +1342,99 @@ async function runGovernInteractive(options, input = process.stdin, output = pro
   }
 }
 
+async function runFleetInteractive(options, input = process.stdin, output = process.stdout) {
+  const snapshot = await fleetSnapshot(options);
+  if (options.json) return snapshot;
+  if (!canUseInteractive(options, input, output)) {
+    output.write(`${fleetPanel(snapshot)}\n`);
+    return snapshot;
+  }
+
+  const state = buildFleetState(snapshot);
+  readline.emitKeypressEvents(input);
+  input.setRawMode(true);
+  output.write('\x1b[?25l');
+
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    if (input.setRawMode) input.setRawMode(false);
+    output.write('\x1b[?25h');
+  };
+  const render = () => output.write(renderFleetTui(state));
+
+  render();
+  let keyHandler;
+  try {
+    await new Promise((resolve) => {
+      keyHandler = (str, key = {}) => {
+        if (key.ctrl && key.name === 'c') {
+          cleanup();
+          resolve();
+          return;
+        }
+        if (key.name === 'q' || key.name === 'escape' || str === 'q') {
+          cleanup();
+          resolve();
+          return;
+        }
+        if (key.name === 'up') {
+          state.cursor = (state.cursor + FLEET_TUI_ROW_COUNT - 1) % FLEET_TUI_ROW_COUNT;
+          render();
+        } else if (key.name === 'down') {
+          state.cursor = (state.cursor + 1) % FLEET_TUI_ROW_COUNT;
+          render();
+        } else if ((key.name === 'left' || key.name === 'right') && state.snapshot.agents.length) {
+          const direction = key.name === 'right' ? 1 : -1;
+          state.agentIndex = (state.agentIndex + direction + state.snapshot.agents.length) % state.snapshot.agents.length;
+          state.status = 'Agent selection changed.';
+          render();
+        } else if (key.name === 'return') {
+          if (state.cursor === 9) {
+            cleanup();
+            output.write(`\n${state.snapshot.fix_commands[0] || 'npx @getmarrow/install doctor'}\n`);
+            resolve();
+            return;
+          }
+          if (state.cursor === 10) {
+            cleanup();
+            resolve();
+            return;
+          }
+          const selectedAgent = state.snapshot.agents[state.agentIndex];
+          if (state.cursor === 0 || state.cursor === 8) {
+            state.lastResult = selectedAgent
+              ? `Agent ${selectedAgent.id}: status=${selectedAgent.status}${selectedAgent.role ? ` role=${selectedAgent.role}` : ''}${selectedAgent.last_seen_at ? ` last_seen=${selectedAgent.last_seen_at}` : ''}`
+              : 'No live agent roster returned yet. Check API key scope or wait for agents to log activity.';
+          } else if (state.cursor === 5) {
+            state.lastResult = state.snapshot.recent_decisions.length
+              ? state.snapshot.recent_decisions.map((decision, index) => `${index + 1}. ${decision}`).join('  ')
+              : 'No recent decisions returned yet.';
+          } else if (state.cursor === 6) {
+            state.lastResult = state.snapshot.degraded_hooks.length
+              ? `Degraded hooks: ${state.snapshot.degraded_hooks.join(', ')}. Fix: ${state.snapshot.fix_commands[0]}`
+              : 'No degraded hooks reported.';
+          } else if (state.cursor === 7) {
+            state.lastResult = `Release gates: deploy=${state.snapshot.gates.deploy}, publish=${state.snapshot.gates.publish}, merge=${state.snapshot.gates.merge}.`;
+          } else {
+            state.lastResult = fleetPanel(state.snapshot).replace(/\n/g, '  ');
+          }
+          state.status = 'Inspection updated.';
+          render();
+        }
+      };
+      input.on('keypress', keyHandler);
+    });
+  } finally {
+    if (keyHandler) input.off('keypress', keyHandler);
+    if (input.pause) input.pause();
+    cleanup();
+    output.write('\n');
+  }
+  return snapshot;
+}
+
 async function runCli(argv) {
   const parsed = parseArgs(argv);
   if (parsed.command === 'help') {
@@ -999,11 +1454,13 @@ async function runCli(argv) {
   else if (parsed.command === 'govern') {
     await runGovernInteractive(parsed.options);
     return;
+  } else if (parsed.command === 'fleet') {
+    result = await runFleetInteractive(parsed.options);
   }
 
   if (parsed.options?.json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   else if (result?.blocked) process.stderr.write(`BLOCKED: ${result.message || 'Marrow blocked this action.'}\n`);
-  else if (parsed.command !== 'run') process.stdout.write('Marrow command completed.\n');
+  else if (parsed.command !== 'run' && parsed.command !== 'fleet') process.stdout.write('Marrow command completed.\n');
 
   if (parsed.command === 'run' || result?.blocked) process.exitCode = result?.exitCode ?? (result?.ok === false ? 1 : 0);
 }
@@ -1016,7 +1473,6 @@ module.exports = {
   inferSurfaces,
   commandForSelection,
   buildGovernState,
-  detectHarnesses,
   detectProjectSignals,
   recommendGovernanceMode,
   recordGovernanceModeSelection,
@@ -1032,5 +1488,12 @@ module.exports = {
   runStatusCheck,
   runGateCheck,
   runGovernInteractive,
+  optionalRequestJson,
+  normalizeFleetSnapshot,
+  fleetSnapshot,
+  fleetPanel,
+  buildFleetState,
+  renderFleetTui,
+  runFleetInteractive,
   runCli,
 };

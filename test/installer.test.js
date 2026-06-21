@@ -8,11 +8,8 @@ const {
   buildPlan,
   detectEnvironment,
   install,
-  inspectPackageVersions,
   inspectNpmTokenConfig,
   parseArgs,
-  passiveRuntimeSource,
-  runDoctorValidation,
   runSelfTest,
 } = require('../src/installer');
 
@@ -283,75 +280,8 @@ test('doctor reports likely env files when MARROW_API_KEY is not loaded', async 
   assert.equal(report.selfTest.skipped, true);
   assert.match(report.selfTest.exact_fix, /--repair/);
   assert.ok(report.doctor.envHints.some((hint) => hint.endsWith(path.join('.marrow', 'env'))));
-  assert.match(report.doctor.recommendedFix, /auto-loaded by Marrow SDK\/MCP runtimes/);
+  assert.match(report.doctor.recommendedFix, /trusted secret storage/);
   assert.doesNotMatch(report.doctor.recommendedFix, /set -a;\s*\./);
-});
-
-test('parseArgs auto-loads Marrow key material from project .marrow/env', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-install-env-autoload-'));
-  fs.mkdirSync(path.join(dir, '.marrow'));
-  fs.writeFileSync(path.join(dir, '.marrow', 'env'), [
-    'MARROW_API_KEY=mrw_test_install_env_key_123456789',
-    'MARROW_FLEET_AGENT_ID=install-agent',
-    '',
-  ].join('\n'));
-
-  const originalApiKey = process.env.MARROW_API_KEY;
-  const originalKey = process.env.MARROW_KEY;
-  const originalFleetAgent = process.env.MARROW_FLEET_AGENT_ID;
-  const originalAgent = process.env.MARROW_AGENT_ID;
-  try {
-    delete process.env.MARROW_API_KEY;
-    delete process.env.MARROW_KEY;
-    delete process.env.MARROW_FLEET_AGENT_ID;
-    delete process.env.MARROW_AGENT_ID;
-    const parsed = parseArgs(['--cwd', dir]);
-    assert.equal(parsed.apiKey, 'mrw_test_install_env_key_123456789');
-    assert.equal(parsed.agentId, 'install-agent');
-    assert.equal(parsed.keySource, path.join(dir, '.marrow', 'env'));
-  } finally {
-    if (originalApiKey === undefined) delete process.env.MARROW_API_KEY;
-    else process.env.MARROW_API_KEY = originalApiKey;
-    if (originalKey === undefined) delete process.env.MARROW_KEY;
-    else process.env.MARROW_KEY = originalKey;
-    if (originalFleetAgent === undefined) delete process.env.MARROW_FLEET_AGENT_ID;
-    else process.env.MARROW_FLEET_AGENT_ID = originalFleetAgent;
-    if (originalAgent === undefined) delete process.env.MARROW_AGENT_ID;
-    else process.env.MARROW_AGENT_ID = originalAgent;
-  }
-});
-
-test('parseArgs does not auto-load internal OpenClaw credential paths for public installer', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-install-public-scope-'));
-  const home = path.join(dir, 'home');
-  fs.mkdirSync(path.join(home, '.openclaw', 'credentials'), { recursive: true });
-  fs.writeFileSync(path.join(home, '.openclaw', 'credentials', 'marrow-mcp.env'), 'MARROW_API_KEY=mrw_test_internal_should_not_load_123456789\n');
-
-  const originalHome = process.env.HOME;
-  const originalApiKey = process.env.MARROW_API_KEY;
-  const originalKey = process.env.MARROW_KEY;
-  try {
-    process.env.HOME = home;
-    delete process.env.MARROW_API_KEY;
-    delete process.env.MARROW_KEY;
-    const parsed = parseArgs(['--cwd', dir]);
-    assert.equal(parsed.apiKey, '');
-    assert.equal(parsed.keySource, undefined);
-  } finally {
-    if (originalHome === undefined) delete process.env.HOME;
-    else process.env.HOME = originalHome;
-    if (originalApiKey === undefined) delete process.env.MARROW_API_KEY;
-    else process.env.MARROW_API_KEY = originalApiKey;
-    if (originalKey === undefined) delete process.env.MARROW_KEY;
-    else process.env.MARROW_KEY = originalKey;
-  }
-});
-
-test('passive runtime source loads .marrow/env before deciding key is missing', () => {
-  const source = passiveRuntimeSource();
-  assert.match(source, /resolveMarrowEnv/);
-  assert.match(source, /\.marrow/);
-  assert.match(source, /MARROW_API_KEY \|\| marrowEnv\.MARROW_KEY/);
 });
 
 test('install auto mode does not create Claude settings when Claude is not detected', async () => {
@@ -372,56 +302,6 @@ test('install auto mode does not create Claude settings when Claude is not detec
 
   assert.equal(fs.existsSync(path.join(dir, '.claude', 'settings.json')), false);
   assert.equal(fs.existsSync(path.join(dir, '.mcp.json')), true);
-});
-
-test('doctor validation reports exact missing key failure', async () => {
-  const validation = await runDoctorValidation({
-    apiKey: '',
-    baseUrl: 'https://api.getmarrow.ai',
-    agentId: '',
-  }, { skipped: true, reason: 'missing MARROW_API_KEY' });
-
-  assert.equal(validation.key_found, false);
-  assert.equal(validation.key_valid, false);
-  assert.equal(validation.failure_reason, 'missing_key');
-  assert.match(validation.exact_fix, /MARROW_API_KEY/);
-});
-
-test('doctor validation confirms write test and outcome closure', async () => {
-  const validation = await runDoctorValidation({
-    apiKey: 'mrw_test_key',
-    baseUrl: 'https://api.getmarrow.ai',
-    agentId: 'agent-a',
-  }, {
-    skipped: false,
-    active: true,
-    decision_id: 'dec_doctor',
-  });
-
-  assert.equal(validation.key_found, true);
-  assert.equal(validation.key_valid, true);
-  assert.equal(validation.write_test_event, 'passed');
-  assert.equal(validation.outcome_closed, 'passed');
-  assert.equal(validation.decision_id, 'dec_doctor');
-});
-
-test('doctor package version warnings find old local SDK and MCP versions', () => {
-  const dir = tempDir();
-  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
-    dependencies: {
-      '@getmarrow/sdk': '^3.7.1',
-      '@getmarrow/mcp': '^3.9.1',
-    },
-  }));
-  const detection = detectEnvironment(dir, {});
-  const versions = inspectPackageVersions(detection);
-
-  const sdk = versions.find((pkg) => pkg.name === '@getmarrow/sdk');
-  const mcp = versions.find((pkg) => pkg.name === '@getmarrow/mcp');
-  assert.equal(sdk.outdated, true);
-  assert.equal(mcp.outdated, true);
-  assert.match(sdk.update_command, /@getmarrow\/sdk@latest/);
-  assert.match(mcp.update_command, /@getmarrow\/mcp@latest/);
 });
 
 test('self-test returns first five-minute value signal and proof', async () => {

@@ -9,35 +9,32 @@ npx @getmarrow/install --dry-run
 npx @getmarrow/install --yes
 npx @getmarrow/install --repair
 npx @getmarrow/install doctor
+npx @getmarrow/install fleet
 ```
 
-## What's New in v0.1.19
+## What's New in v0.1.20
 
-v0.1.19 makes Marrow doctor and release smoke stricter, so agents know exactly why logging is degraded.
+v0.1.20 adds the Fleet Operator TUI for teams running multiple agents under one Marrow account.
 
-- `npx @getmarrow/install doctor --self-test` now validates: key found, key valid, account active, agent identity accepted, harmless write test created, and outcome closed.
-- Doctor reports exact failure reasons such as `missing_key`, `invalid_key`, `wrong_agent_id`, `network_blocked`, and `proof_required`.
-- Doctor warns when local `@getmarrow/install`, `@getmarrow/sdk`, or `@getmarrow/mcp` versions are behind the current release.
-- New `scripts/fresh-install-smoke.sh` verifies a clean temp install can load `.marrow/env`, run doctor, write a test event, and close the outcome.
-- Full keys are still never printed in diagnostics. Keep `.marrow/env` out of git and set file permissions to owner-only when possible.
+- `npx @getmarrow/install fleet` opens a terminal operator view when run in a real TTY.
+- CI/headless agents can use `npx @getmarrow/install fleet --no-interactive` for a stable text snapshot or `--json` for machine-readable status.
+- The view shows live agents, active workflows, risky actions waiting for proof, failed/stale outcomes, backpressure/capacity status, recent decisions, degraded hooks, and deploy/publish/merge gate posture.
+- Operators can press Enter to inspect an agent and print the exact fix command when hooks, outcome closure, or status coverage is degraded.
+- The command reads existing Marrow account endpoints and degrades gracefully when a route is unavailable, so it is safe to use during incidents.
 
-## What's New in v0.1.17
+Example:
 
-v0.1.17 expands the Govern TUI harness addon coverage while preserving adaptive mode recommendations.
-
-- `npx @getmarrow/install govern` now shows first-class rows for Codex, Claude Code, Cursor, Cline, Gemini CLI, Grok CLI, DeepSeek CLI, Minimax CLI, Kimi CLI, Hermes, GLM CLI, Qwen CLI, OpenCode, OpenClaw, MCP-compatible clients, CI scripts, and custom commands.
-- Marrow remains a thin governance layer. It does not replace your model or harness; it wraps the command your agent already runs with pre-action risk gates, proof requirements, and automatic outcome closure.
-- Detection stays recommendation-first. Marrow uses local config, instruction, CI, and MCP markers to suggest the safest path, then the user or owner accepts, overrides, or saves a policy profile.
-- Cursor is treated as a development workflow surface. Marrow can govern Cursor-backed code review, edits, tests, deploys, and release steps through MCP setup, project rules, or the governed command wrapper.
-- If a harness is not detected yet, use **Custom command** or `npx @getmarrow/install run -- <your-agent-command>` to govern it immediately.
-
-Business value: teams can add Marrow to the agent stack they already use instead of migrating to a new agent host. Codex, Claude Code, Cursor, Cline, Gemini, Grok, DeepSeek, Minimax, Kimi/Moonshot, Hermes, GLM, Qwen, OpenClaw, OpenCode, MCP clients, and CI scripts can all be brought under the same governance loop.
+```bash
+MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install fleet
+MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install fleet --no-interactive
+MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install fleet --json
+```
 
 ## What's New in v0.1.14
 
 v0.1.14 adds adaptive governance mode recommendations without silent auto-switching.
 
-- `npx @getmarrow/install govern` now detects project signals such as `package.json`, deploy/publish scripts, platform config files, GitHub workflows, migrations, Cursor/Codex/Claude files, and MCP config.
+- `npx @getmarrow/install govern` now detects project signals such as `package.json`, deploy/publish scripts, `wrangler` config, GitHub workflows, migrations, Cursor/Codex/Claude files, and MCP config.
 - When `MARROW_API_KEY` is present, the TUI asks Marrow for a recommended mode: `passive`, `pilot`, or `enforce`.
 - The TUI shows the exact reasons, confidence, and selected command before the user applies anything.
 - User choice is explicit. Marrow logs whether the recommendation was accepted or overridden, but it does not silently switch modes.
@@ -49,7 +46,7 @@ Example recommendation:
 Recommended mode: pilot
 Reason:
 - Node project detected
-- Edge service detected
+- Cloudflare Worker detected
 - GitHub workflow detected
 - No owner approval policy configured yet
 ```
@@ -104,7 +101,7 @@ MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --agent codex-prod --prof
 Gate a production action before the agent executes it:
 
 ```bash
-MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install gate "deploy production service after tests pass"
+MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install gate "deploy production worker after tests pass"
 ```
 
 Wrap a real deploy, publish, merge, or migration command only after the agent has the required proof:
@@ -115,7 +112,7 @@ MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run \
   --type deploy \
   --profile production \
   --policy enforce \
-  -- npm run deploy
+  -- wrangler deploy
 ```
 
 Use `--policy warn` for pilot mode and `--fail-open` only for non-production local workflows where Marrow should never block execution.
@@ -175,23 +172,48 @@ I am about to deploy to production. What should I check first?
 
 Marrow should answer with `proceed`, `warn`, `block`, or `owner_approval_required`, plus required proof and matching fleet lessons/playbooks before the agent acts. This is the first product moment: not just "hooks installed", but "the agent is being warned before risky work."
 
+## Fleet Scale Startup Guidance
+
+For business fleets, agents can read `GET /v1/agent/scale/capacity-contract` after install or during startup. The capacity contract tells the agent whether the account is under backpressure, when low-risk runtime guidance can be reused, when high-risk actions must still call Marrow, and how to batch low-risk telemetry through `/v1/agent/ingest/batch`.
+
+This keeps Marrow passive without making it chatty. The current contract models the common `50 businesses x 50 agents = 2,500 agents` rollout shape and gives agents an exact next action: cache low-risk runtime guidance briefly, batch command/tool telemetry, and preserve proof-gated checks for deploys, publishes, merges, migrations, secrets, billing, and destructive work.
+
+## Fleet Operator TUI
+
+Use the operator TUI when a human owner or orchestrator agent needs to understand fleet health before acting:
+
+```bash
+MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install fleet
+```
+
+It shows:
+
+- live agents and selected agent inspection
+- active workflows
+- risky actions waiting for proof
+- failed or stale outcomes
+- backpressure and capacity guidance
+- recent decisions
+- degraded hooks
+- deploy, publish, and merge gate status
+- exact fix commands for common degraded states
+
+For automated reports or headless agents:
+
+```bash
+MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install fleet --no-interactive
+MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install fleet --json
+```
+
 ## What It Detects
 
 - OpenClaw-style workspaces
 - Codex/agent instruction files such as `AGENTS.md`
 - Claude Code settings and hooks
 - Cursor project folders
-- Gemini, Grok, DeepSeek, Minimax, Kimi/Moonshot, Hermes, GLM, and Qwen project marker files when present
 - MCP config files
-- CI workflow/script markers
 - Node projects
 - Python projects
-
-The detector is intentionally conservative. If Marrow cannot identify the harness from local files, it still supports the workflow through the custom command path:
-
-```bash
-MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --agent research-agent -- <your-agent-command>
-```
 
 ## Install Modes
 
@@ -232,14 +254,6 @@ Doctor check:
 ```bash
 MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install doctor
 ```
-
-Deep doctor with harmless write/outcome verification:
-
-```bash
-MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install doctor --self-test
-```
-
-Expected healthy output includes `key valid: yes`, `write test event: passed`, and `outcome closed: passed`.
 
 Repair missing hooks/config:
 
