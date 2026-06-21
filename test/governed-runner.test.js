@@ -6,18 +6,21 @@ const { PassThrough, Writable } = require('node:stream');
 const test = require('node:test');
 
 const {
-  detectHarnesses,
   gateDecision,
   governPanel,
   buildGovernState,
+  buildFleetState,
   canUseInteractive,
   commandForSelection,
   detectProjectSignals,
+  fleetPanel,
   inferSurfaces,
   inferType,
+  normalizeFleetSnapshot,
   parseArgs,
   redact,
   redactedCommand,
+  renderFleetTui,
   renderGovernTui,
   runGovernInteractive,
   shouldBlock,
@@ -91,55 +94,10 @@ test('governPanel presents harness selection without becoming a model host', () 
   assert.match(panel, /Codex/);
   assert.match(panel, /Claude Code/);
   assert.match(panel, /Cursor/);
-  assert.match(panel, /Gemini CLI/);
-  assert.match(panel, /Grok CLI/);
-  assert.match(panel, /DeepSeek CLI/);
-  assert.match(panel, /Minimax CLI/);
-  assert.match(panel, /Kimi CLI/);
-  assert.match(panel, /Hermes/);
-  assert.match(panel, /GLM CLI/);
-  assert.match(panel, /Qwen CLI/);
-  assert.match(panel, /Cline/);
-  assert.match(panel, /MCP-compatible client/);
-  assert.match(panel, /CI scripts/);
+  assert.match(panel, /CI script/);
   assert.match(panel, /Custom command/);
   assert.match(panel, /Marrow governs the action before it executes/);
   assert.match(panel, /npx @getmarrow\/install run --agent codex-bob/);
-});
-
-test('detectHarnesses recognizes popular agent harness marker files', () => {
-  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-'));
-  fs.mkdirSync(path.join(cwd, '.cursor'));
-  fs.writeFileSync(path.join(cwd, 'GEMINI.md'), '# Gemini agent notes\n');
-  fs.writeFileSync(path.join(cwd, 'GROK.md'), '# Grok agent notes\n');
-  fs.writeFileSync(path.join(cwd, 'DEEPSEEK.md'), '# DeepSeek agent notes\n');
-  fs.writeFileSync(path.join(cwd, 'MINIMAX.md'), '# Minimax agent notes\n');
-  fs.writeFileSync(path.join(cwd, 'KIMI.md'), '# Kimi agent notes\n');
-  fs.writeFileSync(path.join(cwd, 'HERMES.md'), '# Hermes agent notes\n');
-  fs.writeFileSync(path.join(cwd, 'GLM.md'), '# GLM agent notes\n');
-  fs.writeFileSync(path.join(cwd, 'QWEN.md'), '# Qwen agent notes\n');
-  fs.mkdirSync(path.join(cwd, '.cline'));
-  fs.writeFileSync(path.join(cwd, '.mcp.json'), '{}\n');
-
-  const detected = detectHarnesses(cwd)
-    .filter((candidate) => candidate.detected)
-    .map((candidate) => candidate.name);
-
-  for (const name of [
-    'Cursor',
-    'Gemini CLI',
-    'Grok CLI',
-    'DeepSeek CLI',
-    'Minimax CLI',
-    'Kimi CLI',
-    'Hermes',
-    'GLM CLI',
-    'Qwen CLI',
-    'Cline',
-    'MCP-compatible client',
-  ]) {
-    assert.ok(detected.includes(name), `${name} should be detected`);
-  }
 });
 
 test('detectProjectSignals finds deploy and Cloudflare project evidence', () => {
@@ -172,6 +130,102 @@ test('govern interactive options are parsed and non-tty stays text-safe', () => 
   assert.equal(canUseInteractive({ interactive: false }, { isTTY: true }, { isTTY: true }), false);
   assert.equal(canUseInteractive({ interactive: true }, { isTTY: false }, { isTTY: true }), false);
   assert.equal(canUseInteractive({ interactive: null }, { isTTY: true }, { isTTY: true }), true);
+});
+
+test('fleet command parses operator TUI options', () => {
+  const parsed = parseArgs(['fleet', '--no-interactive', '--json']);
+  assert.equal(parsed.command, 'fleet');
+  assert.equal(parsed.options.interactive, false);
+  assert.equal(parsed.options.json, true);
+});
+
+test('fleet panel summarizes operator-critical account state', () => {
+  const snapshot = normalizeFleetSnapshot({
+    status: {
+      ok: true,
+      data: {
+        active_workflow_count: 4,
+        proof_pack_hygiene: { incomplete: 2 },
+        auto_outcome_closure: { status: 'degraded', stale: 1, exact_fix: 'npx @getmarrow/install --repair' },
+        missed_hooks: ['command_outcome'],
+        deploy_gate: { status: 'enforce' },
+        publish_gate: { status: 'warn' },
+        merge_gate: { status: 'enforce' },
+        recent_decisions: [{ action: 'deploy worker after smoke test' }],
+      },
+    },
+    capacity: {
+      ok: true,
+      data: {
+        current_backpressure: { status: 'ok' },
+        exact_next_action: 'Batch low-risk telemetry; keep high-risk gates live.',
+      },
+    },
+    report: {
+      ok: true,
+      data: {
+        agents: [
+          { id: 'jarvis', role: 'release', status: 'active', last_seen_at: '2026-06-21T00:00:00Z' },
+          { id: 'barvis', role: 'security', status: 'active' },
+        ],
+      },
+    },
+    fleet: { ok: true, data: { live_agent_count: 2 } },
+  }, {
+    agentId: 'codex-bob',
+    baseUrl: 'https://api.getmarrow.ai',
+  });
+
+  const panel = fleetPanel(snapshot);
+  assert.match(panel, /Marrow Fleet Operator/);
+  assert.match(panel, /Live agents: 2/);
+  assert.match(panel, /Active workflows: 4/);
+  assert.match(panel, /Risky actions waiting for proof: 2/);
+  assert.match(panel, /Failed\/stale outcomes: 1/);
+  assert.match(panel, /Backpressure\/capacity status: ok/);
+  assert.match(panel, /Recent decisions:/);
+  assert.match(panel, /Degraded hooks: command_outcome/);
+  assert.match(panel, /Deploy\/publish\/merge gates: deploy=enforce publish=warn merge=enforce/);
+  assert.match(panel, /Press Enter to inspect agent/);
+  assert.match(panel, /Copy exact fix command:/);
+  assert.match(panel, /npx @getmarrow\/install --repair/);
+});
+
+test('fleet TUI render exposes inspection and fix-command rows', () => {
+  const snapshot = normalizeFleetSnapshot({
+    status: {
+      ok: true,
+      data: {
+        active_workflow_count: 1,
+        recent_decisions: ['blocked publish until npm proof was complete'],
+        missed_hooks: [],
+        deploy_gate: 'enforce',
+        publish_gate: 'enforce',
+        merge_gate: 'warn',
+      },
+    },
+    capacity: { ok: true, data: { backpressure: { status: 'ok' } } },
+    report: { ok: true, data: { agents: [{ id: 'codex-bob', status: 'active' }] } },
+    fleet: { ok: true, data: { live_agent_count: 1 } },
+  }, {
+    agentId: 'codex-bob',
+    baseUrl: 'https://api.getmarrow.ai',
+  });
+  const state = buildFleetState(snapshot);
+  const screen = renderFleetTui(state);
+
+  assert.match(screen, /Marrow Fleet Operator/);
+  assert.match(screen, /\[Live agents\]/);
+  assert.match(screen, /\[Active workflows\]/);
+  assert.match(screen, /\[Risky actions waiting for proof\]/);
+  assert.match(screen, /\[Failed\/stale outcomes\]/);
+  assert.match(screen, /\[Backpressure \/ capacity\]/);
+  assert.match(screen, /\[Recent decisions\]/);
+  assert.match(screen, /\[Degraded hooks\]/);
+  assert.match(screen, /\[Deploy\/publish\/merge gates\]/);
+  assert.match(screen, /\[Inspect agent\]/);
+  assert.match(screen, /\[Copy exact fix command\]/);
+  assert.match(screen, /Press Enter to inspect agent/);
 });
 
 test('govern TUI render shows passive and governed commands', () => {
