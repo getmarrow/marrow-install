@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const test = require('node:test');
 
 const {
@@ -9,7 +10,9 @@ const {
   detectEnvironment,
   install,
   inspectNpmTokenConfig,
+  inspectSdkDependency,
   parseArgs,
+  passiveRuntimeSource,
   runSelfTest,
 } = require('../src/installer');
 
@@ -112,14 +115,80 @@ test('install --yes writes passive runtime and instructions idempotently', async
   const agents = fs.readFileSync(path.join(dir, 'AGENTS.md'), 'utf8');
   const settings = JSON.parse(fs.readFileSync(path.join(dir, '.claude', 'settings.json'), 'utf8'));
 
+  assert.match(runtime, /await import\('@getmarrow\/sdk'\)/);
+  assert.match(runtime, /passive runtime skipped/);
+  assert.doesNotMatch(runtime, /error\.message|String\(error\)|message =/);
   assert.match(runtime, /createPassiveRuntime/);
   assert.match(runtime, /useAgentRuntime/);
   assert.match(runtime, /useWorkflowGate/);
   assert.match(runtime, /requireOutcomeClosure/);
+  assert.match(runtime, /captureModelUsage/);
   assert.match(runtime, /MARROW_PASSIVE_VALUE_REPORT !== 'false'/);
+  assert.match(runtime, /MARROW_PASSIVE_TOKEN_USAGE !== 'false'/);
+  const envExample = fs.readFileSync(path.join(dir, '.marrow', 'env.example'), 'utf8');
+  assert.match(envExample, /MARROW_PASSIVE_TOKEN_USAGE=true/);
   assert.equal((agents.match(/marrow:passive-start/g) || []).length, 1);
+  assert.match(agents, /passive token\/model usage proof enabled/);
   assert.ok(settings.hooks.PostToolUse);
   assert.ok(settings.hooks.UserPromptSubmit);
+});
+
+
+
+test('generated passive runtime warning redacts SDK initialization errors', async () => {
+  const dir = tempDir();
+  const moduleDir = path.join(dir, 'node_modules', '@getmarrow', 'sdk');
+  fs.mkdirSync(moduleDir, { recursive: true });
+  fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({ type: 'module', main: 'index.js' }));
+  fs.writeFileSync(path.join(moduleDir, 'index.js'), `export class MarrowClient {\n  constructor(apiKey, options) {\n    throw new Error('leaked ' + apiKey + ' ' + options.baseUrl + ' ' + options.agentId + ' ' + options.sessionId);\n  }\n}\n`);
+  fs.mkdirSync(path.join(dir, '.marrow'), { recursive: true });
+  const runtimePath = path.join(dir, '.marrow', 'passive-runtime.mjs');
+  fs.writeFileSync(runtimePath, passiveRuntimeSource());
+
+  const result = spawnSync(process.execPath, [runtimePath], {
+    cwd: dir,
+    encoding: 'utf8',
+    env: {
+      PATH: process.env.PATH || '',
+      HOME: dir,
+      MARROW_API_KEY: 'mrw_live_should_not_print',
+      MARROW_BASE_URL: 'https://secret.example.test',
+      MARROW_AGENT_ID: 'agent-secret-value',
+      MARROW_SESSION_ID: 'session-secret-value',
+    },
+  });
+
+  assert.equal(result.status, 0);
+  assert.match(result.stderr, /passive runtime skipped/);
+  assert.doesNotMatch(result.stderr, /mrw_live_should_not_print/);
+  assert.doesNotMatch(result.stderr, /secret\.example\.test/);
+  assert.doesNotMatch(result.stderr, /agent-secret-value/);
+  assert.doesNotMatch(result.stderr, /session-secret-value/);
+});
+
+test('install reports missing SDK dependency for passive runtime projects', async () => {
+  const dir = tempDir();
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ dependencies: {} }));
+
+  const report = await install({
+    cwd: dir,
+    mode: 'sdk',
+    yes: false,
+    dryRun: true,
+    selfTest: false,
+    apiKey: '',
+    baseUrl: 'https://api.getmarrow.ai',
+    agentId: '',
+  });
+
+  assert.equal(report.sdkDependency.required, true);
+  assert.equal(report.sdkDependency.present, false);
+  assert.equal(report.sdkDependency.install_command, 'npm install @getmarrow/sdk');
+
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ dependencies: { '@getmarrow/sdk': '^3.7.27' } }));
+  const detected = detectEnvironment(dir, {});
+  const sdk = inspectSdkDependency(detected);
+  assert.equal(sdk.present, true);
 });
 
 test('doctor detects npm token config mismatches without leaking token values', async () => {
@@ -263,6 +332,7 @@ test('repair mode writes config and reports self-test remediation state', async 
 
 test('doctor reports likely env files when MARROW_API_KEY is not loaded', async () => {
   const dir = tempDir();
+  fs.writeFileSync(path.join(dir, 'AGENTS.md'), '# Agents\n');
   fs.mkdirSync(path.join(dir, '.marrow'), { recursive: true });
   fs.writeFileSync(path.join(dir, '.marrow', 'env'), 'MARROW_API_KEY=mrw_live_placeholder\n');
 
@@ -339,6 +409,57 @@ test('self-test returns first five-minute value signal and proof', async () => {
         agent_reliability_score: 0.91,
       } }), { status: 200 });
     }
+    if (href.endsWith('/v1/agent/first-value')) {
+      return new Response(JSON.stringify({ data: {
+        ok: true,
+        active: true,
+        headline: 'Your agent is no longer starting from zero.',
+        first_value: {
+          proof: ['Captured this setup decision', 'Closed the outcome successfully', 'Runtime gate is active'],
+          first_lesson: 'Before continuing, reuse the safe deploy lesson.',
+          try_this_now: 'Ask your agent: "I am about to deploy to production. What should I check first?"',
+          expected_response: 'Marrow should answer with a risk gate, required proof, and matching fleet lessons before the agent acts.',
+        },
+        history_signal: { summary: 'Marrow found 1 avoided mistake signal.' },
+        capture: { surfaces: ['decisions', 'outcomes:active', 'risk-gate'] },
+        value_proof: { avoided_mistakes: 1, reused_winning_decisions: 2, prevented_bad_actions: 1, estimated_tokens_saved: 6600 },
+        next_action: { reason: 'Use this one-call runtime check before risky actions.' },
+      } }), { status: 200 });
+    }
+    if (href.includes('/v1/agent/value/proof')) {
+      return new Response(JSON.stringify({ data: {
+        summary: 'Marrow has 12 recorded outcomes in the selected period with 92% success rate.',
+        model_usage: {
+          enabled: true,
+          capture_default: 'on_when_sdk_mcp_or_installer_hooks_available',
+          observed: {
+            model_calls: 3,
+            agents_seen: 1,
+            workflows_seen: 1,
+            tokens: { input: 1200, output: 500, cached: 300, total: 2000 },
+            cost_usd: 0.02,
+            avg_latency_ms: 820,
+          },
+          savings: {
+            estimated_tokens_saved: 700,
+            estimated_cost_saved_usd: 0.01,
+            estimated_minutes_saved: 2,
+            confidence: 'medium',
+            method: 'explicit_measurements',
+          },
+          trend: {
+            period_days: 30,
+            recent_tokens_per_call: 500,
+            previous_tokens_per_call: 700,
+            reduction_pct: 28.6,
+            direction: 'improving',
+          },
+          top_models: [{ provider: 'openai', model: 'codex-5.5', calls: 3, tokens: 2000 }],
+          proof_line: 'Marrow observed 3 model calls and estimates 700 tokens saved in 30 days.',
+          exact_next_action: 'Show this token_value_signal after work completes and include it in owner reports.',
+        },
+      } }), { status: 200 });
+    }
     return new Response(JSON.stringify({ error: 'unexpected url' }), { status: 404 });
   };
 
@@ -352,10 +473,18 @@ test('self-test returns first five-minute value signal and proof', async () => {
     assert.equal(result.first_value_signal.active, true);
     assert.match(result.first_value_signal.headline, /Marrow active/);
     assert.ok(result.first_value_signal.captured.includes('decisions'));
-    assert.ok(result.first_value_signal.captured.includes('tools'));
+    assert.ok(result.first_value_signal.captured.includes('outcomes:active'));
     assert.match(result.first_value_signal.first_lesson, /safe deploy lesson/);
+    assert.match(result.install_value_moment.headline, /starting from zero/);
+    assert.match(result.install_value_moment.try_this_now, /deploy to production/);
+    assert.match(result.install_value_moment.fleet_signal, /avoided mistake/);
+    assert.equal(result.first_value.headline, 'Your agent is no longer starting from zero.');
     assert.ok(result.first_value_signal.value_proof.some((line) => line.includes('avoided mistake')));
     assert.equal(result.performance_proof.estimated_tokens_saved, 6600);
+    assert.equal(result.token_value_proof.observed.model_calls, 3);
+    assert.equal(result.token_value_proof.observed.tokens.total, 2000);
+    assert.equal(result.token_value_proof.savings.estimated_tokens_saved, 700);
+    assert.ok(result.install_value_moment.proof.some((line) => line.includes('model calls')));
   } finally {
     global.fetch = originalFetch;
   }
