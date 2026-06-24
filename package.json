@@ -1,6 +1,6 @@
 {
   "name": "@getmarrow/install",
-  "version": "0.1.21",
+  "version": "0.1.22",
   "description": "Universal installer for Marrow passive agent setup.",
   "bin": {
     "marrow-install": "bin/marrow-install.js"
