@@ -9,65 +9,24 @@ npx @getmarrow/install --dry-run
 npx @getmarrow/install --yes
 npx @getmarrow/install --repair
 npx @getmarrow/install doctor
-npx @getmarrow/install fleet
 ```
 
-## What's New in v0.1.20
+## What's New in v0.1.21
 
-v0.1.20 adds the Fleet Operator TUI for teams running multiple agents under one Marrow account.
+v0.1.21 makes token value proof part of the default install path.
 
-- `npx @getmarrow/install fleet` opens a terminal operator view when run in a real TTY.
-- CI/headless agents can use `npx @getmarrow/install fleet --no-interactive` for a stable text snapshot or `--json` for machine-readable status.
-- The view shows live agents, active workflows, risky actions waiting for proof, failed/stale outcomes, backpressure/capacity status, recent decisions, degraded hooks, and deploy/publish/merge gate posture.
-- Operators can press Enter to inspect an agent and print the exact fix command when hooks, outcome closure, or status coverage is degraded.
-- The command reads existing Marrow account endpoints and degrades gracefully when a route is unavailable, so it is safe to use during incidents.
+- Generated passive runtimes enable compact model-usage capture by default with `captureModelUsage`.
+- First-run self-test calls `/v1/agent/value/proof` and prints a `Token value proof` block.
+- Fresh accounts show token capture as active and warming up; accounts with observed model calls show calls, tokens, estimated savings, confidence, and next action.
+- Provider usage capture stores compact metadata only: provider, model, token counts, latency, cost estimate, workflow/decision linkage, and Marrow intervention type.
+- Marrow does not store prompts, completions, tool stdout/stderr, plaintext API keys, or raw model output for this feature.
+- Disable only when required with `MARROW_PASSIVE_TOKEN_USAGE=false`.
 
-Example:
+Business value: new users should see from day one whether Marrow is capturing the signals needed to prove token/time savings over workflows, tasks, and builds.
 
-```bash
-MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install fleet
-MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install fleet --no-interactive
-MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install fleet --json
-```
+## Governed Runner
 
-## What's New in v0.1.14
-
-v0.1.14 adds adaptive governance mode recommendations without silent auto-switching.
-
-- `npx @getmarrow/install govern` now detects project signals such as `package.json`, deploy/publish scripts, `wrangler` config, GitHub workflows, migrations, Cursor/Codex/Claude files, and MCP config.
-- When `MARROW_API_KEY` is present, the TUI asks Marrow for a recommended mode: `passive`, `pilot`, or `enforce`.
-- The TUI shows the exact reasons, confidence, and selected command before the user applies anything.
-- User choice is explicit. Marrow logs whether the recommendation was accepted or overridden, but it does not silently switch modes.
-- Policy profiles are supported by the backend/SDK/MCP so businesses can define rules like local=passive, staging=pilot, production deploys=enforce.
-
-Example recommendation:
-
-```text
-Recommended mode: pilot
-Reason:
-- Node project detected
-- Cloudflare Worker detected
-- GitHub workflow detected
-- No owner approval policy configured yet
-```
-
-## What's New in v0.1.13
-
-v0.1.13 turns `npx @getmarrow/install govern` into an interactive terminal setup flow when run in a real TTY.
-
-- Select Codex, Claude Code, Cursor, OpenCode, OpenClaw, CI scripts, or a custom command with arrow keys.
-- Choose passive setup, governed pilot mode, or governed enforce mode.
-- Run passive setup + self-test from the TUI after explicit confirmation.
-- Check Marrow status and test the before-action gate from the same screen.
-- Print the exact command for the selected harness/mode so users know what to run next.
-- Exit cleanly with `q`, `Esc`, or `Ctrl+C`.
-- CI/non-TTY usage remains stable with `npx @getmarrow/install govern --no-interactive`.
-
-This keeps Marrow passive-first: install once, verify Marrow is active, then let agents use the runtime/gate path automatically for risky work.
-
-## What's New in v0.1.12
-
-v0.1.12 adds the Marrow governed runner for businesses that want agent governance without replacing their existing harness.
+The Marrow governed runner is for businesses that want agent governance without replacing their existing harness.
 
 - `npx @getmarrow/install govern` prints a setup panel for detected harnesses and recommended protected commands.
 - `npx @getmarrow/install run --agent <agent-id> -- <command>` wraps existing agent, deploy, merge, publish, migration, and verification commands with Marrow's pre-action runtime gate.
@@ -84,12 +43,6 @@ Preview the detected harnesses and protected command examples:
 
 ```bash
 npx @getmarrow/install govern
-```
-
-In a real terminal, this opens the interactive setup flow. In CI or scripts, use:
-
-```bash
-npx @getmarrow/install govern --no-interactive
 ```
 
 Run a harmless command through Marrow:
@@ -116,15 +69,6 @@ MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run \
 ```
 
 Use `--policy warn` for pilot mode and `--fail-open` only for non-production local workflows where Marrow should never block execution.
-
-## What's New in v0.1.10
-
-- First-run output now explains the value in agent/user language: your agent is no longer starting from zero.
-- Self-test prints first proof: setup decision captured, outcome closed, runtime gate active, and risky work now gets a pre-action brief.
-- Fresh accounts get a guided prompt to try immediately: "I am about to deploy to production. What should I check first?"
-- Existing accounts/fleets show stronger proof when available: avoided mistakes, reused winning decisions, prevented risky actions, and token/time savings.
-- Generated SDK passive runtime now fails soft if `@getmarrow/sdk` is missing and the installer prints the exact dependency fix.
-- Docs now make the universal installer the default path; SDK and MCP are advanced/manual integration paths.
 
 ## Which Install Path Should I Use?
 
@@ -158,7 +102,9 @@ Expected result:
 - `/v1/agent/status` confirms capture health and missing hooks.
 - `/v1/agent/runtime` verifies the one-call runtime gate and returns the before-action intervention contract.
 - `/v1/agent/first-value` returns the five-minute proof payload used by installer, SDK, and MCP clients.
+- `/v1/agent/value/proof` returns token value proof from passive model-usage capture.
 - The installer prints: "Your agent is no longer starting from zero."
+- The installer prints: "Token value proof" with capture status, observed model calls, token totals, estimated savings, confidence, and exact next action.
 - Fresh accounts get a first useful action to try immediately.
 - Accounts with history get proof such as avoided mistakes, reused winning decisions, prevented risky actions, or estimated time/token savings.
 
@@ -171,39 +117,6 @@ I am about to deploy to production. What should I check first?
 ```
 
 Marrow should answer with `proceed`, `warn`, `block`, or `owner_approval_required`, plus required proof and matching fleet lessons/playbooks before the agent acts. This is the first product moment: not just "hooks installed", but "the agent is being warned before risky work."
-
-## Fleet Scale Startup Guidance
-
-For business fleets, agents can read `GET /v1/agent/scale/capacity-contract` after install or during startup. The capacity contract tells the agent whether the account is under backpressure, when low-risk runtime guidance can be reused, when high-risk actions must still call Marrow, and how to batch low-risk telemetry through `/v1/agent/ingest/batch`.
-
-This keeps Marrow passive without making it chatty. The current contract models the common `50 businesses x 50 agents = 2,500 agents` rollout shape and gives agents an exact next action: cache low-risk runtime guidance briefly, batch command/tool telemetry, and preserve proof-gated checks for deploys, publishes, merges, migrations, secrets, billing, and destructive work.
-
-## Fleet Operator TUI
-
-Use the operator TUI when a human owner or orchestrator agent needs to understand fleet health before acting:
-
-```bash
-MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install fleet
-```
-
-It shows:
-
-- live agents and selected agent inspection
-- active workflows
-- risky actions waiting for proof
-- failed or stale outcomes
-- backpressure and capacity guidance
-- recent decisions
-- degraded hooks
-- deploy, publish, and merge gate status
-- exact fix commands for common degraded states
-
-For automated reports or headless agents:
-
-```bash
-MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install fleet --no-interactive
-MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install fleet --json
-```
 
 ## What It Detects
 
@@ -237,7 +150,7 @@ npx @getmarrow/install --md --dry-run
 
 ## Self-Test
 
-When `MARROW_API_KEY` is present, the installer creates a harmless test decision, commits the outcome, reads `/v1/agent/status`, calls the one-call runtime, and prints the first useful Marrow signal.
+When `MARROW_API_KEY` is present, the installer creates a harmless test decision, commits the outcome, reads `/v1/agent/status`, calls the one-call runtime, reads `/v1/agent/value/proof`, and prints the first useful Marrow signal plus token value proof.
 
 ```bash
 MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install --yes
@@ -270,6 +183,34 @@ npm install @getmarrow/sdk
 ```
 
 The generated runtime now fails soft with an explicit warning if the SDK package is missing, so onboarding does not crash a user process.
+
+## Passive Token Value Proof
+
+Token value proof is default-on when the installer writes `.marrow/passive-runtime.mjs`.
+
+In supported Node/TypeScript agents, the SDK passive runtime wraps outbound model-provider `fetch` responses and captures compact `usage` blocks when providers return them. MCP and harness integrations can also attach `model_usage` to `marrow_commit` or call `marrow_model_usage` when the harness exposes usage metadata.
+
+Captured fields are intentionally narrow:
+
+- provider and model
+- input, output, cached, and total token counts
+- optional cost and latency estimates
+- agent, workflow, session, and decision linkage
+- Marrow intervention type, such as `runtime_gate`, `proof_pack`, or `before_you_act`
+
+Marrow does not capture prompt text, completion text, raw tool output, command output, full environment values, or plaintext secrets for token value proof.
+
+Disable capture only when a project requires it:
+
+```bash
+MARROW_PASSIVE_TOKEN_USAGE=false
+```
+
+Day-one behavior:
+
+- Fresh install: `Token usage capture is ready; no model calls have been reported yet.`
+- After observed usage: Marrow reports model calls, total tokens, estimated tokens saved, confidence, trend, and next action.
+- After workflows complete: agents should show the returned `token_value_signal` or value proof in owner updates so users see savings without opening a dashboard.
 
 
 ## Trust and Data Boundaries
