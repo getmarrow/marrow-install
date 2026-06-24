@@ -688,10 +688,13 @@ function normalizeFixCommands(status, capacity) {
   add(status.route_contract?.exact_fix);
   add(status.auto_outcome_closure?.exact_fix);
   add(status.capture_coverage?.exact_fix);
+  add(status.token_capture?.exact_fix);
+  add(status.token_capture?.fix_command, true);
   add(capacity.exact_next_action, true);
   add(capacity.next_action, true);
   if (listValue(status.missed_hooks, status.degraded_hooks).length) add('npx @getmarrow/install --repair');
   if (status.auto_outcome_closure?.status === 'degraded') add('npx @getmarrow/install --repair');
+  if (status.token_capture?.detected === false) add('npx @getmarrow/install --repair');
   return commands.slice(0, 6);
 }
 

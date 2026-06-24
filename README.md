@@ -11,9 +11,9 @@ npx @getmarrow/install --repair
 npx @getmarrow/install doctor
 ```
 
-## What's New in v0.1.21
+## What's New in v0.1.22
 
-v0.1.21 makes token value proof part of the default install path.
+v0.1.22 makes token value proof easier to repair from the Fleet Operator TUI.
 
 - Generated passive runtimes enable compact model-usage capture by default with `captureModelUsage`.
 - First-run self-test calls `/v1/agent/value/proof` and prints a `Token value proof` block.
