@@ -6,6 +6,35 @@ const crypto = require('node:crypto');
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MARROW_BLOCK_START = '<!-- marrow:passive-start -->';
 const MARROW_BLOCK_END = '<!-- marrow:passive-end -->';
+const SOURCE_CLIENTS = new Set(['claude-code', 'cursor', 'windsurf', 'openclaw', 'codex', 'gemini', 'grok', 'deepseek', 'qwen', 'kimi', 'minimax', 'cline', 'opencode', 'hermes', 'glm', 'custom', 'unknown']);
+
+function sourceClient() {
+  const raw = String(process.env.MARROW_CLIENT || process.env.MARROW_HARNESS || process.env.MARROW_AGENT_CLIENT || '').trim().toLowerCase().replace(/\s+/g, '-').replace(/^@/, '');
+  const aliases = {
+    claude: 'claude-code',
+    claude_code: 'claude-code',
+    'claude-code': 'claude-code',
+    cursor: 'cursor',
+    windsurf: 'windsurf',
+    openclaw: 'openclaw',
+    codex: 'codex',
+    'openai-codex': 'codex',
+    gemini: 'gemini',
+    google: 'gemini',
+    grok: 'grok',
+    deepseek: 'deepseek',
+    qwen: 'qwen',
+    kimi: 'kimi',
+    minimax: 'minimax',
+    cline: 'cline',
+    opencode: 'opencode',
+    'open-code': 'opencode',
+    hermes: 'hermes',
+    'hermes-agent': 'hermes',
+    glm: 'glm',
+  };
+  return aliases[raw] || (SOURCE_CLIENTS.has(raw) ? raw : 'custom');
+}
 
 function parseArgs(argv) {
   const options = {
@@ -291,7 +320,7 @@ Marrow should run passively after install:
 Required environment:
 
 - \`MARROW_API_KEY\`
-- Optional: \`MARROW_BASE_URL\`, \`MARROW_FLEET_AGENT_ID\`
+- Optional: \`MARROW_BASE_URL\`, \`MARROW_FLEET_AGENT_ID\`, \`MARROW_CLIENT\`
 - Optional: \`MARROW_PASSIVE_TOKEN_USAGE=false\` disables compact provider usage capture when needed.
 ${MARROW_BLOCK_END}`;
 }
@@ -330,6 +359,7 @@ function envExample() {
   return `MARROW_API_KEY=mrw_live_replace_me
 MARROW_BASE_URL=${DEFAULT_BASE_URL}
 MARROW_FLEET_AGENT_ID=agent-or-fleet-id
+MARROW_CLIENT=codex
 MARROW_ENFORCEMENT_MODE=auto
 MARROW_PASSIVE_BRIEF=auto
 MARROW_PASSIVE_VALUE_REPORT=true
@@ -565,6 +595,7 @@ async function runSelfTest(options) {
     authorization: `Bearer ${options.apiKey}`,
     'content-type': 'application/json',
     'x-marrow-session-id': `install-${Date.now()}`,
+    'x-marrow-client': sourceClient(),
   };
   if (options.agentId) headers['x-marrow-agent-id'] = options.agentId;
 
@@ -575,6 +606,11 @@ async function runSelfTest(options) {
     body: JSON.stringify({
       type: 'process',
       action: 'Marrow passive install self-test: verify SDK/MCP hooks can record a harmless setup event',
+      source_meta: {
+        channel: 'cli',
+        client: sourceClient(),
+        user_intent: 'operate',
+      },
     }),
   });
 

@@ -9,6 +9,36 @@ const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const HIGH_RISK_TERMS = /\b(deploy|prod|production|publish|release|merge|migration|migrate|secret|token|key|cloudflare|wrangler|npm publish|gh pr merge|git push|terraform apply|kubectl apply|delete|destroy|drop)\b/i;
 const GOVERN_TUI_ROW_COUNT = 7;
 const FLEET_TUI_ROW_COUNT = 11;
+const SOURCE_CLIENTS = new Set(['claude-code', 'cursor', 'windsurf', 'openclaw', 'codex', 'gemini', 'grok', 'deepseek', 'qwen', 'kimi', 'minimax', 'cline', 'opencode', 'hermes', 'glm', 'custom', 'unknown']);
+
+function sourceClient() {
+  const raw = String(process.env.MARROW_CLIENT || process.env.MARROW_HARNESS || process.env.MARROW_AGENT_CLIENT || '').trim().toLowerCase().replace(/\s+/g, '-').replace(/^@/, '');
+  const aliases = {
+    claude: 'claude-code',
+    claude_code: 'claude-code',
+    'claude-code': 'claude-code',
+    cursor: 'cursor',
+    windsurf: 'windsurf',
+    openclaw: 'openclaw',
+    codex: 'codex',
+    'openai-codex': 'codex',
+    gemini: 'gemini',
+    google: 'gemini',
+    grok: 'grok',
+    deepseek: 'deepseek',
+    qwen: 'qwen',
+    kimi: 'kimi',
+    minimax: 'minimax',
+    cline: 'cline',
+    opencode: 'opencode',
+    'open-code': 'opencode',
+    hermes: 'hermes',
+    'hermes-agent': 'hermes',
+    glm: 'glm',
+  };
+  return aliases[raw] || (SOURCE_CLIENTS.has(raw) ? raw : 'custom');
+}
+
 function usage() {
   return `Usage:
   npx @getmarrow/install run --agent deploy-agent -- npm test
@@ -283,6 +313,7 @@ function headers(options) {
     'Content-Type': 'application/json',
     'X-Marrow-Agent-Id': options.agentId,
     'X-Marrow-Session-Id': options.sessionId,
+    'X-Marrow-Client': sourceClient(),
     'User-Agent': '@getmarrow/install governed-runner',
   };
   return h;
@@ -448,6 +479,11 @@ async function createDecision(options, action, type) {
       runner: '@getmarrow/install run',
       profile: options.profile,
       governed: true,
+    },
+    source_meta: {
+      channel: 'cli',
+      client: sourceClient(),
+      user_intent: type === 'deploy' ? 'deploy' : 'operate',
     },
   });
 }
