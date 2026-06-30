@@ -11,18 +11,17 @@ npx @getmarrow/install --repair
 npx @getmarrow/install doctor
 ```
 
-## What's New in v0.1.22
+## What's New in v0.1.23
 
-v0.1.22 makes token value proof easier to repair from the Fleet Operator TUI.
+v0.1.23 improves attribution quality so Marrow can produce cleaner per-agent, per-harness, and per-workflow value reports.
 
-- Generated passive runtimes enable compact model-usage capture by default with `captureModelUsage`.
-- First-run self-test calls `/v1/agent/value/proof` and prints a `Token value proof` block.
-- Fresh accounts show token capture as active and warming up; accounts with observed model calls show calls, tokens, estimated savings, confidence, and next action.
-- Provider usage capture stores compact metadata only: provider, model, token counts, latency, cost estimate, workflow/decision linkage, and Marrow intervention type.
-- Marrow does not store prompts, completions, tool stdout/stderr, plaintext API keys, or raw model output for this feature.
-- Disable only when required with `MARROW_PASSIVE_TOKEN_USAGE=false`.
+- Installer self-tests and governed runner calls attach `source_meta.channel`, `source_meta.client`, and inferred workflow intent by default.
+- Generated passive runtime keeps using SDK defaults for `agent_id`, harness/client, source channel, and user intent attribution.
+- Set `MARROW_CLIENT`, `MARROW_HARNESS`, or `MARROW_AGENT_CLIENT` to labels such as `codex`, `claude-code`, `cursor`, `gemini`, `qwen`, `opencode`, `hermes`, `openclaw`, or `custom`.
+- Invalid or unknown client labels fall back to `custom` instead of breaking onboarding.
+- Marrow still does not store prompts, completions, tool stdout/stderr, plaintext API keys, or raw model output for this feature.
 
-Business value: new users should see from day one whether Marrow is capturing the signals needed to prove token/time savings over workflows, tasks, and builds.
+Business value: dashboards and reports can show which agents, harnesses, and workflow types are improving instead of grouping too much work into "unknown."
 
 ## Governed Runner
 
@@ -86,6 +85,14 @@ Use the lower-level packages only when you need direct control:
 - **MCP:** use `@getmarrow/mcp` when you want manual MCP server/hook setup for Claude Code, Claude Desktop, Cursor, or another MCP-compatible client.
 
 The three packages are not three competing onboarding paths. `@getmarrow/install` is the front door; SDK and MCP are the implementation paths underneath it.
+
+For cleaner attribution, set an agent id and optional client label before install:
+
+```bash
+export MARROW_FLEET_AGENT_ID=codex-deploy-agent
+export MARROW_CLIENT=codex
+npx @getmarrow/install --yes
+```
 
 ## Agent Value Proof Quickstart
 
