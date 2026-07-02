@@ -14,6 +14,7 @@ const {
   commandForSelection,
   detectProjectSignals,
   fleetPanel,
+  headers,
   inferSurfaces,
   inferType,
   normalizeFleetSnapshot,
@@ -21,9 +22,14 @@ const {
   redact,
   redactedCommand,
   renderFleetTui,
+  renderIntegrationPanel,
+  localSupportedHarnesses,
+  localIntegrationManifest,
   renderGovernTui,
   runGovernInteractive,
   shouldBlock,
+  sourceClient,
+  sourceMeta,
 } = require('../src/governed-runner');
 
 test('parseArgs supports governed command execution after --', () => {
@@ -94,10 +100,71 @@ test('governPanel presents harness selection without becoming a model host', () 
   assert.match(panel, /Codex/);
   assert.match(panel, /Claude Code/);
   assert.match(panel, /Cursor/);
+  assert.match(panel, /Cursor Composer/);
+  assert.match(panel, /Windsurf/);
+  assert.match(panel, /Gemini CLI/);
   assert.match(panel, /CI script/);
   assert.match(panel, /Custom command/);
   assert.match(panel, /Marrow governs the action before it executes/);
   assert.match(panel, /npx @getmarrow\/install run --agent codex-bob/);
+});
+
+test('local integration registry covers major harnesses and model CLIs', () => {
+  const supported = localSupportedHarnesses();
+  const labels = supported.map((item) => item.client_label);
+
+  assert.ok(labels.includes('codex'));
+  assert.ok(labels.includes('claude-code'));
+  assert.ok(labels.includes('cursor'));
+  assert.ok(labels.includes('composer'));
+  assert.ok(labels.includes('windsurf'));
+  assert.ok(labels.includes('cline'));
+  assert.ok(labels.includes('hermes'));
+  assert.ok(labels.includes('openclaw'));
+  assert.ok(labels.includes('gemini'));
+  assert.ok(labels.includes('grok'));
+  assert.ok(labels.includes('deepseek'));
+  assert.ok(labels.includes('qwen'));
+  assert.ok(labels.includes('kimi'));
+  assert.ok(labels.includes('minimax'));
+  assert.ok(labels.includes('glm'));
+  assert.ok(labels.includes('mcp'));
+  assert.ok(labels.includes('ci'));
+  assert.ok(labels.includes('custom'));
+});
+
+test('governed runner attaches stable client attribution from env and CLI', () => {
+  const originalClient = process.env.MARROW_CLIENT;
+  const originalHarness = process.env.MARROW_HARNESS;
+  const originalAgentClient = process.env.MARROW_AGENT_CLIENT;
+  try {
+    delete process.env.MARROW_HARNESS;
+    delete process.env.MARROW_AGENT_CLIENT;
+    process.env.MARROW_CLIENT = 'Qwen CLI';
+    const envParsed = parseArgs(['run', '--agent', 'qwen-agent', '--', 'qwen', 'chat']);
+    assert.equal(envParsed.options.client, 'qwen');
+    assert.equal(sourceClient(envParsed.options.client), 'qwen');
+    assert.equal(headers(envParsed.options)['X-Marrow-Client'], 'qwen');
+
+    const cliParsed = parseArgs(['run', '--client', 'Hermes', '--agent', 'hermes-agent', '--', 'hermes', '/goal']);
+    const meta = sourceMeta(cliParsed.options, 'runtime', {
+      action: 'run Hermes goal',
+      command: 'hermes /goal',
+    });
+    assert.equal(cliParsed.options.client, 'hermes');
+    assert.equal(meta.channel, 'runtime');
+    assert.equal(meta.client, 'hermes');
+    assert.equal(meta.harness, 'hermes');
+    assert.equal(meta.agent_id, 'hermes-agent');
+    assert.equal(meta.command, 'hermes /goal');
+  } finally {
+    if (originalClient === undefined) delete process.env.MARROW_CLIENT;
+    else process.env.MARROW_CLIENT = originalClient;
+    if (originalHarness === undefined) delete process.env.MARROW_HARNESS;
+    else process.env.MARROW_HARNESS = originalHarness;
+    if (originalAgentClient === undefined) delete process.env.MARROW_AGENT_CLIENT;
+    else process.env.MARROW_AGENT_CLIENT = originalAgentClient;
+  }
 });
 
 test('detectProjectSignals finds deploy and Cloudflare project evidence', () => {
@@ -137,6 +204,42 @@ test('fleet command parses operator TUI options', () => {
   assert.equal(parsed.command, 'fleet');
   assert.equal(parsed.options.interactive, false);
   assert.equal(parsed.options.json, true);
+});
+
+test('Hermes and OpenClaw add-on commands parse through governed runner', () => {
+  const hermes = parseArgs(['hermes', '--no-interactive']);
+  const openclaw = parseArgs(['openclaw', '--json']);
+  const integrations = parseArgs(['integrations']);
+
+  assert.equal(hermes.command, 'hermes');
+  assert.equal(openclaw.command, 'openclaw');
+  assert.equal(openclaw.options.json, true);
+  assert.equal(integrations.command, 'integrations');
+});
+
+test('detectProjectSignals finds Hermes and OpenClaw config evidence', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-signals-'));
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'harness-project' }));
+  fs.writeFileSync(path.join(dir, 'hermes.json'), '{}');
+  fs.writeFileSync(path.join(dir, 'openclaw.json'), '{}');
+
+  const signals = detectProjectSignals(dir);
+  assert.ok(signals.signals.includes('hermes_config'));
+  assert.ok(signals.signals.includes('openclaw_config'));
+});
+
+test('integration panels explain capture points and add-on commands', () => {
+  const hermes = localIntegrationManifest('hermes');
+  const openclaw = localIntegrationManifest('openclaw');
+  const hermesPanel = renderIntegrationPanel('hermes', hermes, 'local', []);
+  const openclawPanel = renderIntegrationPanel('openclaw', openclaw, 'local', []);
+
+  assert.match(hermesPanel, /Marrow \+ Hermes Agent/);
+  assert.match(hermesPanel, /\/goal -> Marrow completion contract/);
+  assert.match(hermesPanel, /npx @getmarrow\/install hermes/);
+  assert.match(openclawPanel, /Marrow \+ OpenClaw/);
+  assert.match(openclawPanel, /handoff\/result files -> proof packs/);
+  assert.match(openclawPanel, /npx @getmarrow\/install openclaw/);
 });
 
 test('fleet panel summarizes operator-critical account state', () => {

@@ -9,36 +9,6 @@ const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const HIGH_RISK_TERMS = /\b(deploy|prod|production|publish|release|merge|migration|migrate|secret|token|key|cloudflare|wrangler|npm publish|gh pr merge|git push|terraform apply|kubectl apply|delete|destroy|drop)\b/i;
 const GOVERN_TUI_ROW_COUNT = 7;
 const FLEET_TUI_ROW_COUNT = 11;
-const SOURCE_CLIENTS = new Set(['claude-code', 'cursor', 'windsurf', 'openclaw', 'codex', 'gemini', 'grok', 'deepseek', 'qwen', 'kimi', 'minimax', 'cline', 'opencode', 'hermes', 'glm', 'custom', 'unknown']);
-
-function sourceClient() {
-  const raw = String(process.env.MARROW_CLIENT || process.env.MARROW_HARNESS || process.env.MARROW_AGENT_CLIENT || '').trim().toLowerCase().replace(/\s+/g, '-').replace(/^@/, '');
-  const aliases = {
-    claude: 'claude-code',
-    claude_code: 'claude-code',
-    'claude-code': 'claude-code',
-    cursor: 'cursor',
-    windsurf: 'windsurf',
-    openclaw: 'openclaw',
-    codex: 'codex',
-    'openai-codex': 'codex',
-    gemini: 'gemini',
-    google: 'gemini',
-    grok: 'grok',
-    deepseek: 'deepseek',
-    qwen: 'qwen',
-    kimi: 'kimi',
-    minimax: 'minimax',
-    cline: 'cline',
-    opencode: 'opencode',
-    'open-code': 'opencode',
-    hermes: 'hermes',
-    'hermes-agent': 'hermes',
-    glm: 'glm',
-  };
-  return aliases[raw] || (SOURCE_CLIENTS.has(raw) ? raw : 'custom');
-}
-
 function usage() {
   return `Usage:
   npx @getmarrow/install run --agent deploy-agent -- npm test
@@ -49,6 +19,9 @@ function usage() {
   npx @getmarrow/install govern
   npx @getmarrow/install govern --no-interactive
   npx @getmarrow/install fleet
+  npx @getmarrow/install integrations
+  npx @getmarrow/install hermes
+  npx @getmarrow/install openclaw
 
 Commands:
   run       Run a command through Marrow pre-action gate and automatic outcome closure
@@ -57,6 +30,9 @@ Commands:
   status    Read /v1/agent/status
   govern    Interactive setup TUI when run in a terminal; text panel in CI/non-TTY
   fleet     Fleet operator TUI for live agents, workflows, gates, proof debt, and exact fixes
+  integrations List Marrow-supported harness add-ons
+  hermes    Show and verify the Marrow add-on path for Hermes Agent
+  openclaw  Show and verify the Marrow add-on path for OpenClaw
 
 Options:
   --agent <id>            Agent identity. Defaults to MARROW_FLEET_AGENT_ID, MARROW_AGENT_ID, or local user
@@ -69,6 +45,7 @@ Options:
   --fail-closed           If Marrow is unreachable, block the command
   --owner-approved <ref>  Owner approval reference for review-required gates
   --proof-file <path>     JSON proof to include on outcome commit
+  --client <label>        Harness/client label. Defaults to MARROW_CLIENT, MARROW_HARNESS, or MARROW_AGENT_CLIENT
   --base-url <url>        Marrow API base URL
   --key <key>             Marrow API key. Prefer MARROW_API_KEY
   --json                  Print machine-readable result after completion
@@ -99,6 +76,40 @@ function shellQuote(value) {
 
 function redactedCommand(command) {
   return command.map((part) => shellQuote(redact(part))).join(' ');
+}
+
+function normalizeClientLabel(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return '';
+  const normalized = raw
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64);
+  const aliases = {
+    claude: 'claude-code',
+    claude_code: 'claude-code',
+    'cursor-composer': 'composer',
+    'openai-codex': 'codex',
+    openai: 'codex',
+    'gemini-cli': 'gemini',
+    'grok-cli': 'grok',
+    'deepseek-cli': 'deepseek',
+    'qwen-cli': 'qwen',
+    'kimi-cli': 'kimi',
+    'minimax-cli': 'minimax',
+    'glm-cli': 'glm',
+  };
+  return aliases[normalized] || normalized || 'custom';
+}
+
+function sourceClient(value) {
+  return normalizeClientLabel(
+    value
+    || process.env.MARROW_CLIENT
+    || process.env.MARROW_HARNESS
+    || process.env.MARROW_AGENT_CLIENT
+    || '@getmarrow/install',
+  );
 }
 
 function displayText(value, maxLength = 120) {
@@ -184,7 +195,23 @@ function detectProjectSignals(cwd = process.cwd()) {
   addFile('AGENTS.md', 'agent_instructions');
   addFile('CLAUDE.md', 'agent_instructions');
   addFile('.mcp.json', 'mcp_config');
+  addFile('mcp.json', 'mcp_config');
   addFile('.cursor', 'cursor_project');
+  addFile('.windsurf', 'windsurf_project');
+  addFile('.cline', 'cline_project');
+  addFile('hermes.json', 'hermes_config');
+  addFile('hermes.yaml', 'hermes_config');
+  addFile('hermes.yml', 'hermes_config');
+  addFile('.hermes', 'hermes_config');
+  addFile('openclaw.json', 'openclaw_config');
+  addFile('.openclaw', 'openclaw_config');
+  addFile('.gemini', 'gemini_profile');
+  addFile('.grok', 'grok_profile');
+  addFile('.deepseek', 'deepseek_profile');
+  addFile('.qwen', 'qwen_profile');
+  addFile('.kimi', 'kimi_profile');
+  addFile('.minimax', 'minimax_profile');
+  addFile('.glm', 'glm_profile');
 
   for (const script of packageScripts) {
     if (/\b(deploy|publish|release|migrate|migration|smoke|check|test)\b/i.test(script)) {
@@ -222,6 +249,7 @@ function parseBaseOptions(argv, startIndex = 0) {
     proofFile: '',
     type: '',
     action: '',
+    client: sourceClient(),
     interactive: null,
   };
   let i = startIndex;
@@ -242,6 +270,7 @@ function parseBaseOptions(argv, startIndex = 0) {
       options.failOpen = false;
     } else if (arg === '--owner-approved') options.ownerApproval = argv[++i] || options.ownerApproval;
     else if (arg === '--proof-file') options.proofFile = argv[++i] || options.proofFile;
+    else if (arg === '--client' || arg === '--harness') options.client = sourceClient(argv[++i] || options.client);
     else if (arg === '--base-url') options.baseUrl = argv[++i] || options.baseUrl;
     else if (arg === '--key') {
       options.apiKey = argv[++i] || options.apiKey;
@@ -298,7 +327,7 @@ function parseArgs(argv) {
     return { command, options };
   }
 
-  if (command === 'status' || command === 'govern' || command === 'fleet') {
+  if (command === 'status' || command === 'govern' || command === 'fleet' || command === 'hermes' || command === 'openclaw' || command === 'integrations') {
     const parsed = parseBaseOptions(argv, 1);
     if (parsed.options.help) return { command: 'help' };
     return { command, options: parsed.options };
@@ -313,10 +342,26 @@ function headers(options) {
     'Content-Type': 'application/json',
     'X-Marrow-Agent-Id': options.agentId,
     'X-Marrow-Session-Id': options.sessionId,
-    'X-Marrow-Client': sourceClient(),
+    'X-Marrow-Client': sourceClient(options.client),
     'User-Agent': '@getmarrow/install governed-runner',
   };
   return h;
+}
+
+function sourceMeta(options, channel, extra = {}) {
+  const client = sourceClient(options.client);
+  return {
+    channel,
+    client,
+    harness: client,
+    runner: '@getmarrow/install',
+    agent_id: options.agentId,
+    session_id: options.sessionId,
+    profile: options.profile,
+    governed: true,
+    ...(extra.action ? { user_intent: displayText(extra.action, 160) } : {}),
+    ...extra,
+  };
 }
 
 function dataOf(json) {
@@ -359,22 +404,26 @@ function defaultProof(input) {
     exit_code: input.exitCode,
     runner: '@getmarrow/install run',
     profile: input.options.profile,
+    source_meta: sourceMeta(input.options, 'proof', { action: input.action }),
     ...(input.options.ownerApproval ? { owner_approval: { approved_by: 'owner', reference: input.options.ownerApproval } } : {}),
     ...proof,
   };
 }
 
 async function preflightRuntime(options, action, type, commandText) {
+  const meta = sourceMeta(options, 'runtime', { action, command: commandText, action_type: type });
   return requestJson(options, 'POST', '/v1/agent/runtime', {
     action,
     type,
     surfaces: inferSurfaces(commandText || action),
+    source_meta: meta,
     context: {
       runner: '@getmarrow/install run',
       profile: options.profile,
       command: commandText,
       policy: options.policy,
       governed: true,
+      source_meta: meta,
     },
   });
 }
@@ -402,6 +451,7 @@ async function recommendGovernanceMode(options, project = detectProjectSignals()
       id: options.agentId,
       role: 'setup',
     },
+    source_meta: sourceMeta(options, 'mode_recommend', { action }),
   });
 }
 
@@ -421,6 +471,7 @@ async function recordGovernanceModeSelection(options, state) {
     },
     selected_mode: selected,
     selection_source: selected === state.recommendation.recommended_mode ? 'accepted' : 'overridden',
+    source_meta: sourceMeta(options, 'mode_selection', { action: 'selected Marrow governance mode for this project' }),
   });
 }
 
@@ -472,18 +523,16 @@ function runChild(command, env = process.env) {
 }
 
 async function createDecision(options, action, type) {
+  const meta = sourceMeta(options, 'think', { action, action_type: type });
   return requestJson(options, 'POST', '/v1/agent/think', {
     action,
     type,
+    source_meta: meta,
     context: {
       runner: '@getmarrow/install run',
       profile: options.profile,
       governed: true,
-    },
-    source_meta: {
-      channel: 'cli',
-      client: sourceClient(),
-      user_intent: type === 'deploy' ? 'deploy' : 'operate',
+      source_meta: meta,
     },
   });
 }
@@ -494,6 +543,7 @@ async function commitOutcome(options, decisionId, success, outcome, proof, gateR
     success,
     outcome,
     proof,
+    source_meta: sourceMeta(options, 'commit', { action: outcome }),
   };
   if (gateReceiptId) body.gate_receipt_id = gateReceiptId;
   return requestJson(options, 'POST', '/v1/agent/commit', body);
@@ -724,13 +774,10 @@ function normalizeFixCommands(status, capacity) {
   add(status.route_contract?.exact_fix);
   add(status.auto_outcome_closure?.exact_fix);
   add(status.capture_coverage?.exact_fix);
-  add(status.token_capture?.exact_fix);
-  add(status.token_capture?.fix_command, true);
   add(capacity.exact_next_action, true);
   add(capacity.next_action, true);
   if (listValue(status.missed_hooks, status.degraded_hooks).length) add('npx @getmarrow/install --repair');
   if (status.auto_outcome_closure?.status === 'degraded') add('npx @getmarrow/install --repair');
-  if (status.token_capture?.detected === false) add('npx @getmarrow/install --repair');
   return commands.slice(0, 6);
 }
 
@@ -878,17 +925,191 @@ function fleetPanel(snapshot) {
   ].filter(Boolean).join('\n');
 }
 
+const GENERIC_GOVERNED_COMMAND = 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --agent <agent-id> --profile production --policy warn -- <harness-command>';
+
+function localSupportedHarnesses() {
+  return [
+    { display_name: 'OpenAI Codex', client_label: 'codex', category: 'agent_harness', support_level: 'governed_runner', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --agent codex-prod -- codex' },
+    { display_name: 'Claude Code', client_label: 'claude-code', category: 'agent_harness', support_level: 'native_mcp_or_sdk', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/mcp setup' },
+    { display_name: 'Cursor', client_label: 'cursor', category: 'ide_agent', support_level: 'native_mcp_or_sdk', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/mcp setup' },
+    { display_name: 'Cursor Composer', client_label: 'composer', category: 'ide_agent', support_level: 'native_mcp_or_sdk', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/mcp setup' },
+    { display_name: 'Windsurf', client_label: 'windsurf', category: 'ide_agent', support_level: 'native_mcp_or_sdk', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/mcp setup' },
+    { display_name: 'Cline', client_label: 'cline', category: 'ide_agent', support_level: 'native_mcp_or_sdk', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/mcp setup' },
+    { display_name: 'OpenCode', client_label: 'opencode', category: 'agent_harness', support_level: 'governed_runner', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --agent opencode-prod -- opencode' },
+    { display_name: 'Hermes Agent', client_label: 'hermes', category: 'agent_harness', support_level: 'first_class_addon', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install hermes' },
+    { display_name: 'OpenClaw', client_label: 'openclaw', category: 'agent_harness', support_level: 'first_class_addon', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install openclaw' },
+    { display_name: 'Gemini CLI', client_label: 'gemini', category: 'model_cli', support_level: 'governed_runner', install_command: GENERIC_GOVERNED_COMMAND },
+    { display_name: 'Grok CLI', client_label: 'grok', category: 'model_cli', support_level: 'governed_runner', install_command: GENERIC_GOVERNED_COMMAND },
+    { display_name: 'DeepSeek', client_label: 'deepseek', category: 'model_cli', support_level: 'governed_runner', install_command: GENERIC_GOVERNED_COMMAND },
+    { display_name: 'Qwen', client_label: 'qwen', category: 'model_cli', support_level: 'governed_runner', install_command: GENERIC_GOVERNED_COMMAND },
+    { display_name: 'Kimi', client_label: 'kimi', category: 'model_cli', support_level: 'governed_runner', install_command: GENERIC_GOVERNED_COMMAND },
+    { display_name: 'MiniMax', client_label: 'minimax', category: 'model_cli', support_level: 'governed_runner', install_command: GENERIC_GOVERNED_COMMAND },
+    { display_name: 'GLM', client_label: 'glm', category: 'model_cli', support_level: 'governed_runner', install_command: GENERIC_GOVERNED_COMMAND },
+    { display_name: 'MCP-compatible clients', client_label: 'mcp', category: 'mcp_client', support_level: 'native_mcp_or_sdk', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/mcp setup' },
+    { display_name: 'CI scripts and deploy runners', client_label: 'ci', category: 'ci_runner', support_level: 'governed_runner', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --agent ci-release --profile production --policy enforce -- <ci-or-deploy-command>' },
+    { display_name: 'Custom shell/API harness', client_label: 'custom', category: 'custom_runner', support_level: 'event_contract', install_command: 'POST /v1/agent/integrations/events with harness, event_type, agent_id, and action' },
+  ];
+}
+
 function detectHarnesses(cwd = process.cwd()) {
   const candidates = [
     { name: 'Codex', command: 'codex', detected: fs.existsSync(path.join(cwd, 'AGENTS.md')) || fs.existsSync(path.join(os.homedir(), '.codex')) },
     { name: 'Claude Code', command: 'claude -p', detected: fs.existsSync(path.join(cwd, 'CLAUDE.md')) || fs.existsSync(path.join(os.homedir(), '.claude.json')) },
     { name: 'Cursor', command: 'cursor', detected: fs.existsSync(path.join(cwd, '.cursor')) || fs.existsSync(path.join(os.homedir(), '.cursor')) },
+    { name: 'Cursor Composer', command: 'cursor composer', detected: fs.existsSync(path.join(cwd, '.cursor')) || fs.existsSync(path.join(os.homedir(), '.cursor')) },
+    { name: 'Windsurf', command: 'windsurf', detected: fs.existsSync(path.join(cwd, '.windsurf')) || fs.existsSync(path.join(os.homedir(), '.windsurf')) },
+    { name: 'Cline', command: 'cline', detected: fs.existsSync(path.join(cwd, '.cline')) || fs.existsSync(path.join(cwd, '.vscode')) },
     { name: 'OpenCode', command: 'opencode', detected: fs.existsSync(path.join(cwd, 'opencode.json')) || fs.existsSync(path.join(os.homedir(), '.opencode')) },
+    { name: 'Hermes Agent', command: 'hermes', detected: fs.existsSync(path.join(cwd, 'hermes.json')) || fs.existsSync(path.join(cwd, '.hermes')) || fs.existsSync(path.join(os.homedir(), '.hermes')) || fs.existsSync(path.join(os.homedir(), '.hermes-agent')) },
     { name: 'OpenClaw', command: 'openclaw agent', detected: fs.existsSync(path.join(os.homedir(), '.openclaw')) },
+    { name: 'Gemini CLI', command: 'gemini', detected: fs.existsSync(path.join(cwd, '.gemini')) || fs.existsSync(path.join(os.homedir(), '.gemini')) },
+    { name: 'Grok CLI', command: 'grok', detected: fs.existsSync(path.join(cwd, '.grok')) || fs.existsSync(path.join(os.homedir(), '.grok')) },
+    { name: 'DeepSeek', command: 'deepseek', detected: fs.existsSync(path.join(cwd, '.deepseek')) || fs.existsSync(path.join(os.homedir(), '.deepseek')) },
+    { name: 'Qwen', command: 'qwen', detected: fs.existsSync(path.join(cwd, '.qwen')) || fs.existsSync(path.join(os.homedir(), '.qwen')) },
+    { name: 'Kimi', command: 'kimi', detected: fs.existsSync(path.join(cwd, '.kimi')) || fs.existsSync(path.join(os.homedir(), '.kimi')) },
+    { name: 'MiniMax', command: 'minimax', detected: fs.existsSync(path.join(cwd, '.minimax')) || fs.existsSync(path.join(os.homedir(), '.minimax')) },
+    { name: 'GLM', command: 'glm', detected: fs.existsSync(path.join(cwd, '.glm')) || fs.existsSync(path.join(os.homedir(), '.glm')) },
+    { name: 'MCP-compatible client', command: 'mcp client', detected: fs.existsSync(path.join(cwd, '.mcp.json')) || fs.existsSync(path.join(cwd, 'mcp.json')) },
     { name: 'CI script', command: 'npm test', detected: fs.existsSync(path.join(cwd, 'package.json')) },
     { name: 'Custom command', command: '<your-agent-command>', detected: true },
   ];
   return candidates;
+}
+
+function localIntegrationManifest(name) {
+  const key = String(name || '').toLowerCase().replace(/\s+/g, '-');
+  if (key === 'hermes' || key === 'hermes-agent') {
+    return {
+      integration: 'hermes-agent',
+      title: 'Marrow + Hermes Agent',
+      client_label: 'hermes',
+      command: 'hermes',
+      install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install hermes',
+      governed_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --agent hermes-prod --profile production --policy enforce -- hermes',
+      capture_points: [
+        '/goal -> Marrow completion contract',
+        'verification evidence -> Marrow proof pack',
+        '/learn -> outcome-ranked fleet lesson',
+        '/journey -> governance timeline',
+        'background subagents -> agent_id + source_meta.client=hermes',
+      ],
+      exact_next_action: 'Run the Hermes add-on, then call Marrow runtime before deploy, merge, publish, migration, credential, or customer-facing work.',
+    };
+  }
+  if (key === 'openclaw' || key === 'open-claw') {
+    return {
+      integration: 'openclaw',
+      title: 'Marrow + OpenClaw',
+      client_label: 'openclaw',
+      command: 'openclaw agent',
+      install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install openclaw',
+      governed_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --agent openclaw-release --profile production --policy enforce -- openclaw agent',
+      capture_points: [
+        'agent sessions -> workflow sessions',
+        'handoff/result files -> proof packs',
+        'timeouts/silent quits -> failed or stale outcomes',
+        'release supervisor results -> deploy proof',
+        'watchdog checkpoints -> fleet handoff lessons',
+      ],
+      exact_next_action: 'Run the OpenClaw add-on, then wrap release and handoff commands with the Marrow governed runner.',
+    };
+  }
+  return null;
+}
+
+async function integrationManifest(options, name) {
+  const local = localIntegrationManifest(name);
+  if (!local) throw new Error(`Unsupported integration: ${name}`);
+  if (!options.apiKey) return { source: 'local', manifest: local };
+  const route = name === 'openclaw' ? '/v1/agent/integrations/openclaw' : '/v1/agent/integrations/hermes';
+  try {
+    const remote = await requestJson(options, 'GET', route);
+    return { source: 'api', manifest: remote };
+  } catch (error) {
+    return { source: 'local', manifest: { ...local, api_warning: error instanceof Error ? error.message : String(error) } };
+  }
+}
+
+function renderIntegrationPanel(name, manifest, source = 'local', detectedHarnesses = detectHarnesses()) {
+  const title = manifest.title || (manifest.integration === 'openclaw' ? 'Marrow + OpenClaw' : 'Marrow + Hermes Agent');
+  const capturePoints = Array.isArray(manifest.capture_points)
+    ? manifest.capture_points.map((point) => {
+      if (typeof point === 'string') return point;
+      return `${point.harness_surface || point.hermes_surface || 'harness event'} -> ${point.marrow_mapping || 'Marrow event'}`;
+    })
+    : [];
+  const installCommands = Array.isArray(manifest.install_commands)
+    ? manifest.install_commands
+    : [manifest.install_command, manifest.governed_command].filter(Boolean);
+  const detected = detectedHarnesses.find((harness) => harness.name.toLowerCase().includes(name === 'openclaw' ? 'openclaw' : 'hermes'))?.detected;
+  const lines = [
+    title,
+    '',
+    `Status: ${manifest.status || 'supported'} (${source})`,
+    `Detected locally: ${detected ? 'yes' : 'not yet'}`,
+    `Client label: ${manifest.client_label}`,
+    '',
+    'What Marrow captures:',
+    ...capturePoints.map((point) => `  - ${displayText(point, 110)}`),
+    '',
+    'Install / run:',
+    ...installCommands.map((command) => `  ${displayText(command, 140)}`),
+    '',
+    'Why this matters:',
+    `  ${displayText(manifest.marrow_positioning || 'Keep the harness. Add Marrow governance, proof packs, outcomes, and buyer-grade fleet value.', 140)}`,
+    '',
+    `Next: ${displayText(manifest.exact_next_action, 140)}`,
+  ];
+  if (manifest.api_warning) lines.push('', `API warning: ${displayText(manifest.api_warning, 120)}`);
+  return lines.join('\n');
+}
+
+async function integrationOnly(parsed, name) {
+  const result = await integrationManifest(parsed.options, name);
+  const panel = renderIntegrationPanel(name, result.manifest, result.source);
+  if (parsed.options.json) {
+    return {
+      ok: true,
+      source: result.source,
+      integration: result.manifest,
+      panel,
+    };
+  }
+  process.stdout.write(`${panel}\n`);
+  return { ok: true, source: result.source, integration: result.manifest };
+}
+
+async function integrationsOnly(parsed) {
+  const local = {
+    integration_registry_version: 'local.broad-harness-support-v2',
+    first_class_addons: ['hermes', 'openclaw'].map((name) => localIntegrationManifest(name)),
+    supported_harnesses: localSupportedHarnesses(),
+    exact_next_action: 'Pick the harness your team already uses. Use the install_command shown here, or send compact events to /v1/agent/integrations/events.',
+  };
+  let registry = local;
+  let source = 'local';
+  if (parsed.options.apiKey) {
+    try {
+      registry = await requestJson(parsed.options, 'GET', '/v1/agent/integrations');
+      source = 'api';
+    } catch (error) {
+      registry = { ...local, api_warning: error instanceof Error ? error.message : String(error) };
+    }
+  }
+  if (parsed.options.json) return { ok: true, source, registry };
+  const harnesses = Array.isArray(registry.supported_harnesses) ? registry.supported_harnesses : [];
+  process.stdout.write([
+    'Marrow Harness Integrations',
+    '',
+    `Source: ${source}`,
+    'Supported harnesses and model CLIs:',
+    ...harnesses.map((harness) => `  - ${displayText(harness.display_name || harness.client_label || harness.integration || harness.title, 40)} [${displayText(harness.support_level || 'supported', 24)}]  ${displayText(harness.install_command || harness.install_commands?.[0] || '', 120)}`),
+    '',
+    'First-class add-on guides: hermes, openclaw',
+    `Next: ${displayText(registry.exact_next_action, 140)}`,
+    registry.api_warning ? `API warning: ${displayText(registry.api_warning, 120)}` : '',
+  ].filter(Boolean).join('\n') + '\n');
+  return { ok: true, source, registry };
 }
 
 function governPanel(options) {
@@ -1495,11 +1716,17 @@ async function runCli(argv) {
     return;
   } else if (parsed.command === 'fleet') {
     result = await runFleetInteractive(parsed.options);
+  } else if (parsed.command === 'hermes') {
+    result = await integrationOnly(parsed, 'hermes');
+  } else if (parsed.command === 'openclaw') {
+    result = await integrationOnly(parsed, 'openclaw');
+  } else if (parsed.command === 'integrations') {
+    result = await integrationsOnly(parsed);
   }
 
   if (parsed.options?.json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   else if (result?.blocked) process.stderr.write(`BLOCKED: ${result.message || 'Marrow blocked this action.'}\n`);
-  else if (parsed.command !== 'run' && parsed.command !== 'fleet') process.stdout.write('Marrow command completed.\n');
+  else if (!['run', 'fleet', 'hermes', 'openclaw', 'integrations'].includes(parsed.command)) process.stdout.write('Marrow command completed.\n');
 
   if (parsed.command === 'run' || result?.blocked) process.exitCode = result?.exitCode ?? (result?.ok === false ? 1 : 0);
 }
@@ -1508,6 +1735,10 @@ module.exports = {
   parseArgs,
   redact,
   redactedCommand,
+  normalizeClientLabel,
+  sourceClient,
+  sourceMeta,
+  headers,
   inferType,
   inferSurfaces,
   commandForSelection,
@@ -1534,5 +1765,10 @@ module.exports = {
   buildFleetState,
   renderFleetTui,
   runFleetInteractive,
+  localSupportedHarnesses,
+  localIntegrationManifest,
+  renderIntegrationPanel,
+  integrationOnly,
+  integrationsOnly,
   runCli,
 };

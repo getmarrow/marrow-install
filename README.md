@@ -9,7 +9,24 @@ npx @getmarrow/install --dry-run
 npx @getmarrow/install --yes
 npx @getmarrow/install --repair
 npx @getmarrow/install doctor
+npx @getmarrow/install govern
+npx @getmarrow/install fleet
+npx @getmarrow/install integrations
+npx @getmarrow/install hermes
+npx @getmarrow/install openclaw
 ```
+
+## What's New in v0.1.26
+
+v0.1.26 expands Marrow's supported harness registry so teams can attach governance to the agent tools, IDE agents, model CLIs, MCP clients, CI runners, and custom harnesses they already use.
+
+- `npx @getmarrow/install integrations` lists supported surfaces, support level, install command, capture path, and detection signals.
+- `npx @getmarrow/install govern` detects Codex, Claude Code, Cursor, Cursor Composer, Windsurf, Cline, OpenCode, Hermes, OpenClaw, Gemini, Grok, DeepSeek, Qwen, Kimi, MiniMax, GLM, MCP clients, CI scripts, and custom commands.
+- Hermes Agent and OpenClaw remain first-class add-ons.
+- Codex, Claude Code, Cursor, Cursor Composer, Windsurf, Cline, OpenCode, Gemini, Grok, DeepSeek, Qwen, Kimi, MiniMax, GLM, MCP clients, CI scripts, and custom shell/API harnesses can use MCP/SDK hooks, the governed runner, or `POST /v1/agent/integrations/events`.
+- Custom harness events should include `harness`, `event_type`, `agent_id`, and `action`, so Marrow can return the right runtime, commit, or batch-ingest next step without storing unsupported or under-attributed raw payloads.
+
+The positioning is simple: keep the harness your team already uses, and add Marrow as the governance, proof, and fleet-intelligence layer around it.
 
 ## What's New in v0.1.24
 
@@ -41,7 +58,7 @@ The Marrow governed runner is for businesses that want agent governance without 
 - Risky actions can fail closed by default when Marrow requires owner approval, blocks an action, or requires missing proof.
 - Successful and failed commands automatically close outcomes through `/v1/agent/commit` with a redacted proof pack.
 - The runner sends action and command metadata only; it does not upload command stdout, stderr, full environment values, or plaintext API keys.
-- This gives teams a thin governance path for Codex, Claude Code, OpenClaw, OpenCode, Cursor, CI scripts, and custom shell-based agents.
+- This gives teams a thin governance path for Codex, Claude Code, Cursor, Cursor Composer, Windsurf, Cline, OpenClaw, Hermes, OpenCode, Gemini, Grok, DeepSeek, Qwen, Kimi, MiniMax, GLM, MCP clients, CI scripts, and custom shell-based agents.
 
 Business value: Marrow can sit in front of the commands that matter most, tell the agent what prior lesson or proof is required before action, and produce an audit-ready outcome trail after the command finishes.
 
@@ -137,9 +154,12 @@ Marrow should answer with `proceed`, `warn`, `block`, or `owner_approval_require
 ## What It Detects
 
 - OpenClaw-style workspaces
+- Hermes Agent config files
 - Codex/agent instruction files such as `AGENTS.md`
 - Claude Code settings and hooks
 - Cursor project folders
+- Cursor Composer, Windsurf, Cline, and OpenCode project markers
+- Gemini, Grok, DeepSeek, Qwen, Kimi, MiniMax, and GLM command/profile markers
 - MCP config files
 - Node projects
 - Python projects
