@@ -1,8 +1,8 @@
 # @getmarrow/install
 
-Universal installer for Marrow passive agent setup.
+Universal installer for Marrow agent governance, proof, and passive control setup.
 
-Use it when you want Marrow to detect the local agent/runtime environment and wire the safest passive integration automatically.
+Use it when you want Marrow to detect the local agent/runtime environment and wire the safest passive governance integration automatically.
 
 ```bash
 npx @getmarrow/install --dry-run
@@ -10,6 +10,15 @@ npx @getmarrow/install --yes
 npx @getmarrow/install --repair
 npx @getmarrow/install doctor
 ```
+
+## What's New in v0.1.24
+
+v0.1.24 aligns the installer docs with Marrow's control-plane direction.
+
+- Marrow is positioned as an agent governance, proof, and intelligence layer, not a single-agent memory app.
+- The recommended setup path remains passive by default: install once, then let agents call runtime gates, completion contracts, and outcome closure as they work.
+- Hermes Agent is a supported client label and integration target; Marrow maps Hermes goals, verification evidence, learning, journey, and subagent outcomes into fleet governance proof.
+- New backend surfaces include governance control-plane proof, completion-contract evaluation, fleet governance timeline, and buyer-grade value proof.
 
 ## What's New in v0.1.23
 

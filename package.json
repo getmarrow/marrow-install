@@ -1,7 +1,7 @@
 {
   "name": "@getmarrow/install",
-  "version": "0.1.23",
-  "description": "Universal installer for Marrow passive agent setup.",
+  "version": "0.1.24",
+  "description": "Universal installer for Marrow agent governance, proof, and passive control setup.",
   "bin": {
     "marrow-install": "bin/marrow-install.js"
   },
@@ -15,7 +15,10 @@
     "marrow",
     "mcp",
     "installer",
-    "passive-runtime"
+    "passive-runtime",
+    "governance",
+    "proof-packs",
+    "agent-control-plane"
   ],
   "repository": {
     "type": "git",
