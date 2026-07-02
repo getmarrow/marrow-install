@@ -2,8 +2,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
 const test = require('node:test');
+const { pathToFileURL } = require('node:url');
 
 const {
   buildPlan,
@@ -145,25 +145,40 @@ test('generated passive runtime warning redacts SDK initialization errors', asyn
   const runtimePath = path.join(dir, '.marrow', 'passive-runtime.mjs');
   fs.writeFileSync(runtimePath, passiveRuntimeSource());
 
-  const result = spawnSync(process.execPath, [runtimePath], {
-    cwd: dir,
-    encoding: 'utf8',
-    env: {
-      PATH: process.env.PATH || '',
-      HOME: dir,
-      MARROW_API_KEY: 'mrw_live_should_not_print',
-      MARROW_BASE_URL: 'https://secret.example.test',
-      MARROW_AGENT_ID: 'agent-secret-value',
-      MARROW_SESSION_ID: 'session-secret-value',
-    },
-  });
+  const previous = {
+    HOME: process.env.HOME,
+    MARROW_API_KEY: process.env.MARROW_API_KEY,
+    MARROW_BASE_URL: process.env.MARROW_BASE_URL,
+    MARROW_AGENT_ID: process.env.MARROW_AGENT_ID,
+    MARROW_SESSION_ID: process.env.MARROW_SESSION_ID,
+  };
+  const originalWarn = console.warn;
+  const warnings = [];
+  try {
+    process.env.HOME = dir;
+    process.env.MARROW_API_KEY = 'mrw_live_should_not_print';
+    process.env.MARROW_BASE_URL = 'https://secret.example.test';
+    process.env.MARROW_AGENT_ID = 'agent-secret-value';
+    process.env.MARROW_SESSION_ID = 'session-secret-value';
+    delete globalThis.__MARROW_PASSIVE_RUNTIME__;
+    console.warn = (...args) => warnings.push(args.join(' '));
 
-  assert.equal(result.status, 0);
-  assert.match(result.stderr, /passive runtime skipped/);
-  assert.doesNotMatch(result.stderr, /mrw_live_should_not_print/);
-  assert.doesNotMatch(result.stderr, /secret\.example\.test/);
-  assert.doesNotMatch(result.stderr, /agent-secret-value/);
-  assert.doesNotMatch(result.stderr, /session-secret-value/);
+    await import(`${pathToFileURL(runtimePath).href}?case=redaction-${Date.now()}`);
+  } finally {
+    console.warn = originalWarn;
+    delete globalThis.__MARROW_PASSIVE_RUNTIME__;
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+
+  const stderr = warnings.join('\n');
+  assert.match(stderr, /passive runtime skipped/);
+  assert.doesNotMatch(stderr, /mrw_live_should_not_print/);
+  assert.doesNotMatch(stderr, /secret\.example\.test/);
+  assert.doesNotMatch(stderr, /agent-secret-value/);
+  assert.doesNotMatch(stderr, /session-secret-value/);
 });
 
 test('install reports missing SDK dependency for passive runtime projects', async () => {
