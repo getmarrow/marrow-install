@@ -254,7 +254,9 @@ Day-one behavior:
 
 ## Trust and Data Boundaries
 
-Marrow is tenant-aware by design. Private account, fleet, memory, workflow, and proof-pack data stays scoped to the authenticated account and authorized agent-bound keys. Shared/hive learning uses visibility-controlled, sanitized aggregate signals; it is not raw cross-customer decision sharing.
+Marrow is tenant-aware by design. Private account, fleet, workflow, proof-pack, and agent data stays scoped to the authenticated account and authorized agent-bound keys.
+
+Enterprise tenants receive a strong private governance baseline from day one: risk gates, proof requirements, workflow templates, private/account learning, and exact next actions. Teams that enable sanitized aggregate contribution unlock richer k-anonymous collective workflow guidance. Contribution never means raw prompts, decisions, proof packs, code, secrets, account identifiers, agent identifiers, or customer identities.
 
 For business pilots, review the live trust notes before production rollout: https://getmarrow.ai/docs#trust-boundaries
 
