@@ -21,6 +21,8 @@ npx @getmarrow/install openclaw
 v0.1.26 expands Marrow's supported harness registry so teams can attach governance to the agent tools, IDE agents, model CLIs, MCP clients, CI runners, and custom harnesses they already use.
 
 - `npx @getmarrow/install integrations` lists supported surfaces, support level, install command, capture path, and detection signals.
+- `GET /v1/agent/data-quality` lets agents verify attribution coverage after install, including agent ID, source metadata, harness/client, workflow type, outcome closure, and exact repair guidance.
+- `GET /v1/agent/integrations/{client}` gives supported harnesses a per-client setup guide with install command, capture points, source metadata, runtime/commit/batch mapping, and exact next action.
 - `npx @getmarrow/install govern` detects Codex, Claude Code, Cursor, Cursor Composer, Windsurf, Cline, OpenCode, Hermes, OpenClaw, Gemini, Grok, DeepSeek, Qwen, Kimi, MiniMax, GLM, MCP clients, CI scripts, and custom commands.
 - Hermes Agent and OpenClaw remain first-class add-ons.
 - Codex, Claude Code, Cursor, Cursor Composer, Windsurf, Cline, OpenCode, Gemini, Grok, DeepSeek, Qwen, Kimi, MiniMax, GLM, MCP clients, CI scripts, and custom shell/API harnesses can use MCP/SDK hooks, the governed runner, or `POST /v1/agent/integrations/events`.
@@ -73,19 +75,19 @@ npx @getmarrow/install govern
 Run a harmless command through Marrow:
 
 ```bash
-MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --agent codex-prod --profile production -- node -e "process.exit(0)"
+MARROW_API_KEY=<your_marrow_key> npx @getmarrow/install run --agent codex-prod --profile production -- node -e "process.exit(0)"
 ```
 
 Gate a production action before the agent executes it:
 
 ```bash
-MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install gate "deploy production worker after tests pass"
+MARROW_API_KEY=<your_marrow_key> npx @getmarrow/install gate "deploy production worker after tests pass"
 ```
 
 Wrap a real deploy, publish, merge, or migration command only after the agent has the required proof:
 
 ```bash
-MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run \
+MARROW_API_KEY=<your_marrow_key> npx @getmarrow/install run \
   --agent deploy-agent \
   --type deploy \
   --profile production \
@@ -125,7 +127,7 @@ npx @getmarrow/install --yes
 One command should prove Marrow is active and useful:
 
 ```bash
-MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install --yes
+MARROW_API_KEY=<your_marrow_key> npx @getmarrow/install --yes
 ```
 
 Expected result:
@@ -133,6 +135,7 @@ Expected result:
 - Marrow writes the safest detected MCP/SDK/agent config.
 - A harmless setup decision is created and its outcome is committed.
 - `/v1/agent/status` confirms capture health and missing hooks.
+- `/v1/agent/data-quality` confirms whether attribution is clean enough for per-agent, per-harness, and per-workflow value proof.
 - `/v1/agent/runtime` verifies the one-call runtime gate and returns the before-action intervention contract.
 - `/v1/agent/first-value` returns the five-minute proof payload used by installer, SDK, and MCP clients.
 - `/v1/agent/value/proof` returns token value proof from passive model-usage capture.
@@ -189,7 +192,7 @@ npx @getmarrow/install --md --dry-run
 When `MARROW_API_KEY` is present, the installer creates a harmless test decision, commits the outcome, reads `/v1/agent/status`, calls the one-call runtime, reads `/v1/agent/value/proof`, and prints the first useful Marrow signal plus token value proof.
 
 ```bash
-MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install --yes
+MARROW_API_KEY=<your_marrow_key> npx @getmarrow/install --yes
 ```
 
 Skip self-test:
@@ -201,13 +204,13 @@ npx @getmarrow/install --yes --no-self-test
 Doctor check:
 
 ```bash
-MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install doctor
+MARROW_API_KEY=<your_marrow_key> npx @getmarrow/install doctor
 ```
 
 Repair missing hooks/config:
 
 ```bash
-MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install --repair
+MARROW_API_KEY=<your_marrow_key> npx @getmarrow/install --repair
 ```
 
 ## SDK Dependency
