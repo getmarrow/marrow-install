@@ -1,6 +1,6 @@
 {
   "name": "@getmarrow/install",
-  "version": "0.1.26",
+  "version": "0.1.27",
   "description": "Universal installer for Marrow agent governance, proof, and passive control setup.",
   "bin": {
     "marrow-install": "bin/marrow-install.js"
