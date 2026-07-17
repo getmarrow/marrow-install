@@ -1,93 +1,81 @@
 # @getmarrow/install
 
-Universal installer for Marrow agent governance, proof, and passive control setup.
+> Universal installer and governed runner for Marrow agent fleets.
 
-Use it when you want Marrow to detect the local agent/runtime environment and wire the safest passive governance integration automatically.
+Marrow is the runtime control and proof layer for teams running AI agents. It applies policy and prior lessons before consequential actions, then records the evidence and outcome afterward.
+
+Use `@getmarrow/install` as the default entry point. It detects supported agent and project surfaces, writes the appropriate passive configuration, runs a harmless end-to-end self-test, and reports whether policy, proof, attribution, and outcome capture are active.
+
+## Install
 
 ```bash
-npx @getmarrow/install --dry-run
 npx @getmarrow/install --yes
-npx @getmarrow/install --repair
-npx @getmarrow/install doctor
-npx @getmarrow/install govern
-npx @getmarrow/install fleet
-npx @getmarrow/install integrations
-npx @getmarrow/install hermes
-npx @getmarrow/install openclaw
 ```
 
-## What's New in v0.1.26
+Required secret:
 
-v0.1.26 expands Marrow's supported harness registry so teams can attach governance to the agent tools, IDE agents, model CLIs, MCP clients, CI runners, and custom harnesses they already use.
+```bash
+export MARROW_API_KEY=mrw_live_...
+```
 
-- `npx @getmarrow/install integrations` lists supported surfaces, support level, install command, capture path, and detection signals.
-- `GET /v1/agent/data-quality` lets agents verify attribution coverage after install, including agent ID, source metadata, harness/client, workflow type, outcome closure, and exact repair guidance.
-- `GET /v1/agent/integrations/{client}` gives supported harnesses a per-client setup guide with install command, capture points, source metadata, runtime/commit/batch mapping, and exact next action.
-- `npx @getmarrow/install govern` detects Codex, Claude Code, Cursor, Cursor Composer, Windsurf, Cline, OpenCode, Hermes, OpenClaw, Gemini, Grok, DeepSeek, Qwen, Kimi, MiniMax, GLM, MCP clients, CI scripts, and custom commands.
-- Hermes Agent and OpenClaw remain first-class add-ons.
-- Codex, Claude Code, Cursor, Cursor Composer, Windsurf, Cline, OpenCode, Gemini, Grok, DeepSeek, Qwen, Kimi, MiniMax, GLM, MCP clients, CI scripts, and custom shell/API harnesses can use MCP/SDK hooks, the governed runner, or `POST /v1/agent/integrations/events`.
-- Custom harness events should include `harness`, `event_type`, `agent_id`, and `action`, so Marrow can return the right runtime, commit, or batch-ingest next step without storing unsupported or under-attributed raw payloads.
+## What's New in v0.1.28
 
-The positioning is simple: keep the harness your team already uses, and add Marrow as the governance, proof, and fleet-intelligence layer around it.
+v0.1.28 aligns first-run documentation with Marrow's business product contract:
 
-## What's New in v0.1.24
+- runtime control before consequential actions;
+- proof and outcome closure afterward;
+- tenant-scoped fleet improvement across interchangeable agents and harnesses;
+- clear separation between the default installer, advanced SDK integration, and MCP-native integration.
 
-v0.1.24 aligns the installer docs with Marrow's control-plane direction.
+This patch changes package documentation and positioning. Existing installer, governed runner, and TUI behavior remains compatible.
 
-- Marrow is positioned as an agent governance, proof, and intelligence layer, not a single-agent memory app.
-- The recommended setup path remains passive by default: install once, then let agents call runtime gates, completion contracts, and outcome closure as they work.
-- Hermes Agent is a supported client label and integration target; Marrow maps Hermes goals, verification evidence, learning, journey, and subagent outcomes into fleet governance proof.
-- New backend surfaces include governance control-plane proof, completion-contract evaluation, fleet governance timeline, and buyer-grade value proof.
+## What It Detects
 
-## What's New in v0.1.23
+The installer detects supported configuration and project signals for:
 
-v0.1.23 improves attribution quality so Marrow can produce cleaner per-agent, per-harness, and per-workflow value reports.
+- Codex, Claude Code, Cursor, Cursor Composer, Windsurf, Cline, OpenCode, Hermes, and OpenClaw;
+- Gemini, Grok, DeepSeek, Qwen, Kimi, MiniMax, and GLM command-line or custom harness paths;
+- MCP client configuration;
+- Node.js and Python projects;
+- CI, deploy, publish, merge, migration, and custom shell workflows.
 
-- Installer self-tests and governed runner calls attach `source_meta.channel`, `source_meta.client`, and inferred workflow intent by default.
-- Generated passive runtime keeps using SDK defaults for `agent_id`, harness/client, source channel, and user intent attribution.
-- Set `MARROW_CLIENT`, `MARROW_HARNESS`, or `MARROW_AGENT_CLIENT` to labels such as `codex`, `claude-code`, `cursor`, `gemini`, `qwen`, `opencode`, `hermes`, `openclaw`, or `custom`.
-- Invalid or unknown client labels fall back to `custom` instead of breaking onboarding.
-- Marrow still does not store prompts, completions, tool stdout/stderr, plaintext API keys, or raw model output for this feature.
+Marrow does not replace these models or harnesses. It adds a common business control, proof, and outcome layer around the actions they perform.
 
-Business value: dashboards and reports can show which agents, harnesses, and workflow types are improving instead of grouping too much work into "unknown."
+## First-Run Verification
+
+With a valid key, setup:
+
+1. detects the local integration surfaces;
+2. writes supported config and passive instructions;
+3. creates a harmless test decision;
+4. closes its outcome;
+5. reads agent status and the one-call runtime;
+6. reports captured surfaces, attribution quality, proof coverage, token-value capture state, and the exact next action.
+
+Healthy output confirms that Marrow is active instead of only confirming that files were written.
+
+## Govern TUI
+
+Open the interactive setup panel:
+
+```bash
+npx @getmarrow/install govern
+```
+
+The TUI shows detected harnesses and project risks, recommends passive, pilot, or enforce mode with reasons, lets the owner accept or override the recommendation, runs the self-test, and confirms the active controls. Use `Ctrl+C` to exit.
+
+For non-interactive environments:
+
+```bash
+npx @getmarrow/install govern --no-interactive
+```
 
 ## Governed Runner
 
-The Marrow governed runner is for businesses that want agent governance without replacing their existing harness.
-
-- `npx @getmarrow/install govern` prints a setup panel for detected harnesses and recommended protected commands.
-- `npx @getmarrow/install run --agent <agent-id> -- <command>` wraps existing agent, deploy, merge, publish, migration, and verification commands with Marrow's pre-action runtime gate.
-- Risky actions can fail closed by default when Marrow requires owner approval, blocks an action, or requires missing proof.
-- Successful and failed commands automatically close outcomes through `/v1/agent/commit` with a redacted proof pack.
-- The runner sends action and command metadata only; it does not upload command stdout, stderr, full environment values, or plaintext API keys.
-- This gives teams a thin governance path for Codex, Claude Code, Cursor, Cursor Composer, Windsurf, Cline, OpenClaw, Hermes, OpenCode, Gemini, Grok, DeepSeek, Qwen, Kimi, MiniMax, GLM, MCP clients, CI scripts, and custom shell-based agents.
-
-Business value: Marrow can sit in front of the commands that matter most, tell the agent what prior lesson or proof is required before action, and produce an audit-ready outcome trail after the command finishes.
-
-### Governed Runner Quickstart
-
-Preview the detected harnesses and protected command examples:
+Place Marrow around an existing command without replacing the agent harness:
 
 ```bash
-npx @getmarrow/install govern
-```
-
-Run a harmless command through Marrow:
-
-```bash
-MARROW_API_KEY=<your_marrow_key> npx @getmarrow/install run --agent codex-prod --profile production -- node -e "process.exit(0)"
-```
-
-Gate a production action before the agent executes it:
-
-```bash
-MARROW_API_KEY=<your_marrow_key> npx @getmarrow/install gate "deploy production worker after tests pass"
-```
-
-Wrap a real deploy, publish, merge, or migration command only after the agent has the required proof:
-
-```bash
-MARROW_API_KEY=<your_marrow_key> npx @getmarrow/install run \
+npx @getmarrow/install run \
   --agent deploy-agent \
   --type deploy \
   --profile production \
@@ -95,180 +83,81 @@ MARROW_API_KEY=<your_marrow_key> npx @getmarrow/install run \
   -- wrangler deploy
 ```
 
-Use `--policy warn` for pilot mode and `--fail-open` only for non-production local workflows where Marrow should never block execution.
+The runner:
 
-## Which Install Path Should I Use?
+1. requests the Marrow runtime gate;
+2. prints the decision, relevant lesson, owner-approval state, and required proof;
+3. blocks when policy requires it;
+4. runs the original command when allowed;
+5. records success or failure and attaches a redacted proof pack.
 
-Start here unless you already know you need a lower-level integration:
-
-```bash
-npx @getmarrow/install --yes
-```
-
-The universal installer detects your local agent/runtime environment and wires the safest combination of MCP hooks, SDK passive runtime files, and agent instructions automatically. It also runs the self-test and prints first-run value proof.
-
-Use the lower-level packages only when you need direct control:
-
-- **SDK:** use `@getmarrow/sdk` when you are building a custom Node/TypeScript agent integration or wrapping your own tools, commands, deploys, and publishes in code.
-- **MCP:** use `@getmarrow/mcp` when you want manual MCP server/hook setup for Claude Code, Claude Desktop, Cursor, or another MCP-compatible client.
-
-The three packages are not three competing onboarding paths. `@getmarrow/install` is the front door; SDK and MCP are the implementation paths underneath it.
-
-For cleaner attribution, set an agent id and optional client label before install:
+Useful commands:
 
 ```bash
-export MARROW_FLEET_AGENT_ID=codex-deploy-agent
-export MARROW_CLIENT=codex
-npx @getmarrow/install --yes
+npx @getmarrow/install gate --agent deploy-agent --type deploy --action "deploy production"
+npx @getmarrow/install status
+npx @getmarrow/install doctor
+npx @getmarrow/install --repair
 ```
 
-## Agent Value Proof Quickstart
-
-One command should prove Marrow is active and useful:
+## Fleet Operator TUI
 
 ```bash
-MARROW_API_KEY=<your_marrow_key> npx @getmarrow/install --yes
+npx @getmarrow/install fleet
 ```
 
-Expected result:
+The fleet view shows live agents, active workflows, risky actions waiting for proof, stale or failed outcomes, capture health, recent decisions, and exact repair commands. It is an operator surface for the authenticated account, not a public status dashboard.
 
-- Marrow writes the safest detected MCP/SDK/agent config.
-- A harmless setup decision is created and its outcome is committed.
-- `/v1/agent/status` confirms capture health and missing hooks.
-- `/v1/agent/data-quality` confirms whether attribution is clean enough for per-agent, per-harness, and per-workflow value proof.
-- `/v1/agent/runtime` verifies the one-call runtime gate and returns the before-action intervention contract.
-- `/v1/agent/first-value` returns the five-minute proof payload used by installer, SDK, and MCP clients.
-- `/v1/agent/value/proof` returns token value proof from passive model-usage capture.
-- The installer prints: "Your agent is no longer starting from zero."
-- The installer prints: "Token value proof" with capture status, observed model calls, token totals, estimated savings, confidence, and exact next action.
-- Fresh accounts get a first useful action to try immediately.
-- Accounts with history get proof such as avoided mistakes, reused winning decisions, prevented risky actions, or estimated time/token savings.
+## Integration Paths
 
-## First Five-Minute Proof
+| Path | Use it when | Owner effort |
+| --- | --- | --- |
+| Universal installer | You want Marrow to detect and wire the safest supported integration | Lowest |
+| Governed runner | You need control around existing shell, CI, deploy, publish, merge, or migration commands | Low |
+| MCP package | The agent client supports MCP and should use Marrow tools and hooks natively | Low |
+| SDK | You own the Node.js/TypeScript runtime and need programmatic control | Advanced |
+| Event contract | You have a custom harness that must map its lifecycle into Marrow | Advanced |
 
-After install, ask the agent:
+These are integration surfaces for one Marrow product, not separate products.
 
-```text
-I am about to deploy to production. What should I check first?
-```
+## Passive Token and Value Proof
 
-Marrow should answer with `proceed`, `warn`, `block`, or `owner_approval_required`, plus required proof and matching fleet lessons/playbooks before the agent acts. This is the first product moment: not just "hooks installed", but "the agent is being warned before risky work."
+When the installer writes `.marrow/passive-runtime.mjs` and the harness exposes usage metadata, Marrow can capture compact provider/model, token, latency, and optional cost counts. It does not require raw prompts, completions, command output, tool output, or plaintext secrets.
 
-## What It Detects
-
-- OpenClaw-style workspaces
-- Hermes Agent config files
-- Codex/agent instruction files such as `AGENTS.md`
-- Claude Code settings and hooks
-- Cursor project folders
-- Cursor Composer, Windsurf, Cline, and OpenCode project markers
-- Gemini, Grok, DeepSeek, Qwen, Kimi, MiniMax, and GLM command/profile markers
-- MCP config files
-- Node projects
-- Python projects
-
-## Install Modes
-
-```bash
-npx @getmarrow/install --mcp --dry-run
-npx @getmarrow/install --sdk --dry-run
-npx @getmarrow/install --both --dry-run
-npx @getmarrow/install --md --dry-run
-```
-
-`--dry-run` is the default unless `--yes` is passed.
-
-## What It Writes
-
-- `.claude/settings.json` passive MCP hooks for tool outcomes and prompt context.
-- `.mcp.json` with the Marrow MCP server entry.
-- `.marrow/passive-runtime.mjs` for SDK passive runtime preload in Node processes.
-- `.marrow/env.example` with required environment variables.
-- `AGENTS.md` instructions for agents that rely on markdown/skills.
-- `.cursor/rules/marrow.mdc` when a Cursor project is detected.
-
-## Self-Test
-
-When `MARROW_API_KEY` is present, the installer creates a harmless test decision, commits the outcome, reads `/v1/agent/status`, calls the one-call runtime, reads `/v1/agent/value/proof`, and prints the first useful Marrow signal plus token value proof.
-
-```bash
-MARROW_API_KEY=<your_marrow_key> npx @getmarrow/install --yes
-```
-
-Skip self-test:
-
-```bash
-npx @getmarrow/install --yes --no-self-test
-```
-
-Doctor check:
-
-```bash
-MARROW_API_KEY=<your_marrow_key> npx @getmarrow/install doctor
-```
-
-Repair missing hooks/config:
-
-```bash
-MARROW_API_KEY=<your_marrow_key> npx @getmarrow/install --repair
-```
-
-## SDK Dependency
-
-When the installer writes `.marrow/passive-runtime.mjs`, the project should have `@getmarrow/sdk` installed:
-
-```bash
-npm install @getmarrow/sdk
-```
-
-The generated runtime now fails soft with an explicit warning if the SDK package is missing, so onboarding does not crash a user process.
-
-## Passive Token Value Proof
-
-Token value proof is default-on when the installer writes `.marrow/passive-runtime.mjs`.
-
-In supported Node/TypeScript agents, the SDK passive runtime wraps outbound model-provider `fetch` responses and captures compact `usage` blocks when providers return them. MCP and harness integrations can also attach `model_usage` to `marrow_commit` or call `marrow_model_usage` when the harness exposes usage metadata.
-
-Captured fields are intentionally narrow:
-
-- provider and model
-- input, output, cached, and total token counts
-- optional cost and latency estimates
-- agent, workflow, session, and decision linkage
-- Marrow intervention type, such as `runtime_gate`, `proof_pack`, or `before_you_act`
-
-Marrow does not capture prompt text, completion text, raw tool output, command output, full environment values, or plaintext secrets for token value proof.
-
-Disable capture only when a project requires it:
-
-```bash
-MARROW_PASSIVE_TOKEN_USAGE=false
-```
-
-Day-one behavior:
-
-- Fresh install: `Token usage capture is ready; no model calls have been reported yet.`
-- After observed usage: Marrow reports model calls, total tokens, estimated tokens saved, confidence, trend, and next action.
-- After workflows complete: agents should show the returned `token_value_signal` or value proof in owner updates so users see savings without opening a dashboard.
-
+After meaningful work, supported runtime and commit responses can return observed usage, trend direction, evidence confidence, and the next capture improvement. Savings are only reported when the available evidence supports them.
 
 ## Trust and Data Boundaries
 
-Marrow is tenant-aware by design. Private account, fleet, workflow, proof-pack, and agent data stays scoped to the authenticated account and authorized agent-bound keys.
+- Private account, fleet, workflow, proof, and agent data remains tenant-scoped by default.
+- Agent-bound keys can be restricted to an allowed identity and permission set.
+- Sanitized aggregate contribution is optional and never means sharing raw prompts, code, secrets, proof packs, account identifiers, agent identifiers, or customer identities.
+- The installer diagnoses key locations without printing secret values.
+- Marrow returns guidance and policy data. Agents must not execute returned text as shell input.
 
-Enterprise tenants receive a strong private governance baseline from day one: risk gates, proof requirements, workflow templates, private/account learning, and exact next actions. Teams that enable sanitized aggregate contribution unlock richer k-anonymous collective workflow guidance. Contribution never means raw prompts, decisions, proof packs, code, secrets, account identifiers, agent identifiers, or customer identities.
+See the [Trust Center](https://getmarrow.ai/trust/) for implemented controls, current limits, and roadmap status.
 
-For business pilots, review the live trust notes before production rollout: https://getmarrow.ai/docs#trust-boundaries
+## Environment
 
-## Trust Model
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `MARROW_API_KEY` | Yes for live verification | Account or agent-bound API key |
+| `MARROW_BASE_URL` | No | API base override |
+| `MARROW_FLEET_AGENT_ID` | No | Default agent identity |
 
-This package is intended to be open source and auditable. It prints every file it will touch, requires `--yes` to write, does not store API keys in project files, and supports MCP-only, SDK-only, both, and markdown-only setups.
+Use the host's secret manager first. The shared resolver can also check documented Marrow and project env files for owned development environments. Run `doctor` when a key or hook cannot be found.
 
----
+## Documentation
+
+- [Source-of-truth docs](https://getmarrow.ai/docs/)
+- [Trust Center](https://getmarrow.ai/trust/)
+- [Status](https://getmarrow.ai/status/)
+- [GitHub](https://github.com/getmarrow/marrow-install)
+
+## License
+
+MIT
 
 ## Related Packages
 
-- **[@getmarrow/sdk](https://www.npmjs.com/package/@getmarrow/sdk)** — TypeScript/Node.js SDK for custom agent integrations, passive runtime hooks, guarded actions, and direct API access.
-- **[@getmarrow/mcp](https://www.npmjs.com/package/@getmarrow/mcp)** — MCP server for Claude Code, Claude Desktop, Cursor, and other MCP-compatible clients.
-
-**Docs:** [https://getmarrow.ai/docs](https://getmarrow.ai/docs)
+- [@getmarrow/sdk](https://www.npmjs.com/package/@getmarrow/sdk) - Node.js and TypeScript integration for owned agent runtimes
+- [@getmarrow/mcp](https://www.npmjs.com/package/@getmarrow/mcp) - MCP-native integration for compatible agent clients
