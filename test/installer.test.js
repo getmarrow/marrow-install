@@ -7,6 +7,7 @@ const { pathToFileURL } = require('node:url');
 
 const {
   buildPlan,
+  applyPlan,
   detectEnvironment,
   install,
   inspectNpmTokenConfig,
@@ -118,8 +119,22 @@ test('programmatic activation cannot attest to a dry-run or skipped self-test', 
     agentId: 'agent-one',
   };
 
-  await assert.rejects(install({ ...base, dryRun: true, selfTest: true }), /cannot run in dry-run mode/);
+  await assert.rejects(install({ ...base, dryRun: true, selfTest: true }), /requires write mode/);
+  await assert.rejects(install({ ...base, yes: false, dryRun: false, selfTest: true }), /requires write mode/);
+  await assert.rejects(install({ ...base, yes: undefined, dryRun: false, selfTest: true }), /requires write mode/);
+  await assert.rejects(install({ ...base, doctor: true, dryRun: false, selfTest: true }), /requires write mode/);
   await assert.rejects(install({ ...base, dryRun: false, selfTest: false }), /requires the server self-test/);
+});
+
+test('applyPlan distinguishes files written now from configuration already present', () => {
+  const dir = tempDir();
+  const target = path.join(dir, 'existing.txt');
+  fs.writeFileSync(target, 'same\n');
+  const plan = { writes: [{ type: 'file', path: target, label: 'Existing hook config', content: 'same\n' }] };
+  const [change] = applyPlan(plan, { yes: true, dryRun: false, doctor: false });
+  assert.equal(change.changed, false);
+  assert.equal(change.applied, false);
+  assert.equal(change.already_present, true);
 });
 
 test('install --yes writes passive runtime and instructions idempotently', async () => {
@@ -592,9 +607,49 @@ test('activation requires a receipt bound to the exact decision, agent, and succ
     };
     await assert.rejects(runSelfTest(options), /activation receipt did not verify/);
     receipt.decision_id = 'decision-activation';
+    receipt.outcome_recorded_at = '';
+    await assert.rejects(runSelfTest(options), /activation receipt did not verify/);
+    receipt.outcome_recorded_at = 'not-a-timestamp';
+    await assert.rejects(runSelfTest(options), /activation receipt did not verify/);
+    receipt.outcome_recorded_at = '2026-07-23T00:00:00.000Z';
     const result = await runSelfTest(options);
     assert.equal(result.activation_verified, true);
     assert.equal(result.activation_receipt.decision_id, 'decision-activation');
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('activation rejects an ambiguous empty runtime payload', async () => {
+  const originalFetch = global.fetch;
+  let firstValueCalled = false;
+  global.fetch = async (url) => {
+    const href = String(url);
+    if (href.endsWith('/v1/agent/think')) {
+      return new Response(JSON.stringify({ data: { decision_id: 'decision-runtime-empty' } }), { status: 200 });
+    }
+    if (href.endsWith('/v1/agent/commit') || href.endsWith('/v1/agent/status')) {
+      return new Response(JSON.stringify({ data: { ok: true, enabled: true } }), { status: 200 });
+    }
+    if (href.endsWith('/v1/agent/runtime')) {
+      return new Response(JSON.stringify({ data: {} }), { status: 200 });
+    }
+    if (href.endsWith('/v1/agent/first-value')) {
+      firstValueCalled = true;
+      return new Response(JSON.stringify({ data: { active: true } }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ data: {} }), { status: 200 });
+  };
+
+  try {
+    await assert.rejects(runSelfTest({
+      selfTest: true,
+      apiKey: 'test-api-key',
+      baseUrl: 'https://api.example.test',
+      agentId: 'agent-one',
+      activation: { harness: 'codex', capture_verified: true },
+    }), /activation receipt did not verify/);
+    assert.equal(firstValueCalled, true);
   } finally {
     global.fetch = originalFetch;
   }

@@ -589,7 +589,13 @@ function applyPlan(plan, options) {
 
     const changed = before !== after;
     const writeApplied = Boolean(options.yes && !options.dryRun && !options.doctor);
-    changes.push({ path: write.path, label: write.label, changed, applied: !changed || writeApplied });
+    changes.push({
+      path: write.path,
+      label: write.label,
+      changed,
+      applied: changed && writeApplied,
+      already_present: !changed,
+    });
     if (changed && writeApplied) {
       fs.mkdirSync(path.dirname(write.path), { recursive: true });
       fs.writeFileSync(write.path, after);
@@ -612,6 +618,22 @@ async function requestJson(url, options) {
     throw new Error(String(message));
   }
   return json.data || json;
+}
+
+function isCanonicalTimestamp(value) {
+  if (typeof value !== 'string' || value.length === 0) return false;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === value;
+}
+
+function runtimeGateVerified(runtime) {
+  if (!runtime || typeof runtime !== 'object') return false;
+  if (runtime.ok === true) return true;
+  const gate = runtime.risk_gate;
+  if (!gate || typeof gate !== 'object') return false;
+  if (typeof gate.allow === 'boolean' || typeof gate.allowed === 'boolean') return true;
+  const decision = typeof gate.decision === 'string' ? gate.decision.toLowerCase() : '';
+  return ['allow', 'warn', 'review_required', 'block'].includes(decision);
 }
 
 async function runSelfTest(options) {
@@ -696,7 +718,7 @@ async function runSelfTest(options) {
       agent_id: options.agentId,
       activation: options.activation ? {
         ...options.activation,
-        intervention_verified: Boolean(runtime && runtime.ok !== false),
+        intervention_verified: runtimeGateVerified(runtime),
         closure_verified: true,
       } : undefined,
     }),
@@ -720,7 +742,7 @@ async function runSelfTest(options) {
       && activationReceipt.decision_id === decisionId
       && activationReceipt.agent_id === options.agentId
       && activationReceipt.outcome_success === true
-      && typeof activationReceipt.outcome_recorded_at === 'string'
+      && isCanonicalTimestamp(activationReceipt.outcome_recorded_at)
       && activationReceipt.server_confirmed === true
       && activationReceipt.capture_verified === true
       && activationReceipt.intervention_verified === true
@@ -728,7 +750,7 @@ async function runSelfTest(options) {
     if (!receiptValid) {
       throw new Error('activation receipt did not verify the exact self-test decision, agent, runtime gate, and closed successful outcome');
     }
-    activationVerified = Boolean(firstValue.active && runtime.ok !== false && (status.enabled ?? status.ok));
+    activationVerified = Boolean(firstValue.active && runtimeGateVerified(runtime) && (status.enabled ?? status.ok));
     if (!activationVerified) {
       throw new Error('activation prerequisites were not all verified by the server');
     }
@@ -742,7 +764,7 @@ async function runSelfTest(options) {
     recommended_fix: status.recommended_fix || null,
     next_action: status.next_action || null,
     auto_outcome_closure: status.auto_outcome_closure || null,
-    runtime_active: Boolean(runtime && runtime.ok !== false),
+    runtime_active: runtimeGateVerified(runtime),
     runtime_exact_next_action: runtime.exact_next_action || null,
     runtime_before_you_act: runtime.before_you_act || null,
     activation_verified: activationVerified,
@@ -997,8 +1019,8 @@ function printReport(report) {
 }
 
 async function install(options) {
-  if (options.activate && options.dryRun) {
-    throw new Error('activate cannot run in dry-run mode because no hooks would be installed');
+  if (options.activate && (options.yes !== true || options.dryRun || options.doctor)) {
+    throw new Error('activate requires write mode (--yes) because hooks must be installed during this run');
   }
   if (options.activate && options.selfTest === false) {
     throw new Error('activate requires the server self-test');
@@ -1016,7 +1038,7 @@ async function install(options) {
     install_surface: plan.mode,
     mode: options.governanceMode || 'passive',
     hooks_installed: changes
-      .filter((change) => change.applied && /hook|runtime|rule|instruction|config/i.test(change.label))
+      .filter((change) => change.changed && change.applied && /hook|runtime|rule|instruction|config/i.test(change.label))
       .map((change) => change.label)
       .slice(0, 20),
     capture_verified: changes.every((change) => change.applied),
