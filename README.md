@@ -18,16 +18,20 @@ Required secret:
 export MARROW_API_KEY=mrw_live_...
 ```
 
-## What's New in v0.1.28
+## What's New in v0.1.29
 
-v0.1.28 aligns first-run documentation with Marrow's business product contract:
+v0.1.29 makes first-run activation server-verifiable instead of relying on local setup output:
 
-- runtime control before consequential actions;
-- proof and outcome closure afterward;
-- tenant-scoped fleet improvement across interchangeable agents and harnesses;
-- clear separation between the default installer, advanced SDK integration, and MCP-native integration.
+- `npx @getmarrow/install activate` detects the current harness, writes supported passive controls, creates and closes a harmless decision, and asks Marrow to verify that exact outcome;
+- activation succeeds only when the API returns a tenant-scoped activation receipt;
+- the receipt reports capture, before-action intervention, outcome closure, and first-value state;
+- existing setup, governed runner, and TUI commands remain compatible.
 
-This patch changes package documentation and positioning. Existing installer, governed runner, and TUI behavior remains compatible.
+Use `activate` when you want one command with an explicit success contract. Use `--yes` when an existing automation already handles setup prompts and verification output.
+
+```bash
+npx @getmarrow/install activate
+```
 
 ## What It Detects
 
@@ -41,18 +45,19 @@ The installer detects supported configuration and project signals for:
 
 Marrow does not replace these models or harnesses. It adds a common business control, proof, and outcome layer around the actions they perform.
 
-## First-Run Verification
+## First-Run Activation
 
-With a valid key, setup:
+With a valid key, `activate`:
 
 1. detects the local integration surfaces;
 2. writes supported config and passive instructions;
 3. creates a harmless test decision;
 4. closes its outcome;
-5. reads agent status and the one-call runtime;
-6. reports captured surfaces, attribution quality, proof coverage, token-value capture state, and the exact next action.
+5. sends the exact self-test decision ID to Marrow for server-side verification;
+6. reads agent status and the one-call runtime;
+7. returns an activation receipt with capture, intervention, closure, first-value state, and the exact next action.
 
-Healthy output confirms that Marrow is active instead of only confirming that files were written.
+Healthy output confirms the exact decision outcome exists under the authenticated account and agent. A local file write or client-supplied `verified: true` value cannot produce an active receipt.
 
 ## Govern TUI
 
@@ -119,6 +124,14 @@ The fleet view shows live agents, active workflows, risky actions waiting for pr
 | Event contract | You have a custom harness that must map its lifecycle into Marrow | Advanced |
 
 These are integration surfaces for one Marrow product, not separate products.
+
+## Always-On Lifecycle
+
+Supported integrations capture a compact lifecycle without storing raw prompts, completions, command output, tool output, or credentials. Marrow recognizes prompt, goal, pre-action, tool/command result, verification evidence, workflow/session, subagent, handoff, proof-pack, and outcome events.
+
+Meaningful work opens an outcome-closure item. A tool exit or workflow completion does not silently count as a successful business outcome; an explicit outcome receipt closes it. Transient delivery failures are held in an owner-only local spool and retried with the same event ID so retries do not create duplicate lifecycle records.
+
+Owners can inspect pending outcomes in Fleet Operations. Agents can retrieve a tenant-scoped causal trace for a decision to see the prior failure, lesson, gate, proof, workflow, and outcome path that changed the action.
 
 ## Passive Token and Value Proof
 

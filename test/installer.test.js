@@ -38,6 +38,13 @@ test('parseArgs defaults to dry-run unless --yes is passed', () => {
   assert.equal(repair.yes, true);
 });
 
+test('activate is the one-command write and server verification path', () => {
+  const parsed = parseArgs(['activate']);
+  assert.equal(parsed.activate, true);
+  assert.equal(parsed.yes, true);
+  assert.equal(parsed.selfTest, true);
+});
+
 test('parseArgs marks --key for process-list warning', () => {
   const opts = parseArgs(['--key', 'mrw_live_test']);
   assert.equal(opts.apiKey, 'mrw_live_test');
