@@ -48,6 +48,7 @@ function parseArgs(argv) {
     baseUrl: process.env.MARROW_BASE_URL || DEFAULT_BASE_URL,
     agentId: process.env.MARROW_FLEET_AGENT_ID || process.env.MARROW_AGENT_ID || '',
     selfTest: true,
+    selfTestExplicitlyDisabled: false,
     json: false,
     activate: false,
   };
@@ -67,7 +68,10 @@ function parseArgs(argv) {
     else if (arg === '--dry-run') options.dryRun = true;
     else if (arg === '--doctor' || arg === 'doctor' || arg === 'check') options.doctor = true;
     else if (arg === '--json') options.json = true;
-    else if (arg === '--no-self-test') options.selfTest = false;
+    else if (arg === '--no-self-test') {
+      options.selfTest = false;
+      options.selfTestExplicitlyDisabled = true;
+    }
     else if (arg === '--self-test') options.selfTest = true;
     else if (arg === '--cwd') options.cwd = path.resolve(argv[++i] || options.cwd);
     else if (arg === '--mode') options.mode = argv[++i] || options.mode;
@@ -90,6 +94,12 @@ function parseArgs(argv) {
 
   if (!['auto', 'mcp', 'sdk', 'both', 'md'].includes(options.mode)) {
     throw new Error('--mode must be one of auto, mcp, sdk, both, md');
+  }
+  if (options.activate && options.selfTestExplicitlyDisabled) {
+    throw new Error('activate cannot be combined with --no-self-test because server verification is required');
+  }
+  if (options.activate && options.dryRun) {
+    throw new Error('activate cannot be combined with --dry-run; use --dry-run without activate to preview changes');
   }
 
   return options;
@@ -578,8 +588,9 @@ function applyPlan(plan, options) {
     }
 
     const changed = before !== after;
-    changes.push({ path: write.path, label: write.label, changed });
-    if (changed && options.yes && !options.dryRun && !options.doctor) {
+    const writeApplied = Boolean(options.yes && !options.dryRun && !options.doctor);
+    changes.push({ path: write.path, label: write.label, changed, applied: !changed || writeApplied });
+    if (changed && writeApplied) {
       fs.mkdirSync(path.dirname(write.path), { recursive: true });
       fs.writeFileSync(write.path, after);
     }
@@ -663,10 +674,7 @@ async function runSelfTest(options) {
         outcome: 'self-test outcome committed',
       },
     }),
-  }).catch((error) => ({
-    ok: false,
-    error: error instanceof Error ? error.message : String(error),
-  }));
+  });
   const performance = await requestJson(`${baseUrl}/v1/analytics/agent-performance?period=7`, { headers })
     .catch((error) => ({
       ok: false,
@@ -685,15 +693,12 @@ async function runSelfTest(options) {
         outcome: 'first-value endpoint reached',
       },
       decision_id: decisionId,
-      activation: options.activation || {
-        harness: sourceClient(),
-        install_surface: options.mode || 'auto',
-        mode: options.governanceMode || 'passive',
-        hooks_installed: [],
-        capture_verified: true,
+      agent_id: options.agentId,
+      activation: options.activation ? {
+        ...options.activation,
         intervention_verified: Boolean(runtime && runtime.ok !== false),
         closure_verified: true,
-      },
+      } : undefined,
     }),
   });
   const valueProof = await requestJson(`${baseUrl}/v1/agent/value/proof?period_days=30`, { headers })
@@ -704,6 +709,30 @@ async function runSelfTest(options) {
   const tokenValueProof = buildTokenValueProof(valueProof);
   const firstValueSignal = buildFirstValueSignal(status, runtime, performance, firstValue, tokenValueProof);
   const installValueMoment = buildInstallValueMoment(firstValueSignal, status, runtime, performance, firstValue, tokenValueProof);
+  let activationReceipt = null;
+  let activationVerified = false;
+  if (options.activation) {
+    activationReceipt = firstValue && firstValue.activation_receipt;
+    const receiptValid = activationReceipt
+      && typeof activationReceipt === 'object'
+      && typeof activationReceipt.id === 'string'
+      && activationReceipt.id.length > 0
+      && activationReceipt.decision_id === decisionId
+      && activationReceipt.agent_id === options.agentId
+      && activationReceipt.outcome_success === true
+      && typeof activationReceipt.outcome_recorded_at === 'string'
+      && activationReceipt.server_confirmed === true
+      && activationReceipt.capture_verified === true
+      && activationReceipt.intervention_verified === true
+      && activationReceipt.closure_verified === true;
+    if (!receiptValid) {
+      throw new Error('activation receipt did not verify the exact self-test decision, agent, runtime gate, and closed successful outcome');
+    }
+    activationVerified = Boolean(firstValue.active && runtime.ok !== false && (status.enabled ?? status.ok));
+    if (!activationVerified) {
+      throw new Error('activation prerequisites were not all verified by the server');
+    }
+  }
   return {
     skipped: false,
     decision_id: decisionId,
@@ -716,8 +745,8 @@ async function runSelfTest(options) {
     runtime_active: Boolean(runtime && runtime.ok !== false),
     runtime_exact_next_action: runtime.exact_next_action || null,
     runtime_before_you_act: runtime.before_you_act || null,
-    activation_verified: Boolean(firstValue && firstValue.ok !== false && firstValue.active),
-    activation_receipt: firstValue.activation_receipt || null,
+    activation_verified: activationVerified,
+    activation_receipt: activationReceipt,
     first_value: firstValue && firstValue.ok !== false ? firstValue : null,
     first_value_signal: firstValueSignal,
     install_value_moment: installValueMoment,
@@ -852,7 +881,7 @@ function printReport(report) {
   process.stdout.write(`Mode: ${report.mode}\n`);
   process.stdout.write(`Write mode: ${report.writeMode}\n\n`);
 
-  if (report.activation) {
+  if (report.activation?.requested) {
     process.stdout.write('Activation:\n');
     process.stdout.write(`- agent: ${report.activation.agent_id}\n`);
     process.stdout.write(`- server confirmed: ${report.activation.server_confirmed ? 'yes' : 'no'}\n\n`);
@@ -878,6 +907,7 @@ function printReport(report) {
     process.stdout.write(`- decision_id: ${report.selfTest.decision_id}\n`);
     process.stdout.write(`- health: ${report.selfTest.health || 'unknown'}\n`);
     process.stdout.write(`- one-call runtime: ${report.selfTest.runtime_active ? 'active' : 'not verified'}\n`);
+    if (report.selfTest.error) process.stdout.write(`- error: ${report.selfTest.error}\n`);
     if (report.selfTest.next_action) process.stdout.write(`- next action: ${report.selfTest.next_action}\n`);
     if (report.selfTest.first_value_signal) {
       process.stdout.write('\nFirst value:\n');
@@ -967,6 +997,12 @@ function printReport(report) {
 }
 
 async function install(options) {
+  if (options.activate && options.dryRun) {
+    throw new Error('activate cannot run in dry-run mode because no hooks would be installed');
+  }
+  if (options.activate && options.selfTest === false) {
+    throw new Error('activate requires the server self-test');
+  }
   const detection = detectEnvironment(options.cwd);
   const plan = buildPlan(detection, options);
   const writeMode = options.doctor ? 'doctor' : options.dryRun ? 'dry-run' : options.repair ? 'repair' : options.yes ? 'write' : 'dry-run';
@@ -974,16 +1010,19 @@ async function install(options) {
   const client = detectedClient(detection);
   options.client = client;
   if (!options.agentId) options.agentId = stableAgentId(detection.root, client);
-  options.activation = {
+  options.activation = options.activate ? {
     harness: client,
     agent_id: options.agentId,
     install_surface: plan.mode,
     mode: options.governanceMode || 'passive',
-    hooks_installed: changes.filter((change) => /hook|runtime|rule|instruction|config/i.test(change.label)).map((change) => change.label).slice(0, 20),
-    capture_verified: true,
-    intervention_verified: true,
-    closure_verified: true,
-  };
+    hooks_installed: changes
+      .filter((change) => change.applied && /hook|runtime|rule|instruction|config/i.test(change.label))
+      .map((change) => change.label)
+      .slice(0, 20),
+    capture_verified: changes.every((change) => change.applied),
+    intervention_verified: false,
+    closure_verified: false,
+  } : null;
   const configInspection = inspectNpmTokenConfig();
   const sdkDependency = inspectSdkDependency(detection);
   const configDiagnostics = configInspection.safe;
@@ -991,11 +1030,17 @@ async function install(options) {
     ? repairConfigDiagnostics(configDiagnostics)
     : [];
   const envHints = options.apiKey ? [] : findLikelyEnvFiles(detection);
-  const selfTest = await runSelfTest(options).catch((error) => ({
-    skipped: false,
-    active: false,
-    error: error instanceof Error ? error.message : String(error),
-  }));
+  let selfTest;
+  try {
+    selfTest = await runSelfTest(options);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (options.activate) throw new Error(`Marrow activation failed: ${message}`);
+    selfTest = { skipped: false, active: false, error: message };
+  }
+  if (options.activate && !selfTest.activation_verified) {
+    throw new Error('Marrow activation failed: server confirmation was not returned');
+  }
   const changedConfig = changes.some((change) => change.changed) || configRepairs.some((repair) => repair.changed);
   const selfTestPassed = Boolean(!selfTest.skipped && selfTest.active && !selfTest.error);
   const remediation = options.repair

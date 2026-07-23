@@ -45,6 +45,13 @@ test('activate is the one-command write and server verification path', () => {
   assert.equal(parsed.selfTest, true);
 });
 
+test('activate rejects dry-run and disabled self-test modifiers in any order', () => {
+  assert.throws(() => parseArgs(['activate', '--dry-run']), /cannot be combined with --dry-run/);
+  assert.throws(() => parseArgs(['--dry-run', 'activate']), /cannot be combined with --dry-run/);
+  assert.throws(() => parseArgs(['activate', '--no-self-test']), /cannot be combined with --no-self-test/);
+  assert.throws(() => parseArgs(['--no-self-test', 'activate']), /cannot be combined with --no-self-test/);
+});
+
 test('parseArgs marks --key for process-list warning', () => {
   const opts = parseArgs(['--key', 'mrw_live_test']);
   assert.equal(opts.apiKey, 'mrw_live_test');
@@ -96,6 +103,23 @@ test('install dry-run does not write files', async () => {
 
   assert.equal(report.writeMode, 'dry-run');
   assert.equal(fs.existsSync(path.join(dir, '.marrow', 'passive-runtime.mjs')), false);
+});
+
+test('programmatic activation cannot attest to a dry-run or skipped self-test', async () => {
+  const dir = tempDir();
+  fs.writeFileSync(path.join(dir, 'package.json'), '{}');
+  const base = {
+    cwd: dir,
+    mode: 'sdk',
+    yes: true,
+    activate: true,
+    apiKey: 'test-api-key',
+    baseUrl: 'https://api.example.test',
+    agentId: 'agent-one',
+  };
+
+  await assert.rejects(install({ ...base, dryRun: true, selfTest: true }), /cannot run in dry-run mode/);
+  await assert.rejects(install({ ...base, dryRun: false, selfTest: false }), /requires the server self-test/);
 });
 
 test('install --yes writes passive runtime and instructions idempotently', async () => {
@@ -507,6 +531,125 @@ test('self-test returns first five-minute value signal and proof', async () => {
     assert.equal(result.token_value_proof.observed.tokens.total, 2000);
     assert.equal(result.token_value_proof.savings.estimated_tokens_saved, 700);
     assert.ok(result.install_value_moment.proof.some((line) => line.includes('model calls')));
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('activation requires a receipt bound to the exact decision, agent, and successful outcome', async () => {
+  const originalFetch = global.fetch;
+  let receipt = null;
+  global.fetch = async (url) => {
+    const href = String(url);
+    if (href.endsWith('/v1/agent/think')) {
+      return new Response(JSON.stringify({ data: { decision_id: 'decision-activation' } }), { status: 200 });
+    }
+    if (href.endsWith('/v1/agent/commit')) {
+      return new Response(JSON.stringify({ data: { ok: true } }), { status: 200 });
+    }
+    if (href.endsWith('/v1/agent/status')) {
+      return new Response(JSON.stringify({ data: { ok: true, enabled: true, health: 'healthy' } }), { status: 200 });
+    }
+    if (href.endsWith('/v1/agent/runtime')) {
+      return new Response(JSON.stringify({ data: { ok: true, risk_gate: { allow: true } } }), { status: 200 });
+    }
+    if (href.endsWith('/v1/agent/first-value')) {
+      return new Response(JSON.stringify({ data: { ok: true, active: true, activation_receipt: receipt } }), { status: 200 });
+    }
+    if (href.includes('/v1/analytics/agent-performance') || href.includes('/v1/agent/value/proof')) {
+      return new Response(JSON.stringify({ data: {} }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ error: 'unexpected url' }), { status: 404 });
+  };
+
+  const options = {
+    selfTest: true,
+    apiKey: 'test-api-key',
+    baseUrl: 'https://api.example.test',
+    agentId: 'agent-one',
+    client: 'codex',
+    activation: {
+      harness: 'codex',
+      install_surface: 'both',
+      mode: 'passive',
+      hooks_installed: ['passive runtime'],
+      capture_verified: true,
+    },
+  };
+
+  try {
+    await assert.rejects(runSelfTest(options), /activation receipt did not verify/);
+    receipt = {
+      id: 'activation-receipt-one',
+      decision_id: 'wrong-decision',
+      agent_id: 'agent-one',
+      outcome_success: true,
+      outcome_recorded_at: '2026-07-23T00:00:00.000Z',
+      server_confirmed: true,
+      capture_verified: true,
+      intervention_verified: true,
+      closure_verified: true,
+    };
+    await assert.rejects(runSelfTest(options), /activation receipt did not verify/);
+    receipt.decision_id = 'decision-activation';
+    const result = await runSelfTest(options);
+    assert.equal(result.activation_verified, true);
+    assert.equal(result.activation_receipt.decision_id, 'decision-activation');
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('activation fails before confirmation when runtime verification is unavailable', async () => {
+  const originalFetch = global.fetch;
+  let firstValueCalled = false;
+  global.fetch = async (url) => {
+    const href = String(url);
+    if (href.endsWith('/v1/agent/think')) {
+      return new Response(JSON.stringify({ data: { decision_id: 'decision-runtime-fail' } }), { status: 200 });
+    }
+    if (href.endsWith('/v1/agent/commit') || href.endsWith('/v1/agent/status')) {
+      return new Response(JSON.stringify({ data: { ok: true, enabled: true } }), { status: 200 });
+    }
+    if (href.endsWith('/v1/agent/runtime')) {
+      return new Response(JSON.stringify({ error: 'runtime unavailable' }), { status: 503 });
+    }
+    if (href.endsWith('/v1/agent/first-value')) firstValueCalled = true;
+    return new Response(JSON.stringify({ data: {} }), { status: 200 });
+  };
+
+  try {
+    await assert.rejects(runSelfTest({
+      selfTest: true,
+      apiKey: 'test-api-key',
+      baseUrl: 'https://api.example.test',
+      agentId: 'agent-one',
+      activation: { harness: 'codex', capture_verified: true },
+    }), /runtime unavailable/);
+    assert.equal(firstValueCalled, false);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('activation endpoint failure rejects install instead of returning a false success report', async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => new Response(JSON.stringify({ error: 'activation service unavailable' }), { status: 503 });
+  const dir = tempDir();
+  fs.writeFileSync(path.join(dir, 'package.json'), '{}');
+
+  try {
+    await assert.rejects(install({
+      cwd: dir,
+      mode: 'sdk',
+      yes: true,
+      activate: true,
+      dryRun: false,
+      selfTest: true,
+      apiKey: 'test-api-key',
+      baseUrl: 'https://api.example.test',
+      agentId: 'agent-one',
+    }), /Marrow activation failed: activation service unavailable/);
   } finally {
     global.fetch = originalFetch;
   }
