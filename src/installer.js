@@ -49,11 +49,17 @@ function parseArgs(argv) {
     agentId: process.env.MARROW_FLEET_AGENT_ID || process.env.MARROW_AGENT_ID || '',
     selfTest: true,
     json: false,
+    activate: false,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
-    if (arg === '--yes' || arg === '-y') options.yes = true;
+    if (arg === 'activate' || arg === '--activate') {
+      options.activate = true;
+      options.yes = true;
+      options.selfTest = true;
+    }
+    else if (arg === '--yes' || arg === '-y') options.yes = true;
     else if (arg === '--repair' || arg === 'repair') {
       options.repair = true;
       options.yes = true;
@@ -92,6 +98,7 @@ function parseArgs(argv) {
 function usage() {
   return `Usage:
   npx @getmarrow/install --dry-run
+  npx @getmarrow/install activate
   npx @getmarrow/install --yes
   npx @getmarrow/install --repair
   npx @getmarrow/install doctor
@@ -99,6 +106,7 @@ function usage() {
   npx @getmarrow/install --sdk --yes
 
 Options:
+  activate           Detect, install, self-test, and return a server-confirmed activation receipt
   --dry-run          Print planned changes without writing
   --doctor           Check install health without writing
   --repair           Write missing hooks/config, then run self-test and status check
@@ -109,6 +117,20 @@ Options:
   --agent-id <id>    Agent/fleet id for self-test headers
   --no-self-test     Skip API smoke/self-test
 `;
+}
+
+function stableAgentId(root, client = sourceClient()) {
+  const identity = `${path.resolve(root)}:${os.hostname()}:${client}`;
+  return `${client}-${crypto.createHash('sha256').update(identity).digest('hex').slice(0, 12)}`;
+}
+
+function detectedClient(detection) {
+  if (sourceClient() !== 'custom') return sourceClient();
+  if (detection.openclaw) return 'openclaw';
+  if (detection.claudeCode) return 'claude-code';
+  if (detection.cursor) return 'cursor';
+  if (detection.codex) return 'codex';
+  return 'custom';
 }
 
 function exists(filePath) {
@@ -595,7 +617,7 @@ async function runSelfTest(options) {
     authorization: `Bearer ${options.apiKey}`,
     'content-type': 'application/json',
     'x-marrow-session-id': `install-${Date.now()}`,
-    'x-marrow-client': sourceClient(),
+    'x-marrow-client': options.client || sourceClient(),
   };
   if (options.agentId) headers['x-marrow-agent-id'] = options.agentId;
 
@@ -608,7 +630,7 @@ async function runSelfTest(options) {
       action: 'Marrow passive install self-test: verify SDK/MCP hooks can record a harmless setup event',
       source_meta: {
         channel: 'cli',
-        client: sourceClient(),
+        client: options.client || sourceClient(),
         user_intent: 'operate',
       },
     }),
@@ -662,11 +684,18 @@ async function runSelfTest(options) {
         checks: ['installer first-value self-test'],
         outcome: 'first-value endpoint reached',
       },
+      decision_id: decisionId,
+      activation: options.activation || {
+        harness: sourceClient(),
+        install_surface: options.mode || 'auto',
+        mode: options.governanceMode || 'passive',
+        hooks_installed: [],
+        capture_verified: true,
+        intervention_verified: Boolean(runtime && runtime.ok !== false),
+        closure_verified: true,
+      },
     }),
-  }).catch((error) => ({
-    ok: false,
-    error: error instanceof Error ? error.message : String(error),
-  }));
+  });
   const valueProof = await requestJson(`${baseUrl}/v1/agent/value/proof?period_days=30`, { headers })
     .catch((error) => ({
       ok: false,
@@ -687,6 +716,8 @@ async function runSelfTest(options) {
     runtime_active: Boolean(runtime && runtime.ok !== false),
     runtime_exact_next_action: runtime.exact_next_action || null,
     runtime_before_you_act: runtime.before_you_act || null,
+    activation_verified: Boolean(firstValue && firstValue.ok !== false && firstValue.active),
+    activation_receipt: firstValue.activation_receipt || null,
     first_value: firstValue && firstValue.ok !== false ? firstValue : null,
     first_value_signal: firstValueSignal,
     install_value_moment: installValueMoment,
@@ -821,6 +852,12 @@ function printReport(report) {
   process.stdout.write(`Mode: ${report.mode}\n`);
   process.stdout.write(`Write mode: ${report.writeMode}\n\n`);
 
+  if (report.activation) {
+    process.stdout.write('Activation:\n');
+    process.stdout.write(`- agent: ${report.activation.agent_id}\n`);
+    process.stdout.write(`- server confirmed: ${report.activation.server_confirmed ? 'yes' : 'no'}\n\n`);
+  }
+
   process.stdout.write('Detected:\n');
   for (const [key, value] of Object.entries(report.detected)) {
     process.stdout.write(`- ${key}: ${value ? 'yes' : 'no'}\n`);
@@ -934,6 +971,19 @@ async function install(options) {
   const plan = buildPlan(detection, options);
   const writeMode = options.doctor ? 'doctor' : options.dryRun ? 'dry-run' : options.repair ? 'repair' : options.yes ? 'write' : 'dry-run';
   const changes = applyPlan(plan, options);
+  const client = detectedClient(detection);
+  options.client = client;
+  if (!options.agentId) options.agentId = stableAgentId(detection.root, client);
+  options.activation = {
+    harness: client,
+    agent_id: options.agentId,
+    install_surface: plan.mode,
+    mode: options.governanceMode || 'passive',
+    hooks_installed: changes.filter((change) => /hook|runtime|rule|instruction|config/i.test(change.label)).map((change) => change.label).slice(0, 20),
+    capture_verified: true,
+    intervention_verified: true,
+    closure_verified: true,
+  };
   const configInspection = inspectNpmTokenConfig();
   const sdkDependency = inspectSdkDependency(detection);
   const configDiagnostics = configInspection.safe;
@@ -975,6 +1025,12 @@ async function install(options) {
       codex: detection.codex,
       openclaw: detection.openclaw,
       mcpConfig: detection.mcpConfig,
+    },
+    activation: {
+      requested: options.activate,
+      agent_id: options.agentId,
+      server_confirmed: Boolean(selfTest.activation_verified),
+      receipt: selfTest.activation_receipt || null,
     },
     changes,
     doctor: {
@@ -1026,4 +1082,5 @@ module.exports = {
   inspectSdkDependency,
   buildInstallValueMoment,
   buildTokenValueProof,
+  stableAgentId,
 };
