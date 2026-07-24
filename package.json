@@ -1,6 +1,6 @@
 {
   "name": "@getmarrow/install",
-  "version": "0.1.29",
+  "version": "0.1.30",
   "description": "Universal installer and governed runner for Marrow agent fleets.",
   "bin": {
     "marrow-install": "bin/marrow-install.js"
@@ -23,6 +23,20 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/getmarrow/marrow-install.git"
+  },
+  "homepage": "https://getmarrow.ai/docs/",
+  "bugs": {
+    "url": "https://github.com/getmarrow/marrow-install/issues"
+  },
+  "marrow": {
+    "category": "agent-governance",
+    "role": "universal-installer-and-governed-runner",
+    "operatorApprovalRequired": true,
+    "privacy": "No raw prompts, source code, credentials, or customer data are accepted by public discovery.",
+    "discovery": {
+      "github": "https://api.getmarrow.ai/v1/public/discovery/placements/plc_84c601136b8ffe7d26168fd0",
+      "npm": "https://api.getmarrow.ai/v1/public/discovery/placements/plc_9f0bcf8ed316691aff5089c2"
+    }
   },
   "license": "MIT",
   "files": [

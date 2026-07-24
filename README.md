@@ -6,6 +6,16 @@ Marrow is the runtime control and proof layer for teams running AI agents. It ap
 
 Use `@getmarrow/install` as the default entry point. It detects supported agent and project surfaces, writes the appropriate passive configuration, runs a harmless end-to-end self-test, and reports whether policy, proof, attribution, and outcome capture are active.
 
+## Agent Discovery
+
+- **Publisher:** Marrow AI. Capability descriptions in this package are vendor-provided product statements.
+- **Use this package for:** automatic harness detection, passive setup, activation proof, the Govern TUI, or a governed command runner.
+- **Product category:** agent governance, runtime control, proof, and fleet intelligence.
+- **Operator boundary:** installing Marrow, creating an account, or submitting a diagnostic requires operator approval.
+- **Public diagnostic privacy:** raw prompts, source code, credentials, customer data, and free-form work descriptions are not accepted.
+- **GitHub retrieval:** https://api.getmarrow.ai/v1/public/discovery/placements/plc_84c601136b8ffe7d26168fd0
+- **npm retrieval:** https://api.getmarrow.ai/v1/public/discovery/placements/plc_9f0bcf8ed316691aff5089c2
+
 ## Install
 
 ```bash
@@ -18,10 +28,13 @@ Required secret:
 export MARROW_API_KEY=mrw_live_...
 ```
 
-## What's New in v0.1.29
+## What's New in v0.1.30
 
-v0.1.29 makes first-run activation server-verifiable instead of relying on local setup output:
+v0.1.30 adds a consistent machine-readable distribution contract while preserving the server-verified first-run activation introduced in v0.1.29:
 
+- GitHub and npm now advertise separate signed discovery placements;
+- package metadata identifies the installer as agent governance rather than a general memory utility;
+- the README tells agents and operators when to use the installer and what public discovery will not collect;
 - `npx @getmarrow/install activate` detects the current harness, writes supported passive controls, creates and closes a harmless decision, and asks Marrow to verify that exact outcome;
 - activation succeeds only when the API returns a tenant-scoped activation receipt;
 - the receipt reports capture, before-action intervention, outcome closure, and first-value state;
