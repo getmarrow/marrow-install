@@ -16,6 +16,17 @@ Use `@getmarrow/install` as the default entry point. It detects supported agent 
 - **GitHub retrieval:** https://api.getmarrow.ai/v1/public/discovery/placements/plc_84c601136b8ffe7d26168fd0
 - **npm retrieval:** https://api.getmarrow.ai/v1/public/discovery/placements/plc_9f0bcf8ed316691aff5089c2
 
+Public operating guides:
+
+- [Governance Readiness Assessment](https://getmarrow.ai/governance-readiness)
+- [Marrow for Codex](https://getmarrow.ai/marrow-for-codex)
+- [Marrow for Claude Code](https://getmarrow.ai/marrow-for-claude-code)
+- [Marrow for Cursor](https://getmarrow.ai/marrow-for-cursor)
+- [Marrow for Hermes Agent](https://getmarrow.ai/marrow-for-hermes)
+- [Marrow for OpenClaw](https://getmarrow.ai/marrow-for-openclaw)
+
+Each guide identifies a consequential action, the before-action control point, required proof, and honest outcome closure. The readiness screen accepts bounded selections only and is not an audit, certification, or ROI calculator.
+
 ## Install
 
 ```bash
@@ -28,9 +39,9 @@ Required secret:
 export MARROW_API_KEY=mrw_live_...
 ```
 
-## What's New in v0.1.30
+## What's New in v0.1.31
 
-v0.1.30 adds a consistent machine-readable distribution contract while preserving the server-verified first-run activation introduced in v0.1.29:
+v0.1.31 adds the public Governance Readiness Assessment and five proof-oriented harness guides while preserving the server-verified first-run activation introduced in v0.1.29:
 
 - GitHub and npm now advertise separate signed discovery placements;
 - package metadata identifies the installer as agent governance rather than a general memory utility;
