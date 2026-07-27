@@ -18,5 +18,9 @@ test('npm entry point matches the product positioning contract', () => {
   assert.match(pkg.marrow.discovery.github, /\/placements\/plc_[a-f0-9]{24}$/);
   assert.match(pkg.marrow.discovery.npm, /\/placements\/plc_[a-f0-9]{24}$/);
   assert.match(readme, /Public diagnostic privacy/);
-  assert.ok(readme.indexOf('## First-Run Verification') < readme.indexOf('## Trust and Data Boundaries'));
+  const firstRunHeading = readme.indexOf('## First-Run Activation');
+  const trustHeading = readme.indexOf('## Trust and Data Boundaries');
+  assert.notEqual(firstRunHeading, -1, 'README must contain the first-run activation section');
+  assert.notEqual(trustHeading, -1, 'README must contain the trust and data-boundaries section');
+  assert.ok(firstRunHeading < trustHeading, 'first-run activation must precede trust boundaries');
 });
