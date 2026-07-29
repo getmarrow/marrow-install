@@ -321,7 +321,7 @@ test('fleet snapshot reads certified activation coverage without inventing drift
           capture_coverage: { available: true, rate: 0.75 },
           outcome_closure: { available: true, rate: 0.5 },
           intervention_effectiveness: { available: true, follow_through_rate: 1 },
-          drift: { detected: false, reasons: [], repair_command: null },
+          drift: { available: true, detected: false, reasons: [], repair_command: null },
         },
       },
     },
@@ -340,6 +340,21 @@ test('fleet snapshot reads certified activation coverage without inventing drift
     drift: false,
     exact_fix: '',
   });
+});
+
+test('fleet snapshot leaves drift unavailable when the API does not certify it', () => {
+  const snapshot = normalizeFleetSnapshot({
+    status: { ok: true, data: { activation_coverage: {
+      available: true,
+      capture_coverage: { available: true, rate: 0.5 },
+      drift: { detected: false },
+    } } },
+    capacity: { ok: true, data: {} },
+    report: { ok: true, data: {} },
+    fleet: { ok: true, data: {} },
+  }, { agentId: 'agent-one', baseUrl: 'https://api.getmarrow.ai' });
+
+  assert.equal(snapshot.activation_coverage.drift, null);
 });
 
 test('fleet snapshot distinguishes explicit percent fields from ratio fields', () => {
