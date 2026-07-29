@@ -683,7 +683,7 @@ test('activation requires a receipt bound to the exact decision, agent, and succ
     receiptAccountBindingId = profileAccountBindingId;
     await assert.rejects(runSelfTest(options), /activation prerequisites were not all verified/);
     configurationBindingId = crypto.createHash('sha256')
-      .update('agent-config-receipt:v1:fixture-config-fingerprint')
+      .update(`agent-config-receipt:v2:${profileAccountBindingId}:fixture-config-fingerprint`)
       .digest('hex');
     const result = await runSelfTest(options);
     assert.equal(result.activation_verified, true);
