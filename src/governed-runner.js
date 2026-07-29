@@ -8,7 +8,7 @@ const readline = require('node:readline');
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const HIGH_RISK_TERMS = /\b(deploy|prod|production|publish|release|merge|migration|migrate|secret|token|key|cloudflare|wrangler|npm publish|gh pr merge|git push|terraform apply|kubectl apply|delete|destroy|drop)\b/i;
 const GOVERN_TUI_ROW_COUNT = 7;
-const FLEET_TUI_ROW_COUNT = 11;
+const FLEET_TUI_ROW_COUNT = 12;
 function usage() {
   return `Usage:
   npx @getmarrow/install run --agent deploy-agent -- npm test
@@ -761,6 +761,38 @@ function normalizeGates(status, report) {
   };
 }
 
+function normalizeArbitrations(status, report, fleet) {
+  const source = firstDefined(
+    report.arbitrations,
+    report.report?.arbitrations,
+    fleet.arbitrations,
+    status.arbitrations,
+    {},
+  ) || {};
+  const receipts = listValue(
+    source.receipts,
+    source.items,
+    report.recent_arbitrations,
+    fleet.recent_arbitrations,
+    status.recent_arbitrations,
+  ).slice(0, 8).map((receipt) => ({
+    id: displayText(firstDefined(receipt?.id, receipt?.receipt_id, 'arbitration'), 80),
+    decision_id: displayText(firstDefined(receipt?.decision_id, ''), 80),
+    resolution: statusLabel(receipt?.resolution, 'unknown'),
+    conflict_type: displayText(firstDefined(receipt?.conflict_type, 'action_conflict'), 60),
+    selected_proposal_id: displayText(firstDefined(receipt?.selected_proposal_id, ''), 80),
+    requesting_agent_id: displayText(firstDefined(receipt?.requesting_agent_id, ''), 80),
+    exact_next_action: displayText(firstDefined(receipt?.exact_next_action, ''), 180),
+    owner_approval_required: Boolean(receipt?.owner_approval_required),
+    created_at: displayText(firstDefined(receipt?.created_at, ''), 80),
+  }));
+  return {
+    open_count: numberValue(firstDefined(source.open_count, source.open, receipts.filter((item) => item.resolution !== 'selected' && item.resolution !== 'synthesized').length), 0),
+    review_required_count: numberValue(firstDefined(source.review_required_count, source.review_required, receipts.filter((item) => item.resolution === 'review_required').length), 0),
+    receipts,
+  };
+}
+
 function normalizeFixCommands(status, capacity) {
   const commands = [];
   const add = (value, commandOnly = false) => {
@@ -840,6 +872,7 @@ function normalizeFleetSnapshot(raw, options) {
   ), raw.capacity?.ok ? 'ok' : 'unknown');
   const recentDecisions = normalizeRecentDecisions(status, report, fleet);
   const gates = normalizeGates(status, report);
+  const arbitrations = normalizeArbitrations(status, report, fleet);
   const fixCommands = normalizeFixCommands(status, capacity);
   const errors = Object.entries(raw)
     .filter(([, value]) => value && value.ok === false)
@@ -859,6 +892,7 @@ function normalizeFleetSnapshot(raw, options) {
     recent_decisions: recentDecisions,
     degraded_hooks: missedHooks,
     gates,
+    arbitrations,
     agents,
     fix_commands: fixCommands.length ? fixCommands : ['npx @getmarrow/install doctor'],
     source_errors: errors,
@@ -898,6 +932,10 @@ function fleetPanel(snapshot) {
     ? snapshot.agents.slice(0, 5).map((agent) => `  - ${agent.id}${agent.role ? ` (${agent.role})` : ''}: ${agent.status}${agent.last_seen_at ? ` last_seen=${agent.last_seen_at}` : ''}`).join('\n')
     : '  - no agent roster returned yet';
   const fixes = snapshot.fix_commands.map((command) => `  - ${command}`).join('\n');
+  const arbitration = snapshot.arbitrations.receipts[0];
+  const arbitrationSummary = arbitration
+    ? `${arbitration.resolution} (${arbitration.conflict_type})${arbitration.exact_next_action ? ` - ${arbitration.exact_next_action}` : ''}`
+    : 'none reported yet';
   return [
     'Marrow Fleet Operator',
     '',
@@ -906,6 +944,8 @@ function fleetPanel(snapshot) {
     '',
     `Live agents: ${snapshot.live_agents ?? 'unknown'}`,
     `Active workflows: ${snapshot.active_workflows ?? 'unknown'}`,
+    `Agent disagreements: open=${snapshot.arbitrations.open_count} review_required=${snapshot.arbitrations.review_required_count}`,
+    `Latest arbitration: ${arbitrationSummary}`,
     `Risky actions waiting for proof: ${snapshot.proof_waiting}`,
     `Failed/stale outcomes: ${snapshot.failed_stale_outcomes}`,
     `Backpressure/capacity status: ${snapshot.backpressure_status}${snapshot.capacity_next_action ? ` - ${snapshot.capacity_next_action}` : ''}`,
@@ -1324,6 +1364,7 @@ function renderFleetTui(state) {
   const gateSummary = `deploy=${snapshot.gates.deploy} publish=${snapshot.gates.publish} merge=${snapshot.gates.merge}`;
   const fixCommand = snapshot.fix_commands[0] || 'npx @getmarrow/install doctor';
   const recent = snapshot.recent_decisions[0] || 'none reported yet';
+  const arbitration = snapshot.arbitrations.receipts[0];
   const rows = [
     {
       label: 'Live agents',
@@ -1334,6 +1375,13 @@ function renderFleetTui(state) {
       label: 'Active workflows',
       value: String(snapshot.active_workflows ?? 'unknown'),
       hint: 'Current account-scoped workflow pressure from Marrow.',
+    },
+    {
+      label: 'Agent disagreements',
+      value: `open=${snapshot.arbitrations.open_count} review_required=${snapshot.arbitrations.review_required_count}`,
+      hint: arbitration
+        ? `${arbitration.resolution}: ${arbitration.exact_next_action || arbitration.conflict_type}`
+        : 'No conflicting fleet proposals reported.',
     },
     {
       label: 'Risky actions waiting for proof',
@@ -1651,31 +1699,36 @@ async function runFleetInteractive(options, input = process.stdin, output = proc
           state.status = 'Agent selection changed.';
           render();
         } else if (key.name === 'return') {
-          if (state.cursor === 9) {
+          if (state.cursor === 10) {
             cleanup();
             output.write(`\n${state.snapshot.fix_commands[0] || 'npx @getmarrow/install doctor'}\n`);
             resolve();
             return;
           }
-          if (state.cursor === 10) {
+          if (state.cursor === 11) {
             cleanup();
             resolve();
             return;
           }
           const selectedAgent = state.snapshot.agents[state.agentIndex];
-          if (state.cursor === 0 || state.cursor === 8) {
+          if (state.cursor === 0 || state.cursor === 9) {
             state.lastResult = selectedAgent
               ? `Agent ${selectedAgent.id}: status=${selectedAgent.status}${selectedAgent.role ? ` role=${selectedAgent.role}` : ''}${selectedAgent.last_seen_at ? ` last_seen=${selectedAgent.last_seen_at}` : ''}`
               : 'No live agent roster returned yet. Check API key scope or wait for agents to log activity.';
-          } else if (state.cursor === 5) {
+          } else if (state.cursor === 2) {
+            const receipts = state.snapshot.arbitrations.receipts;
+            state.lastResult = receipts.length
+              ? receipts.map((receipt, index) => `${index + 1}. ${receipt.id}: ${receipt.resolution}${receipt.decision_id ? `; decision=${receipt.decision_id}` : ''}${receipt.selected_proposal_id ? `; selected=${receipt.selected_proposal_id}` : ''}; ${receipt.exact_next_action || receipt.conflict_type}${receipt.owner_approval_required ? ' Owner approval must be issued from an authenticated Marrow dashboard session.' : ''}`).join('  ')
+              : 'No agent disagreements or arbitration receipts returned yet.';
+          } else if (state.cursor === 6) {
             state.lastResult = state.snapshot.recent_decisions.length
               ? state.snapshot.recent_decisions.map((decision, index) => `${index + 1}. ${decision}`).join('  ')
               : 'No recent decisions returned yet.';
-          } else if (state.cursor === 6) {
+          } else if (state.cursor === 7) {
             state.lastResult = state.snapshot.degraded_hooks.length
               ? `Degraded hooks: ${state.snapshot.degraded_hooks.join(', ')}. Fix: ${state.snapshot.fix_commands[0]}`
               : 'No degraded hooks reported.';
-          } else if (state.cursor === 7) {
+          } else if (state.cursor === 8) {
             state.lastResult = `Release gates: deploy=${state.snapshot.gates.deploy}, publish=${state.snapshot.gates.publish}, merge=${state.snapshot.gates.merge}.`;
           } else {
             state.lastResult = fleetPanel(state.snapshot).replace(/\n/g, '  ');

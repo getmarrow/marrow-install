@@ -267,6 +267,19 @@ test('fleet panel summarizes operator-critical account state', () => {
     report: {
       ok: true,
       data: {
+        arbitrations: {
+          open_count: 1,
+          review_required_count: 1,
+          receipts: [{
+            id: 'arb_release_1',
+            decision_id: 'decision_release_1',
+            resolution: 'review_required',
+            conflict_type: 'evidence_conflict',
+            selected_proposal_id: 'proposal_audit_first',
+            owner_approval_required: true,
+            exact_next_action: 'Ask the owner to approve the audited SHA.',
+          }],
+        },
         agents: [
           { id: 'jarvis', role: 'release', status: 'active', last_seen_at: '2026-06-21T00:00:00Z' },
           { id: 'barvis', role: 'security', status: 'active' },
@@ -283,6 +296,8 @@ test('fleet panel summarizes operator-critical account state', () => {
   assert.match(panel, /Marrow Fleet Operator/);
   assert.match(panel, /Live agents: 2/);
   assert.match(panel, /Active workflows: 4/);
+  assert.match(panel, /Agent disagreements: open=1 review_required=1/);
+  assert.match(panel, /Latest arbitration: review_required \(evidence_conflict\)/);
   assert.match(panel, /Risky actions waiting for proof: 2/);
   assert.match(panel, /Failed\/stale outcomes: 1/);
   assert.match(panel, /Backpressure\/capacity status: ok/);
@@ -320,6 +335,7 @@ test('fleet TUI render exposes inspection and fix-command rows', () => {
   assert.match(screen, /Marrow Fleet Operator/);
   assert.match(screen, /\[Live agents\]/);
   assert.match(screen, /\[Active workflows\]/);
+  assert.match(screen, /\[Agent disagreements\]/);
   assert.match(screen, /\[Risky actions waiting for proof\]/);
   assert.match(screen, /\[Failed\/stale outcomes\]/);
   assert.match(screen, /\[Backpressure \/ capacity\]/);
