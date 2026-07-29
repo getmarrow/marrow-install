@@ -806,11 +806,46 @@ function normalizeFixCommands(status, capacity) {
   add(status.route_contract?.exact_fix);
   add(status.auto_outcome_closure?.exact_fix);
   add(status.capture_coverage?.exact_fix);
+  add(status.activation_coverage?.exact_fix);
+  add(status.activation_coverage?.drift?.repair_command, true);
+  add(status.passive_activation?.exact_fix);
   add(capacity.exact_next_action, true);
   add(capacity.next_action, true);
   if (listValue(status.missed_hooks, status.degraded_hooks).length) add('npx @getmarrow/install --repair');
   if (status.auto_outcome_closure?.status === 'degraded') add('npx @getmarrow/install --repair');
   return commands.slice(0, 6);
+}
+
+function normalizeActivationCoverage(status, report, fleet) {
+  const source = firstDefined(
+    status.activation_coverage,
+    status.passive_activation,
+    report.activation_coverage,
+    report.passive_activation,
+    fleet.activation_coverage,
+    {},
+  ) || {};
+  const activation = source.activation || {};
+  const capture = source.capture_coverage || source.capture || source.coverage || {};
+  const closure = source.outcome_closure || source.closure || {};
+  const effectiveness = source.intervention_effectiveness || source.effectiveness || {};
+  const drift = source.drift && typeof source.drift === 'object' ? source.drift : {};
+  const available = source.available === true || capture.available === true;
+  const percent = (value) => {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return null;
+    return Math.max(0, Math.min(100, number <= 1 ? number * 100 : number));
+  };
+  return {
+    available,
+    state: statusLabel(firstDefined(source.state, source.status), available ? 'active' : 'warming_up'),
+    capability_level: displayText(firstDefined(activation.capability_level, source.capability_level, source.capability, 'unknown'), 40),
+    capture_percent: percent(firstDefined(capture.percent, capture.rate, source.capture_percent)),
+    closure_percent: percent(firstDefined(closure.percent, closure.rate, source.closure_percent)),
+    effectiveness_percent: percent(firstDefined(effectiveness.follow_through_rate, effectiveness.followed_percent, effectiveness.rate, source.effectiveness_percent)),
+    drift: Boolean(firstDefined(drift.detected, source.drift_detected, false)),
+    exact_fix: displayText(firstDefined(drift.repair_command, source.exact_fix, source.repair_command, ''), 180),
+  };
 }
 
 function normalizeFleetSnapshot(raw, options) {
@@ -873,6 +908,7 @@ function normalizeFleetSnapshot(raw, options) {
   const recentDecisions = normalizeRecentDecisions(status, report, fleet);
   const gates = normalizeGates(status, report);
   const arbitrations = normalizeArbitrations(status, report, fleet);
+  const activationCoverage = normalizeActivationCoverage(status, report, fleet);
   const fixCommands = normalizeFixCommands(status, capacity);
   const errors = Object.entries(raw)
     .filter(([, value]) => value && value.ok === false)
@@ -893,6 +929,7 @@ function normalizeFleetSnapshot(raw, options) {
     degraded_hooks: missedHooks,
     gates,
     arbitrations,
+    activation_coverage: activationCoverage,
     agents,
     fix_commands: fixCommands.length ? fixCommands : ['npx @getmarrow/install doctor'],
     source_errors: errors,
@@ -944,6 +981,8 @@ function fleetPanel(snapshot) {
     '',
     `Live agents: ${snapshot.live_agents ?? 'unknown'}`,
     `Active workflows: ${snapshot.active_workflows ?? 'unknown'}`,
+    `Passive activation: ${snapshot.activation_coverage.state} capability=${snapshot.activation_coverage.capability_level}`,
+    `Passive coverage: ${snapshot.activation_coverage.capture_percent ?? 'insufficient data'}${snapshot.activation_coverage.capture_percent == null ? '' : '%'}; outcome closure=${snapshot.activation_coverage.closure_percent ?? 'insufficient data'}${snapshot.activation_coverage.closure_percent == null ? '' : '%'}; intervention follow-through=${snapshot.activation_coverage.effectiveness_percent ?? 'insufficient data'}${snapshot.activation_coverage.effectiveness_percent == null ? '' : '%'}`,
     `Agent disagreements: open=${snapshot.arbitrations.open_count} review_required=${snapshot.arbitrations.review_required_count}`,
     `Latest arbitration: ${arbitrationSummary}`,
     `Risky actions waiting for proof: ${snapshot.proof_waiting}`,
@@ -1361,6 +1400,10 @@ function renderFleetTui(state) {
   const snapshot = state.snapshot;
   const selectedAgent = snapshot.agents[state.agentIndex] || { id: 'no agent returned', status: 'unknown', role: '' };
   const degraded = snapshot.degraded_hooks.length ? snapshot.degraded_hooks.join(', ') : 'none';
+  const activation = snapshot.activation_coverage;
+  const coverageValue = activation.available
+    ? `${activation.state}; capture=${activation.capture_percent ?? 'n/a'}%; closure=${activation.closure_percent ?? 'n/a'}%`
+    : `${activation.state}; insufficient data`;
   const gateSummary = `deploy=${snapshot.gates.deploy} publish=${snapshot.gates.publish} merge=${snapshot.gates.merge}`;
   const fixCommand = snapshot.fix_commands[0] || 'npx @getmarrow/install doctor';
   const recent = snapshot.recent_decisions[0] || 'none reported yet';
@@ -1404,9 +1447,13 @@ function renderFleetTui(state) {
       hint: 'Latest fleet decision signal returned by Marrow.',
     },
     {
-      label: 'Degraded hooks',
-      value: degraded,
-      hint: degraded === 'none' ? 'No missing hooks reported.' : 'Repair hooks before trusting passive coverage.',
+      label: 'Passive activation / coverage',
+      value: coverageValue,
+      hint: activation.drift
+        ? `Configuration drift detected. ${activation.exact_fix || fixCommand}`
+        : degraded === 'none'
+        ? `Capability=${activation.capability_level}; no missing hooks reported.`
+        : `Degraded hooks: ${degraded}. Repair before trusting passive coverage.`,
     },
     {
       label: 'Deploy/publish/merge gates',
@@ -1725,9 +1772,8 @@ async function runFleetInteractive(options, input = process.stdin, output = proc
               ? state.snapshot.recent_decisions.map((decision, index) => `${index + 1}. ${decision}`).join('  ')
               : 'No recent decisions returned yet.';
           } else if (state.cursor === 7) {
-            state.lastResult = state.snapshot.degraded_hooks.length
-              ? `Degraded hooks: ${state.snapshot.degraded_hooks.join(', ')}. Fix: ${state.snapshot.fix_commands[0]}`
-              : 'No degraded hooks reported.';
+            const coverage = state.snapshot.activation_coverage;
+            state.lastResult = `Passive activation=${coverage.state}; capability=${coverage.capability_level}; capture=${coverage.capture_percent ?? 'insufficient data'}; closure=${coverage.closure_percent ?? 'insufficient data'}; intervention follow-through=${coverage.effectiveness_percent ?? 'insufficient data'}${coverage.drift ? `. Drift detected. Fix: ${coverage.exact_fix || state.snapshot.fix_commands[0]}` : ''}`;
           } else if (state.cursor === 8) {
             state.lastResult = `Release gates: deploy=${state.snapshot.gates.deploy}, publish=${state.snapshot.gates.publish}, merge=${state.snapshot.gates.merge}.`;
           } else {

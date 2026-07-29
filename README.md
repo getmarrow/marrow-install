@@ -53,7 +53,7 @@ Verify current claims through the [public evidence manifest](https://getmarrow.a
 ## Install
 
 ```bash
-npx @getmarrow/install --yes
+npx @getmarrow/install activate
 ```
 
 Required secret:
@@ -62,9 +62,18 @@ Required secret:
 export MARROW_API_KEY=mrw_live_...
 ```
 
-## What's New in v0.1.33
+## What's New in v0.1.34
 
-v0.1.33 adds agent-disagreement visibility to the Fleet Operator TUI. Operators can see open and review-required arbitration receipts and inspect the exact next action produced through the existing Marrow runtime. It preserves the machine-readable governance-fit contract introduced in v0.1.32 and the server-verified first-run activation introduced in v0.1.29:
+v0.1.34 verifies whether passive governance is actually active after install. Activation now registers a bounded capability profile, a one-way configuration fingerprint, expected and observed hook surfaces, and a server-accepted lifecycle receipt. The Fleet Operator shows activation state, capture coverage, outcome closure, intervention follow-through, drift, and the exact repair:
+
+- Claude Code installation includes `UserPromptSubmit`, `PostToolUse`, and `Stop` hooks;
+- the capability registry distinguishes native hooks, MCP, SDK passive runtime, governed wrappers, and custom event contracts;
+- `activate` fails when the local integration is incomplete or the server does not accept the exact activation profile;
+- `doctor` and `--repair` use the same configuration evidence without exposing configuration contents;
+- the harness certification suite prevents support claims from overstating what is automatic;
+- unavailable coverage remains “insufficient data” instead of a synthetic percentage.
+
+It preserves agent-disagreement visibility from v0.1.33 and the server-verified first-run activation introduced in v0.1.29:
 
 - GitHub and npm now advertise separate signed discovery placements;
 - package metadata identifies the installer as agent governance rather than a general memory utility;
@@ -104,9 +113,12 @@ With a valid key, `activate`:
 4. closes its outcome;
 5. sends the exact self-test decision ID to Marrow for server-side verification;
 6. reads agent status and the one-call runtime;
-7. returns an activation receipt with capture, intervention, closure, first-value state, and the exact next action.
+7. registers the detected capability, expected hooks, and one-way configuration fingerprint;
+8. returns an activation receipt with capture, intervention, closure, first-value state, and the exact next action.
 
 Healthy output confirms the exact decision outcome exists under the authenticated account and agent. A local file write or client-supplied `verified: true` value cannot produce an active receipt.
+
+The installer does not claim identical automation for every harness. Native hooks provide the broadest automatic coverage; MCP covers MCP-routed actions; the SDK covers owned Node processes; the governed runner covers commands launched through it; custom harnesses must map their own lifecycle events.
 
 ## Govern TUI
 
