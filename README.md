@@ -66,7 +66,8 @@ export MARROW_API_KEY=mrw_live_...
 
 v0.1.34 verifies whether passive governance is actually active after install. Activation now registers a bounded capability profile, a one-way configuration fingerprint, expected and observed hook surfaces, and a server-accepted lifecycle receipt. The Fleet Operator shows activation state, capture coverage, outcome closure, intervention follow-through, drift, and the exact repair:
 
-- Claude Code installation includes `UserPromptSubmit`, `PostToolUse`, and `Stop` hooks;
+- Claude Code installation includes exact `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, and `Stop` hooks;
+- matching pre-action/result receipts use one tool correlation, and activation fingerprints the exact hook contract without uploading configuration contents;
 - the capability registry distinguishes native hooks, MCP, SDK passive runtime, governed wrappers, and custom event contracts;
 - `activate` fails when the local integration is incomplete or the server does not accept the exact activation profile;
 - `doctor` and `--repair` use the same configuration evidence without exposing configuration contents;

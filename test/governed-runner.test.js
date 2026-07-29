@@ -342,6 +342,38 @@ test('fleet snapshot reads certified activation coverage without inventing drift
   });
 });
 
+test('fleet snapshot distinguishes explicit percent fields from ratio fields', () => {
+  const explicit = normalizeFleetSnapshot({
+    status: { ok: true, data: { activation_coverage: {
+      available: true,
+      capture_coverage: { available: true, percent: 1 },
+      outcome_closure: { available: true, percent: 1 },
+      intervention_effectiveness: { available: true, followed_percent: 1 },
+    } } },
+    capacity: { ok: true, data: {} },
+    report: { ok: true, data: {} },
+    fleet: { ok: true, data: {} },
+  }, { agentId: 'agent-one', baseUrl: 'https://api.getmarrow.ai' });
+  assert.equal(explicit.activation_coverage.capture_percent, 1);
+  assert.equal(explicit.activation_coverage.closure_percent, 1);
+  assert.equal(explicit.activation_coverage.effectiveness_percent, 1);
+
+  const ratios = normalizeFleetSnapshot({
+    status: { ok: true, data: { activation_coverage: {
+      available: true,
+      capture_coverage: { available: true, rate: 1 },
+      outcome_closure: { available: true, rate: 1 },
+      intervention_effectiveness: { available: true, follow_through_rate: 1 },
+    } } },
+    capacity: { ok: true, data: {} },
+    report: { ok: true, data: {} },
+    fleet: { ok: true, data: {} },
+  }, { agentId: 'agent-one', baseUrl: 'https://api.getmarrow.ai' });
+  assert.equal(ratios.activation_coverage.capture_percent, 100);
+  assert.equal(ratios.activation_coverage.closure_percent, 100);
+  assert.equal(ratios.activation_coverage.effectiveness_percent, 100);
+});
+
 test('fleet TUI render exposes inspection and fix-command rows', () => {
   const snapshot = normalizeFleetSnapshot({
     status: {
