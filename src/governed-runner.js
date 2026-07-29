@@ -831,6 +831,7 @@ function normalizeActivationCoverage(status, report, fleet) {
   const effectiveness = source.intervention_effectiveness || source.effectiveness || {};
   const drift = source.drift && typeof source.drift === 'object' ? source.drift : {};
   const available = source.available === true || capture.available === true;
+  const driftAvailable = available && drift.available === true && typeof drift.detected === 'boolean';
   const percent = (value) => {
     const number = Number(value);
     if (!Number.isFinite(number)) return null;
@@ -856,7 +857,7 @@ function normalizeActivationCoverage(status, report, fleet) {
       firstDefined(effectiveness.follow_through_rate, effectiveness.rate),
       source.effectiveness_percent,
     ),
-    drift: Boolean(firstDefined(drift.detected, source.drift_detected, false)),
+    drift: driftAvailable ? drift.detected : null,
     exact_fix: displayText(firstDefined(drift.repair_command, source.exact_fix, source.repair_command, ''), 180),
   };
 }
