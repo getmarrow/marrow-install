@@ -12,6 +12,7 @@ const {
   buildPlan,
   claudeNativeHookFingerprint,
   detectEnvironment,
+  inspectSdkDependency,
 } = require('../src/installer');
 
 const NATIVE_HOOK_MATCHER = 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*';
@@ -150,6 +151,10 @@ test('Claude setup preserves malformed and non-object settings by failing closed
       const plan = buildPlan(detection, { mode: 'both' });
       assert.throws(() => applyPlan(plan, { yes: true, dryRun: false, doctor: false }));
       assert.equal(fs.readFileSync(settingsPath, 'utf8'), contents);
+      assert.equal(fs.existsSync(path.join(root, '.marrow', 'passive-runtime.mjs')), false);
+      assert.equal(fs.existsSync(path.join(root, '.marrow', 'env.example')), false);
+      assert.equal(fs.existsSync(path.join(root, '.mcp.json')), false);
+      assert.equal(fs.existsSync(path.join(root, 'AGENTS.md')), false);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
@@ -255,6 +260,35 @@ test('custom SDK activation requires both dependency and exact generated runtime
     profile = activationProfile(detection, plan, changes, 'custom');
     assert.equal(profile.complete, true);
     assert.deepEqual(profile.observed_hooks, ['pre_action', 'action_result', 'outcome_closure']);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('custom SDK activation rejects npm aliases even when version and installed name are forged', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-sdk-alias-'));
+  try {
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({
+      dependencies: { '@getmarrow/sdk': 'npm:untrusted-sdk@3.7.49' },
+    }));
+    const moduleDir = path.join(root, 'node_modules', '@getmarrow', 'sdk');
+    fs.mkdirSync(moduleDir, { recursive: true });
+    fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({
+      name: '@getmarrow/sdk',
+      version: '3.7.49',
+    }));
+
+    const detection = detectEnvironment(root, { ...process.env, HOME: root });
+    const dependency = inspectSdkDependency(detection);
+    const plan = buildPlan(detection, { mode: 'sdk' });
+    const changes = applyPlan(plan, { yes: true, dryRun: false, doctor: false });
+    const profile = activationProfile(detection, plan, changes, 'custom');
+
+    assert.equal(dependency.declared, true);
+    assert.equal(dependency.declaration_trusted, false);
+    assert.equal(dependency.present, false);
+    assert.equal(profile.complete, false);
+    assert.match(profile.exact_fix, /npm install @getmarrow\/sdk/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
