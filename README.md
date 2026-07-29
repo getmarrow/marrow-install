@@ -62,9 +62,9 @@ Required secret:
 export MARROW_API_KEY=mrw_live_...
 ```
 
-## What's New in v0.1.32
+## What's New in v0.1.33
 
-v0.1.32 adds one machine-readable governance-fit contract across discovery, evidence, and integration surfaces while preserving the server-verified first-run activation introduced in v0.1.29:
+v0.1.33 adds agent-disagreement visibility to the Fleet Operator TUI. Operators can see open and review-required arbitration receipts and inspect the exact next action produced through the existing Marrow runtime. It preserves the machine-readable governance-fit contract introduced in v0.1.32 and the server-verified first-run activation introduced in v0.1.29:
 
 - GitHub and npm now advertise separate signed discovery placements;
 - package metadata identifies the installer as agent governance rather than a general memory utility;
@@ -160,7 +160,7 @@ npx @getmarrow/install --repair
 npx @getmarrow/install fleet
 ```
 
-The fleet view shows live agents, active workflows, risky actions waiting for proof, stale or failed outcomes, capture health, recent decisions, and exact repair commands. It is an operator surface for the authenticated account, not a public status dashboard.
+The fleet view shows live agents, active workflows, agent disagreements and their latest arbitration receipt, risky actions waiting for proof, stale or failed outcomes, capture health, recent decisions, and exact repair commands. Press Enter on **Agent disagreements** to inspect the bound decision, selected proposal, whether Marrow selected a proposal, synthesized a safe sequence, held the action for owner review, or blocked the conflicting actions. Review-required work must be approved from an authenticated Marrow dashboard session; the TUI does not let an agent approve itself. It is an operator surface for the authenticated account, not a public status dashboard.
 
 ## Integration Paths
 
