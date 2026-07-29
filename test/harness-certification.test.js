@@ -98,7 +98,10 @@ test('Claude setup replaces old Marrow hooks without duplicate execution', () =>
       permissions: { allow: ['Read'] },
       hooks: {
         UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'npx -y @getmarrow/mcp context-hook', timeout: 11 }] }],
-        PreToolUse: [{ matcher: NATIVE_HOOK_MATCHER, hooks: [{ type: 'command', command: 'npx -y @getmarrow/mcp@3.9.49 pre-action-hook' }] }],
+        PreToolUse: [{ matcher: NATIVE_HOOK_MATCHER, hooks: [
+          { type: 'command', command: 'npx -y @getmarrow/mcp@3.9.49 pre-action-hook' },
+          { type: 'command', command: 'npx -y @getmarrow/mcp@3.9.49 hook', timeout: 99 },
+        ] }],
         PostToolUse: [{ matcher: NATIVE_HOOK_MATCHER, hooks: [
           { type: 'command', command: 'npx -y @getmarrow/mcp hook' },
           { type: 'command', command: 'printf unrelated' },
