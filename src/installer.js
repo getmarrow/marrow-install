@@ -534,7 +534,9 @@ function marrowHookDescriptors(settings, eventName, subcommand) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry) || !Array.isArray(entry.hooks)) return [];
     return entry.hooks.flatMap((hook) => {
       if (!hook || typeof hook !== 'object' || Array.isArray(hook)
-        || hook.type !== 'command' || marrowHookSubcommand(hook.command) !== subcommand) return [];
+        || hook.type !== 'command') return [];
+      const detected = marrowHookSubcommand(hook.command);
+      if (!detected || (subcommand && detected !== subcommand)) return [];
       return [{
         matcher: typeof entry.matcher === 'string' ? entry.matcher : null,
         command: hook.command.trim(),
@@ -572,11 +574,11 @@ function claudeNativeHookFingerprint(settings) {
       session_end: exactHookDescriptors(settings, 'Stop', MCP_SESSION_END_HOOK_COMMAND),
     },
     active_marrow_handlers: {
-      prompt: marrowHookDescriptors(settings, 'UserPromptSubmit', 'context-hook'),
-      pre_action: marrowHookDescriptors(settings, 'PreToolUse', 'pre-action-hook'),
-      action_result_success: marrowHookDescriptors(settings, 'PostToolUse', 'hook'),
-      action_result_failure: marrowHookDescriptors(settings, 'PostToolUseFailure', 'hook'),
-      session_end: marrowHookDescriptors(settings, 'Stop', 'session-hook'),
+      prompt: marrowHookDescriptors(settings, 'UserPromptSubmit'),
+      pre_action: marrowHookDescriptors(settings, 'PreToolUse'),
+      action_result_success: marrowHookDescriptors(settings, 'PostToolUse'),
+      action_result_failure: marrowHookDescriptors(settings, 'PostToolUseFailure'),
+      session_end: marrowHookDescriptors(settings, 'Stop'),
     },
   };
   return crypto.createHash('sha256').update(JSON.stringify(contract)).digest('hex');
