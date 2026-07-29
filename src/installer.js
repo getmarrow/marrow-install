@@ -997,10 +997,12 @@ async function runSelfTest(options) {
     });
     const profileCoverage = activationProfileReceipt?.activation_coverage;
     const profileReceipt = profileCoverage?.profile_receipt;
-    const expectedConfigurationBindingId = crypto.createHash('sha256')
-      .update(`agent-config-receipt:v1:${activationConfigFingerprint}`)
-      .digest('hex');
     const accountBindingId = profileCoverage?.account_binding_id;
+    const expectedConfigurationBindingId = typeof accountBindingId === 'string'
+      ? crypto.createHash('sha256')
+        .update(`agent-config-receipt:v2:${accountBindingId}:${activationConfigFingerprint}`)
+        .digest('hex')
+      : null;
     const expectedHooksMatch = Array.isArray(profileCoverage?.capture_coverage?.expected_hooks)
       && [...profileCoverage.capture_coverage.expected_hooks].sort().join(',') === [...activationExpectedHooks].sort().join(',');
     const profileBound = Boolean(
