@@ -741,18 +741,28 @@ function inspectSdkDependency(detection) {
     [path.join('node_modules', '@getmarrow', 'sdk', 'package.json')],
   );
   let installedVersion = null;
+  let installedName = null;
   try {
     const installedPackage = installedPackagePath ? JSON.parse(safeRead(installedPackagePath)) : null;
     installedVersion = typeof installedPackage?.version === 'string' ? installedPackage.version : null;
+    installedName = typeof installedPackage?.name === 'string' ? installedPackage.name : null;
   } catch {
     installedVersion = null;
+    installedName = null;
   }
-  const present = declaredSpec != null && installedVersion === SDK_ADAPTER_VERSION;
+  const declarationTrusted = typeof declaredSpec === 'string'
+    && declaredSpec.trim().length > 0
+    && /^[v0-9xX*<>=~^|.\s-]+$/.test(declaredSpec.trim());
+  const present = declarationTrusted
+    && installedName === '@getmarrow/sdk'
+    && installedVersion === SDK_ADAPTER_VERSION;
   return {
     required: true,
     present,
     declared: declaredSpec != null,
     declared_spec: declaredSpec,
+    declaration_trusted: declarationTrusted,
+    installed_name: installedName,
     installed_version: installedVersion,
     expected_version: SDK_ADAPTER_VERSION,
     install_command: present ? null : `npm install @getmarrow/sdk@${SDK_ADAPTER_VERSION}`,
@@ -824,8 +834,7 @@ function buildPlan(detection, options) {
 }
 
 function applyPlan(plan, options) {
-  const changes = [];
-  for (const write of plan.writes) {
+  const prepared = plan.writes.map((write) => {
     const before = safeRead(write.path);
     let after;
     if (write.type === 'file') {
@@ -842,6 +851,11 @@ function applyPlan(plan, options) {
       throw new Error(`Unknown write type: ${write.type}`);
     }
 
+    return { write, before, after };
+  });
+
+  const changes = [];
+  for (const { write, before, after } of prepared) {
     const changed = before !== after;
     const writeApplied = Boolean(options.yes && !options.dryRun && !options.doctor);
     changes.push({
