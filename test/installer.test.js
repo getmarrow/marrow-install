@@ -23,6 +23,21 @@ function tempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-install-'));
 }
 
+function writeSdkLock(root, declaredSpec = '^3.7.49') {
+  fs.writeFileSync(path.join(root, 'package-lock.json'), JSON.stringify({
+    name: 'fixture',
+    lockfileVersion: 3,
+    packages: {
+      '': { dependencies: { '@getmarrow/sdk': declaredSpec } },
+      'node_modules/@getmarrow/sdk': {
+        version: '3.7.49',
+        resolved: 'https://registry.npmjs.org/@getmarrow/sdk/-/sdk-3.7.49.tgz',
+        integrity: 'sha512-t+KpL61NmmreIGI2qKhp+6EnEEiXVmc/9a7KMog+ZlHafUtnvDBGNe4udTGCHfrh9q1GKj3MkJaOXjYKoP5CkQ==',
+      },
+    },
+  }));
+}
+
 test('parseArgs defaults to dry-run unless --yes is passed', () => {
   const dry = parseArgs(['--mcp']);
   assert.equal(dry.mode, 'mcp');
@@ -257,6 +272,7 @@ test('install reports missing SDK dependency for passive runtime projects', asyn
   assert.equal(sdk.present, false);
   assert.equal(sdk.installed_version, '0.0.1');
   fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({ name: '@getmarrow/sdk', version: '3.7.49' }));
+  writeSdkLock(dir, '^3.7.27');
   detected = detectEnvironment(dir, {});
   sdk = inspectSdkDependency(detected);
   assert.equal(sdk.present, true);
@@ -353,6 +369,25 @@ test('repair dry-run remains dry-run and does not write files', async () => {
   });
 
   assert.equal(report.writeMode, 'dry-run');
+  assert.equal(fs.existsSync(path.join(dir, '.marrow', 'passive-runtime.mjs')), false);
+});
+
+test('programmatic repair requires explicit write authorization', async () => {
+  const dir = tempDir();
+  fs.writeFileSync(path.join(dir, 'package.json'), '{}');
+
+  await assert.rejects(install({
+    cwd: dir,
+    mode: 'sdk',
+    yes: false,
+    repair: true,
+    dryRun: false,
+    selfTest: false,
+    apiKey: '',
+    baseUrl: 'https://api.getmarrow.ai',
+    agentId: '',
+  }), /repair requires explicit write authorization/);
+
   assert.equal(fs.existsSync(path.join(dir, '.marrow', 'passive-runtime.mjs')), false);
 });
 
@@ -584,6 +619,7 @@ test('activation requires a receipt bound to the exact decision, agent, and succ
   let profileAccountBindingId = 'a'.repeat(64);
   let receiptAccountBindingId = 'b'.repeat(64);
   let configurationBindingId = 'wrong-configuration-binding';
+  let runtimePayload = { ok: true, risk_gate: { allow: true } };
   global.fetch = async (url, request = {}) => {
     const href = String(url);
     if (href.endsWith('/v1/agent/think')) {
@@ -596,7 +632,7 @@ test('activation requires a receipt bound to the exact decision, agent, and succ
       return new Response(JSON.stringify({ data: { ok: true, enabled: true, health: 'healthy' } }), { status: 200 });
     }
     if (href.endsWith('/v1/agent/runtime')) {
-      return new Response(JSON.stringify({ data: { ok: true, risk_gate: { allow: true } } }), { status: 200 });
+      return new Response(JSON.stringify({ data: runtimePayload }), { status: 200 });
     }
     if (href.endsWith('/v1/agent/first-value')) {
       return new Response(JSON.stringify({ data: { ok: true, active: true, activation_receipt: receipt } }), { status: 200 });
@@ -695,6 +731,8 @@ test('activation requires a receipt bound to the exact decision, agent, and succ
     assert.equal('correlation_id' in activationProfileEvent, false);
     assert.equal('intervention_disposition' in activationProfileEvent, false);
     assert.equal('action_changed' in activationProfileEvent, false);
+    runtimePayload = { ok: true };
+    await assert.rejects(runSelfTest(options), /activation prerequisites were not all verified/);
   } finally {
     global.fetch = originalFetch;
   }
