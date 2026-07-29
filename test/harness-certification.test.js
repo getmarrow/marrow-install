@@ -14,6 +14,9 @@ const {
   detectEnvironment,
 } = require('../src/installer');
 
+const NATIVE_HOOK_MATCHER = 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*';
+const MCP_ACTION_RESULT_HOOK_COMMAND = 'npx -y @getmarrow/mcp@3.9.50 hook';
+
 test('capability registry certifies every advertised harness without overstating automatic coverage', () => {
   const clients = new Set(HARNESS_CAPABILITY_REGISTRY.map((entry) => entry.client));
   for (const client of ['claude-code', 'cursor', 'composer', 'cline', 'codex', 'opencode', 'hermes', 'openclaw', 'gemini', 'grok', 'deepseek', 'qwen', 'kimi', 'minimax', 'glm', 'custom']) {
@@ -65,6 +68,13 @@ test('Claude native-hook activation certifies pre-action, result, and session-en
         action_result_failure: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y @getmarrow/mcp@3.9.50 hook', timeout: null }],
         session_end: [{ matcher: null, command: 'npx -y @getmarrow/mcp@3.9.50 session-hook', timeout: null }],
       },
+      active_marrow_handlers: {
+        prompt: [{ matcher: null, command: 'npx -y @getmarrow/mcp@3.9.50 context-hook', timeout: null }],
+        pre_action: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y @getmarrow/mcp@3.9.50 pre-action-hook', timeout: null }],
+        action_result_success: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y @getmarrow/mcp@3.9.50 hook', timeout: null }],
+        action_result_failure: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y @getmarrow/mcp@3.9.50 hook', timeout: null }],
+        session_end: [{ matcher: null, command: 'npx -y @getmarrow/mcp@3.9.50 session-hook', timeout: null }],
+      },
     })).digest('hex');
     assert.equal(profile.config_fingerprint, canonicalFingerprint);
     assert.equal(claudeNativeHookFingerprint(parsedSettings), canonicalFingerprint);
@@ -73,6 +83,92 @@ test('Claude native-hook activation certifies pre-action, result, and session-en
     assert.match(settings, /PostToolUseFailure/);
     assert.match(settings, /session-hook/);
     assert.match(settings, /getmarrow\/mcp@3\.9\.50 hook/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Claude setup replaces old Marrow hooks without duplicate execution', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-upgrade-'));
+  try {
+    fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
+    fs.writeFileSync(path.join(root, 'CLAUDE.md'), '# Claude\n');
+    fs.mkdirSync(path.join(root, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(root, '.claude', 'settings.json'), JSON.stringify({
+      permissions: { allow: ['Read'] },
+      hooks: {
+        UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'npx -y @getmarrow/mcp context-hook', timeout: 11 }] }],
+        PreToolUse: [{ matcher: NATIVE_HOOK_MATCHER, hooks: [{ type: 'command', command: 'npx -y @getmarrow/mcp@3.9.49 pre-action-hook' }] }],
+        PostToolUse: [{ matcher: NATIVE_HOOK_MATCHER, hooks: [
+          { type: 'command', command: 'npx -y @getmarrow/mcp hook' },
+          { type: 'command', command: 'printf unrelated' },
+        ] }],
+        PostToolUseFailure: [
+          { matcher: NATIVE_HOOK_MATCHER, hooks: [{ type: 'command', command: 'npx -y @getmarrow/mcp@3.9.48 hook' }] },
+          { matcher: NATIVE_HOOK_MATCHER, hooks: [{ type: 'command', command: MCP_ACTION_RESULT_HOOK_COMMAND, timeout: 14 }] },
+        ],
+        Stop: [{ hooks: [{ type: 'command', command: 'npx -y @getmarrow/mcp session-hook' }] }],
+      },
+    }, null, 2));
+
+    const detection = detectEnvironment(root, { ...process.env, HOME: root });
+    const plan = buildPlan(detection, { mode: 'both' });
+    applyPlan(plan, { yes: true, dryRun: false, doctor: false });
+    const first = fs.readFileSync(path.join(root, '.claude', 'settings.json'), 'utf8');
+    const settings = JSON.parse(first);
+    const commandCounts = Object.values(settings.hooks).flatMap((entries) => entries)
+      .flatMap((entry) => entry.hooks || [])
+      .filter((hook) => /^npx\s+(?:-y\s+)?@getmarrow\/mcp(?:@[^\s]+)?\s+/.test(hook.command || ''));
+    assert.equal(commandCounts.length, 5);
+    assert.ok(commandCounts.every((hook) => hook.command.includes('@getmarrow/mcp@3.9.50')));
+    assert.deepEqual(settings.permissions, { allow: ['Read'] });
+    assert.match(first, /printf unrelated/);
+    assert.equal(settings.hooks.PostToolUseFailure.at(-1).hooks[0].timeout, 14);
+
+    const secondDetection = detectEnvironment(root, { ...process.env, HOME: root });
+    const secondPlan = buildPlan(secondDetection, { mode: 'both' });
+    applyPlan(secondPlan, { yes: true, dryRun: false, doctor: false });
+    assert.equal(fs.readFileSync(path.join(root, '.claude', 'settings.json'), 'utf8'), first);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Claude setup preserves malformed and non-object settings by failing closed', () => {
+  for (const contents of ['{broken', '[]']) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-invalid-settings-'));
+    try {
+      fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
+      fs.writeFileSync(path.join(root, 'CLAUDE.md'), '# Claude\n');
+      fs.mkdirSync(path.join(root, '.claude'), { recursive: true });
+      const settingsPath = path.join(root, '.claude', 'settings.json');
+      fs.writeFileSync(settingsPath, contents);
+      const detection = detectEnvironment(root, { ...process.env, HOME: root });
+      const plan = buildPlan(detection, { mode: 'both' });
+      assert.throws(() => applyPlan(plan, { yes: true, dryRun: false, doctor: false }));
+      assert.equal(fs.readFileSync(settingsPath, 'utf8'), contents);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('Claude fingerprint includes unexpected legacy and duplicate active handlers', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-drift-'));
+  try {
+    fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
+    fs.writeFileSync(path.join(root, 'CLAUDE.md'), '# Claude\n');
+    const detection = detectEnvironment(root, { ...process.env, HOME: root });
+    const plan = buildPlan(detection, { mode: 'both' });
+    applyPlan(plan, { yes: true, dryRun: false, doctor: false });
+    const settingsPath = path.join(root, '.claude', 'settings.json');
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    const certified = claudeNativeHookFingerprint(settings);
+    settings.hooks.PreToolUse.push({
+      matcher: NATIVE_HOOK_MATCHER,
+      hooks: [{ type: 'command', command: 'npx -y @getmarrow/mcp pre-action-hook', timeout: 99 }],
+    });
+    assert.notEqual(claudeNativeHookFingerprint(settings), certified);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

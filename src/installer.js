@@ -492,6 +492,58 @@ function exactHookDescriptors(settings, eventName, command, matcher) {
   });
 }
 
+function marrowHookSubcommand(command) {
+  if (typeof command !== 'string') return null;
+  const match = command.trim().match(
+    /^npx\s+(?:-y\s+)?@getmarrow\/mcp(?:@[^\s]+)?\s+(context-hook|pre-action-hook|hook|session-hook)$/,
+  );
+  return match?.[1] || null;
+}
+
+function reconcileMarrowCommandHook(settings, eventName, subcommand, command, matcher) {
+  const original = Array.isArray(settings?.hooks?.[eventName]) ? settings.hooks[eventName] : [];
+  let preferredHandler = null;
+  const retained = [];
+  for (const entry of original) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || !Array.isArray(entry.hooks)) {
+      retained.push(entry);
+      continue;
+    }
+    const remaining = [];
+    for (const hook of entry.hooks) {
+      if (hook && typeof hook === 'object' && !Array.isArray(hook)
+        && hook.type === 'command' && marrowHookSubcommand(hook.command) === subcommand) {
+        const exactMatcher = matcher == null ? entry.matcher === undefined : entry.matcher === matcher;
+        if (!preferredHandler || (hook.command === command && exactMatcher)) preferredHandler = hook;
+        continue;
+      }
+      remaining.push(hook);
+    }
+    if (remaining.length > 0) retained.push({ ...entry, hooks: remaining });
+  }
+  const canonical = { hooks: [{ ...(preferredHandler || {}), type: 'command', command }] };
+  if (matcher != null) canonical.matcher = matcher;
+  retained.push(canonical);
+  return retained;
+}
+
+function marrowHookDescriptors(settings, eventName, subcommand) {
+  const entries = settings?.hooks?.[eventName];
+  if (!Array.isArray(entries)) return [];
+  return entries.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || !Array.isArray(entry.hooks)) return [];
+    return entry.hooks.flatMap((hook) => {
+      if (!hook || typeof hook !== 'object' || Array.isArray(hook)
+        || hook.type !== 'command' || marrowHookSubcommand(hook.command) !== subcommand) return [];
+      return [{
+        matcher: typeof entry.matcher === 'string' ? entry.matcher : null,
+        command: hook.command.trim(),
+        timeout: typeof hook.timeout === 'number' && Number.isFinite(hook.timeout) ? hook.timeout : null,
+      }];
+    });
+  });
+}
+
 function safeJsonObject(filePath) {
   try {
     return parseJsonObject(filePath);
@@ -519,6 +571,13 @@ function claudeNativeHookFingerprint(settings) {
       action_result_failure: exactHookDescriptors(settings, 'PostToolUseFailure', MCP_ACTION_RESULT_HOOK_COMMAND, NATIVE_HOOK_MATCHER),
       session_end: exactHookDescriptors(settings, 'Stop', MCP_SESSION_END_HOOK_COMMAND),
     },
+    active_marrow_handlers: {
+      prompt: marrowHookDescriptors(settings, 'UserPromptSubmit', 'context-hook'),
+      pre_action: marrowHookDescriptors(settings, 'PreToolUse', 'pre-action-hook'),
+      action_result_success: marrowHookDescriptors(settings, 'PostToolUse', 'hook'),
+      action_result_failure: marrowHookDescriptors(settings, 'PostToolUseFailure', 'hook'),
+      session_end: marrowHookDescriptors(settings, 'Stop', 'session-hook'),
+    },
   };
   return crypto.createHash('sha256').update(JSON.stringify(contract)).digest('hex');
 }
@@ -528,46 +587,21 @@ function upsertClaudeHooks(settingsPath) {
   const hooks = settings.hooks && typeof settings.hooks === 'object' && !Array.isArray(settings.hooks)
     ? settings.hooks
     : {};
-  const postToolUse = Array.isArray(hooks.PostToolUse) ? [...hooks.PostToolUse] : [];
-  const postToolUseFailure = Array.isArray(hooks.PostToolUseFailure) ? [...hooks.PostToolUseFailure] : [];
-  const preToolUse = Array.isArray(hooks.PreToolUse) ? [...hooks.PreToolUse] : [];
-  const userPromptSubmit = Array.isArray(hooks.UserPromptSubmit) ? [...hooks.UserPromptSubmit] : [];
-  const stop = Array.isArray(hooks.Stop) ? [...hooks.Stop] : [];
-
-  const hasPost = exactHookConfigured(settings, 'PostToolUse', MCP_ACTION_RESULT_HOOK_COMMAND, NATIVE_HOOK_MATCHER);
-  const hasPostFailure = exactHookConfigured(settings, 'PostToolUseFailure', MCP_ACTION_RESULT_HOOK_COMMAND, NATIVE_HOOK_MATCHER);
-  const hasPre = exactHookConfigured(settings, 'PreToolUse', MCP_PRE_ACTION_HOOK_COMMAND, NATIVE_HOOK_MATCHER);
-  const hasPrompt = exactHookConfigured(settings, 'UserPromptSubmit', MCP_CONTEXT_HOOK_COMMAND);
-  const hasStop = exactHookConfigured(settings, 'Stop', MCP_SESSION_END_HOOK_COMMAND);
-
-  if (!hasPost) {
-    postToolUse.push({
-      matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*',
-      hooks: [{ type: 'command', command: MCP_ACTION_RESULT_HOOK_COMMAND }],
-    });
-  }
-  if (!hasPostFailure) {
-    postToolUseFailure.push({
-      matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*',
-      hooks: [{ type: 'command', command: MCP_ACTION_RESULT_HOOK_COMMAND }],
-    });
-  }
-  if (!hasPre) {
-    preToolUse.push({
-      matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*',
-      hooks: [{ type: 'command', command: MCP_PRE_ACTION_HOOK_COMMAND }],
-    });
-  }
-  if (!hasPrompt) {
-    userPromptSubmit.push({
-      hooks: [{ type: 'command', command: MCP_CONTEXT_HOOK_COMMAND }],
-    });
-  }
-  if (!hasStop) {
-    stop.push({
-      hooks: [{ type: 'command', command: MCP_SESSION_END_HOOK_COMMAND }],
-    });
-  }
+  const postToolUse = reconcileMarrowCommandHook(
+    settings, 'PostToolUse', 'hook', MCP_ACTION_RESULT_HOOK_COMMAND, NATIVE_HOOK_MATCHER,
+  );
+  const postToolUseFailure = reconcileMarrowCommandHook(
+    settings, 'PostToolUseFailure', 'hook', MCP_ACTION_RESULT_HOOK_COMMAND, NATIVE_HOOK_MATCHER,
+  );
+  const preToolUse = reconcileMarrowCommandHook(
+    settings, 'PreToolUse', 'pre-action-hook', MCP_PRE_ACTION_HOOK_COMMAND, NATIVE_HOOK_MATCHER,
+  );
+  const userPromptSubmit = reconcileMarrowCommandHook(
+    settings, 'UserPromptSubmit', 'context-hook', MCP_CONTEXT_HOOK_COMMAND,
+  );
+  const stop = reconcileMarrowCommandHook(
+    settings, 'Stop', 'session-hook', MCP_SESSION_END_HOOK_COMMAND,
+  );
 
   settings.hooks = {
     ...hooks,
