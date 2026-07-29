@@ -931,7 +931,7 @@ async function runSelfTest(options) {
       headers,
       body: JSON.stringify({
         event_id: `activation-${activationConfigFingerprint.slice(0, 32)}`,
-        event_type: 'prompt_submitted',
+        event_type: 'activation_profile_registered',
         harness: options.activation.harness,
         agent_id: options.agentId,
         session_id: headers['x-marrow-session-id'],

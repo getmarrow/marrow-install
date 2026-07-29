@@ -666,7 +666,7 @@ test('activation requires a receipt bound to the exact decision, agent, and succ
     const result = await runSelfTest(options);
     assert.equal(result.activation_verified, true);
     assert.equal(result.activation_receipt.decision_id, 'decision-activation');
-    assert.equal(activationProfileEvent.event_type, 'prompt_submitted');
+    assert.equal(activationProfileEvent.event_type, 'activation_profile_registered');
     assert.equal('observed_hook' in activationProfileEvent, false);
     assert.equal('outcome_state' in activationProfileEvent, false);
     assert.equal('success' in activationProfileEvent, false);
