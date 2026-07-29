@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -245,12 +246,21 @@ test('install reports missing SDK dependency for passive runtime projects', asyn
 
   assert.equal(report.sdkDependency.required, true);
   assert.equal(report.sdkDependency.present, false);
-  assert.equal(report.sdkDependency.install_command, 'npm install @getmarrow/sdk');
+  assert.equal(report.sdkDependency.install_command, 'npm install @getmarrow/sdk@3.7.49');
 
   fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ dependencies: { '@getmarrow/sdk': '^3.7.27' } }));
-  const detected = detectEnvironment(dir, {});
-  const sdk = inspectSdkDependency(detected);
+  const moduleDir = path.join(dir, 'node_modules', '@getmarrow', 'sdk');
+  fs.mkdirSync(moduleDir, { recursive: true });
+  fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({ name: '@getmarrow/sdk', version: '0.0.1' }));
+  let detected = detectEnvironment(dir, {});
+  let sdk = inspectSdkDependency(detected);
+  assert.equal(sdk.present, false);
+  assert.equal(sdk.installed_version, '0.0.1');
+  fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({ name: '@getmarrow/sdk', version: '3.7.49' }));
+  detected = detectEnvironment(dir, {});
+  sdk = inspectSdkDependency(detected);
   assert.equal(sdk.present, true);
+  assert.equal(sdk.installed_version, '3.7.49');
 });
 
 test('doctor detects npm token config mismatches without leaking token values', async () => {
@@ -571,6 +581,9 @@ test('activation requires a receipt bound to the exact decision, agent, and succ
   let receipt = null;
   let activationProfileEvent = null;
   let profileBindingEnabled = false;
+  let profileAccountBindingId = 'a'.repeat(64);
+  let receiptAccountBindingId = 'b'.repeat(64);
+  let configurationBindingId = 'wrong-configuration-binding';
   global.fetch = async (url, request = {}) => {
     const href = String(url);
     if (href.endsWith('/v1/agent/think')) {
@@ -596,6 +609,7 @@ test('activation requires a receipt bound to the exact decision, agent, and succ
       return new Response(JSON.stringify({ data: {
         accepted: true,
         activation_coverage: {
+          account_binding_id: profileAccountBindingId,
           agent_id: activationProfileEvent.agent_id,
           harness: activationProfileEvent.harness,
           activation: {
@@ -605,11 +619,13 @@ test('activation requires a receipt bound to the exact decision, agent, and succ
           capture_coverage: { expected_hooks: activationProfileEvent.expected_hooks },
           profile_receipt: {
             event_receipt_id: 'event-receipt-one',
+            account_binding_id: receiptAccountBindingId,
             agent_id: activationProfileEvent.agent_id,
             harness: activationProfileEvent.harness,
             adapter_version: activationProfileEvent.adapter_version,
             capability_level: activationProfileEvent.capability_level,
             config_fingerprint_verified: true,
+            configuration_binding_id: configurationBindingId,
             expected_hooks_verified: true,
           },
         },
@@ -663,6 +679,12 @@ test('activation requires a receipt bound to the exact decision, agent, and succ
     receipt.outcome_recorded_at = '2026-07-23T00:00:00.000Z';
     await assert.rejects(runSelfTest(options), /activation prerequisites were not all verified/);
     profileBindingEnabled = true;
+    await assert.rejects(runSelfTest(options), /activation prerequisites were not all verified/);
+    receiptAccountBindingId = profileAccountBindingId;
+    await assert.rejects(runSelfTest(options), /activation prerequisites were not all verified/);
+    configurationBindingId = crypto.createHash('sha256')
+      .update('agent-config-receipt:v1:fixture-config-fingerprint')
+      .digest('hex');
     const result = await runSelfTest(options);
     assert.equal(result.activation_verified, true);
     assert.equal(result.activation_receipt.decision_id, 'decision-activation');

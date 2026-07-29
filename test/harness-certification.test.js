@@ -48,7 +48,7 @@ test('Claude native-hook activation certifies pre-action, result, and session-en
     const settings = fs.readFileSync(path.join(root, '.claude', 'settings.json'), 'utf8');
     const parsedSettings = JSON.parse(settings);
     const canonicalFingerprint = crypto.createHash('sha256').update(JSON.stringify({
-      schema: 'marrow-claude-native-hooks.v2',
+      schema: 'marrow-claude-native-hooks.v3',
       adapter_version: '3.9.50',
       expected_hooks: ['prompt', 'pre_action', 'action_result', 'session_end'],
       configured: {
@@ -58,6 +58,13 @@ test('Claude native-hook activation certifies pre-action, result, and session-en
         action_result_failure: true,
         session_end: true,
       },
+      descriptors: {
+        prompt: [{ matcher: null, command: 'npx -y @getmarrow/mcp@3.9.50 context-hook', timeout: null }],
+        pre_action: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y @getmarrow/mcp@3.9.50 pre-action-hook', timeout: null }],
+        action_result_success: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y @getmarrow/mcp@3.9.50 hook', timeout: null }],
+        action_result_failure: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y @getmarrow/mcp@3.9.50 hook', timeout: null }],
+        session_end: [{ matcher: null, command: 'npx -y @getmarrow/mcp@3.9.50 session-hook', timeout: null }],
+      },
     })).digest('hex');
     assert.equal(profile.config_fingerprint, canonicalFingerprint);
     assert.equal(claudeNativeHookFingerprint(parsedSettings), canonicalFingerprint);
@@ -65,7 +72,7 @@ test('Claude native-hook activation certifies pre-action, result, and session-en
     assert.match(settings, /pre-action-hook/);
     assert.match(settings, /PostToolUseFailure/);
     assert.match(settings, /session-hook/);
-    assert.match(settings, /getmarrow\/mcp hook/);
+    assert.match(settings, /getmarrow\/mcp@3\.9\.50 hook/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -132,6 +139,9 @@ test('custom SDK activation requires both dependency and exact generated runtime
     assert.match(profile.exact_fix, /npm install @getmarrow\/sdk/);
 
     fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ dependencies: { '@getmarrow/sdk': '^3.7.49' } }));
+    const moduleDir = path.join(root, 'node_modules', '@getmarrow', 'sdk');
+    fs.mkdirSync(moduleDir, { recursive: true });
+    fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({ name: '@getmarrow/sdk', version: '3.7.49' }));
     detection = detectEnvironment(root, { ...process.env, HOME: root });
     plan = buildPlan(detection, { mode: 'sdk' });
     changes = applyPlan(plan, { yes: true, dryRun: false, doctor: false });
