@@ -9,7 +9,7 @@ const MARROW_BLOCK_END = '<!-- marrow:passive-end -->';
 const INSTALLER_ADAPTER_VERSION = '0.1.34';
 const MCP_ADAPTER_VERSION = '3.9.50';
 const SDK_ADAPTER_VERSION = '3.7.49';
-const SDK_ADAPTER_INTEGRITY = 'sha512-t+KpL61NmmreIGI2qKhp+6EnEEiXVmc/9a7KMog+ZlHafUtnvDBGNe4udTGCHfrh9q1GKj3MkJaOXjYKoP5CkQ==';
+const SDK_ADAPTER_INTEGRITY = 'sha512-9a6pWWACubWTmulG7TwwgMNP/iSzoEh4wCH2oWUyO8XHeD2Eokj1GXrkCyX86md3bV7vGX6kyllfswZDlGj6WA==';
 const SDK_ADAPTER_TARBALL = `https://registry.npmjs.org/@getmarrow/sdk/-/sdk-${SDK_ADAPTER_VERSION}.tgz`;
 const MCP_PACKAGE_SPEC = `@getmarrow/mcp@${MCP_ADAPTER_VERSION}`;
 const MCP_CONTEXT_HOOK_COMMAND = `npx -y ${MCP_PACKAGE_SPEC} context-hook`;
