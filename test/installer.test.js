@@ -14,6 +14,7 @@ const {
   inspectSdkDependency,
   parseArgs,
   passiveRuntimeSource,
+  printReport,
   runSelfTest,
 } = require('../src/installer');
 
@@ -389,6 +390,20 @@ test('repair mode writes config and reports self-test remediation state', async 
   assert.equal(fs.existsSync(path.join(dir, '.marrow', 'passive-runtime.mjs')), true);
   assert.equal(report.remediation.attempted, true);
   assert.equal(report.remediation.fixedConfig, true);
+
+  let output = '';
+  const originalWrite = process.stdout.write;
+  process.stdout.write = (chunk) => {
+    output += String(chunk);
+    return true;
+  };
+  try {
+    printReport(report);
+  } finally {
+    process.stdout.write = originalWrite;
+  }
+  assert.match(output, /- wrote: SDK passive runtime preload/);
+  assert.doesNotMatch(output, /would write/);
 });
 
 test('doctor reports likely env files when MARROW_API_KEY is not loaded', async () => {
@@ -555,6 +570,7 @@ test('activation requires a receipt bound to the exact decision, agent, and succ
   const originalFetch = global.fetch;
   let receipt = null;
   let activationProfileEvent = null;
+  let profileBindingEnabled = false;
   global.fetch = async (url, request = {}) => {
     const href = String(url);
     if (href.endsWith('/v1/agent/think')) {
@@ -574,7 +590,30 @@ test('activation requires a receipt bound to the exact decision, agent, and succ
     }
     if (href.endsWith('/v1/agent/integrations/events')) {
       activationProfileEvent = JSON.parse(request.body);
-      return new Response(JSON.stringify({ data: { accepted: true } }), { status: 200 });
+      if (!profileBindingEnabled) {
+        return new Response(JSON.stringify({ data: { accepted: true } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ data: {
+        accepted: true,
+        activation_coverage: {
+          agent_id: activationProfileEvent.agent_id,
+          harness: activationProfileEvent.harness,
+          activation: {
+            adapter_version: activationProfileEvent.adapter_version,
+            capability_level: activationProfileEvent.capability_level,
+          },
+          capture_coverage: { expected_hooks: activationProfileEvent.expected_hooks },
+          profile_receipt: {
+            event_receipt_id: 'event-receipt-one',
+            agent_id: activationProfileEvent.agent_id,
+            harness: activationProfileEvent.harness,
+            adapter_version: activationProfileEvent.adapter_version,
+            capability_level: activationProfileEvent.capability_level,
+            config_fingerprint_verified: true,
+            expected_hooks_verified: true,
+          },
+        },
+      } }), { status: 200 });
     }
     if (href.includes('/v1/analytics/agent-performance') || href.includes('/v1/agent/value/proof')) {
       return new Response(JSON.stringify({ data: {} }), { status: 200 });
@@ -594,6 +633,11 @@ test('activation requires a receipt bound to the exact decision, agent, and succ
       mode: 'passive',
       hooks_installed: ['passive runtime'],
       capture_verified: true,
+      complete: true,
+      adapter_version: '0.1.34',
+      capability_level: 'governed_wrapper',
+      config_fingerprint: 'fixture-config-fingerprint',
+      expected_hooks: ['pre_action', 'action_result', 'outcome_closure'],
     },
   };
 
@@ -617,10 +661,16 @@ test('activation requires a receipt bound to the exact decision, agent, and succ
     receipt.outcome_recorded_at = 'not-a-timestamp';
     await assert.rejects(runSelfTest(options), /activation receipt did not verify/);
     receipt.outcome_recorded_at = '2026-07-23T00:00:00.000Z';
+    await assert.rejects(runSelfTest(options), /activation prerequisites were not all verified/);
+    profileBindingEnabled = true;
     const result = await runSelfTest(options);
     assert.equal(result.activation_verified, true);
     assert.equal(result.activation_receipt.decision_id, 'decision-activation');
-    assert.equal(activationProfileEvent.observed_hook, 'pre_action');
+    assert.equal(activationProfileEvent.event_type, 'prompt_submitted');
+    assert.equal('observed_hook' in activationProfileEvent, false);
+    assert.equal('outcome_state' in activationProfileEvent, false);
+    assert.equal('success' in activationProfileEvent, false);
+    assert.equal('correlation_id' in activationProfileEvent, false);
     assert.equal('intervention_disposition' in activationProfileEvent, false);
     assert.equal('action_changed' in activationProfileEvent, false);
   } finally {

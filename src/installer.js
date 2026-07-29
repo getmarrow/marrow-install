@@ -7,24 +7,28 @@ const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MARROW_BLOCK_START = '<!-- marrow:passive-start -->';
 const MARROW_BLOCK_END = '<!-- marrow:passive-end -->';
 const INSTALLER_ADAPTER_VERSION = '0.1.34';
+const MCP_ADAPTER_VERSION = '3.9.50';
+const SDK_ADAPTER_VERSION = '3.7.49';
+const NATIVE_HOOK_MATCHER = 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*';
+const NATIVE_EXPECTED_HOOKS = ['prompt', 'pre_action', 'action_result', 'session_end'];
 const SOURCE_CLIENTS = new Set(['claude-code', 'cursor', 'composer', 'windsurf', 'openclaw', 'codex', 'gemini', 'grok', 'deepseek', 'qwen', 'kimi', 'minimax', 'cline', 'opencode', 'hermes', 'glm', 'custom', 'unknown']);
 const HARNESS_CAPABILITY_REGISTRY = Object.freeze([
-  { client: 'claude-code', capability_level: 'native_hooks', automatic: ['pre_action', 'action_result', 'session_end'], install_surface: 'mcp' },
+  { client: 'claude-code', capability_level: 'native_hooks', automatic: ['prompt', 'pre_action', 'action_result', 'session_end'], install_surface: 'mcp' },
   { client: 'cursor', capability_level: 'mcp', automatic: ['mcp_tool_calls'], install_surface: 'mcp' },
   { client: 'composer', capability_level: 'mcp', automatic: ['mcp_tool_calls'], install_surface: 'mcp' },
   { client: 'cline', capability_level: 'mcp', automatic: ['mcp_tool_calls'], install_surface: 'mcp' },
   { client: 'windsurf', capability_level: 'mcp', automatic: ['mcp_tool_calls'], install_surface: 'mcp' },
-  { client: 'codex', capability_level: 'governed_wrapper', automatic: ['wrapped_pre_action', 'wrapped_result', 'wrapped_outcome'], install_surface: 'runner' },
-  { client: 'opencode', capability_level: 'governed_wrapper', automatic: ['wrapped_pre_action', 'wrapped_result', 'wrapped_outcome'], install_surface: 'runner' },
-  { client: 'hermes', capability_level: 'event_contract', automatic: ['mapped_harness_events'], install_surface: 'addon' },
-  { client: 'openclaw', capability_level: 'event_contract', automatic: ['mapped_harness_events'], install_surface: 'addon' },
-  { client: 'gemini', capability_level: 'governed_wrapper', automatic: ['wrapped_pre_action', 'wrapped_result', 'wrapped_outcome'], install_surface: 'runner' },
-  { client: 'grok', capability_level: 'governed_wrapper', automatic: ['wrapped_pre_action', 'wrapped_result', 'wrapped_outcome'], install_surface: 'runner' },
-  { client: 'deepseek', capability_level: 'governed_wrapper', automatic: ['wrapped_pre_action', 'wrapped_result', 'wrapped_outcome'], install_surface: 'runner' },
-  { client: 'qwen', capability_level: 'governed_wrapper', automatic: ['wrapped_pre_action', 'wrapped_result', 'wrapped_outcome'], install_surface: 'runner' },
-  { client: 'kimi', capability_level: 'governed_wrapper', automatic: ['wrapped_pre_action', 'wrapped_result', 'wrapped_outcome'], install_surface: 'runner' },
-  { client: 'minimax', capability_level: 'governed_wrapper', automatic: ['wrapped_pre_action', 'wrapped_result', 'wrapped_outcome'], install_surface: 'runner' },
-  { client: 'glm', capability_level: 'governed_wrapper', automatic: ['wrapped_pre_action', 'wrapped_result', 'wrapped_outcome'], install_surface: 'runner' },
+  { client: 'codex', capability_level: 'governed_wrapper', automatic: ['pre_action', 'action_result', 'outcome_closure'], install_surface: 'runner' },
+  { client: 'opencode', capability_level: 'governed_wrapper', automatic: ['pre_action', 'action_result', 'outcome_closure'], install_surface: 'runner' },
+  { client: 'hermes', capability_level: 'event_contract', automatic: [], install_surface: 'addon' },
+  { client: 'openclaw', capability_level: 'event_contract', automatic: [], install_surface: 'addon' },
+  { client: 'gemini', capability_level: 'governed_wrapper', automatic: ['pre_action', 'action_result', 'outcome_closure'], install_surface: 'runner' },
+  { client: 'grok', capability_level: 'governed_wrapper', automatic: ['pre_action', 'action_result', 'outcome_closure'], install_surface: 'runner' },
+  { client: 'deepseek', capability_level: 'governed_wrapper', automatic: ['pre_action', 'action_result', 'outcome_closure'], install_surface: 'runner' },
+  { client: 'qwen', capability_level: 'governed_wrapper', automatic: ['pre_action', 'action_result', 'outcome_closure'], install_surface: 'runner' },
+  { client: 'kimi', capability_level: 'governed_wrapper', automatic: ['pre_action', 'action_result', 'outcome_closure'], install_surface: 'runner' },
+  { client: 'minimax', capability_level: 'governed_wrapper', automatic: ['pre_action', 'action_result', 'outcome_closure'], install_surface: 'runner' },
+  { client: 'glm', capability_level: 'governed_wrapper', automatic: ['pre_action', 'action_result', 'outcome_closure'], install_surface: 'runner' },
   { client: 'custom', capability_level: 'event_contract', automatic: [], install_surface: 'event_contract' },
 ]);
 
@@ -443,23 +447,81 @@ function upsertBlock(content, block) {
   return `${content}${separator}${block}\n`;
 }
 
+function exactHookConfigured(settings, eventName, command, matcher) {
+  const entries = settings?.hooks?.[eventName];
+  if (!Array.isArray(entries)) return false;
+  return entries.some((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
+    if (matcher != null && entry.matcher !== matcher) return false;
+    if (!Array.isArray(entry.hooks)) return false;
+    return entry.hooks.some((hook) => (
+      hook
+      && typeof hook === 'object'
+      && !Array.isArray(hook)
+      && hook.type === 'command'
+      && typeof hook.command === 'string'
+      && hook.command.trim() === command
+    ));
+  });
+}
+
+function safeJsonObject(filePath) {
+  try {
+    return parseJsonObject(filePath);
+  } catch {
+    return {};
+  }
+}
+
+function claudeNativeHookFingerprint(settings) {
+  const contract = {
+    schema: 'marrow-claude-native-hooks.v2',
+    adapter_version: MCP_ADAPTER_VERSION,
+    expected_hooks: NATIVE_EXPECTED_HOOKS,
+    configured: {
+      prompt: exactHookConfigured(settings, 'UserPromptSubmit', 'npx -y @getmarrow/mcp context-hook'),
+      pre_action: exactHookConfigured(settings, 'PreToolUse', 'npx -y @getmarrow/mcp pre-action-hook', NATIVE_HOOK_MATCHER),
+      action_result_success: exactHookConfigured(settings, 'PostToolUse', 'npx -y @getmarrow/mcp hook', NATIVE_HOOK_MATCHER),
+      action_result_failure: exactHookConfigured(settings, 'PostToolUseFailure', 'npx -y @getmarrow/mcp hook', NATIVE_HOOK_MATCHER),
+      session_end: exactHookConfigured(settings, 'Stop', 'npx -y @getmarrow/mcp session-hook'),
+    },
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(contract)).digest('hex');
+}
+
 function upsertClaudeHooks(settingsPath) {
   const settings = parseJsonObject(settingsPath);
   const hooks = settings.hooks && typeof settings.hooks === 'object' && !Array.isArray(settings.hooks)
     ? settings.hooks
     : {};
   const postToolUse = Array.isArray(hooks.PostToolUse) ? [...hooks.PostToolUse] : [];
+  const postToolUseFailure = Array.isArray(hooks.PostToolUseFailure) ? [...hooks.PostToolUseFailure] : [];
+  const preToolUse = Array.isArray(hooks.PreToolUse) ? [...hooks.PreToolUse] : [];
   const userPromptSubmit = Array.isArray(hooks.UserPromptSubmit) ? [...hooks.UserPromptSubmit] : [];
   const stop = Array.isArray(hooks.Stop) ? [...hooks.Stop] : [];
 
-  const hasPost = postToolUse.some((entry) => JSON.stringify(entry).includes('npx -y @getmarrow/mcp hook'));
-  const hasPrompt = userPromptSubmit.some((entry) => JSON.stringify(entry).includes('npx -y @getmarrow/mcp context-hook'));
-  const hasStop = stop.some((entry) => JSON.stringify(entry).includes('npx -y @getmarrow/mcp session-hook'));
+  const hasPost = exactHookConfigured(settings, 'PostToolUse', 'npx -y @getmarrow/mcp hook', 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*');
+  const hasPostFailure = exactHookConfigured(settings, 'PostToolUseFailure', 'npx -y @getmarrow/mcp hook', 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*');
+  const hasPre = exactHookConfigured(settings, 'PreToolUse', 'npx -y @getmarrow/mcp pre-action-hook', 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*');
+  const hasPrompt = exactHookConfigured(settings, 'UserPromptSubmit', 'npx -y @getmarrow/mcp context-hook');
+  const hasStop = exactHookConfigured(settings, 'Stop', 'npx -y @getmarrow/mcp session-hook');
 
   if (!hasPost) {
     postToolUse.push({
       matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*',
       hooks: [{ type: 'command', command: 'npx -y @getmarrow/mcp hook' }],
+    });
+  }
+  if (!hasPostFailure) {
+    postToolUseFailure.push({
+      matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*',
+      hooks: [{ type: 'command', command: 'npx -y @getmarrow/mcp hook' }],
+    });
+  }
+  if (!hasPre) {
+    preToolUse.push({
+      matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*',
+      hooks: [{ type: 'command', command: 'npx -y @getmarrow/mcp pre-action-hook' }],
     });
   }
   if (!hasPrompt) {
@@ -475,7 +537,9 @@ function upsertClaudeHooks(settingsPath) {
 
   settings.hooks = {
     ...hooks,
+    PreToolUse: preToolUse,
     PostToolUse: postToolUse,
+    PostToolUseFailure: postToolUseFailure,
     UserPromptSubmit: userPromptSubmit,
     Stop: stop,
   };
@@ -484,49 +548,73 @@ function upsertClaudeHooks(settingsPath) {
 }
 
 function activationProfile(detection, plan, changes, client) {
-  const nativeHooks = detection.claudeCode && (plan.mode === 'mcp' || plan.mode === 'both');
-  const capabilityLevel = nativeHooks
-    ? 'native_hooks'
-    : plan.mode === 'sdk' || plan.mode === 'both'
+  const registry = HARNESS_CAPABILITY_REGISTRY.find((entry) => entry.client === client)
+    || HARNESS_CAPABILITY_REGISTRY.find((entry) => entry.client === 'custom');
+  const sdkDependency = inspectSdkDependency(detection);
+  const capabilityLevel = client === 'custom' && (plan.mode === 'sdk' || plan.mode === 'both')
     ? 'sdk_passive_runtime'
-    : plan.mode === 'mcp'
-    ? 'mcp'
-    : 'event_contract';
-  const expectedHooks = capabilityLevel === 'native_hooks'
-    ? ['pre_action', 'action_result', 'session_end']
-    : capabilityLevel === 'sdk_passive_runtime'
+    : registry.capability_level;
+  const expectedHooks = capabilityLevel === 'sdk_passive_runtime'
     ? ['pre_action', 'action_result', 'outcome_closure']
-    : capabilityLevel === 'mcp'
-    ? ['mcp_tool_calls']
-    : [];
+    : [...registry.automatic];
+  const adapterVersion = capabilityLevel === 'native_hooks' || capabilityLevel === 'mcp'
+    ? MCP_ADAPTER_VERSION
+    : capabilityLevel === 'sdk_passive_runtime'
+    ? SDK_ADAPTER_VERSION
+    : INSTALLER_ADAPTER_VERSION;
   const observedHooks = [];
-  const claudeConfig = safeRead(detection.paths.claudeSettings);
-  if (/getmarrow\/mcp context-hook/.test(claudeConfig)) observedHooks.push('pre_action');
-  if (/getmarrow\/mcp hook/.test(claudeConfig)) observedHooks.push('action_result');
-  if (/getmarrow\/mcp session-hook/.test(claudeConfig)) observedHooks.push('session_end');
-  if (exists(detection.paths.passiveRuntime) && /createPassiveRuntime/.test(safeRead(detection.paths.passiveRuntime))) {
+  const claudeSettings = safeJsonObject(detection.paths.claudeSettings);
+  if (capabilityLevel === 'native_hooks'
+    && exactHookConfigured(claudeSettings, 'UserPromptSubmit', 'npx -y @getmarrow/mcp context-hook')) observedHooks.push('prompt');
+  if (capabilityLevel === 'native_hooks'
+    && exactHookConfigured(claudeSettings, 'PreToolUse', 'npx -y @getmarrow/mcp pre-action-hook', 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*')) observedHooks.push('pre_action');
+  if (capabilityLevel === 'native_hooks'
+    && exactHookConfigured(claudeSettings, 'PostToolUse', 'npx -y @getmarrow/mcp hook', 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*')
+    && exactHookConfigured(claudeSettings, 'PostToolUseFailure', 'npx -y @getmarrow/mcp hook', 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*')) observedHooks.push('action_result');
+  if (capabilityLevel === 'native_hooks'
+    && exactHookConfigured(claudeSettings, 'Stop', 'npx -y @getmarrow/mcp session-hook')) observedHooks.push('session_end');
+  const passiveRuntime = safeRead(detection.paths.passiveRuntime);
+  if (capabilityLevel === 'sdk_passive_runtime'
+    && sdkDependency.present
+    && /await import\('@getmarrow\/sdk'\)/.test(passiveRuntime)
+    && /runtime\.install\(\)/.test(passiveRuntime)) {
     for (const hook of ['pre_action', 'action_result', 'outcome_closure']) {
       if (!observedHooks.includes(hook)) observedHooks.push(hook);
     }
   }
-  const mcpConfig = `${safeRead(detection.paths.mcpJson)}\n${safeRead(detection.paths.cursorMcp)}\n${claudeConfig}`;
-  if (capabilityLevel === 'mcp' && /@getmarrow\/mcp/.test(mcpConfig)) observedHooks.push('mcp_tool_calls');
+  const mcpConfigs = [detection.paths.mcpJson, detection.paths.cursorMcp]
+    .map((filePath) => safeJsonObject(filePath));
+  if (capabilityLevel === 'mcp' && mcpConfigs.some((config) => (
+    config?.mcpServers?.marrow?.command === 'npx'
+    && Array.isArray(config.mcpServers.marrow.args)
+    && config.mcpServers.marrow.args.join(' ') === '-y @getmarrow/mcp'
+  ))) observedHooks.push('mcp_tool_calls');
   const fingerprintMaterial = changes
     .filter((change) => change.applied || change.already_present)
     .map((change) => `${change.label}:${crypto.createHash('sha256').update(safeRead(change.path)).digest('hex')}`)
     .sort()
     .join('|');
-  const configFingerprint = crypto.createHash('sha256')
-    .update(`${client}:${capabilityLevel}:${expectedHooks.join(',')}:${fingerprintMaterial}`)
-    .digest('hex');
+  const configFingerprint = capabilityLevel === 'native_hooks'
+    ? claudeNativeHookFingerprint(claudeSettings)
+    : crypto.createHash('sha256')
+      .update(`${client}:${capabilityLevel}:${expectedHooks.join(',')}:${fingerprintMaterial}`)
+      .digest('hex');
+  const complete = expectedHooks.length > 0 && expectedHooks.every((hook) => observedHooks.includes(hook));
+  const exactFix = complete
+    ? null
+    : capabilityLevel === 'sdk_passive_runtime' && !sdkDependency.present
+    ? 'npm install @getmarrow/sdk && npx @getmarrow/install --repair'
+    : capabilityLevel === 'governed_wrapper'
+    ? `npx @getmarrow/install run --agent <agent-id> -- ${client}`
+    : 'npx @getmarrow/install --repair';
   return {
-    adapter_version: INSTALLER_ADAPTER_VERSION,
+    adapter_version: adapterVersion,
     capability_level: capabilityLevel,
     config_fingerprint: configFingerprint,
     expected_hooks: expectedHooks,
     observed_hooks: observedHooks,
-    complete: expectedHooks.every((hook) => observedHooks.includes(hook)),
-    exact_fix: expectedHooks.every((hook) => observedHooks.includes(hook)) ? null : 'npx @getmarrow/install --repair',
+    complete,
+    exact_fix: exactFix,
   };
 }
 
@@ -843,29 +931,42 @@ async function runSelfTest(options) {
       headers,
       body: JSON.stringify({
         event_id: `activation-${activationConfigFingerprint.slice(0, 32)}`,
-        event_type: 'pre_action_checked',
+        event_type: 'prompt_submitted',
         harness: options.activation.harness,
         agent_id: options.agentId,
         session_id: headers['x-marrow-session-id'],
-        workflow_id: `activation-${activationConfigFingerprint.slice(0, 32)}`,
-        correlation_id: activationConfigFingerprint.slice(0, 32),
         adapter_version: activationAdapterVersion,
         capability_level: activationCapabilityLevel,
         config_fingerprint: activationConfigFingerprint,
         expected_hooks: activationExpectedHooks,
-        observed_hook: 'pre_action',
-        action: 'passive integration activation verified',
-        outcome_state: 'closed',
-        success: true,
+        action: 'passive integration activation profile registered',
         occurred_at: new Date().toISOString(),
       }),
     });
+    const profileCoverage = activationProfileReceipt?.activation_coverage;
+    const profileReceipt = profileCoverage?.profile_receipt;
+    const expectedHooksMatch = Array.isArray(profileCoverage?.capture_coverage?.expected_hooks)
+      && [...profileCoverage.capture_coverage.expected_hooks].sort().join(',') === [...activationExpectedHooks].sort().join(',');
+    const profileBound = Boolean(
+      activationProfileReceipt?.accepted === true
+      && profileCoverage?.agent_id === options.agentId
+      && profileCoverage?.harness === options.activation.harness
+      && profileCoverage?.activation?.adapter_version === activationAdapterVersion
+      && profileCoverage?.activation?.capability_level === activationCapabilityLevel
+      && profileReceipt?.agent_id === options.agentId
+      && profileReceipt?.harness === options.activation.harness
+      && profileReceipt?.adapter_version === activationAdapterVersion
+      && profileReceipt?.capability_level === activationCapabilityLevel
+      && profileReceipt?.config_fingerprint_verified === true
+      && profileReceipt?.expected_hooks_verified === true
+      && expectedHooksMatch
+    );
     activationVerified = Boolean(
       firstValue.active
       && runtimeGateVerified(runtime)
       && (status.enabled ?? status.ok)
-      && activationProfileReceipt?.accepted === true
-      && (options.activation.complete ?? options.activation.capture_verified === true),
+      && options.activation.complete === true
+      && profileBound,
     );
     if (!activationVerified) {
       throw new Error('activation prerequisites were not all verified by the server');
@@ -1034,7 +1135,7 @@ function printReport(report) {
 
   process.stdout.write('\nPlanned changes:\n');
   for (const change of report.changes) {
-    const marker = change.changed ? (report.writeMode === 'write' ? 'wrote' : 'would write') : 'unchanged';
+    const marker = change.changed ? (['write', 'repair'].includes(report.writeMode) ? 'wrote' : 'would write') : 'unchanged';
     process.stdout.write(`- ${marker}: ${change.label} (${change.path})\n`);
   }
 
@@ -1277,5 +1378,7 @@ module.exports = {
   buildTokenValueProof,
   stableAgentId,
   activationProfile,
+  claudeNativeHookFingerprint,
+  printReport,
   HARNESS_CAPABILITY_REGISTRY,
 };

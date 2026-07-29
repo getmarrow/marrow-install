@@ -834,15 +834,28 @@ function normalizeActivationCoverage(status, report, fleet) {
   const percent = (value) => {
     const number = Number(value);
     if (!Number.isFinite(number)) return null;
-    return Math.max(0, Math.min(100, number <= 1 ? number * 100 : number));
+    return Math.max(0, Math.min(100, number));
+  };
+  const ratio = (value) => {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return null;
+    return Math.max(0, Math.min(100, number * 100));
+  };
+  const metricPercent = (explicitPercent, rate, fallbackPercent) => {
+    const explicit = firstDefined(explicitPercent, fallbackPercent);
+    return explicit == null ? ratio(rate) : percent(explicit);
   };
   return {
     available,
     state: statusLabel(firstDefined(source.state, source.status), available ? 'active' : 'warming_up'),
     capability_level: displayText(firstDefined(activation.capability_level, source.capability_level, source.capability, 'unknown'), 40),
-    capture_percent: percent(firstDefined(capture.percent, capture.rate, source.capture_percent)),
-    closure_percent: percent(firstDefined(closure.percent, closure.rate, source.closure_percent)),
-    effectiveness_percent: percent(firstDefined(effectiveness.follow_through_rate, effectiveness.followed_percent, effectiveness.rate, source.effectiveness_percent)),
+    capture_percent: metricPercent(capture.percent, capture.rate, source.capture_percent),
+    closure_percent: metricPercent(closure.percent, closure.rate, source.closure_percent),
+    effectiveness_percent: metricPercent(
+      effectiveness.followed_percent,
+      firstDefined(effectiveness.follow_through_rate, effectiveness.rate),
+      source.effectiveness_percent,
+    ),
     drift: Boolean(firstDefined(drift.detected, source.drift_detected, false)),
     exact_fix: displayText(firstDefined(drift.repair_command, source.exact_fix, source.repair_command, ''), 180),
   };
