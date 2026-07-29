@@ -9,6 +9,8 @@ const MARROW_BLOCK_END = '<!-- marrow:passive-end -->';
 const INSTALLER_ADAPTER_VERSION = '0.1.34';
 const MCP_ADAPTER_VERSION = '3.9.50';
 const SDK_ADAPTER_VERSION = '3.7.49';
+const SDK_ADAPTER_INTEGRITY = 'sha512-t+KpL61NmmreIGI2qKhp+6EnEEiXVmc/9a7KMog+ZlHafUtnvDBGNe4udTGCHfrh9q1GKj3MkJaOXjYKoP5CkQ==';
+const SDK_ADAPTER_TARBALL = `https://registry.npmjs.org/@getmarrow/sdk/-/sdk-${SDK_ADAPTER_VERSION}.tgz`;
 const MCP_PACKAGE_SPEC = `@getmarrow/mcp@${MCP_ADAPTER_VERSION}`;
 const MCP_CONTEXT_HOOK_COMMAND = `npx -y ${MCP_PACKAGE_SPEC} context-hook`;
 const MCP_PRE_ACTION_HOOK_COMMAND = `npx -y ${MCP_PACKAGE_SPEC} pre-action-hook`;
@@ -736,6 +738,35 @@ function inspectSdkDependency(detection) {
   const declaredSpec = dependencyBlocks
     .map((deps) => deps && typeof deps['@getmarrow/sdk'] === 'string' ? deps['@getmarrow/sdk'] : null)
     .find(Boolean) || null;
+  const objectTargetsSdk = (value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    return Object.entries(value).some(([key, nested]) => (
+      key.includes('@getmarrow/sdk') || objectTargetsSdk(nested)
+    ));
+  };
+  const overrideDetected = objectTargetsSdk(packageJson.overrides)
+    || objectTargetsSdk(packageJson.resolutions)
+    || objectTargetsSdk(packageJson.pnpm?.overrides);
+  let lockVerified = false;
+  try {
+    const lock = JSON.parse(safeRead(path.join(detection.root, 'package-lock.json')) || '{}');
+    const rootLock = lock?.packages?.[''];
+    const lockedSdk = lock?.packages?.['node_modules/@getmarrow/sdk'];
+    const lockedDeclaration = [
+      rootLock?.dependencies,
+      rootLock?.devDependencies,
+      rootLock?.optionalDependencies,
+      rootLock?.peerDependencies,
+    ].map((deps) => deps && typeof deps['@getmarrow/sdk'] === 'string' ? deps['@getmarrow/sdk'] : null)
+      .find(Boolean) || null;
+    lockVerified = [2, 3].includes(lock?.lockfileVersion)
+      && lockedDeclaration === declaredSpec
+      && lockedSdk?.version === SDK_ADAPTER_VERSION
+      && lockedSdk?.resolved === SDK_ADAPTER_TARBALL
+      && lockedSdk?.integrity === SDK_ADAPTER_INTEGRITY;
+  } catch {
+    lockVerified = false;
+  }
   const installedPackagePath = findUp(
     detection.root,
     [path.join('node_modules', '@getmarrow', 'sdk', 'package.json')],
@@ -754,6 +785,8 @@ function inspectSdkDependency(detection) {
     && declaredSpec.trim().length > 0
     && /^[v0-9xX*<>=~^|.\s-]+$/.test(declaredSpec.trim());
   const present = declarationTrusted
+    && !overrideDetected
+    && lockVerified
     && installedName === '@getmarrow/sdk'
     && installedVersion === SDK_ADAPTER_VERSION;
   return {
@@ -762,6 +795,8 @@ function inspectSdkDependency(detection) {
     declared: declaredSpec != null,
     declared_spec: declaredSpec,
     declaration_trusted: declarationTrusted,
+    override_detected: overrideDetected,
+    lock_verified: lockVerified,
     installed_name: installedName,
     installed_version: installedVersion,
     expected_version: SDK_ADAPTER_VERSION,
@@ -897,7 +932,6 @@ function isCanonicalTimestamp(value) {
 
 function runtimeGateVerified(runtime) {
   if (!runtime || typeof runtime !== 'object') return false;
-  if (runtime.ok === true) return true;
   const gate = runtime.risk_gate;
   if (!gate || typeof gate !== 'object') return false;
   if (typeof gate.allow === 'boolean' || typeof gate.allowed === 'boolean') return true;
@@ -1250,7 +1284,7 @@ function printReport(report) {
 
   process.stdout.write('\nPlanned changes:\n');
   for (const change of report.changes) {
-    const marker = change.changed ? (['write', 'repair'].includes(report.writeMode) ? 'wrote' : 'would write') : 'unchanged';
+    const marker = change.applied ? 'wrote' : change.changed ? 'would write' : 'unchanged';
     process.stdout.write(`- ${marker}: ${change.label} (${change.path})\n`);
   }
 
@@ -1359,6 +1393,9 @@ async function install(options) {
   if (options.activate && options.selfTest === false) {
     throw new Error('activate requires the server self-test');
   }
+  if (options.repair && options.yes !== true && !options.dryRun && !options.doctor) {
+    throw new Error('repair requires explicit write authorization (--yes)');
+  }
   const detection = detectEnvironment(options.cwd);
   const plan = buildPlan(detection, options);
   const writeMode = options.doctor ? 'doctor' : options.dryRun ? 'dry-run' : options.repair ? 'repair' : options.yes ? 'write' : 'dry-run';
@@ -1389,7 +1426,7 @@ async function install(options) {
   const configInspection = inspectNpmTokenConfig();
   const sdkDependency = inspectSdkDependency(detection);
   const configDiagnostics = configInspection.safe;
-  const configRepairs = options.repair && !options.dryRun && !options.doctor
+  const configRepairs = options.repair && options.yes && !options.dryRun && !options.doctor
     ? repairConfigDiagnostics(configDiagnostics)
     : [];
   const envHints = options.apiKey ? [] : findLikelyEnvFiles(detection);
@@ -1404,7 +1441,7 @@ async function install(options) {
   if (options.activate && !selfTest.activation_verified) {
     throw new Error('Marrow activation failed: server confirmation was not returned');
   }
-  const changedConfig = changes.some((change) => change.changed) || configRepairs.some((repair) => repair.changed);
+  const changedConfig = changes.some((change) => change.applied) || configRepairs.some((repair) => repair.changed);
   const selfTestPassed = Boolean(!selfTest.skipped && selfTest.active && !selfTest.error);
   const remediation = options.repair
     ? {

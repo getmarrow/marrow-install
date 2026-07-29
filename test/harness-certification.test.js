@@ -17,6 +17,22 @@ const {
 
 const NATIVE_HOOK_MATCHER = 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*';
 const MCP_ACTION_RESULT_HOOK_COMMAND = 'npx -y @getmarrow/mcp@3.9.50 hook';
+const SDK_INTEGRITY = 'sha512-t+KpL61NmmreIGI2qKhp+6EnEEiXVmc/9a7KMog+ZlHafUtnvDBGNe4udTGCHfrh9q1GKj3MkJaOXjYKoP5CkQ==';
+
+function writeSdkLock(root, declaredSpec = '^3.7.49') {
+  fs.writeFileSync(path.join(root, 'package-lock.json'), JSON.stringify({
+    name: 'fixture',
+    lockfileVersion: 3,
+    packages: {
+      '': { dependencies: { '@getmarrow/sdk': declaredSpec } },
+      'node_modules/@getmarrow/sdk': {
+        version: '3.7.49',
+        resolved: 'https://registry.npmjs.org/@getmarrow/sdk/-/sdk-3.7.49.tgz',
+        integrity: SDK_INTEGRITY,
+      },
+    },
+  }));
+}
 
 test('capability registry certifies every advertised harness without overstating automatic coverage', () => {
   const clients = new Set(HARNESS_CAPABILITY_REGISTRY.map((entry) => entry.client));
@@ -254,6 +270,7 @@ test('custom SDK activation requires both dependency and exact generated runtime
     const moduleDir = path.join(root, 'node_modules', '@getmarrow', 'sdk');
     fs.mkdirSync(moduleDir, { recursive: true });
     fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({ name: '@getmarrow/sdk', version: '3.7.49' }));
+    writeSdkLock(root);
     detection = detectEnvironment(root, { ...process.env, HOME: root });
     plan = buildPlan(detection, { mode: 'sdk' });
     changes = applyPlan(plan, { yes: true, dryRun: false, doctor: false });
@@ -289,6 +306,36 @@ test('custom SDK activation rejects npm aliases even when version and installed 
     assert.equal(dependency.present, false);
     assert.equal(profile.complete, false);
     assert.match(profile.exact_fix, /npm install @getmarrow\/sdk/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('custom SDK activation rejects override impersonation despite forged installed metadata', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-sdk-override-'));
+  try {
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({
+      dependencies: { '@getmarrow/sdk': '^3.7.49' },
+      overrides: { '@getmarrow/sdk': 'npm:untrusted-sdk@3.7.49' },
+    }));
+    writeSdkLock(root);
+    const moduleDir = path.join(root, 'node_modules', '@getmarrow', 'sdk');
+    fs.mkdirSync(moduleDir, { recursive: true });
+    fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({
+      name: '@getmarrow/sdk',
+      version: '3.7.49',
+    }));
+
+    const detection = detectEnvironment(root, { ...process.env, HOME: root });
+    const dependency = inspectSdkDependency(detection);
+    const plan = buildPlan(detection, { mode: 'sdk' });
+    const changes = applyPlan(plan, { yes: true, dryRun: false, doctor: false });
+    const profile = activationProfile(detection, plan, changes, 'custom');
+
+    assert.equal(dependency.override_detected, true);
+    assert.equal(dependency.lock_verified, true);
+    assert.equal(dependency.present, false);
+    assert.equal(profile.complete, false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
