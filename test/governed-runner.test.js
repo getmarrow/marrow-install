@@ -309,6 +309,39 @@ test('fleet panel summarizes operator-critical account state', () => {
   assert.match(panel, /npx @getmarrow\/install --repair/);
 });
 
+test('fleet snapshot reads certified activation coverage without inventing drift', () => {
+  const snapshot = normalizeFleetSnapshot({
+    status: {
+      ok: true,
+      data: {
+        activation_coverage: {
+          available: true,
+          status: 'active',
+          activation: { active: true, capability_level: 'native_hooks' },
+          capture_coverage: { available: true, rate: 0.75 },
+          outcome_closure: { available: true, rate: 0.5 },
+          intervention_effectiveness: { available: true, follow_through_rate: 1 },
+          drift: { detected: false, reasons: [], repair_command: null },
+        },
+      },
+    },
+    capacity: { ok: true, data: {} },
+    report: { ok: true, data: {} },
+    fleet: { ok: true, data: {} },
+  }, { agentId: 'agent-one', baseUrl: 'https://api.getmarrow.ai' });
+
+  assert.deepEqual(snapshot.activation_coverage, {
+    available: true,
+    state: 'active',
+    capability_level: 'native_hooks',
+    capture_percent: 75,
+    closure_percent: 50,
+    effectiveness_percent: 100,
+    drift: false,
+    exact_fix: '',
+  });
+});
+
 test('fleet TUI render exposes inspection and fix-command rows', () => {
   const snapshot = normalizeFleetSnapshot({
     status: {
@@ -320,6 +353,15 @@ test('fleet TUI render exposes inspection and fix-command rows', () => {
         deploy_gate: 'enforce',
         publish_gate: 'enforce',
         merge_gate: 'warn',
+        activation_coverage: {
+          available: true,
+          state: 'active',
+          capability_level: 'native_hooks',
+          capture: { available: true, percent: 100 },
+          outcome_closure: { available: true, percent: 92 },
+          intervention_effectiveness: { available: true, followed_percent: 88 },
+          drift_detected: false,
+        },
       },
     },
     capacity: { ok: true, data: { backpressure: { status: 'ok' } } },
@@ -340,7 +382,8 @@ test('fleet TUI render exposes inspection and fix-command rows', () => {
   assert.match(screen, /\[Failed\/stale outcomes\]/);
   assert.match(screen, /\[Backpressure \/ capacity\]/);
   assert.match(screen, /\[Recent decisions\]/);
-  assert.match(screen, /\[Degraded hooks\]/);
+  assert.match(screen, /\[Passive activation \/ coverage\]/);
+  assert.match(screen, /capture=100%; closure=92%/);
   assert.match(screen, /\[Deploy\/publish\/merge gates\]/);
   assert.match(screen, /\[Inspect agent\]/);
   assert.match(screen, /\[Copy exact fix command\]/);

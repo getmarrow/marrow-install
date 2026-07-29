@@ -554,7 +554,8 @@ test('self-test returns first five-minute value signal and proof', async () => {
 test('activation requires a receipt bound to the exact decision, agent, and successful outcome', async () => {
   const originalFetch = global.fetch;
   let receipt = null;
-  global.fetch = async (url) => {
+  let activationProfileEvent = null;
+  global.fetch = async (url, request = {}) => {
     const href = String(url);
     if (href.endsWith('/v1/agent/think')) {
       return new Response(JSON.stringify({ data: { decision_id: 'decision-activation' } }), { status: 200 });
@@ -570,6 +571,10 @@ test('activation requires a receipt bound to the exact decision, agent, and succ
     }
     if (href.endsWith('/v1/agent/first-value')) {
       return new Response(JSON.stringify({ data: { ok: true, active: true, activation_receipt: receipt } }), { status: 200 });
+    }
+    if (href.endsWith('/v1/agent/integrations/events')) {
+      activationProfileEvent = JSON.parse(request.body);
+      return new Response(JSON.stringify({ data: { accepted: true } }), { status: 200 });
     }
     if (href.includes('/v1/analytics/agent-performance') || href.includes('/v1/agent/value/proof')) {
       return new Response(JSON.stringify({ data: {} }), { status: 200 });
@@ -615,6 +620,9 @@ test('activation requires a receipt bound to the exact decision, agent, and succ
     const result = await runSelfTest(options);
     assert.equal(result.activation_verified, true);
     assert.equal(result.activation_receipt.decision_id, 'decision-activation');
+    assert.equal(activationProfileEvent.observed_hook, 'pre_action');
+    assert.equal('intervention_disposition' in activationProfileEvent, false);
+    assert.equal('action_changed' in activationProfileEvent, false);
   } finally {
     global.fetch = originalFetch;
   }

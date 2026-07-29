@@ -6,7 +6,27 @@ const crypto = require('node:crypto');
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MARROW_BLOCK_START = '<!-- marrow:passive-start -->';
 const MARROW_BLOCK_END = '<!-- marrow:passive-end -->';
-const SOURCE_CLIENTS = new Set(['claude-code', 'cursor', 'windsurf', 'openclaw', 'codex', 'gemini', 'grok', 'deepseek', 'qwen', 'kimi', 'minimax', 'cline', 'opencode', 'hermes', 'glm', 'custom', 'unknown']);
+const INSTALLER_ADAPTER_VERSION = '0.1.34';
+const SOURCE_CLIENTS = new Set(['claude-code', 'cursor', 'composer', 'windsurf', 'openclaw', 'codex', 'gemini', 'grok', 'deepseek', 'qwen', 'kimi', 'minimax', 'cline', 'opencode', 'hermes', 'glm', 'custom', 'unknown']);
+const HARNESS_CAPABILITY_REGISTRY = Object.freeze([
+  { client: 'claude-code', capability_level: 'native_hooks', automatic: ['pre_action', 'action_result', 'session_end'], install_surface: 'mcp' },
+  { client: 'cursor', capability_level: 'mcp', automatic: ['mcp_tool_calls'], install_surface: 'mcp' },
+  { client: 'composer', capability_level: 'mcp', automatic: ['mcp_tool_calls'], install_surface: 'mcp' },
+  { client: 'cline', capability_level: 'mcp', automatic: ['mcp_tool_calls'], install_surface: 'mcp' },
+  { client: 'windsurf', capability_level: 'mcp', automatic: ['mcp_tool_calls'], install_surface: 'mcp' },
+  { client: 'codex', capability_level: 'governed_wrapper', automatic: ['wrapped_pre_action', 'wrapped_result', 'wrapped_outcome'], install_surface: 'runner' },
+  { client: 'opencode', capability_level: 'governed_wrapper', automatic: ['wrapped_pre_action', 'wrapped_result', 'wrapped_outcome'], install_surface: 'runner' },
+  { client: 'hermes', capability_level: 'event_contract', automatic: ['mapped_harness_events'], install_surface: 'addon' },
+  { client: 'openclaw', capability_level: 'event_contract', automatic: ['mapped_harness_events'], install_surface: 'addon' },
+  { client: 'gemini', capability_level: 'governed_wrapper', automatic: ['wrapped_pre_action', 'wrapped_result', 'wrapped_outcome'], install_surface: 'runner' },
+  { client: 'grok', capability_level: 'governed_wrapper', automatic: ['wrapped_pre_action', 'wrapped_result', 'wrapped_outcome'], install_surface: 'runner' },
+  { client: 'deepseek', capability_level: 'governed_wrapper', automatic: ['wrapped_pre_action', 'wrapped_result', 'wrapped_outcome'], install_surface: 'runner' },
+  { client: 'qwen', capability_level: 'governed_wrapper', automatic: ['wrapped_pre_action', 'wrapped_result', 'wrapped_outcome'], install_surface: 'runner' },
+  { client: 'kimi', capability_level: 'governed_wrapper', automatic: ['wrapped_pre_action', 'wrapped_result', 'wrapped_outcome'], install_surface: 'runner' },
+  { client: 'minimax', capability_level: 'governed_wrapper', automatic: ['wrapped_pre_action', 'wrapped_result', 'wrapped_outcome'], install_surface: 'runner' },
+  { client: 'glm', capability_level: 'governed_wrapper', automatic: ['wrapped_pre_action', 'wrapped_result', 'wrapped_outcome'], install_surface: 'runner' },
+  { client: 'custom', capability_level: 'event_contract', automatic: [], install_surface: 'event_contract' },
+]);
 
 function sourceClient() {
   const raw = String(process.env.MARROW_CLIENT || process.env.MARROW_HARNESS || process.env.MARROW_AGENT_CLIENT || '').trim().toLowerCase().replace(/\s+/g, '-').replace(/^@/, '');
@@ -15,6 +35,7 @@ function sourceClient() {
     claude_code: 'claude-code',
     'claude-code': 'claude-code',
     cursor: 'cursor',
+    composer: 'composer',
     windsurf: 'windsurf',
     openclaw: 'openclaw',
     codex: 'codex',
@@ -429,9 +450,11 @@ function upsertClaudeHooks(settingsPath) {
     : {};
   const postToolUse = Array.isArray(hooks.PostToolUse) ? [...hooks.PostToolUse] : [];
   const userPromptSubmit = Array.isArray(hooks.UserPromptSubmit) ? [...hooks.UserPromptSubmit] : [];
+  const stop = Array.isArray(hooks.Stop) ? [...hooks.Stop] : [];
 
   const hasPost = postToolUse.some((entry) => JSON.stringify(entry).includes('npx -y @getmarrow/mcp hook'));
   const hasPrompt = userPromptSubmit.some((entry) => JSON.stringify(entry).includes('npx -y @getmarrow/mcp context-hook'));
+  const hasStop = stop.some((entry) => JSON.stringify(entry).includes('npx -y @getmarrow/mcp session-hook'));
 
   if (!hasPost) {
     postToolUse.push({
@@ -444,14 +467,67 @@ function upsertClaudeHooks(settingsPath) {
       hooks: [{ type: 'command', command: 'npx -y @getmarrow/mcp context-hook' }],
     });
   }
+  if (!hasStop) {
+    stop.push({
+      hooks: [{ type: 'command', command: 'npx -y @getmarrow/mcp session-hook' }],
+    });
+  }
 
   settings.hooks = {
     ...hooks,
     PostToolUse: postToolUse,
     UserPromptSubmit: userPromptSubmit,
+    Stop: stop,
   };
 
   return JSON.stringify(settings, null, 2) + '\n';
+}
+
+function activationProfile(detection, plan, changes, client) {
+  const nativeHooks = detection.claudeCode && (plan.mode === 'mcp' || plan.mode === 'both');
+  const capabilityLevel = nativeHooks
+    ? 'native_hooks'
+    : plan.mode === 'sdk' || plan.mode === 'both'
+    ? 'sdk_passive_runtime'
+    : plan.mode === 'mcp'
+    ? 'mcp'
+    : 'event_contract';
+  const expectedHooks = capabilityLevel === 'native_hooks'
+    ? ['pre_action', 'action_result', 'session_end']
+    : capabilityLevel === 'sdk_passive_runtime'
+    ? ['pre_action', 'action_result', 'outcome_closure']
+    : capabilityLevel === 'mcp'
+    ? ['mcp_tool_calls']
+    : [];
+  const observedHooks = [];
+  const claudeConfig = safeRead(detection.paths.claudeSettings);
+  if (/getmarrow\/mcp context-hook/.test(claudeConfig)) observedHooks.push('pre_action');
+  if (/getmarrow\/mcp hook/.test(claudeConfig)) observedHooks.push('action_result');
+  if (/getmarrow\/mcp session-hook/.test(claudeConfig)) observedHooks.push('session_end');
+  if (exists(detection.paths.passiveRuntime) && /createPassiveRuntime/.test(safeRead(detection.paths.passiveRuntime))) {
+    for (const hook of ['pre_action', 'action_result', 'outcome_closure']) {
+      if (!observedHooks.includes(hook)) observedHooks.push(hook);
+    }
+  }
+  const mcpConfig = `${safeRead(detection.paths.mcpJson)}\n${safeRead(detection.paths.cursorMcp)}\n${claudeConfig}`;
+  if (capabilityLevel === 'mcp' && /@getmarrow\/mcp/.test(mcpConfig)) observedHooks.push('mcp_tool_calls');
+  const fingerprintMaterial = changes
+    .filter((change) => change.applied || change.already_present)
+    .map((change) => `${change.label}:${crypto.createHash('sha256').update(safeRead(change.path)).digest('hex')}`)
+    .sort()
+    .join('|');
+  const configFingerprint = crypto.createHash('sha256')
+    .update(`${client}:${capabilityLevel}:${expectedHooks.join(',')}:${fingerprintMaterial}`)
+    .digest('hex');
+  return {
+    adapter_version: INSTALLER_ADAPTER_VERSION,
+    capability_level: capabilityLevel,
+    config_fingerprint: configFingerprint,
+    expected_hooks: expectedHooks,
+    observed_hooks: observedHooks,
+    complete: expectedHooks.every((hook) => observedHooks.includes(hook)),
+    exact_fix: expectedHooks.every((hook) => observedHooks.includes(hook)) ? null : 'npx @getmarrow/install --repair',
+  };
 }
 
 function upsertMcpServerConfig(filePath) {
@@ -733,7 +809,19 @@ async function runSelfTest(options) {
   const installValueMoment = buildInstallValueMoment(firstValueSignal, status, runtime, performance, firstValue, tokenValueProof);
   let activationReceipt = null;
   let activationVerified = false;
+  let activationProfileReceipt = null;
   if (options.activation) {
+    const activationAdapterVersion = options.activation.adapter_version || INSTALLER_ADAPTER_VERSION;
+    const activationCapabilityLevel = options.activation.capability_level || 'event_contract';
+    const activationExpectedHooks = Array.isArray(options.activation.expected_hooks) ? options.activation.expected_hooks : [];
+    const activationConfigFingerprint = options.activation.config_fingerprint || crypto.createHash('sha256')
+      .update(JSON.stringify({
+        harness: options.activation.harness || options.client || 'custom',
+        install_surface: options.activation.install_surface || 'unknown',
+        adapter_version: activationAdapterVersion,
+        expected_hooks: activationExpectedHooks,
+      }))
+      .digest('hex');
     activationReceipt = firstValue && firstValue.activation_receipt;
     const receiptValid = activationReceipt
       && typeof activationReceipt === 'object'
@@ -750,7 +838,35 @@ async function runSelfTest(options) {
     if (!receiptValid) {
       throw new Error('activation receipt did not verify the exact self-test decision, agent, runtime gate, and closed successful outcome');
     }
-    activationVerified = Boolean(firstValue.active && runtimeGateVerified(runtime) && (status.enabled ?? status.ok));
+    activationProfileReceipt = await requestJson(`${baseUrl}/v1/agent/integrations/events`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        event_id: `activation-${activationConfigFingerprint.slice(0, 32)}`,
+        event_type: 'pre_action_checked',
+        harness: options.activation.harness,
+        agent_id: options.agentId,
+        session_id: headers['x-marrow-session-id'],
+        workflow_id: `activation-${activationConfigFingerprint.slice(0, 32)}`,
+        correlation_id: activationConfigFingerprint.slice(0, 32),
+        adapter_version: activationAdapterVersion,
+        capability_level: activationCapabilityLevel,
+        config_fingerprint: activationConfigFingerprint,
+        expected_hooks: activationExpectedHooks,
+        observed_hook: 'pre_action',
+        action: 'passive integration activation verified',
+        outcome_state: 'closed',
+        success: true,
+        occurred_at: new Date().toISOString(),
+      }),
+    });
+    activationVerified = Boolean(
+      firstValue.active
+      && runtimeGateVerified(runtime)
+      && (status.enabled ?? status.ok)
+      && activationProfileReceipt?.accepted === true
+      && (options.activation.complete ?? options.activation.capture_verified === true),
+    );
     if (!activationVerified) {
       throw new Error('activation prerequisites were not all verified by the server');
     }
@@ -769,6 +885,8 @@ async function runSelfTest(options) {
     runtime_before_you_act: runtime.before_you_act || null,
     activation_verified: activationVerified,
     activation_receipt: activationReceipt,
+    activation_profile_receipt: activationProfileReceipt,
+    activation_coverage: status.activation_coverage || firstValue.activation_coverage || null,
     first_value: firstValue && firstValue.ok !== false ? firstValue : null,
     first_value_signal: firstValueSignal,
     install_value_moment: installValueMoment,
@@ -1032,6 +1150,7 @@ async function install(options) {
   const client = detectedClient(detection);
   options.client = client;
   if (!options.agentId) options.agentId = stableAgentId(detection.root, client);
+  const profile = activationProfile(detection, plan, changes, client);
   options.activation = options.activate ? {
     harness: client,
     agent_id: options.agentId,
@@ -1041,7 +1160,13 @@ async function install(options) {
       .filter((change) => change.changed && change.applied && /hook|runtime|rule|instruction|config/i.test(change.label))
       .map((change) => change.label)
       .slice(0, 20),
-    capture_verified: changes.every((change) => change.applied),
+    capture_verified: changes.every((change) => change.applied || change.already_present),
+    adapter_version: profile.adapter_version,
+    capability_level: profile.capability_level,
+    config_fingerprint: profile.config_fingerprint,
+    expected_hooks: profile.expected_hooks,
+    observed_hooks: profile.observed_hooks,
+    complete: profile.complete,
     intervention_verified: false,
     closure_verified: false,
   } : null;
@@ -1098,6 +1223,7 @@ async function install(options) {
       agent_id: options.agentId,
       server_confirmed: Boolean(selfTest.activation_verified),
       receipt: selfTest.activation_receipt || null,
+      profile,
     },
     changes,
     doctor: {
@@ -1150,4 +1276,6 @@ module.exports = {
   buildInstallValueMoment,
   buildTokenValueProof,
   stableAgentId,
+  activationProfile,
+  HARNESS_CAPABILITY_REGISTRY,
 };
