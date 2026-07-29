@@ -32,7 +32,7 @@ function writeSdkLock(root, declaredSpec = '^3.7.49') {
       'node_modules/@getmarrow/sdk': {
         version: '3.7.49',
         resolved: 'https://registry.npmjs.org/@getmarrow/sdk/-/sdk-3.7.49.tgz',
-        integrity: 'sha512-t+KpL61NmmreIGI2qKhp+6EnEEiXVmc/9a7KMog+ZlHafUtnvDBGNe4udTGCHfrh9q1GKj3MkJaOXjYKoP5CkQ==',
+        integrity: 'sha512-9a6pWWACubWTmulG7TwwgMNP/iSzoEh4wCH2oWUyO8XHeD2Eokj1GXrkCyX86md3bV7vGX6kyllfswZDlGj6WA==',
       },
     },
   }));

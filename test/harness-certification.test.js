@@ -17,7 +17,7 @@ const {
 
 const NATIVE_HOOK_MATCHER = 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*';
 const MCP_ACTION_RESULT_HOOK_COMMAND = 'npx -y @getmarrow/mcp@3.9.50 hook';
-const SDK_INTEGRITY = 'sha512-t+KpL61NmmreIGI2qKhp+6EnEEiXVmc/9a7KMog+ZlHafUtnvDBGNe4udTGCHfrh9q1GKj3MkJaOXjYKoP5CkQ==';
+const SDK_INTEGRITY = 'sha512-9a6pWWACubWTmulG7TwwgMNP/iSzoEh4wCH2oWUyO8XHeD2Eokj1GXrkCyX86md3bV7vGX6kyllfswZDlGj6WA==';
 
 function writeSdkLock(root, declaredSpec = '^3.7.49') {
   fs.writeFileSync(path.join(root, 'package-lock.json'), JSON.stringify({
