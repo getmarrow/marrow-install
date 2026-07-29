@@ -511,10 +511,13 @@ function reconcileMarrowCommandHook(settings, eventName, subcommand, command, ma
     }
     const remaining = [];
     for (const hook of entry.hooks) {
-      if (hook && typeof hook === 'object' && !Array.isArray(hook)
-        && hook.type === 'command' && marrowHookSubcommand(hook.command) === subcommand) {
+      const detected = hook && typeof hook === 'object' && !Array.isArray(hook)
+        && hook.type === 'command' ? marrowHookSubcommand(hook.command) : null;
+      if (detected) {
         const exactMatcher = matcher == null ? entry.matcher === undefined : entry.matcher === matcher;
-        if (!preferredHandler || (hook.command === command && exactMatcher)) preferredHandler = hook;
+        if (detected === subcommand && (!preferredHandler || (hook.command === command && exactMatcher))) {
+          preferredHandler = hook;
+        }
         continue;
       }
       remaining.push(hook);
