@@ -169,6 +169,14 @@ test('Claude fingerprint includes unexpected legacy and duplicate active handler
       hooks: [{ type: 'command', command: 'npx -y @getmarrow/mcp pre-action-hook', timeout: 99 }],
     });
     assert.notEqual(claudeNativeHookFingerprint(settings), certified);
+
+    settings.hooks.PreToolUse.pop();
+    const expectedOnly = claudeNativeHookFingerprint(settings);
+    settings.hooks.PreToolUse.push({
+      matcher: NATIVE_HOOK_MATCHER,
+      hooks: [{ type: 'command', command: 'npx -y @getmarrow/mcp@3.9.49 hook', timeout: 77 }],
+    });
+    assert.notEqual(claudeNativeHookFingerprint(settings), expectedOnly);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
