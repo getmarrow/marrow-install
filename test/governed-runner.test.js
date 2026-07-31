@@ -147,7 +147,7 @@ test('governed runner attaches stable client attribution from env and CLI', () =
     assert.equal(sourceClient(envParsed.options.client), 'qwen');
     assert.equal(headers(envParsed.options)['X-Marrow-Client'], 'qwen');
     assert.equal(headers(envParsed.options)['X-Marrow-Package'], '@getmarrow/install');
-    assert.equal(headers(envParsed.options)['X-Marrow-Package-Version'], '0.1.34');
+    assert.equal(headers(envParsed.options)['X-Marrow-Package-Version'], '0.1.35');
 
     const cliParsed = parseArgs(['run', '--client', 'Hermes', '--agent', 'hermes-agent', '--', 'hermes', '/goal']);
     const meta = sourceMeta(cliParsed.options, 'runtime', {
@@ -258,8 +258,8 @@ test('fleet panel summarizes operator-critical account state', () => {
         publish_gate: { status: 'warn' },
         merge_gate: { status: 'enforce' },
         client_update: {
-          installed_version: '0.1.34',
-          latest_version: '0.1.35',
+          installed_version: '0.1.35',
+          latest_version: '0.1.36',
           version_status: 'behind',
           update_available: true,
           notification_state: 'recommended',
@@ -314,7 +314,7 @@ test('fleet panel summarizes operator-critical account state', () => {
   assert.match(panel, /Backpressure\/capacity status: ok/);
   assert.match(panel, /Recent decisions:/);
   assert.match(panel, /Degraded hooks: command_outcome/);
-  assert.match(panel, /Marrow client update: recommended; installed=0\.1\.34; latest=0\.1\.35; operator approval required/);
+  assert.match(panel, /Marrow client update: recommended; installed=0\.1\.35; latest=0\.1\.36; operator approval required/);
   assert.match(panel, /Deploy\/publish\/merge gates: deploy=enforce publish=warn merge=enforce/);
   assert.match(panel, /Press Enter to inspect agent/);
   assert.match(panel, /Copy exact fix command:/);
@@ -326,8 +326,8 @@ test('status panel makes an available update actionable without silently applyin
   const panel = statusPanel({
     health: 'healthy',
     client_update: {
-      installed_version: '0.1.34',
-      latest_version: '0.1.35',
+      installed_version: '0.1.35',
+      latest_version: '0.1.36',
       version_status: 'behind',
       update_available: true,
       notification_state: 'recommended',
@@ -336,7 +336,7 @@ test('status panel makes an available update actionable without silently applyin
     },
   });
 
-  assert.match(panel, /Client update: recommended; installed=0\.1\.34; latest=0\.1\.35/);
+  assert.match(panel, /Client update: recommended; installed=0\.1\.35; latest=0\.1\.36/);
   assert.match(panel, /Automatic notification: yes; automatic local mutation: no/);
   assert.match(panel, /Update: npx @getmarrow\/install@latest --repair/);
   assert.match(panel, /Verify: npx @getmarrow\/install@latest doctor/);
