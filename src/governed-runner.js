@@ -5,6 +5,15 @@ const os = require('node:os');
 const path = require('node:path');
 const readline = require('node:readline');
 const { version: INSTALLER_PACKAGE_VERSION } = require('../package.json');
+const {
+  actionBinding,
+  closeActionPermit,
+  issueActionPermit,
+  readEnforcementCoverage,
+  recordEnforcementHeartbeat,
+  verifyActionPermit,
+} = require('./enforcement-client');
+const { startGovernanceSidecar } = require('./governance-sidecar');
 
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const HIGH_RISK_TERMS = /\b(deploy|prod|production|publish|release|merge|migration|migrate|secret|token|key|cloudflare|wrangler|npm publish|gh pr merge|git push|terraform apply|kubectl apply|delete|destroy|drop)\b/i;
@@ -17,6 +26,10 @@ function usage() {
   npx @getmarrow/install gate "deploy production worker"
   npx @getmarrow/install proof --decision-id <id> --success --summary "smoke passed"
   npx @getmarrow/install status
+  npx @getmarrow/install permit --action "deploy production" --type deploy
+  MARROW_ACTION_PERMIT=... npx @getmarrow/install verify-permit --action "deploy production" --type deploy
+  npx @getmarrow/install coverage
+  npx @getmarrow/install sidecar
   npx @getmarrow/install govern
   npx @getmarrow/install govern --no-interactive
   npx @getmarrow/install fleet
@@ -29,6 +42,10 @@ Commands:
   gate      Check Marrow runtime/gate for an action without running a command
   proof     Commit an outcome/proof for an existing decision
   status    Read /v1/agent/status
+  permit    Issue a short-lived action-bound permit after Marrow policy evaluation
+  verify-permit Verify a permit before CI, deploy, publish, merge, migration, or credential access
+  coverage  Show enforcement, hook-health, closure, and bypass coverage
+  sidecar   Run the loopback-only Marrow governance sidecar
   govern    Interactive setup TUI when run in a terminal; text panel in CI/non-TTY
   fleet     Fleet operator TUI for live agents, workflows, gates, proof debt, and exact fixes
   integrations List Marrow-supported harness add-ons
@@ -45,6 +62,9 @@ Options:
   --fail-open             If Marrow is unreachable, run anyway and mark telemetry degraded
   --fail-closed           If Marrow is unreachable, block the command
   --owner-approved <ref>  Owner approval reference for review-required gates
+  --permit <token>        Short-lived action permit. Prefer MARROW_ACTION_PERMIT
+  --target <text>         Protected target binding, such as repository/environment
+  --sidecar-port <port>   Loopback sidecar port. Default: ephemeral
   --proof-file <path>     JSON proof to include on outcome commit
   --client <label>        Harness/client label. Defaults to MARROW_CLIENT, MARROW_HARNESS, or MARROW_AGENT_CLIENT
   --base-url <url>        Marrow API base URL
@@ -252,6 +272,9 @@ function parseBaseOptions(argv, startIndex = 0) {
     action: '',
     client: sourceClient(),
     interactive: null,
+    permit: process.env.MARROW_ACTION_PERMIT || '',
+    target: process.env.MARROW_ACTION_TARGET || '',
+    sidecarPort: process.env.MARROW_SIDECAR_PORT || '0',
   };
   let i = startIndex;
   for (; i < argv.length; i += 1) {
@@ -270,6 +293,9 @@ function parseBaseOptions(argv, startIndex = 0) {
       options.failClosed = true;
       options.failOpen = false;
     } else if (arg === '--owner-approved') options.ownerApproval = argv[++i] || options.ownerApproval;
+    else if (arg === '--permit') options.permit = argv[++i] || options.permit;
+    else if (arg === '--target') options.target = argv[++i] || options.target;
+    else if (arg === '--sidecar-port') options.sidecarPort = argv[++i] || options.sidecarPort;
     else if (arg === '--proof-file') options.proofFile = argv[++i] || options.proofFile;
     else if (arg === '--client' || arg === '--harness') options.client = sourceClient(argv[++i] || options.client);
     else if (arg === '--base-url') options.baseUrl = argv[++i] || options.baseUrl;
@@ -311,6 +337,17 @@ function parseArgs(argv) {
     return { command, options: { ...parsed.options, action } };
   }
 
+  if (command === 'permit' || command === 'verify-permit') {
+    const parsed = parseBaseOptions(argv, 1);
+    const action = parsed.options.action || argv.slice(parsed.index).join(' ');
+    if (parsed.options.help) return { command: 'help' };
+    if (!action) throw new Error(`${command} requires --action or an action string`);
+    if (command === 'verify-permit' && !parsed.options.permit) {
+      throw new Error('verify-permit requires MARROW_ACTION_PERMIT or --permit');
+    }
+    return { command, options: { ...parsed.options, action } };
+  }
+
   if (command === 'proof') {
     const parsed = parseBaseOptions(argv, 1);
     const options = { ...parsed.options, decisionId: '', success: true, summary: '', outcome: '' };
@@ -328,7 +365,7 @@ function parseArgs(argv) {
     return { command, options };
   }
 
-  if (command === 'status' || command === 'govern' || command === 'fleet' || command === 'hermes' || command === 'openclaw' || command === 'integrations') {
+  if (command === 'status' || command === 'govern' || command === 'fleet' || command === 'hermes' || command === 'openclaw' || command === 'integrations' || command === 'coverage' || command === 'sidecar') {
     const parsed = parseBaseOptions(argv, 1);
     if (parsed.options.help) return { command: 'help' };
     return { command, options: parsed.options };
@@ -525,6 +562,21 @@ function runChild(command, env = process.env) {
   });
 }
 
+function scopedExecutionEnv(permit) {
+  const env = {};
+  for (const [name, value] of Object.entries(process.env)) {
+    if (/^MARROW_(?:API_KEY|KEY(?:_|$)|DASHBOARD|SESSION_TOKEN|SIDECAR_TOKEN|OWNER_APPROVAL)/.test(name)) continue;
+    if (name === 'ACTION_PERMIT_SIGNING_KEY') continue;
+    env[name] = value;
+  }
+  if (permit?.permit) {
+    env.MARROW_ACTION_PERMIT = permit.permit;
+    env.MARROW_ACTION_PERMIT_ID = String(permit.permit_id || '');
+    env.MARROW_GOVERNANCE_VERIFIED = 'true';
+  }
+  return env;
+}
+
 async function createDecision(options, action, type) {
   const meta = sourceMeta(options, 'think', { action, action_type: type });
   return requestJson(options, 'POST', '/v1/agent/think', {
@@ -561,6 +613,8 @@ async function runGoverned(parsed) {
   let runtime = null;
   let decision = null;
   let decisionId = '';
+  let actionPermit = null;
+  const surfaces = inferSurfaces(commandText || action);
 
   try {
     runtime = await preflightRuntime(options, action, type, commandText);
@@ -580,6 +634,26 @@ async function runGoverned(parsed) {
     }
     const think = await createDecision(options, action, type);
     decisionId = think.decision_id || think.id || think.decision?.id || '';
+    actionPermit = await issueActionPermit(requestJson, options, {
+      action,
+      type,
+      target: options.target || commandText,
+      surfaces,
+      decisionId,
+      gateReceiptId: decision?.receiptId || '',
+      ownerApproval: options.ownerApproval,
+      proofRequirements: decision?.proofPack?.required_fields || decision?.proofPack?.missing || [],
+    });
+    if (!actionPermit?.permit || !actionPermit?.permit_id) {
+      throw new Error('Marrow did not issue a valid action permit.');
+    }
+    const verified = await verifyActionPermit(requestJson, options, {
+      action,
+      type,
+      target: options.target || commandText,
+      permit: actionPermit.permit,
+    });
+    if (!verified?.verified) throw new Error('Marrow action permit verification failed.');
   } catch (error) {
     if (options.failOpen || (!risky && !options.failClosed)) {
       process.stderr.write(`Marrow degraded: ${error.message}. Continuing because fail-open/non-risky policy allows it.\n`);
@@ -597,7 +671,8 @@ async function runGoverned(parsed) {
     }
   }
 
-  const child = await runChild(childCommand);
+  const childEnv = scopedExecutionEnv(actionPermit);
+  const child = await runChild(childCommand, childEnv);
   const success = child.exitCode === 0;
   const proof = defaultProof({ options, action, childCommand, exitCode: child.exitCode, success });
   const outcome = success
@@ -613,6 +688,21 @@ async function runGoverned(parsed) {
     }
   }
 
+  let permitClosed = null;
+  if (actionPermit?.permit) {
+    try {
+      permitClosed = await closeActionPermit(requestJson, options, {
+        permit: actionPermit.permit,
+        permitId: actionPermit.permit_id,
+        decisionId,
+        success,
+        evidence: proof,
+      });
+    } catch (error) {
+      process.stderr.write(`Marrow permit close failed: ${error.message}\n`);
+    }
+  }
+
   return {
     ok: success,
     blocked: false,
@@ -623,7 +713,65 @@ async function runGoverned(parsed) {
     decision,
     decision_id: decisionId,
     outcome_committed: Boolean(commit),
+    permit_id: actionPermit?.permit_id || null,
+    permit_verified: Boolean(actionPermit?.permit),
+    permit_closed: Boolean(permitClosed),
   };
+}
+
+async function permitOnly(parsed) {
+  const { options } = parsed;
+  const action = redact(options.action);
+  const type = options.type || inferType(action);
+  const runtime = await preflightRuntime(options, action, type, options.target || action);
+  const decision = gateDecision(runtime);
+  if (shouldBlock(decision, options)) {
+    return { ok: false, blocked: true, exitCode: 12, decision, message: decision.exactNextAction };
+  }
+  const think = await createDecision(options, action, type);
+  const decisionId = think.decision_id || think.id || think.decision?.id || '';
+  const result = await issueActionPermit(requestJson, options, {
+    action,
+    type,
+    target: options.target || action,
+    surfaces: inferSurfaces(options.target || action),
+    decisionId,
+    gateReceiptId: decision.receiptId,
+    ownerApproval: options.ownerApproval,
+    proofRequirements: decision?.proofPack?.required_fields || decision?.proofPack?.missing || [],
+  });
+  return { ok: true, decision_id: decisionId, ...result };
+}
+
+async function verifyPermitOnly(parsed) {
+  const { options } = parsed;
+  const action = redact(options.action);
+  const type = options.type || inferType(action);
+  const result = await verifyActionPermit(requestJson, options, {
+    action,
+    type,
+    target: options.target || action,
+    permit: options.permit,
+  });
+  return { ok: Boolean(result?.verified), ...result };
+}
+
+async function coverageOnly(parsed) {
+  return readEnforcementCoverage(requestJson, parsed.options);
+}
+
+async function sidecarOnly(parsed) {
+  const options = parsed.options;
+  const sidecar = await startGovernanceSidecar(options, {
+    permit: (input) => issueActionPermit(requestJson, options, input),
+    verify: (input) => verifyActionPermit(requestJson, options, input),
+    close: (input) => closeActionPermit(requestJson, options, input),
+    coverage: () => readEnforcementCoverage(requestJson, options),
+    heartbeat: (input) => recordEnforcementHeartbeat(requestJson, options, input),
+  });
+  process.stdout.write(`Marrow governance sidecar active on 127.0.0.1:${sidecar.port}. Press Ctrl+C to stop.\n`);
+  await new Promise((resolve) => sidecar.server.once('close', resolve));
+  return { ok: true };
 }
 
 async function gateOnly(parsed) {
@@ -1859,6 +2007,10 @@ async function runCli(argv) {
   else if (parsed.command === 'gate') result = await gateOnly(parsed);
   else if (parsed.command === 'proof') result = await proofOnly(parsed);
   else if (parsed.command === 'status') result = await statusOnly(parsed);
+  else if (parsed.command === 'permit') result = await permitOnly(parsed);
+  else if (parsed.command === 'verify-permit') result = await verifyPermitOnly(parsed);
+  else if (parsed.command === 'coverage') result = await coverageOnly(parsed);
+  else if (parsed.command === 'sidecar') result = await sidecarOnly(parsed);
   else if (parsed.command === 'govern') {
     await runGovernInteractive(parsed.options);
     return;
@@ -1901,6 +2053,12 @@ module.exports = {
   renderGovernTui,
   canUseInteractive,
   runGoverned,
+  scopedExecutionEnv,
+  permitOnly,
+  verifyPermitOnly,
+  coverageOnly,
+  sidecarOnly,
+  actionBinding,
   gateOnly,
   proofOnly,
   statusOnly,
