@@ -18,6 +18,7 @@ const { startGovernanceSidecar } = require('./governance-sidecar');
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const HIGH_RISK_TERMS = /\b(deploy|prod|production|publish|release|merge|migration|migrate|secret|token|key|cloudflare|wrangler|npm publish|gh pr merge|git push|terraform apply|kubectl apply|delete|destroy|drop)\b/i;
 const PROTECTED_COMMAND_PATTERNS = [
+  /\b(?:npm|pnpm|yarn)\b[^\n;&|]{0,160}\b(?:publish|unpublish|deprecate|dist-tag\s+(?:add|rm)|owner\s+(?:add|rm)|access\s+set|token\s+(?:create|revoke))\b/i,
   /\bgit\b[^\n;&|]{0,240}\b(?:push|merge|commit|rebase|reset|tag)\b/i,
   /\bgh\b[^\n;&|]{0,160}\b(?:pr\s+merge|release\s+(?:create|delete)|repo\s+(?:archive|delete))\b/i,
   /\bkubectl\b[^\n;&|]{0,160}\b(?:apply|create|delete|edit|patch|replace|rollout|scale|set)\b/i,
@@ -25,6 +26,7 @@ const PROTECTED_COMMAND_PATTERNS = [
   /\bpulumi\b[^\n;&|]{0,160}\b(?:up|destroy|import|refresh|stack\s+rm)\b/i,
   /\bhelm\b[^\n;&|]{0,160}\b(?:install|upgrade|uninstall|rollback)\b/i,
   /\b(?:docker|podman)\b[^\n;&|]{0,160}\bpush\b/i,
+  /\bwrangler\b[^\n;&|]{0,240}\b(?:deploy|delete|rollback|execute|apply|put|bulk|secret)\b/i,
 ];
 const PROTECTED_ACTION_TYPES = new Set([
   'credential',
@@ -188,7 +190,7 @@ function inferType(text) {
   const value = String(text || '').toLowerCase();
   if (/\b(deploy|wrangler|cloudflare|production|prod|release)\b/.test(value)
     || /\b(?:kubectl|terraform|pulumi|helm)\b/.test(value) && isProtectedCommand(value)) return 'deploy';
-  if (/\b(publish|npm publish)\b/.test(value)) return 'publish';
+  if (/\b(publish|unpublish|deprecate|npm publish)\b/.test(value)) return 'publish';
   if (/\b(merge|gh pr merge)\b/.test(value)
     || /\bgit\b[^\n;&|]{0,240}\bpush\b/.test(value)) return 'merge';
   if (/\b(migration|migrate|schema|d1 execute|drop table)\b/.test(value)) return 'migration';
