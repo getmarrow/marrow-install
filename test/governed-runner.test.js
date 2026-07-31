@@ -388,6 +388,19 @@ test('global-option and infrastructure command forms remain protected', () => {
     ['rclone copy artifact.tar.gz remote:releases', 'general'],
     ['op item share production-credential', 'deploy'],
     ['rm -rf generated-release', 'deploy'],
+    ['npm login', 'general'],
+    ['git worktree remove scratch-copy', 'general'],
+    ['gh run cancel 12345', 'general'],
+    ['kubectl certificate approve agent-csr', 'deploy'],
+    ['terraform state replace-provider old/provider new/provider', 'deploy'],
+    ['curl --json {"enabled":true} https://example.invalid/items', 'general'],
+    ['curl --data-ascii enabled=true https://example.invalid/items', 'general'],
+    ["psql --command 'CALL rotate_cache()' appdb", 'general'],
+    ['redis-cli EVALSHA abcdef123456 0', 'general'],
+    ['gcloud storage rsync ./dist gs://example-bucket/releases', 'general'],
+    ['op item move shared-item archive-vault', 'general'],
+    ['/usr/bin/rm -rf generated-cache', 'general'],
+    ['kubectl --context ' + 'ctxvalue-'.repeat(1200) + ' apply -f manifest.yaml', 'deploy'],
   ];
   for (const [command, expectedType] of cases) {
     assert.equal(inferType(command), expectedType);
@@ -427,10 +440,39 @@ test('adjacent protected command forms never start a child during a governance o
     ['curl', ['-T', 'artifact.tar.gz', 'https://uploads.example.invalid/artifact']],
     ['aws', ['s3', 'cp', 'artifact.tar.gz', 's3://bucket/artifact.tar.gz']],
     ['kubectl', ['--context', 'production-'.repeat(30), 'apply', '-f', 'deployment.yaml']],
+    ['npm', ['login']],
+    ['git', ['worktree', 'remove', 'scratch-copy']],
+    ['gh', ['run', 'cancel', '12345']],
+    ['kubectl', ['certificate', 'approve', 'agent-csr']],
+    ['terraform', ['state', 'replace-provider', 'old/provider', 'new/provider']],
+    ['curl', ['--json', '{"enabled":true}', 'https://example.invalid/items']],
+    ['psql', ['--command', 'CALL rotate_cache()', 'appdb']],
+    ['redis-cli', ['EVALSHA', 'abcdef123456', '0']],
+    ['gcloud', ['storage', 'rsync', './dist', 'gs://example-bucket/releases']],
+    ['op', ['item', 'move', 'shared-item', 'archive-vault']],
+    ['rm', ['-rf', 'generated-cache']],
+    ['kubectl', ['--context', 'ctxvalue-'.repeat(1200), 'apply', '-f', 'manifest.yaml']],
+    ['npm', ['profile', 'enable-2fa', 'auth-only']],
+    ['gh', ['repo', 'fork', 'acme/app', '--clone=false']],
+    ['flux', ['reconcile', 'source', 'git', 'platform']],
+    ['nomad', ['job', 'run', 'platform.nomad']],
+    ['cdk', ['deploy', 'PlatformStack']],
+    ['ansible-playbook', ['deploy.yml']],
+    ['curl', ['--form-string', 'name=value', 'https://example.invalid/items']],
+    ['wget', ['--body-data', 'enabled=true', 'https://example.invalid/items']],
+    ['redis-cli', ['FUNCTION', 'LOAD', 'REPLACE', '#!lua name=lib']],
+    ['gsutil', ['cp', 'artifact.tar.gz', 'gs://example-bucket/releases/']],
+    ['mc', ['cp', 'artifact.tar.gz', 'production/releases/']],
+    ['oci', ['os', 'object', 'put', '--bucket-name', 'releases', '--file', 'artifact.tar.gz']],
+    ['pass', ['insert', 'production/token']],
+    ['unlink', ['generated-cache/file']],
+    ['xargs', ['/bin/rm']],
+    ['dd', ['if=/dev/zero', 'of=generated-cache/image.bin', 'bs=1', 'count=1']],
+    ['git', ['-c', 'credential.helper=x'.repeat(600), 'push', 'origin', 'master']],
   ];
   try {
-    for (const [name, args] of cases) {
-      const directory = path.join(root, name);
+    for (const [index, [name, args]] of cases.entries()) {
+      const directory = path.join(root, `${index}-${name}`);
       fs.mkdirSync(directory);
       const marker = path.join(directory, 'executed');
       const executable = path.join(directory, name);

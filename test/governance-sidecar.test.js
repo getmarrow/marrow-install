@@ -75,3 +75,59 @@ test('sidecar rejects a symlinked active state file without overwriting its targ
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('sidecar rejects an existing state file with group or world access', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-sidecar-mode-'));
+  const stateDir = path.join(root, 'state');
+  const prior = process.env.MARROW_SIDECAR_STATE_DIR;
+  fs.mkdirSync(stateDir, { mode: 0o700 });
+  fs.writeFileSync(path.join(stateDir, 'active.json'), '{"stale":true}\n', { mode: 0o644 });
+  fs.chmodSync(path.join(stateDir, 'active.json'), 0o644);
+  process.env.MARROW_SIDECAR_STATE_DIR = stateDir;
+
+  try {
+    await assert.rejects(
+      startGovernanceSidecar({ apiKey: 'test-key', sidecarPort: 0 }, {
+        permit: async () => ({ permit: 'opaque', permit_id: 'permit-1' }),
+        verify: async () => ({ verified: true }),
+        close: async () => ({ closed: true }),
+        coverage: async () => ({ status: 'pass' }),
+        heartbeat: async () => ({ accepted: true }),
+      }),
+      /permissions must be 0600 or stricter/,
+    );
+  } finally {
+    if (prior === undefined) delete process.env.MARROW_SIDECAR_STATE_DIR;
+    else process.env.MARROW_SIDECAR_STATE_DIR = prior;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('sidecar rejects symlinked state directory components before creating outside state', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-sidecar-component-'));
+  const outsideDir = path.join(root, 'outside');
+  const lexicalDir = path.join(root, 'lexical');
+  const prior = process.env.MARROW_SIDECAR_STATE_DIR;
+  fs.mkdirSync(outsideDir, { mode: 0o700 });
+  fs.mkdirSync(lexicalDir, { mode: 0o700 });
+  fs.symlinkSync(outsideDir, path.join(lexicalDir, 'linked'));
+  process.env.MARROW_SIDECAR_STATE_DIR = path.join(lexicalDir, 'linked', 'state');
+
+  try {
+    await assert.rejects(
+      startGovernanceSidecar({ apiKey: 'test-key', sidecarPort: 0 }, {
+        permit: async () => ({ permit: 'opaque', permit_id: 'permit-1' }),
+        verify: async () => ({ verified: true }),
+        close: async () => ({ closed: true }),
+        coverage: async () => ({ status: 'pass' }),
+        heartbeat: async () => ({ accepted: true }),
+      }),
+      /symlinked path components/,
+    );
+    assert.equal(fs.existsSync(path.join(outsideDir, 'state')), false);
+  } finally {
+    if (prior === undefined) delete process.env.MARROW_SIDECAR_STATE_DIR;
+    else process.env.MARROW_SIDECAR_STATE_DIR = prior;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

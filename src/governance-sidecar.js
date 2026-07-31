@@ -14,9 +14,27 @@ function currentUid() {
   return typeof process.getuid === 'function' ? process.getuid() : null;
 }
 
-function assertPrivateStateDirectory(directory) {
+function createPrivateDirectoryWithoutSymlinks(directory) {
   const resolved = path.resolve(directory);
-  fs.mkdirSync(resolved, { recursive: true, mode: 0o700 });
+  const parsed = path.parse(resolved);
+  let current = parsed.root;
+  for (const segment of resolved.slice(parsed.root.length).split(path.sep).filter(Boolean)) {
+    current = path.join(current, segment);
+    try {
+      fs.mkdirSync(current, { mode: 0o700 });
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+    }
+    const stat = fs.lstatSync(current);
+    if (stat.isSymbolicLink() || !stat.isDirectory() || fs.realpathSync(current) !== current) {
+      throw new Error('Sidecar state directory cannot contain symlinked path components.');
+    }
+  }
+  return resolved;
+}
+
+function assertPrivateStateDirectory(directory) {
+  const resolved = createPrivateDirectoryWithoutSymlinks(directory);
   const stat = fs.lstatSync(resolved);
   if (stat.isSymbolicLink() || !stat.isDirectory()) {
     throw new Error('Sidecar state directory must be a private real directory.');
@@ -43,6 +61,9 @@ function assertSafeStateFile(filePath) {
   }
   if (uid !== null && stat.uid !== uid) {
     throw new Error('Sidecar state file must be owned by the current user.');
+  }
+  if ((stat.mode & 0o077) !== 0) {
+    throw new Error('Sidecar state file permissions must be 0600 or stricter.');
   }
 }
 
