@@ -291,6 +291,7 @@ function fingerprint(value) {
 function npmTokenPaths(env = process.env) {
   const home = env.HOME || env.USERPROFILE || os.homedir();
   return {
+    home,
     openclawEnv: path.join(home, '.openclaw', '.env'),
     credentialFile: path.join(home, '.openclaw', 'credentials', 'npm-getmarrow-token.txt'),
     npmrc: path.join(home, '.npmrc'),
@@ -301,7 +302,14 @@ function inspectNpmTokenConfig(env = process.env) {
   const paths = npmTokenPaths(env);
   const openclawToken = readEnvVar(paths.openclawEnv, 'NPM_TOKEN');
   const credentialToken = readFirstLineSecret(paths.credentialFile);
-  const npmrcToken = readNpmrcToken(paths.npmrc);
+  let npmrcToken = '';
+  let unsafeNpmrcPath = false;
+  try {
+    assertDirectOwnerFile(paths.home, paths.npmrc, { allowMissing: true });
+    npmrcToken = readNpmrcToken(paths.npmrc);
+  } catch {
+    unsafeNpmrcPath = true;
+  }
   const sourceToken = openclawToken || credentialToken;
   const mismatch = Boolean(sourceToken && npmrcToken && fingerprint(sourceToken) !== fingerprint(npmrcToken));
   const missingNpmrcToken = Boolean(sourceToken && !npmrcToken);
@@ -310,15 +318,18 @@ function inspectNpmTokenConfig(env = process.env) {
     safe: {
       npm_token: {
         checked: true,
-        repairable: Boolean(sourceToken && (mismatch || missingNpmrcToken)),
+        repairable: Boolean(sourceToken && (mismatch || missingNpmrcToken) && !unsafeNpmrcPath),
         mismatch,
         missing_npmrc_token: missingNpmrcToken,
+        unsafe_path: unsafeNpmrcPath,
         sources: {
           openclaw_env: { path: paths.openclawEnv, present: Boolean(openclawToken), fingerprint: fingerprint(openclawToken) },
           credential_file: { path: paths.credentialFile, present: Boolean(credentialToken), fingerprint: fingerprint(credentialToken) },
           npmrc: { path: paths.npmrc, present: Boolean(npmrcToken), fingerprint: fingerprint(npmrcToken) },
         },
-        recommended_fix: mismatch || missingNpmrcToken
+        recommended_fix: unsafeNpmrcPath
+          ? 'Refusing automatic npm token repair because ~/.npmrc or its home directory is not a direct, regular owner path.'
+          : mismatch || missingNpmrcToken
           ? 'Run npx @getmarrow/install --repair to sync ~/.npmrc from the active OpenClaw/getmarrow npm token source.'
           : null,
       },
@@ -327,7 +338,49 @@ function inspectNpmTokenConfig(env = process.env) {
   };
 }
 
-function upsertNpmrcToken(filePath, token) {
+function assertDirectOwnerFile(homePath, filePath, { allowMissing = false } = {}) {
+  const home = path.resolve(homePath);
+  const target = path.resolve(filePath);
+  if (target !== path.join(home, '.npmrc')) throw new Error('npm token repair target must be the direct owner ~/.npmrc');
+  if (!fs.existsSync(home)) throw new Error('npm token repair owner home does not exist');
+  const homeStat = fs.lstatSync(home);
+  if (!homeStat.isDirectory() || homeStat.isSymbolicLink() || fs.realpathSync(home) !== home) {
+    throw new Error('npm token repair owner home must be a direct, non-symbolic directory');
+  }
+  if (!fs.existsSync(target)) {
+    if (allowMissing) return;
+    throw new Error('npm token repair target does not exist');
+  }
+  const targetStat = fs.lstatSync(target);
+  if (targetStat.isSymbolicLink() || !targetStat.isFile()) {
+    throw new Error('npm token repair target must be a regular file, not a symbolic link');
+  }
+}
+
+function atomicWriteOwnerFile(homePath, filePath, contents) {
+  const home = path.resolve(homePath);
+  const target = path.resolve(filePath);
+  const allowMissing = !fs.existsSync(target);
+  assertDirectOwnerFile(home, target, { allowMissing });
+  const tempPath = path.join(home, `.npmrc.marrow-${process.pid}-${crypto.randomBytes(6).toString('hex')}.tmp`);
+  let descriptor;
+  try {
+    descriptor = fs.openSync(tempPath, 'wx', 0o600);
+    fs.writeFileSync(descriptor, contents, { encoding: 'utf8' });
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = undefined;
+    assertDirectOwnerFile(home, target, { allowMissing });
+    fs.renameSync(tempPath, target);
+    fs.chmodSync(target, 0o600);
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+    if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+  }
+}
+
+function upsertNpmrcToken(homePath, filePath, token) {
+  assertDirectOwnerFile(homePath, filePath, { allowMissing: true });
   const before = safeRead(filePath);
   const tokenLine = `//registry.npmjs.org/:_authToken=${token}`;
   let after;
@@ -338,14 +391,17 @@ function upsertNpmrcToken(filePath, token) {
     after = `${before}${separator}${tokenLine}\n`;
   }
   if (before !== after) {
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
     if (before) {
       const backupPath = `${filePath}.marrow-backup`;
-      fs.writeFileSync(backupPath, before, { mode: 0o600 });
+      if (fs.existsSync(backupPath) && fs.lstatSync(backupPath).isSymbolicLink()) {
+        throw new Error('npm token repair backup must not be a symbolic link');
+      }
+      const backupTemp = path.join(path.resolve(homePath), `.npmrc.marrow-backup-${process.pid}-${crypto.randomBytes(6).toString('hex')}.tmp`);
+      fs.writeFileSync(backupTemp, before, { mode: 0o600, flag: 'wx' });
+      fs.renameSync(backupTemp, backupPath);
       fs.chmodSync(backupPath, 0o600);
     }
-    fs.writeFileSync(filePath, after, { mode: 0o600 });
-    fs.chmodSync(filePath, 0o600);
+    atomicWriteOwnerFile(homePath, filePath, after);
   }
   return before !== after;
 }
@@ -355,7 +411,7 @@ function repairConfigDiagnostics(diagnostics, env = process.env) {
   const npm = diagnostics.npm_token;
   const repairs = [];
   if (npm?.repairable && inspection.raw.sourceToken) {
-    const changed = upsertNpmrcToken(inspection.raw.paths.npmrc, inspection.raw.sourceToken);
+    const changed = upsertNpmrcToken(inspection.raw.paths.home, inspection.raw.paths.npmrc, inspection.raw.sourceToken);
     repairs.push({
       type: 'npm_token_npmrc_sync',
       changed,
