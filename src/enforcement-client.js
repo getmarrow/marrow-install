@@ -44,6 +44,7 @@ async function verifyActionPermit(requestJson, options, input) {
   const binding = actionBinding(input);
   return enforcementRequest(requestJson, options, 'verify', {
     ...binding,
+    surfaces: Array.isArray(input.surfaces) ? input.surfaces : [],
     permit: input.permit,
     session_id: options.sessionId,
     agent_id: options.agentId,

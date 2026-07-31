@@ -189,9 +189,11 @@ test('governed runner never starts a protected child when permit verification is
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-runner-verify-'));
   const marker = path.join(directory, 'executed');
   const originalFetch = globalThis.fetch;
+  const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const pathname = new URL(String(url)).pathname;
     const body = init.body ? JSON.parse(String(init.body)) : {};
+    calls.push({ pathname, body });
     if (pathname === '/v1/agent/runtime') {
       return Response.json({ data: {
         risk_gate: { allow: true, decision: 'allow', risk_level: 'high' },
@@ -219,6 +221,9 @@ test('governed runner never starts a protected child when permit verification is
     assert.equal(result.blocked, true);
     assert.equal(result.exitCode, 13);
     assert.equal(fs.existsSync(marker), false);
+    const issue = calls.find((call) => call.pathname === '/v1/agent/enforcement' && call.body.operation === 'issue').body;
+    const verify = calls.find((call) => call.pathname === '/v1/agent/enforcement' && call.body.operation === 'verify').body;
+    assert.deepEqual(issue.surfaces, verify.surfaces);
   } finally {
     globalThis.fetch = originalFetch;
     fs.rmSync(directory, { recursive: true, force: true });

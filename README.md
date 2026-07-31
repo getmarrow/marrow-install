@@ -187,10 +187,10 @@ The runner:
 
 1. requests the Marrow runtime gate;
 2. records the governed decision against that exact gate;
-3. requests and verifies a single-use action permit;
+3. requests and verifies a single-use permit bound to the exact action, target, and canonical action surfaces;
 4. blocks protected work if policy or permit verification fails;
 5. runs the original command with the scoped permit, not the Marrow API key;
-6. records success or failure, attaches a redacted proof pack, and closes the permit.
+6. records success or failure, supplies every exact server-required proof field through a redacted proof pack, and closes the permit.
 
 Useful commands:
 
