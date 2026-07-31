@@ -76,9 +76,17 @@ npx -y @getmarrow/install@latest --repair
 
 `activate` reconciles Marrow-managed entries while retaining unrelated user hooks and configuration. Detection and notification are automatic; local changes remain explicit and subject to the operator's normal change policy.
 
-## What's New in v0.1.34
+## What's New in v0.1.35
 
-v0.1.34 verifies whether passive governance is actually active after install. Activation now registers a bounded capability profile, a one-way configuration fingerprint, expected and observed hook surfaces, and a server-accepted lifecycle receipt. The Fleet Operator shows activation state, capture coverage, outcome closure, intervention follow-through, drift, and the exact repair:
+v0.1.35 turns server-side client update detection into a guided, low-friction operator workflow. Installer status, activation reports, and the Fleet Operator expose a request-specific advisory with the exact update and verification commands while keeping local mutation explicit:
+
+- official installer requests identify the installed `@getmarrow/install` version;
+- status, self-test, and Fleet Operator output show recommended, unrecognized, and security-required update states without conflating them;
+- generated agent instructions tell the agent to notify the operator and obey local change policy;
+- certified activation now pins MCP 3.9.51 and SDK 3.7.50, including the exact SDK registry integrity;
+- `activate`, `doctor`, and `--repair` remain explicit commands and preserve unrelated hooks and configuration.
+
+It preserves the passive-governance verification introduced in v0.1.34. Activation registers a bounded capability profile, a one-way configuration fingerprint, expected and observed hook surfaces, and a server-accepted lifecycle receipt. The Fleet Operator shows activation state, capture coverage, outcome closure, intervention follow-through, drift, and the exact repair:
 
 - Claude Code installation includes exact `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, and `Stop` hooks;
 - matching pre-action/result receipts use one tool correlation, and activation fingerprints the exact hook contract without uploading configuration contents;

@@ -23,16 +23,16 @@ function tempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-install-'));
 }
 
-function writeSdkLock(root, declaredSpec = '^3.7.49') {
+function writeSdkLock(root, declaredSpec = '^3.7.50') {
   fs.writeFileSync(path.join(root, 'package-lock.json'), JSON.stringify({
     name: 'fixture',
     lockfileVersion: 3,
     packages: {
       '': { dependencies: { '@getmarrow/sdk': declaredSpec } },
       'node_modules/@getmarrow/sdk': {
-        version: '3.7.49',
-        resolved: 'https://registry.npmjs.org/@getmarrow/sdk/-/sdk-3.7.49.tgz',
-        integrity: 'sha512-9a6pWWACubWTmulG7TwwgMNP/iSzoEh4wCH2oWUyO8XHeD2Eokj1GXrkCyX86md3bV7vGX6kyllfswZDlGj6WA==',
+        version: '3.7.50',
+        resolved: 'https://registry.npmjs.org/@getmarrow/sdk/-/sdk-3.7.50.tgz',
+        integrity: 'sha512-TyCXUKZAaKRPdfVqXEuIvWnOt4GLcIUbwhpX+EopzdALNzq+t5wUGHrqJlkNSvopppPTTdFVLJ7O1vtwofqFqw==',
       },
     },
   }));
@@ -261,7 +261,7 @@ test('install reports missing SDK dependency for passive runtime projects', asyn
 
   assert.equal(report.sdkDependency.required, true);
   assert.equal(report.sdkDependency.present, false);
-  assert.equal(report.sdkDependency.install_command, 'npm install @getmarrow/sdk@3.7.49');
+  assert.equal(report.sdkDependency.install_command, 'npm install @getmarrow/sdk@3.7.50');
 
   fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ dependencies: { '@getmarrow/sdk': '^3.7.27' } }));
   const moduleDir = path.join(dir, 'node_modules', '@getmarrow', 'sdk');
@@ -271,12 +271,12 @@ test('install reports missing SDK dependency for passive runtime projects', asyn
   let sdk = inspectSdkDependency(detected);
   assert.equal(sdk.present, false);
   assert.equal(sdk.installed_version, '0.0.1');
-  fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({ name: '@getmarrow/sdk', version: '3.7.49' }));
+  fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({ name: '@getmarrow/sdk', version: '3.7.50' }));
   writeSdkLock(dir, '^3.7.27');
   detected = detectEnvironment(dir, {});
   sdk = inspectSdkDependency(detected);
   assert.equal(sdk.present, true);
-  assert.equal(sdk.installed_version, '3.7.49');
+  assert.equal(sdk.installed_version, '3.7.50');
 });
 
 test('doctor detects npm token config mismatches without leaking token values', async () => {
@@ -515,8 +515,8 @@ test('self-test returns first five-minute value signal and proof', async () => {
         capture_coverage: { decisions: true, tools: 'detected', commands: 'detected', deploys: 'unknown', publishes: 'unknown' },
         auto_outcome_closure: { state: 'active' },
         client_update: {
-          installed_version: '0.1.34',
-          latest_version: '0.1.35',
+          installed_version: '0.1.35',
+          latest_version: '0.1.36',
           version_status: 'behind',
           update_available: true,
           notification_state: 'recommended',
@@ -603,7 +603,7 @@ test('self-test returns first five-minute value signal and proof', async () => {
       agentId: 'installer-test',
     });
     assert.equal(requestHeaders['x-marrow-package'], '@getmarrow/install');
-    assert.equal(requestHeaders['x-marrow-package-version'], '0.1.34');
+    assert.equal(requestHeaders['x-marrow-package-version'], '0.1.35');
     assert.equal(result.first_value_signal.active, true);
     assert.match(result.first_value_signal.headline, /Marrow active/);
     assert.ok(result.first_value_signal.captured.includes('decisions'));
@@ -701,7 +701,7 @@ test('activation requires a receipt bound to the exact decision, agent, and succ
       hooks_installed: ['passive runtime'],
       capture_verified: true,
       complete: true,
-      adapter_version: '0.1.34',
+      adapter_version: '0.1.35',
       capability_level: 'governed_wrapper',
       config_fingerprint: 'fixture-config-fingerprint',
       expected_hooks: ['pre_action', 'action_result', 'outcome_closure'],
