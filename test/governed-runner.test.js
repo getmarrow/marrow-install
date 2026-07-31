@@ -18,6 +18,7 @@ const {
   headers,
   inferSurfaces,
   inferType,
+  isRisky,
   normalizeFleetSnapshot,
   parseArgs,
   redact,
@@ -347,6 +348,41 @@ test('infers type and surfaces for common risky actions', () => {
   assert.equal(inferType('npm publish @getmarrow/sdk'), 'publish');
   assert.equal(inferType('gh pr merge 12'), 'merge');
   assert.deepEqual(inferSurfaces('wrangler deploy after gh pr merge'), ['github', 'cloudflare']);
+});
+
+test('global-option and infrastructure command forms remain protected', () => {
+  const cases = [
+    ['git -C /workspace push origin master', 'merge'],
+    ['kubectl --context production apply -f deployment.yaml', 'deploy'],
+    ['terraform -chdir=infra apply -auto-approve', 'deploy'],
+  ];
+  for (const [command, expectedType] of cases) {
+    assert.equal(inferType(command), expectedType);
+    assert.equal(isRisky(command, inferType(command)), true);
+  }
+});
+
+test('git global-option push fails closed before child execution when governance is unavailable', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-runner-git-options-'));
+  const marker = path.join(directory, 'executed');
+  const fakeGit = path.join(directory, 'git');
+  const originalFetch = globalThis.fetch;
+  fs.writeFileSync(fakeGit, `#!/usr/bin/env node\nrequire('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran');\n`, { mode: 0o700 });
+  globalThis.fetch = async () => { throw new Error('governance unavailable'); };
+  try {
+    const parsed = parseArgs([
+      'run', '--key', 'test-key', '--agent', 'release-agent', '--policy', 'enforce', '--fail-open', '--',
+      fakeGit, '-C', '/workspace', 'push', 'origin', 'master',
+    ]);
+    const result = await runGoverned(parsed);
+    assert.equal(result.blocked, true);
+    assert.equal(result.exitCode, 13);
+    assert.equal(result.risky, true);
+    assert.equal(fs.existsSync(marker), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('gateDecision extracts receipt and shouldBlock enforces owner approval', () => {

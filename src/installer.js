@@ -866,10 +866,69 @@ function buildPlan(detection, options) {
     });
   }
 
-  return { mode, writes };
+  return { mode, root: detection.root, writes };
+}
+
+function assertContainedManagedTarget(root, targetPath) {
+  const resolvedRoot = path.resolve(root);
+  const resolvedTarget = path.resolve(targetPath);
+  if (resolvedTarget === resolvedRoot || !resolvedTarget.startsWith(`${resolvedRoot}${path.sep}`)) {
+    throw new Error(`Refusing installer write outside project root: ${resolvedTarget}`);
+  }
+  if (!fs.existsSync(resolvedRoot)) throw new Error(`Project root does not exist: ${resolvedRoot}`);
+  const rootStat = fs.lstatSync(resolvedRoot);
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    throw new Error(`Refusing installer write through unsafe project root: ${resolvedRoot}`);
+  }
+  const realRoot = fs.realpathSync(resolvedRoot);
+  const relativeParent = path.relative(resolvedRoot, path.dirname(resolvedTarget));
+  let current = resolvedRoot;
+  for (const segment of relativeParent.split(path.sep).filter(Boolean)) {
+    current = path.join(current, segment);
+    if (!fs.existsSync(current)) break;
+    const stat = fs.lstatSync(current);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error(`Refusing installer write through unsafe path component: ${current}`);
+    }
+    const realCurrent = fs.realpathSync(current);
+    if (realCurrent !== realRoot && !realCurrent.startsWith(`${realRoot}${path.sep}`)) {
+      throw new Error(`Refusing installer write outside resolved project root: ${current}`);
+    }
+  }
+  if (fs.existsSync(resolvedTarget)) {
+    const targetStat = fs.lstatSync(resolvedTarget);
+    if (targetStat.isSymbolicLink() || !targetStat.isFile()) {
+      throw new Error(`Refusing installer write to unsafe managed target: ${resolvedTarget}`);
+    }
+  }
+  return { resolvedRoot, resolvedTarget };
+}
+
+function atomicWriteManagedFile(root, targetPath, contents) {
+  const { resolvedTarget } = assertContainedManagedTarget(root, targetPath);
+  const parent = path.dirname(resolvedTarget);
+  fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
+  assertContainedManagedTarget(root, resolvedTarget);
+  const existingMode = fs.existsSync(resolvedTarget)
+    ? fs.lstatSync(resolvedTarget).mode & 0o777
+    : 0o600;
+  const tempPath = path.join(
+    parent,
+    `.${path.basename(resolvedTarget)}.marrow-${process.pid}-${crypto.randomBytes(6).toString('hex')}`,
+  );
+  try {
+    fs.writeFileSync(tempPath, contents, { flag: 'wx', mode: existingMode });
+    assertContainedManagedTarget(root, resolvedTarget);
+    fs.renameSync(tempPath, resolvedTarget);
+  } finally {
+    if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+  }
 }
 
 function applyPlan(plan, options) {
+  if (!Array.isArray(plan?.writes) || plan.writes.length === 0) return [];
+  const root = path.resolve(plan.root || path.dirname(plan.writes[0].path));
+  for (const write of plan.writes) assertContainedManagedTarget(root, write.path);
   const prepared = plan.writes.map((write) => {
     const before = safeRead(write.path);
     let after;
@@ -902,8 +961,7 @@ function applyPlan(plan, options) {
       already_present: !changed,
     });
     if (changed && writeApplied) {
-      fs.mkdirSync(path.dirname(write.path), { recursive: true });
-      fs.writeFileSync(write.path, after);
+      atomicWriteManagedFile(root, write.path, after);
     }
   }
   return changes;

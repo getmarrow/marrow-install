@@ -147,11 +147,53 @@ test('applyPlan distinguishes files written now from configuration already prese
   const dir = tempDir();
   const target = path.join(dir, 'existing.txt');
   fs.writeFileSync(target, 'same\n');
-  const plan = { writes: [{ type: 'file', path: target, label: 'Existing hook config', content: 'same\n' }] };
+  const plan = { root: dir, writes: [{ type: 'file', path: target, label: 'Existing hook config', content: 'same\n' }] };
   const [change] = applyPlan(plan, { yes: true, dryRun: false, doctor: false });
   assert.equal(change.changed, false);
   assert.equal(change.applied, false);
   assert.equal(change.already_present, true);
+});
+
+test('applyPlan rejects symlinked targets and cannot modify files outside the project', () => {
+  const dir = tempDir();
+  const outside = tempDir();
+  const outsideFile = path.join(outside, 'owner-file.md');
+  fs.writeFileSync(outsideFile, 'owner content\n');
+  fs.symlinkSync(outsideFile, path.join(dir, 'AGENTS.md'));
+  const plan = {
+    root: dir,
+    writes: [{ type: 'file', path: path.join(dir, 'AGENTS.md'), label: 'Agent instructions', content: 'changed\n' }],
+  };
+
+  assert.throws(
+    () => applyPlan(plan, { yes: true, dryRun: false, doctor: false }),
+    /unsafe managed target/i,
+  );
+  assert.equal(fs.readFileSync(outsideFile, 'utf8'), 'owner content\n');
+});
+
+test('applyPlan rejects symlinked parent directories and lexical path escapes', () => {
+  const dir = tempDir();
+  const outside = tempDir();
+  fs.symlinkSync(outside, path.join(dir, '.marrow'));
+  const linkedPlan = {
+    root: dir,
+    writes: [{ type: 'file', path: path.join(dir, '.marrow', 'passive-runtime.mjs'), label: 'Runtime', content: 'safe\n' }],
+  };
+  const escapedPlan = {
+    root: dir,
+    writes: [{ type: 'file', path: path.join(dir, '..', 'escaped.txt'), label: 'Escape', content: 'unsafe\n' }],
+  };
+
+  assert.throws(
+    () => applyPlan(linkedPlan, { yes: true, dryRun: false, doctor: false }),
+    /unsafe path component/i,
+  );
+  assert.throws(
+    () => applyPlan(escapedPlan, { yes: true, dryRun: false, doctor: false }),
+    /outside project root/i,
+  );
+  assert.equal(fs.existsSync(path.join(outside, 'passive-runtime.mjs')), false);
 });
 
 test('install --yes writes passive runtime and instructions idempotently', async () => {
