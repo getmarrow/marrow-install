@@ -394,6 +394,40 @@ test('repair syncs npmrc token from active OpenClaw token source', async () => {
   }
 });
 
+test('repair refuses a symlinked npmrc without modifying its target', async () => {
+  const dir = tempDir();
+  const home = tempDir();
+  const outside = path.join(tempDir(), 'outside-npmrc');
+  fs.mkdirSync(path.join(home, '.openclaw'), { recursive: true });
+  fs.writeFileSync(path.join(home, '.openclaw', '.env'), 'NPM_TOKEN=npm_new_secret_123456789\n');
+  fs.writeFileSync(outside, 'outside=unchanged\n', { mode: 0o600 });
+  fs.symlinkSync(outside, path.join(home, '.npmrc'));
+
+  const originalHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const report = await install({
+      cwd: dir,
+      mode: 'md',
+      yes: true,
+      repair: true,
+      dryRun: false,
+      selfTest: false,
+      apiKey: 'mrw_test_key',
+      baseUrl: 'https://api.getmarrow.ai',
+      agentId: '',
+    });
+    assert.equal(report.configDiagnostics.npm_token.unsafe_path, true);
+    assert.equal(report.configDiagnostics.npm_token.repairable, false);
+    assert.equal(report.configRepairs.length, 0);
+    assert.equal(fs.readFileSync(outside, 'utf8'), 'outside=unchanged\n');
+    assert.equal(fs.lstatSync(path.join(home, '.npmrc')).isSymbolicLink(), true);
+  } finally {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+  }
+});
+
 test('repair dry-run remains dry-run and does not write files', async () => {
   const dir = tempDir();
   fs.writeFileSync(path.join(dir, 'package.json'), '{}');

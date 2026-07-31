@@ -18,15 +18,25 @@ const { startGovernanceSidecar } = require('./governance-sidecar');
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const HIGH_RISK_TERMS = /\b(deploy|prod|production|publish|release|merge|migration|migrate|secret|token|key|cloudflare|wrangler|npm publish|gh pr merge|git push|terraform apply|kubectl apply|delete|destroy|drop)\b/i;
 const PROTECTED_COMMAND_PATTERNS = [
-  /\b(?:npm|pnpm|yarn)\b[^\n;&|]{0,160}\b(?:publish|unpublish|deprecate|dist-tag\s+(?:add|rm)|owner\s+(?:add|rm)|access\s+set|token\s+(?:create|revoke))\b/i,
+  /\b(?:npm|pnpm|yarn)\b[^\n;&|]{0,160}\b(?:publish|unpublish|deprecate|dist-tag\s+(?:add|rm)|owner\s+(?:add|rm)|access\s+set|token\s+(?:create|delete|revoke))\b/i,
   /\bgit\b[^\n;&|]{0,240}\b(?:push|merge|commit|rebase|reset|tag)\b/i,
-  /\bgh\b[^\n;&|]{0,160}\b(?:pr\s+merge|release\s+(?:create|delete)|repo\s+(?:archive|delete))\b/i,
-  /\bkubectl\b[^\n;&|]{0,160}\b(?:apply|create|delete|edit|patch|replace|rollout|scale|set)\b/i,
+  /\bgh\b[^\n;&|]{0,200}\b(?:pr\s+merge|release\s+(?:create|delete)|repo\s+(?:archive|delete)|api\b[^\n;&|]{0,100}(?:--method|-X)(?:=|\s+)(?:POST|PUT|PATCH|DELETE))\b/i,
+  /\bkubectl\b[^\n;&|]{0,160}\b(?:apply|create|delete|edit|patch|replace|rollout|scale|set|drain|cordon|uncordon|taint|exec|cp)\b/i,
   /\bterraform\b[^\n;&|]{0,160}\b(?:apply|destroy|import|taint|untaint|state\s+(?:mv|rm))\b/i,
   /\bpulumi\b[^\n;&|]{0,160}\b(?:up|destroy|import|refresh|stack\s+rm)\b/i,
   /\bhelm\b[^\n;&|]{0,160}\b(?:install|upgrade|uninstall|rollback)\b/i,
   /\b(?:docker|podman)\b[^\n;&|]{0,160}\bpush\b/i,
   /\bwrangler\b[^\n;&|]{0,240}\b(?:deploy|delete|rollback|execute|apply|put|bulk|secret)\b/i,
+  /\b(?:cargo\s+(?:publish|yank|owner)|twine\s+upload|gem\s+(?:push|yank|owner)|(?:dotnet\s+nuget|nuget)\s+(?:push|delete))\b/i,
+  /\bcurl\b[^\n;&|]{0,320}(?:-X\s*|--request(?:=|\s+))(?:POST|PUT|PATCH|DELETE)\b/i,
+  /\b(?:http|xh)\b\s+(?:POST|PUT|PATCH|DELETE)\b/i,
+  /\bcurl\b[^\n;&|]{0,320}(?:--data(?:-raw|-binary|-urlencode)?|-d|--form|-F)\b/i,
+  /\b(?:psql|mysql|sqlite3|duckdb)\b[^\n;&|]{0,320}\b(?:drop|delete|update|insert|alter|truncate|create|grant|revoke)\b/i,
+  /\bredis-cli\b[^\n;&|]{0,240}\b(?:del|set|mset|flushall|flushdb|shutdown|config\s+set|acl\s+setuser)\b/i,
+  /\baws\b[^\n;&|]{0,320}\b(?:s3\s+rm|s3api\s+delete|cloudformation\s+(?:deploy|delete)|secretsmanager\s+(?:create|put|update|delete|restore|rotate)|iam\s+(?:create|update|delete|attach|detach|put))\b/i,
+  /\bgcloud\b[^\n;&|]{0,320}\b(?:storage\s+rm|secrets\s+versions\s+(?:add|destroy|disable)|run\s+deploy|functions\s+deploy|projects\s+(?:add|remove)-iam-policy-binding)\b/i,
+  /\baz\b[^\n;&|]{0,320}\b(?:storage\b[^\n;&|]{0,80}\bdelete|keyvault\s+secret\s+(?:set|delete|backup|restore)|deployment\b[^\n;&|]{0,80}\b(?:create|delete))\b/i,
+  /\b(?:vault|op)\b[^\n;&|]{0,240}\b(?:write|put|patch|delete|edit|create|rotate|revoke|destroy)\b/i,
 ];
 const PROTECTED_ACTION_TYPES = new Set([
   'credential',

@@ -357,6 +357,15 @@ test('global-option and infrastructure command forms remain protected', () => {
     ['terraform -chdir=infra apply -auto-approve', 'deploy'],
     ['npm unpublish @example/package@1.0.0', 'publish'],
     ['wrangler d1 execute app --remote --file migration.sql', 'deploy'],
+    ['curl -X DELETE https://api.github.com/repos/acme/app', 'general'],
+    ['gh api repos/acme/app/hooks/1 --method DELETE', 'general'],
+    ['psql "$DATABASE_URL" -c "DELETE FROM jobs"', 'general'],
+    ['redis-cli -u "$REDIS_URL" FLUSHDB', 'general'],
+    ['aws s3 rm s3://bucket/artifact.tar.gz', 'general'],
+    ['kubectl drain node-1 --ignore-daemonsets', 'deploy'],
+    ['vault kv put secret/app token=value', 'security'],
+    ['cargo yank --vers 1.0.0 package', 'general'],
+    ['npm token delete token-id', 'security'],
   ];
   for (const [command, expectedType] of cases) {
     assert.equal(inferType(command), expectedType);
