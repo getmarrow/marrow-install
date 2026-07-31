@@ -28,29 +28,52 @@ const {
   localIntegrationManifest,
   renderGovernTui,
   runGoverned,
+  runCli,
   scopedExecutionEnv,
   runGovernInteractive,
   shouldBlock,
   sourceClient,
   sourceMeta,
   statusPanel,
+  verifyPermitOnly,
 } = require('../src/governed-runner');
 
 test('scoped execution environment replaces Marrow account credentials with the action permit', () => {
-  const prior = {
-    MARROW_API_KEY: process.env.MARROW_API_KEY,
-    MARROW_KEY: process.env.MARROW_KEY,
-    MARROW_KEY_BOB: process.env.MARROW_KEY_BOB,
-    MARROW_DASHBOARD_TOKEN: process.env.MARROW_DASHBOARD_TOKEN,
-    ACTION_PERMIT_SIGNING_KEY: process.env.ACTION_PERMIT_SIGNING_KEY,
-    DEPLOY_TOKEN: process.env.DEPLOY_TOKEN,
-  };
+  const names = [
+    'MARROW_API_KEY',
+    'MARROW_KEY',
+    'MARROW_KEY_BOB',
+    'MARROW_FLEET_API_KEY',
+    'MARROW_INTERNAL_KEY',
+    'MARROW_TOKEN',
+    'MARROW_ACCESS_TOKEN',
+    'MARROW_DASHBOARD_TOKEN',
+    'MARROW_SIDECAR_TOKEN',
+    'MARROW_OWNER_APPROVAL_TOKEN',
+    'MARROW_ACTION_PERMIT_SIGNING_KEY',
+    'ACTION_PERMIT_SIGNING_KEY',
+    'MARROW_AGENT_ID',
+    'MARROW_SESSION_ID',
+    'MARROW_CLIENT',
+    'DEPLOY_TOKEN',
+  ];
+  const prior = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   Object.assign(process.env, {
     MARROW_API_KEY: 'account-secret',
     MARROW_KEY: 'fallback-secret',
     MARROW_KEY_BOB: 'fleet-secret',
+    MARROW_FLEET_API_KEY: 'fleet-api-secret',
+    MARROW_INTERNAL_KEY: 'internal-secret',
+    MARROW_TOKEN: 'token-secret',
+    MARROW_ACCESS_TOKEN: 'access-token-secret',
     MARROW_DASHBOARD_TOKEN: 'dashboard-secret',
+    MARROW_SIDECAR_TOKEN: 'sidecar-secret',
+    MARROW_OWNER_APPROVAL_TOKEN: 'owner-approval-secret',
+    MARROW_ACTION_PERMIT_SIGNING_KEY: 'marrow-signing-secret',
     ACTION_PERMIT_SIGNING_KEY: 'signing-secret',
+    MARROW_AGENT_ID: 'child-agent',
+    MARROW_SESSION_ID: 'child-session',
+    MARROW_CLIENT: 'ci',
     DEPLOY_TOKEN: 'task-scoped-secret',
   });
   try {
@@ -58,8 +81,18 @@ test('scoped execution environment replaces Marrow account credentials with the 
     assert.equal(env.MARROW_API_KEY, undefined);
     assert.equal(env.MARROW_KEY, undefined);
     assert.equal(env.MARROW_KEY_BOB, undefined);
+    assert.equal(env.MARROW_FLEET_API_KEY, undefined);
+    assert.equal(env.MARROW_INTERNAL_KEY, undefined);
+    assert.equal(env.MARROW_TOKEN, undefined);
+    assert.equal(env.MARROW_ACCESS_TOKEN, undefined);
     assert.equal(env.MARROW_DASHBOARD_TOKEN, undefined);
+    assert.equal(env.MARROW_SIDECAR_TOKEN, undefined);
+    assert.equal(env.MARROW_OWNER_APPROVAL_TOKEN, undefined);
+    assert.equal(env.MARROW_ACTION_PERMIT_SIGNING_KEY, undefined);
     assert.equal(env.ACTION_PERMIT_SIGNING_KEY, undefined);
+    assert.equal(env.MARROW_AGENT_ID, 'child-agent');
+    assert.equal(env.MARROW_SESSION_ID, 'child-session');
+    assert.equal(env.MARROW_CLIENT, 'ci');
     assert.equal(env.DEPLOY_TOKEN, 'task-scoped-secret');
     assert.equal(env.MARROW_ACTION_PERMIT, 'signed-permit');
     assert.equal(env.MARROW_ACTION_PERMIT_ID, 'permit-one');
@@ -76,9 +109,11 @@ test('governed runner never starts a protected child when permit verification ca
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-runner-permit-'));
   const marker = path.join(directory, 'executed');
   const originalFetch = globalThis.fetch;
+  const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     const pathname = new URL(String(url)).pathname;
     const body = init.body ? JSON.parse(String(init.body)) : {};
+    calls.push({ pathname, body });
     if (pathname === '/v1/agent/runtime') {
       return Response.json({ data: {
         risk_gate: { allow: true, decision: 'allow', risk_level: 'high' },
@@ -97,7 +132,47 @@ test('governed runner never starts a protected child when permit verification ca
   try {
     const parsed = parseArgs([
       'run', '--key', 'test-key', '--agent', 'deploy-agent', '--type', 'deploy',
-      '--action', 'deploy production', '--policy', 'enforce', '--',
+      '--action', 'deploy production', '--policy', 'enforce', '--fail-open', '--',
+      process.execPath, '-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`,
+    ]);
+    const result = await runGoverned(parsed);
+    assert.equal(result.blocked, true);
+    assert.equal(result.exitCode, 13);
+    assert.equal(fs.existsSync(marker), false);
+    const runtime = calls.find((call) => call.pathname === '/v1/agent/runtime').body;
+    const think = calls.find((call) => call.pathname === '/v1/agent/think').body;
+    const issue = calls.find((call) => call.pathname === '/v1/agent/enforcement' && call.body.operation === 'issue').body;
+    assert.equal(runtime.target, issue.target);
+    assert.equal(think.target, issue.target);
+    assert.deepEqual(runtime.surfaces, issue.surfaces);
+    assert.deepEqual(think.surfaces, issue.surfaces);
+  } finally {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('server-classified high-risk actions ignore fail-open before permit issuance', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-runner-high-risk-'));
+  const marker = path.join(directory, 'executed');
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const pathname = new URL(String(url)).pathname;
+    if (pathname === '/v1/agent/runtime') {
+      return Response.json({ data: {
+        risk_gate: { allow: true, decision: 'allow', risk_level: 'high' },
+        gate_receipt: { required: false },
+      } });
+    }
+    if (pathname === '/v1/agent/think') {
+      return Response.json({ error: 'decision service unavailable' }, { status: 503 });
+    }
+    return Response.json({ data: {} });
+  };
+  try {
+    const parsed = parseArgs([
+      'run', '--key', 'test-key', '--agent', 'general-agent', '--type', 'general',
+      '--action', 'inspect current state', '--fail-open', '--',
       process.execPath, '-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`,
     ]);
     const result = await runGoverned(parsed);
@@ -107,6 +182,77 @@ test('governed runner never starts a protected child when permit verification ca
   } finally {
     globalThis.fetch = originalFetch;
     fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('governed runner never starts a protected child when permit verification is not exactly true', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-runner-verify-'));
+  const marker = path.join(directory, 'executed');
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const pathname = new URL(String(url)).pathname;
+    const body = init.body ? JSON.parse(String(init.body)) : {};
+    if (pathname === '/v1/agent/runtime') {
+      return Response.json({ data: {
+        risk_gate: { allow: true, decision: 'allow', risk_level: 'high' },
+        gate_receipt: { id: 'gate-one', required: true },
+      } });
+    }
+    if (pathname === '/v1/agent/think') {
+      return Response.json({ data: { decision_id: 'decision-one' } });
+    }
+    if (pathname === '/v1/agent/enforcement' && body.operation === 'issue') {
+      return Response.json({ data: { permit: 'opaque-permit', permit_id: 'permit-one' } });
+    }
+    if (pathname === '/v1/agent/enforcement' && body.operation === 'verify') {
+      return Response.json({ data: { verified: 'true' } });
+    }
+    return Response.json({ data: {} });
+  };
+  try {
+    const parsed = parseArgs([
+      'run', '--key', 'test-key', '--agent', 'deploy-agent', '--type', 'deploy',
+      '--action', 'deploy production', '--policy', 'enforce', '--fail-open', '--',
+      process.execPath, '-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`,
+    ]);
+    const result = await runGoverned(parsed);
+    assert.equal(result.blocked, true);
+    assert.equal(result.exitCode, 13);
+    assert.equal(fs.existsSync(marker), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('verify-permit fails unless the service returns verified exactly true', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalExitCode = process.exitCode;
+  let verifiedValue = 'true';
+  globalThis.fetch = async () => Response.json({ data: { verified: verifiedValue } });
+  try {
+    const parsed = parseArgs([
+      'verify-permit', '--key', 'test-key', '--permit', 'opaque-permit',
+      '--type', 'deploy', '--action', 'deploy production',
+    ]);
+    const result = await verifyPermitOnly(parsed);
+    assert.equal(result.ok, false);
+    assert.equal(result.exitCode, 14);
+
+    process.exitCode = 0;
+    await runCli([
+      'verify-permit', '--key', 'test-key', '--permit', 'opaque-permit',
+      '--type', 'deploy', '--action', 'deploy production', '--json',
+    ]);
+    assert.equal(process.exitCode, 14);
+
+    verifiedValue = true;
+    const verifiedResult = await verifyPermitOnly(parsed);
+    assert.equal(verifiedResult.ok, true);
+    assert.equal(verifiedResult.exitCode, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.exitCode = originalExitCode;
   }
 });
 
