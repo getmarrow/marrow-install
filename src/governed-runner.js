@@ -17,6 +17,28 @@ const { startGovernanceSidecar } = require('./governance-sidecar');
 
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const HIGH_RISK_TERMS = /\b(deploy|prod|production|publish|release|merge|migration|migrate|secret|token|key|cloudflare|wrangler|npm publish|gh pr merge|git push|terraform apply|kubectl apply|delete|destroy|drop)\b/i;
+const PROTECTED_ACTION_TYPES = new Set([
+  'credential',
+  'credentials',
+  'deploy',
+  'financial',
+  'merge',
+  'migration',
+  'production',
+  'publish',
+  'release',
+  'secret',
+  'security',
+]);
+const SAFE_MARROW_CHILD_METADATA = new Set([
+  'MARROW_AGENT_ID',
+  'MARROW_AGENT_CLIENT',
+  'MARROW_CLIENT',
+  'MARROW_FLEET_AGENT_ID',
+  'MARROW_GOVERN_PROFILE',
+  'MARROW_HARNESS',
+  'MARROW_SESSION_ID',
+]);
 const GOVERN_TUI_ROW_COUNT = 7;
 const FLEET_TUI_ROW_COUNT = 12;
 function usage() {
@@ -59,7 +81,7 @@ Options:
   --action <text>         Human-readable action. Defaults to the redacted command
   --profile <name>        Policy profile label, such as dev, staging, or production
   --policy <mode>         enforce, warn, or audit. Default: enforce
-  --fail-open             If Marrow is unreachable, run anyway and mark telemetry degraded
+  --fail-open             For non-protected, low-risk actions only, run if Marrow is unreachable
   --fail-closed           If Marrow is unreachable, block the command
   --owner-approved <ref>  Owner approval reference for review-required gates
   --permit <token>        Short-lived action permit. Prefer MARROW_ACTION_PERMIT
@@ -252,7 +274,8 @@ function detectProjectSignals(cwd = process.cwd()) {
 }
 
 function isRisky(text, type) {
-  return HIGH_RISK_TERMS.test(`${type || ''} ${text || ''}`);
+  return PROTECTED_ACTION_TYPES.has(String(type || '').trim().toLowerCase())
+    || HIGH_RISK_TERMS.test(`${type || ''} ${text || ''}`);
 }
 
 function parseBaseOptions(argv, startIndex = 0) {
@@ -451,11 +474,14 @@ function defaultProof(input) {
 }
 
 async function preflightRuntime(options, action, type, commandText) {
+  const target = options.target || commandText || action;
+  const surfaces = inferSurfaces(commandText || action);
   const meta = sourceMeta(options, 'runtime', { action, command: commandText, action_type: type });
   return requestJson(options, 'POST', '/v1/agent/runtime', {
     action,
     type,
-    surfaces: inferSurfaces(commandText || action),
+    target,
+    surfaces,
     source_meta: meta,
     context: {
       runner: '@getmarrow/install run',
@@ -521,6 +547,7 @@ function gateDecision(runtime) {
   return {
     decision: gate.enforcement_decision || receipt.decision || gate.decision || 'unknown',
     allow: gate.allow !== false,
+    riskLevel: String(gate.risk_level || receipt.risk_level || runtime?.risk_level || '').trim().toLowerCase(),
     required: Boolean(receipt.required || gate.gate_required),
     ownerApprovalRequired: Boolean(receipt.owner_approval_required || gate.owner_approval_required),
     receiptId: receipt.id || gate.gate_receipt_id || '',
@@ -565,8 +592,8 @@ function runChild(command, env = process.env) {
 function scopedExecutionEnv(permit) {
   const env = {};
   for (const [name, value] of Object.entries(process.env)) {
-    if (/^MARROW_(?:API_KEY|KEY(?:_|$)|DASHBOARD|SESSION_TOKEN|SIDECAR_TOKEN|OWNER_APPROVAL)/.test(name)) continue;
-    if (name === 'ACTION_PERMIT_SIGNING_KEY') continue;
+    if (name.startsWith('MARROW_') && !SAFE_MARROW_CHILD_METADATA.has(name)) continue;
+    if (name.startsWith('ACTION_PERMIT_')) continue;
     env[name] = value;
   }
   if (permit?.permit) {
@@ -577,11 +604,13 @@ function scopedExecutionEnv(permit) {
   return env;
 }
 
-async function createDecision(options, action, type) {
+async function createDecision(options, action, type, target, surfaces) {
   const meta = sourceMeta(options, 'think', { action, action_type: type });
   return requestJson(options, 'POST', '/v1/agent/think', {
     action,
     type,
+    target,
+    surfaces,
     source_meta: meta,
     context: {
       runner: '@getmarrow/install run',
@@ -608,12 +637,15 @@ async function runGoverned(parsed) {
   const { options, childCommand } = parsed;
   const commandText = redactedCommand(childCommand);
   const action = options.action ? redact(options.action) : commandText;
-  const type = options.type || inferType(`${action} ${commandText}`);
-  const risky = isRisky(`${action} ${commandText}`, type);
+  const riskText = `${action} ${commandText} ${options.target || ''}`;
+  const type = options.type || inferType(riskText);
+  const risky = isRisky(riskText, type);
   let runtime = null;
   let decision = null;
   let decisionId = '';
   let actionPermit = null;
+  let permitEnforcementStarted = false;
+  let permitVerified = false;
   const surfaces = inferSurfaces(commandText || action);
 
   try {
@@ -632,12 +664,14 @@ async function runGoverned(parsed) {
         message: decision.exactNextAction || 'Marrow blocked this action before execution.',
       };
     }
-    const think = await createDecision(options, action, type);
+    const target = options.target || commandText;
+    const think = await createDecision(options, action, type, target, surfaces);
     decisionId = think.decision_id || think.id || think.decision?.id || '';
+    permitEnforcementStarted = true;
     actionPermit = await issueActionPermit(requestJson, options, {
       action,
       type,
-      target: options.target || commandText,
+      target,
       surfaces,
       decisionId,
       gateReceiptId: decision?.receiptId || '',
@@ -650,12 +684,20 @@ async function runGoverned(parsed) {
     const verified = await verifyActionPermit(requestJson, options, {
       action,
       type,
-      target: options.target || commandText,
+      target,
       permit: actionPermit.permit,
     });
-    if (!verified?.verified) throw new Error('Marrow action permit verification failed.');
+    if (verified?.verified !== true) throw new Error('Marrow action permit verification failed.');
+    permitVerified = true;
   } catch (error) {
-    if (options.failOpen || (!risky && !options.failClosed)) {
+    const protectedAction = risky
+      || decision?.required === true
+      || decision?.riskLevel === 'high'
+      || decision?.riskLevel === 'critical';
+    const canDegrade = !permitEnforcementStarted
+      && !protectedAction
+      && (options.failOpen || !options.failClosed);
+    if (canDegrade) {
       process.stderr.write(`Marrow degraded: ${error.message}. Continuing because fail-open/non-risky policy allows it.\n`);
     } else {
       return {
@@ -714,7 +756,7 @@ async function runGoverned(parsed) {
     decision_id: decisionId,
     outcome_committed: Boolean(commit),
     permit_id: actionPermit?.permit_id || null,
-    permit_verified: Boolean(actionPermit?.permit),
+    permit_verified: permitVerified,
     permit_closed: Boolean(permitClosed),
   };
 }
@@ -723,18 +765,20 @@ async function permitOnly(parsed) {
   const { options } = parsed;
   const action = redact(options.action);
   const type = options.type || inferType(action);
-  const runtime = await preflightRuntime(options, action, type, options.target || action);
+  const target = options.target || action;
+  const surfaces = inferSurfaces(target);
+  const runtime = await preflightRuntime(options, action, type, target);
   const decision = gateDecision(runtime);
   if (shouldBlock(decision, options)) {
     return { ok: false, blocked: true, exitCode: 12, decision, message: decision.exactNextAction };
   }
-  const think = await createDecision(options, action, type);
+  const think = await createDecision(options, action, type, target, surfaces);
   const decisionId = think.decision_id || think.id || think.decision?.id || '';
   const result = await issueActionPermit(requestJson, options, {
     action,
     type,
-    target: options.target || action,
-    surfaces: inferSurfaces(options.target || action),
+    target,
+    surfaces,
     decisionId,
     gateReceiptId: decision.receiptId,
     ownerApproval: options.ownerApproval,
@@ -753,7 +797,8 @@ async function verifyPermitOnly(parsed) {
     target: options.target || action,
     permit: options.permit,
   });
-  return { ok: Boolean(result?.verified), ...result };
+  const verified = result?.verified === true;
+  return { ...result, ok: verified, exitCode: verified ? 0 : 14 };
 }
 
 async function coverageOnly(parsed) {
@@ -2029,7 +2074,9 @@ async function runCli(argv) {
   else if (parsed.command === 'status') process.stdout.write(`${statusPanel(result)}\n`);
   else if (!['run', 'fleet', 'hermes', 'openclaw', 'integrations'].includes(parsed.command)) process.stdout.write('Marrow command completed.\n');
 
-  if (parsed.command === 'run' || result?.blocked) process.exitCode = result?.exitCode ?? (result?.ok === false ? 1 : 0);
+  if (parsed.command === 'run' || parsed.command === 'verify-permit' || result?.blocked) {
+    process.exitCode = result?.exitCode ?? (result?.ok === false ? 1 : 0);
+  }
 }
 
 module.exports = {
