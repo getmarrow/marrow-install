@@ -62,6 +62,20 @@ Required secret:
 export MARROW_API_KEY=mrw_live_...
 ```
 
+## Keeping Marrow Current
+
+Marrow's hosted API, website, and dashboard update automatically; local SDK dependencies, generated runtime files, MCP hooks/configuration, and pinned package versions do not silently rewrite themselves. Keeping them current delivers new client-side features, compatibility improvements, and any published security fixes. Supported clients report their package version during authenticated status/runtime activity, and Marrow returns a `client_update` notice with the exact action when the version is behind or unknown.
+
+```bash
+npx -y @getmarrow/install@latest activate
+npx -y @getmarrow/install@latest doctor
+
+# Use only when doctor reports drift
+npx -y @getmarrow/install@latest --repair
+```
+
+`activate` reconciles Marrow-managed entries while retaining unrelated user hooks and configuration. Detection and notification are automatic; local changes remain explicit and subject to the operator's normal change policy.
+
 ## What's New in v0.1.34
 
 v0.1.34 verifies whether passive governance is actually active after install. Activation now registers a bounded capability profile, a one-way configuration fingerprint, expected and observed hook surfaces, and a server-accepted lifecycle receipt. The Fleet Operator shows activation state, capture coverage, outcome closure, intervention follow-through, drift, and the exact repair:

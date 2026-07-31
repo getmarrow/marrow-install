@@ -30,6 +30,7 @@ const {
   shouldBlock,
   sourceClient,
   sourceMeta,
+  statusPanel,
 } = require('../src/governed-runner');
 
 test('parseArgs supports governed command execution after --', () => {
@@ -145,6 +146,8 @@ test('governed runner attaches stable client attribution from env and CLI', () =
     assert.equal(envParsed.options.client, 'qwen');
     assert.equal(sourceClient(envParsed.options.client), 'qwen');
     assert.equal(headers(envParsed.options)['X-Marrow-Client'], 'qwen');
+    assert.equal(headers(envParsed.options)['X-Marrow-Package'], '@getmarrow/install');
+    assert.equal(headers(envParsed.options)['X-Marrow-Package-Version'], '0.1.34');
 
     const cliParsed = parseArgs(['run', '--client', 'Hermes', '--agent', 'hermes-agent', '--', 'hermes', '/goal']);
     const meta = sourceMeta(cliParsed.options, 'runtime', {
@@ -254,6 +257,14 @@ test('fleet panel summarizes operator-critical account state', () => {
         deploy_gate: { status: 'enforce' },
         publish_gate: { status: 'warn' },
         merge_gate: { status: 'enforce' },
+        client_update: {
+          installed_version: '0.1.34',
+          latest_version: '0.1.35',
+          version_status: 'behind',
+          update_available: true,
+          notification_state: 'recommended',
+          update_command: 'npx @getmarrow/install@latest --repair',
+        },
         recent_decisions: [{ action: 'deploy worker after smoke test' }],
       },
     },
@@ -303,10 +314,50 @@ test('fleet panel summarizes operator-critical account state', () => {
   assert.match(panel, /Backpressure\/capacity status: ok/);
   assert.match(panel, /Recent decisions:/);
   assert.match(panel, /Degraded hooks: command_outcome/);
+  assert.match(panel, /Marrow client update: recommended; installed=0\.1\.34; latest=0\.1\.35; operator approval required/);
   assert.match(panel, /Deploy\/publish\/merge gates: deploy=enforce publish=warn merge=enforce/);
   assert.match(panel, /Press Enter to inspect agent/);
   assert.match(panel, /Copy exact fix command:/);
   assert.match(panel, /npx @getmarrow\/install --repair/);
+  assert.match(panel, /npx @getmarrow\/install@latest --repair/);
+});
+
+test('status panel makes an available update actionable without silently applying it', () => {
+  const panel = statusPanel({
+    health: 'healthy',
+    client_update: {
+      installed_version: '0.1.34',
+      latest_version: '0.1.35',
+      version_status: 'behind',
+      update_available: true,
+      notification_state: 'recommended',
+      update_command: 'npx @getmarrow/install@latest --repair',
+      verification_command: 'npx @getmarrow/install@latest doctor',
+    },
+  });
+
+  assert.match(panel, /Client update: recommended; installed=0\.1\.34; latest=0\.1\.35/);
+  assert.match(panel, /Automatic notification: yes; automatic local mutation: no/);
+  assert.match(panel, /Update: npx @getmarrow\/install@latest --repair/);
+  assert.match(panel, /Verify: npx @getmarrow\/install@latest doctor/);
+});
+
+test('status panel keeps unknown client versions non-alarming', () => {
+  const panel = statusPanel({
+    health: 'healthy',
+    client_update: {
+      installed_version: null,
+      latest_version: null,
+      version_status: 'unknown',
+      update_available: null,
+      notification_state: 'unknown',
+      update_command: 'npx @getmarrow/install@latest --repair',
+      verification_command: 'npx @getmarrow/install@latest doctor',
+    },
+  });
+
+  assert.match(panel, /Client update: version_unknown; installed=unknown; latest=unknown/);
+  assert.doesNotMatch(panel, /security_required/);
 });
 
 test('fleet snapshot reads certified activation coverage without inventing drift', () => {
