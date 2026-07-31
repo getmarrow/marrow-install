@@ -685,6 +685,7 @@ async function runGoverned(parsed) {
       action,
       type,
       target,
+      surfaces,
       permit: actionPermit.permit,
     });
     if (verified?.verified !== true) throw new Error('Marrow action permit verification failed.');
@@ -791,10 +792,12 @@ async function verifyPermitOnly(parsed) {
   const { options } = parsed;
   const action = redact(options.action);
   const type = options.type || inferType(action);
+  const surfaces = inferSurfaces(options.target || action);
   const result = await verifyActionPermit(requestJson, options, {
     action,
     type,
     target: options.target || action,
+    surfaces,
     permit: options.permit,
   });
   const verified = result?.verified === true;
