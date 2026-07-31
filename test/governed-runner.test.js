@@ -355,6 +355,8 @@ test('global-option and infrastructure command forms remain protected', () => {
     ['git -C /workspace push origin master', 'merge'],
     ['kubectl --context production apply -f deployment.yaml', 'deploy'],
     ['terraform -chdir=infra apply -auto-approve', 'deploy'],
+    ['npm unpublish @example/package@1.0.0', 'publish'],
+    ['wrangler d1 execute app --remote --file migration.sql', 'deploy'],
   ];
   for (const [command, expectedType] of cases) {
     assert.equal(inferType(command), expectedType);
