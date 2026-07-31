@@ -497,7 +497,9 @@ test('install auto mode does not create Claude settings when Claude is not detec
 
 test('self-test returns first five-minute value signal and proof', async () => {
   const originalFetch = global.fetch;
-  global.fetch = async (url) => {
+  let requestHeaders;
+  global.fetch = async (url, request = {}) => {
+    requestHeaders = request.headers || requestHeaders;
     const href = String(url);
     if (href.endsWith('/v1/agent/think')) {
       return new Response(JSON.stringify({ data: { decision_id: 'dec_install_value' } }), { status: 200 });
@@ -512,6 +514,15 @@ test('self-test returns first five-minute value signal and proof', async () => {
         health: 'healthy',
         capture_coverage: { decisions: true, tools: 'detected', commands: 'detected', deploys: 'unknown', publishes: 'unknown' },
         auto_outcome_closure: { state: 'active' },
+        client_update: {
+          installed_version: '0.1.34',
+          latest_version: '0.1.35',
+          version_status: 'behind',
+          update_available: true,
+          notification_state: 'recommended',
+          update_command: 'npx @getmarrow/install@latest --repair',
+          verification_command: 'npx @getmarrow/install@latest doctor',
+        },
       } }), { status: 200 });
     }
     if (href.endsWith('/v1/agent/runtime')) {
@@ -591,6 +602,8 @@ test('self-test returns first five-minute value signal and proof', async () => {
       baseUrl: 'https://api.getmarrow.ai',
       agentId: 'installer-test',
     });
+    assert.equal(requestHeaders['x-marrow-package'], '@getmarrow/install');
+    assert.equal(requestHeaders['x-marrow-package-version'], '0.1.34');
     assert.equal(result.first_value_signal.active, true);
     assert.match(result.first_value_signal.headline, /Marrow active/);
     assert.ok(result.first_value_signal.captured.includes('decisions'));
@@ -605,6 +618,8 @@ test('self-test returns first five-minute value signal and proof', async () => {
     assert.equal(result.token_value_proof.observed.model_calls, 3);
     assert.equal(result.token_value_proof.observed.tokens.total, 2000);
     assert.equal(result.token_value_proof.savings.estimated_tokens_saved, 700);
+    assert.equal(result.client_update.update_available, true);
+    assert.equal(result.client_update.verification_command, 'npx @getmarrow/install@latest doctor');
     assert.ok(result.install_value_moment.proof.some((line) => line.includes('model calls')));
   } finally {
     global.fetch = originalFetch;

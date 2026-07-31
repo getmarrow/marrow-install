@@ -2,11 +2,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
+const { version: INSTALLER_ADAPTER_VERSION } = require('../package.json');
 
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MARROW_BLOCK_START = '<!-- marrow:passive-start -->';
 const MARROW_BLOCK_END = '<!-- marrow:passive-end -->';
-const INSTALLER_ADAPTER_VERSION = '0.1.34';
 const MCP_ADAPTER_VERSION = '3.9.50';
 const SDK_ADAPTER_VERSION = '3.7.49';
 const SDK_ADAPTER_INTEGRITY = 'sha512-9a6pWWACubWTmulG7TwwgMNP/iSzoEh4wCH2oWUyO8XHeD2Eokj1GXrkCyX86md3bV7vGX6kyllfswZDlGj6WA==';
@@ -380,6 +380,7 @@ Marrow should run passively after install:
 - Before risky work, use Marrow's decision brief or passive prompt hook.
 - After meaningful work, record the outcome so future agents learn from it.
 - Check health with \`marrow_agent_status\` or \`GET /v1/agent/status\`.
+- When status/runtime returns a \`client_update\` notice, tell the operator and use its exact update and verification commands only when local change policy permits.
 
 Required environment:
 
@@ -954,6 +955,8 @@ async function runSelfTest(options) {
     'content-type': 'application/json',
     'x-marrow-session-id': `install-${Date.now()}`,
     'x-marrow-client': options.client || sourceClient(),
+    'x-marrow-package': '@getmarrow/install',
+    'x-marrow-package-version': INSTALLER_ADAPTER_VERSION,
   };
   if (options.agentId) headers['x-marrow-agent-id'] = options.agentId;
 
@@ -1141,6 +1144,7 @@ async function runSelfTest(options) {
     first_value_signal: firstValueSignal,
     install_value_moment: installValueMoment,
     token_value_proof: tokenValueProof,
+    client_update: status.client_update || runtime.client_update || runtime.status?.client_update || null,
     performance_proof: performance && performance.ok !== false ? {
       avoided_mistakes: performance.avoided_mistakes ?? performance.avoided_repeated_mistakes ?? 0,
       reused_winning_decisions: performance.reused_winning_decisions ?? 0,
@@ -1299,6 +1303,18 @@ function printReport(report) {
     process.stdout.write(`- one-call runtime: ${report.selfTest.runtime_active ? 'active' : 'not verified'}\n`);
     if (report.selfTest.error) process.stdout.write(`- error: ${report.selfTest.error}\n`);
     if (report.selfTest.next_action) process.stdout.write(`- next action: ${report.selfTest.next_action}\n`);
+    const update = report.selfTest.client_update;
+    const notification = update?.notification_state || update?.notification;
+    if (update && (update.update_available === true || update.version_status === 'unknown' || notification === 'unknown' || notification === 'version_unknown' || notification === 'security_required')) {
+      process.stdout.write('\nMarrow client update:\n');
+      process.stdout.write(`- priority: ${notification === 'security_required' ? 'security_required' : notification === 'recommended' ? 'recommended' : update.version_status === 'unknown' || notification === 'unknown' || notification === 'version_unknown' ? 'version_unknown' : update.priority || 'recommended'}\n`);
+      process.stdout.write(`- installed: ${update.installed_version || update.current_version || 'unknown'}\n`);
+      process.stdout.write(`- latest: ${update.latest_version || 'unknown'}\n`);
+      process.stdout.write('- automatic notification: yes\n');
+      process.stdout.write('- automatic local mutation: no; operator policy applies\n');
+      if (update.update_command || update.exact_update_command) process.stdout.write(`- update: ${update.update_command || update.exact_update_command}\n`);
+      if (update.verification_command || update.exact_verification_command) process.stdout.write(`- verify: ${update.verification_command || update.exact_verification_command}\n`);
+    }
     if (report.selfTest.first_value_signal) {
       process.stdout.write('\nFirst value:\n');
       const valueMoment = report.selfTest.install_value_moment;

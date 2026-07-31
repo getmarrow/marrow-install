@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const readline = require('node:readline');
+const { version: INSTALLER_PACKAGE_VERSION } = require('../package.json');
 
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const HIGH_RISK_TERMS = /\b(deploy|prod|production|publish|release|merge|migration|migrate|secret|token|key|cloudflare|wrangler|npm publish|gh pr merge|git push|terraform apply|kubectl apply|delete|destroy|drop)\b/i;
@@ -343,6 +344,8 @@ function headers(options) {
     'X-Marrow-Agent-Id': options.agentId,
     'X-Marrow-Session-Id': options.sessionId,
     'X-Marrow-Client': sourceClient(options.client),
+    'X-Marrow-Package': '@getmarrow/install',
+    'X-Marrow-Package-Version': INSTALLER_PACKAGE_VERSION,
     'User-Agent': '@getmarrow/install governed-runner',
   };
   return h;
@@ -657,6 +660,31 @@ async function statusOnly(parsed) {
   return requestJson(parsed.options, 'GET', '/v1/agent/status');
 }
 
+function statusPanel(status = {}) {
+  const update = status.client_update && typeof status.client_update === 'object'
+    ? status.client_update
+    : null;
+  const lines = [
+    'Marrow runtime status',
+    `Health: ${displayText(firstDefined(status.health, status.status, status.ok === false ? 'degraded' : 'unknown'), 40)}`,
+  ];
+  const notification = update?.notification_state || update?.notification;
+  const priority = notification === 'security_required' || notification === 'recommended'
+    ? notification
+    : update?.version_status === 'unknown' || notification === 'unknown' || notification === 'version_unknown'
+    ? 'version_unknown'
+    : update?.priority || 'recommended';
+  if (update && (update.update_available === true || update.version_status === 'unknown' || notification === 'unknown' || notification === 'version_unknown' || priority === 'security_required')) {
+    lines.push(`Client update: ${displayText(priority, 32)}; installed=${displayText(update.installed_version || update.current_version || 'unknown', 32)}; latest=${displayText(update.latest_version || 'unknown', 32)}`);
+    lines.push('Automatic notification: yes; automatic local mutation: no; operator policy applies.');
+    if (update.update_command || update.exact_update_command) lines.push(`Update: ${displayText(update.update_command || update.exact_update_command, 240)}`);
+    if (update.verification_command || update.exact_verification_command) lines.push(`Verify: ${displayText(update.verification_command || update.exact_verification_command, 240)}`);
+  } else {
+    lines.push('Client update: current or unavailable.');
+  }
+  return lines.join('\n');
+}
+
 async function optionalRequestJson(options, method, route, body) {
   try {
     return { ok: true, data: await requestJson(options, method, route, body) };
@@ -809,6 +837,9 @@ function normalizeFixCommands(status, capacity) {
   add(status.activation_coverage?.exact_fix);
   add(status.activation_coverage?.drift?.repair_command, true);
   add(status.passive_activation?.exact_fix);
+  if (status.client_update?.update_available === true || status.client_update?.version_status === 'unknown' || status.client_update?.notification_state === 'unknown' || status.client_update?.notification === 'version_unknown') {
+    add(status.client_update?.update_command || status.client_update?.exact_update_command, true);
+  }
   add(capacity.exact_next_action, true);
   add(capacity.next_action, true);
   if (listValue(status.missed_hooks, status.degraded_hooks).length) add('npx @getmarrow/install --repair');
@@ -944,6 +975,7 @@ function normalizeFleetSnapshot(raw, options) {
     gates,
     arbitrations,
     activation_coverage: activationCoverage,
+    client_update: status.client_update || null,
     agents,
     fix_commands: fixCommands.length ? fixCommands : ['npx @getmarrow/install doctor'],
     source_errors: errors,
@@ -1003,6 +1035,9 @@ function fleetPanel(snapshot) {
     `Failed/stale outcomes: ${snapshot.failed_stale_outcomes}`,
     `Backpressure/capacity status: ${snapshot.backpressure_status}${snapshot.capacity_next_action ? ` - ${snapshot.capacity_next_action}` : ''}`,
     `Degraded hooks: ${degraded}`,
+    snapshot.client_update && (snapshot.client_update.update_available === true || snapshot.client_update.version_status === 'unknown' || snapshot.client_update.notification_state === 'unknown' || snapshot.client_update.notification === 'version_unknown')
+      ? `Marrow client update: ${displayText(snapshot.client_update.notification_state === 'security_required' ? 'security_required' : snapshot.client_update.notification_state === 'recommended' ? 'recommended' : snapshot.client_update.version_status === 'unknown' || snapshot.client_update.notification_state === 'unknown' || snapshot.client_update.notification === 'version_unknown' ? 'version_unknown' : snapshot.client_update.priority || 'recommended', 32)}; installed=${displayText(snapshot.client_update.installed_version || snapshot.client_update.current_version || 'unknown', 32)}; latest=${displayText(snapshot.client_update.latest_version || 'unknown', 32)}; operator approval required`
+      : 'Marrow client update: current or unavailable',
     `Deploy/publish/merge gates: deploy=${snapshot.gates.deploy} publish=${snapshot.gates.publish} merge=${snapshot.gates.merge}`,
     '',
     'Live agent roster:',
@@ -1839,6 +1874,7 @@ async function runCli(argv) {
 
   if (parsed.options?.json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   else if (result?.blocked) process.stderr.write(`BLOCKED: ${result.message || 'Marrow blocked this action.'}\n`);
+  else if (parsed.command === 'status') process.stdout.write(`${statusPanel(result)}\n`);
   else if (!['run', 'fleet', 'hermes', 'openclaw', 'integrations'].includes(parsed.command)) process.stdout.write('Marrow command completed.\n');
 
   if (parsed.command === 'run' || result?.blocked) process.exitCode = result?.exitCode ?? (result?.ok === false ? 1 : 0);
@@ -1868,6 +1904,7 @@ module.exports = {
   gateOnly,
   proofOnly,
   statusOnly,
+  statusPanel,
   runStatusCheck,
   runGateCheck,
   runGovernInteractive,
