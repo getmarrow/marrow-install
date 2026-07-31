@@ -7,6 +7,7 @@ const test = require('node:test');
 
 const {
   gateDecision,
+  actionBinding,
   governPanel,
   buildGovernState,
   buildFleetState,
@@ -26,12 +27,88 @@ const {
   localSupportedHarnesses,
   localIntegrationManifest,
   renderGovernTui,
+  runGoverned,
+  scopedExecutionEnv,
   runGovernInteractive,
   shouldBlock,
   sourceClient,
   sourceMeta,
   statusPanel,
 } = require('../src/governed-runner');
+
+test('scoped execution environment replaces Marrow account credentials with the action permit', () => {
+  const prior = {
+    MARROW_API_KEY: process.env.MARROW_API_KEY,
+    MARROW_KEY: process.env.MARROW_KEY,
+    MARROW_KEY_BOB: process.env.MARROW_KEY_BOB,
+    MARROW_DASHBOARD_TOKEN: process.env.MARROW_DASHBOARD_TOKEN,
+    ACTION_PERMIT_SIGNING_KEY: process.env.ACTION_PERMIT_SIGNING_KEY,
+    DEPLOY_TOKEN: process.env.DEPLOY_TOKEN,
+  };
+  Object.assign(process.env, {
+    MARROW_API_KEY: 'account-secret',
+    MARROW_KEY: 'fallback-secret',
+    MARROW_KEY_BOB: 'fleet-secret',
+    MARROW_DASHBOARD_TOKEN: 'dashboard-secret',
+    ACTION_PERMIT_SIGNING_KEY: 'signing-secret',
+    DEPLOY_TOKEN: 'task-scoped-secret',
+  });
+  try {
+    const env = scopedExecutionEnv({ permit: 'signed-permit', permit_id: 'permit-one' });
+    assert.equal(env.MARROW_API_KEY, undefined);
+    assert.equal(env.MARROW_KEY, undefined);
+    assert.equal(env.MARROW_KEY_BOB, undefined);
+    assert.equal(env.MARROW_DASHBOARD_TOKEN, undefined);
+    assert.equal(env.ACTION_PERMIT_SIGNING_KEY, undefined);
+    assert.equal(env.DEPLOY_TOKEN, 'task-scoped-secret');
+    assert.equal(env.MARROW_ACTION_PERMIT, 'signed-permit');
+    assert.equal(env.MARROW_ACTION_PERMIT_ID, 'permit-one');
+    assert.equal(env.MARROW_GOVERNANCE_VERIFIED, 'true');
+  } finally {
+    for (const [name, value] of Object.entries(prior)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
+test('governed runner never starts a protected child when permit verification cannot complete', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-runner-permit-'));
+  const marker = path.join(directory, 'executed');
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const pathname = new URL(String(url)).pathname;
+    const body = init.body ? JSON.parse(String(init.body)) : {};
+    if (pathname === '/v1/agent/runtime') {
+      return Response.json({ data: {
+        risk_gate: { allow: true, decision: 'allow', risk_level: 'high' },
+        gate_receipt: { id: 'gate-one', required: true },
+        proof_pack: { required: true, required_fields: ['test'] },
+      } });
+    }
+    if (pathname === '/v1/agent/think') {
+      return Response.json({ data: { decision_id: 'decision-one' } });
+    }
+    if (pathname === '/v1/agent/enforcement' && body.operation === 'issue') {
+      return Response.json({ error: 'permit service unavailable' }, { status: 503 });
+    }
+    return Response.json({ data: {} });
+  };
+  try {
+    const parsed = parseArgs([
+      'run', '--key', 'test-key', '--agent', 'deploy-agent', '--type', 'deploy',
+      '--action', 'deploy production', '--policy', 'enforce', '--',
+      process.execPath, '-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`,
+    ]);
+    const result = await runGoverned(parsed);
+    assert.equal(result.blocked, true);
+    assert.equal(result.exitCode, 13);
+    assert.equal(fs.existsSync(marker), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test('parseArgs supports governed command execution after --', () => {
   const parsed = parseArgs([
@@ -52,6 +129,54 @@ test('parseArgs supports governed command execution after --', () => {
   assert.equal(parsed.options.type, 'deploy');
   assert.equal(parsed.options.policy, 'enforce');
   assert.deepEqual(parsed.childCommand, ['wrangler', 'deploy']);
+});
+
+test('permit and verifier commands bind action, target, session, and agent without exposing credentials', () => {
+  const permit = parseArgs([
+    'permit',
+    '--agent',
+    'deploy-agent',
+    '--session',
+    'release-42',
+    '--type',
+    'deploy',
+    '--target',
+    'getmarrow/marrow:production',
+    '--action',
+    'deploy audited release',
+  ]);
+  assert.equal(permit.command, 'permit');
+  assert.equal(permit.options.agentId, 'deploy-agent');
+  assert.equal(permit.options.target, 'getmarrow/marrow:production');
+
+  const verify = parseArgs([
+    'verify-permit',
+    '--permit',
+    'opaque-short-lived-token',
+    '--target',
+    'getmarrow/marrow:production',
+    '--action',
+    'deploy audited release',
+  ]);
+  assert.equal(verify.command, 'verify-permit');
+  assert.equal(verify.options.permit, 'opaque-short-lived-token');
+
+  const binding = actionBinding({
+    action: 'deploy audited release',
+    type: 'deploy',
+    target: 'getmarrow/marrow:production',
+  });
+  assert.match(binding.action_hash, /^[a-f0-9]{64}$/);
+  assert.match(binding.target_hash, /^[a-f0-9]{64}$/);
+  assert.equal(binding.target, 'getmarrow/marrow:production');
+  assert.notEqual(binding.action_hash, binding.target_hash);
+});
+
+test('coverage and sidecar commands are first-class governed surfaces', () => {
+  assert.equal(parseArgs(['coverage', '--agent', 'bob']).command, 'coverage');
+  const sidecar = parseArgs(['sidecar', '--sidecar-port', '43821']);
+  assert.equal(sidecar.command, 'sidecar');
+  assert.equal(sidecar.options.sidecarPort, '43821');
 });
 
 test('redacts API keys and tokens from command text', () => {

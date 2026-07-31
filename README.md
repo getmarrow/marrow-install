@@ -76,17 +76,28 @@ npx -y @getmarrow/install@latest --repair
 
 `activate` reconciles Marrow-managed entries while retaining unrelated user hooks and configuration. Detection and notification are automatic; local changes remain explicit and subject to the operator's normal change policy.
 
-## What's New in v0.1.35
+## What's New in v0.1.36
 
-v0.1.35 turns server-side client update detection into a guided, low-friction operator workflow. Installer status, activation reports, and the Fleet Operator expose a request-specific advisory with the exact update and verification commands while keeping local mutation explicit:
+v0.1.36 combines guided, operator-controlled client updates with a signed permit boundary for protected actions. Installer status, activation reports, and the Fleet Operator expose request-specific update advisories with exact update and verification commands while keeping local mutation explicit:
 
 - official installer requests identify the installed `@getmarrow/install` version;
 - status, self-test, and Fleet Operator output show recommended, unrecognized, and security-required update states without conflating them;
 - generated agent instructions tell the agent to notify the operator and obey local change policy;
-- certified activation now pins MCP 3.9.51 and SDK 3.7.50, including the exact SDK registry integrity;
+- certified activation pins the matching MCP and SDK releases, including exact SDK registry integrity;
 - `activate`, `doctor`, and `--repair` remain explicit commands and preserve unrelated hooks and configuration.
 
-It preserves the passive-governance verification introduced in v0.1.34. Activation registers a bounded capability profile, a one-way configuration fingerprint, expected and observed hook surfaces, and a server-accepted lifecycle receipt. The Fleet Operator shows activation state, capture coverage, outcome closure, intervention follow-through, drift, and the exact repair:
+The governed runner makes protected actions executable only through a short-lived, signed Marrow permit bound to the exact account, agent, session, action, target, canonical action surfaces, runtime gate, and decision before starting the child process. It then closes that permit with exact evidence and the real outcome:
+
+- deploy, publish, merge, migration, credential, and other protected work fails closed when its permit cannot be verified;
+- the child process receives only the scoped permit, never the Marrow API key through a new broker interface;
+- permits are single-use, expire within minutes, and cannot be replayed for another agent, action, target, or session;
+- `permit` and `verify-permit` provide deterministic CI choke points;
+- the loopback `sidecar` keeps private state owner-only and reports hook/configuration drift;
+- `coverage` reports permit closure, bypasses, stale sidecars, and hook health with exact repair steps;
+- correlated result hooks can close evidence automatically, while incomplete protected work remains visible;
+- controlled break-glass access requires an authenticated account owner, a current runtime gate, a reason, a short expiry, and evidence closure.
+
+It preserves the measurable passive-governance coverage introduced in v0.1.34:
 
 - Claude Code installation includes exact `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, and `Stop` hooks;
 - matching pre-action/result receipts use one tool correlation, and activation fingerprints the exact hook contract without uploading configuration contents;
@@ -175,15 +186,20 @@ npx @getmarrow/install run \
 The runner:
 
 1. requests the Marrow runtime gate;
-2. prints the decision, relevant lesson, owner-approval state, and required proof;
-3. blocks when policy requires it;
-4. runs the original command when allowed;
-5. records success or failure and attaches a redacted proof pack.
+2. records the governed decision against that exact gate;
+3. requests and verifies a single-use action permit;
+4. blocks protected work if policy or permit verification fails;
+5. runs the original command with the scoped permit, not the Marrow API key;
+6. records success or failure, attaches a redacted proof pack, and closes the permit.
 
 Useful commands:
 
 ```bash
 npx @getmarrow/install gate --agent deploy-agent --type deploy --action "deploy production"
+npx @getmarrow/install permit --agent deploy-agent --type deploy --action "deploy production"
+MARROW_ACTION_PERMIT=... npx @getmarrow/install verify-permit --agent deploy-agent --type deploy --action "deploy production"
+npx @getmarrow/install coverage --agent deploy-agent
+npx @getmarrow/install sidecar --agent deploy-agent
 npx @getmarrow/install status
 npx @getmarrow/install doctor
 npx @getmarrow/install --repair
