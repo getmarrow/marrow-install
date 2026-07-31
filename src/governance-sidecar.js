@@ -10,10 +10,73 @@ function sidecarStateDir() {
   return process.env.MARROW_SIDECAR_STATE_DIR || path.join(os.homedir(), '.marrow', 'sidecar');
 }
 
-function writePrivateJson(filePath, value) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-  fs.chmodSync(filePath, 0o600);
+function currentUid() {
+  return typeof process.getuid === 'function' ? process.getuid() : null;
+}
+
+function assertPrivateStateDirectory(directory) {
+  const resolved = path.resolve(directory);
+  fs.mkdirSync(resolved, { recursive: true, mode: 0o700 });
+  const stat = fs.lstatSync(resolved);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new Error('Sidecar state directory must be a private real directory.');
+  }
+  if (fs.realpathSync(resolved) !== resolved) {
+    throw new Error('Sidecar state directory cannot contain symlinked path components.');
+  }
+  const uid = currentUid();
+  if (uid !== null && stat.uid !== uid) {
+    throw new Error('Sidecar state directory must be owned by the current user.');
+  }
+  if ((stat.mode & 0o077) !== 0) {
+    throw new Error('Sidecar state directory permissions must be 0700 or stricter.');
+  }
+  return resolved;
+}
+
+function assertSafeStateFile(filePath) {
+  if (!fs.existsSync(filePath)) return;
+  const stat = fs.lstatSync(filePath);
+  const uid = currentUid();
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    throw new Error('Sidecar state file must be a private regular file.');
+  }
+  if (uid !== null && stat.uid !== uid) {
+    throw new Error('Sidecar state file must be owned by the current user.');
+  }
+}
+
+function writePrivateJsonAtomic(filePath, value) {
+  const directory = assertPrivateStateDirectory(path.dirname(filePath));
+  const target = path.join(directory, path.basename(filePath));
+  assertSafeStateFile(target);
+  const temporary = path.join(directory, '.active-' + process.pid + '-' + crypto.randomBytes(8).toString('hex') + '.tmp');
+  let descriptor;
+  try {
+    descriptor = fs.openSync(temporary, 'wx', 0o600);
+    fs.writeFileSync(descriptor, JSON.stringify(value, null, 2) + '\n', 'utf8');
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = undefined;
+    assertSafeStateFile(target);
+    fs.renameSync(temporary, target);
+    fs.chmodSync(target, 0o600);
+  } finally {
+    if (descriptor !== undefined) {
+      try { fs.closeSync(descriptor); } catch {}
+    }
+    try { fs.unlinkSync(temporary); } catch {}
+  }
+}
+
+function unlinkPrivateStateFile(filePath) {
+  try {
+    const stat = fs.lstatSync(filePath);
+    const uid = currentUid();
+    if (!stat.isSymbolicLink() && stat.isFile() && (uid === null || stat.uid === uid)) {
+      fs.unlinkSync(filePath);
+    }
+  } catch {}
 }
 
 async function readJson(req) {
@@ -85,14 +148,19 @@ async function startGovernanceSidecar(options, handlers) {
   const address = server.address();
   const boundPort = typeof address === 'object' && address ? address.port : port;
   const stateFile = path.join(sidecarStateDir(), 'active.json');
-  writePrivateJson(stateFile, {
-    instance_id: instanceId,
-    pid: process.pid,
-    host: '127.0.0.1',
-    port: boundPort,
-    token: authToken,
-    started_at: startedAt,
-  });
+  try {
+    writePrivateJsonAtomic(stateFile, {
+      instance_id: instanceId,
+      pid: process.pid,
+      host: '127.0.0.1',
+      port: boundPort,
+      token: authToken,
+      started_at: startedAt,
+    });
+  } catch (error) {
+    await new Promise((resolve) => server.close(resolve));
+    throw error;
+  }
 
   const heartbeat = async () => {
     try {
@@ -105,9 +173,14 @@ async function startGovernanceSidecar(options, handlers) {
   const timer = setInterval(heartbeat, 30_000);
   timer.unref();
 
+  let closed = false;
   const close = () => {
+    if (closed) return;
+    closed = true;
     clearInterval(timer);
-    try { fs.unlinkSync(stateFile); } catch {}
+    unlinkPrivateStateFile(stateFile);
+    process.off('SIGINT', close);
+    process.off('SIGTERM', close);
     server.close();
   };
   process.once('SIGINT', close);

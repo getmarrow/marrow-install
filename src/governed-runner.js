@@ -18,25 +18,28 @@ const { startGovernanceSidecar } = require('./governance-sidecar');
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const HIGH_RISK_TERMS = /\b(deploy|prod|production|publish|release|merge|migration|migrate|secret|token|key|cloudflare|wrangler|npm publish|gh pr merge|git push|terraform apply|kubectl apply|delete|destroy|drop)\b/i;
 const PROTECTED_COMMAND_PATTERNS = [
-  /\b(?:npm|pnpm|yarn)\b[^\n;&|]{0,160}\b(?:publish|unpublish|deprecate|dist-tag\s+(?:add|rm)|owner\s+(?:add|rm)|access\s+set|token\s+(?:create|delete|revoke))\b/i,
-  /\bgit\b[^\n;&|]{0,240}\b(?:push|merge|commit|rebase|reset|tag)\b/i,
-  /\bgh\b[^\n;&|]{0,200}\b(?:pr\s+merge|release\s+(?:create|delete)|repo\s+(?:archive|delete)|api\b[^\n;&|]{0,100}(?:--method|-X)(?:=|\s+)(?:POST|PUT|PATCH|DELETE))\b/i,
-  /\bkubectl\b[^\n;&|]{0,160}\b(?:apply|create|delete|edit|patch|replace|rollout|scale|set|drain|cordon|uncordon|taint|exec|cp)\b/i,
-  /\bterraform\b[^\n;&|]{0,160}\b(?:apply|destroy|import|taint|untaint|state\s+(?:mv|rm))\b/i,
-  /\bpulumi\b[^\n;&|]{0,160}\b(?:up|destroy|import|refresh|stack\s+rm)\b/i,
-  /\bhelm\b[^\n;&|]{0,160}\b(?:install|upgrade|uninstall|rollback)\b/i,
-  /\b(?:docker|podman)\b[^\n;&|]{0,160}\bpush\b/i,
-  /\bwrangler\b[^\n;&|]{0,240}\b(?:deploy|delete|rollback|execute|apply|put|bulk|secret)\b/i,
+  /\b(?:npm|pnpm|yarn)(?:\s+npm)?\b[\s\S]{0,8192}\b(?:publish|unpublish|deprecate|access|owner|team|token|dist-tag|tag\s+(?:add|remove))\b/i,
   /\b(?:cargo\s+(?:publish|yank|owner)|twine\s+upload|gem\s+(?:push|yank|owner)|(?:dotnet\s+nuget|nuget)\s+(?:push|delete))\b/i,
-  /\bcurl\b[^\n;&|]{0,320}(?:-X\s*|--request(?:=|\s+))(?:POST|PUT|PATCH|DELETE)\b/i,
-  /\b(?:http|xh)\b\s+(?:POST|PUT|PATCH|DELETE)\b/i,
-  /\bcurl\b[^\n;&|]{0,320}(?:--data(?:-raw|-binary|-urlencode)?|-d|--form|-F)\b/i,
-  /\b(?:psql|mysql|sqlite3|duckdb)\b[^\n;&|]{0,320}\b(?:drop|delete|update|insert|alter|truncate|create|grant|revoke)\b/i,
-  /\bredis-cli\b[^\n;&|]{0,240}\b(?:del|set|mset|flushall|flushdb|shutdown|config\s+set|acl\s+setuser)\b/i,
-  /\baws\b[^\n;&|]{0,320}\b(?:s3\s+rm|s3api\s+delete|cloudformation\s+(?:deploy|delete)|secretsmanager\s+(?:create|put|update|delete|restore|rotate)|iam\s+(?:create|update|delete|attach|detach|put))\b/i,
-  /\bgcloud\b[^\n;&|]{0,320}\b(?:storage\s+rm|secrets\s+versions\s+(?:add|destroy|disable)|run\s+deploy|functions\s+deploy|projects\s+(?:add|remove)-iam-policy-binding)\b/i,
-  /\baz\b[^\n;&|]{0,320}\b(?:storage\b[^\n;&|]{0,80}\bdelete|keyvault\s+secret\s+(?:set|delete|backup|restore)|deployment\b[^\n;&|]{0,80}\b(?:create|delete))\b/i,
-  /\b(?:vault|op)\b[^\n;&|]{0,240}\b(?:write|put|patch|delete|edit|create|rotate|revoke|destroy)\b/i,
+  /\bgit\b[\s\S]{0,8192}\b(?:push|commit|merge|rebase|reset|tag|clean|rm|cherry-pick|revert|branch\s+(?:-[dDmM]|--delete|--move)|remote\s+(?:add|remove|rename|set-url|set-head|prune|update)|checkout\s+-[bB]|switch\s+-[cC])\b/i,
+  /\bgh\b[\s\S]{0,8192}\b(?:pr\s+(?:merge|close|reopen|edit|review|comment)|issue\s+(?:create|close|reopen|edit|comment)|release\s+(?:create|delete|edit|upload)|repo\s+(?:archive|delete|edit|rename)|workflow\s+run|secret\s+(?:set|delete)|variable\s+(?:set|delete))\b/i,
+  /\bgh\s+api\b[\s\S]{0,8192}(?:(?:--method|-X)(?:=|\s+)(?:POST|PUT|PATCH|DELETE)\b|(?:-f|-F|--field|--raw-field|--input)(?:=|\s+))/i,
+  /\b(?:kubectl|oc)\b[\s\S]{0,8192}\b(?:apply|create|delete|edit|patch|replace|rollout|scale|set|drain|cordon|uncordon|taint|exec|cp|run|expose|autoscale|label|annotate|reconcile)\b/i,
+  /\b(?:terraform|terragrunt|tofu)\b[\s\S]{0,8192}\b(?:apply|destroy|import|taint|untaint|force-unlock|state\s+(?:mv|rm|push)|workspace\s+(?:new|delete))\b/i,
+  /\bpulumi\b[\s\S]{0,8192}\b(?:up|destroy|import|refresh|stack\s+rm|config\s+(?:set|rm))\b/i,
+  /\bhelm\b[\s\S]{0,8192}\b(?:install|upgrade|uninstall|rollback|push)\b/i,
+  /\b(?:docker|podman)\b[\s\S]{0,8192}\b(?:push|buildx\s+build\b[\s\S]*--push)\b/i,
+  /\bwrangler\b[\s\S]{0,8192}\b(?:deploy|delete|rollback|execute|apply|put|bulk|secret|publish)\b/i,
+  /\bcurl\b[\s\S]{0,8192}(?:(?:-X\s*|--request(?:=|\s+))(?:POST|PUT|PATCH|DELETE)\b|--data(?:-raw|-binary|-urlencode)?(?:=|\s+)|-[dF](?:\s+|[^A-Za-z])|--form(?:=|\s+)|(?:-T|--upload-file)(?:=|\s+))/i,
+  /\b(?:http|xh)\b[\s\S]{0,8192}(?:\b(?:POST|PUT|PATCH|DELETE)\b|(?:--form|--raw|-f)\b|\s[^\s=:@]+(?::=|=|@))/i,
+  /\bwget\b[\s\S]{0,8192}(?:--post-data|--post-file|--method(?:=|\s+)(?:POST|PUT|PATCH|DELETE))\b/i,
+  /\b(?:psql|mysql|sqlite3|duckdb)\b[\s\S]{0,8192}(?:\b(?:drop|delete|update|insert|alter|truncate|create|grant|revoke)\b|(?:-f|--file|\.read|source)(?:=|\s+)|\s<\s*[^\s])/i,
+  /\bredis-cli\b[\s\S]{0,8192}\b(?:set|setex|psetex|mset|del|unlink|getdel|incr|decr|append|expire|persist|rename|move|flushall|flushdb|shutdown|config\s+set|acl\s+setuser|hset|hdel|lpush|rpush|lpop|rpop|sadd|srem|zadd|zrem|xadd|xdel|publish|restore|migrate)\b/i,
+  /\baws\b[\s\S]{0,8192}\b(?:create|update|delete|put|attach|detach|associate|disassociate|terminate|stop|start|reboot|modify|restore|rotate|tag|untag|deploy|sync|s3\s+(?:cp|mv|rm)|s3api\s+put-object|ssm\s+(?:put-parameter|delete-parameter|delete-parameters))\b/i,
+  /\bgcloud\b[\s\S]{0,8192}\b(?:create|update|delete|deploy|add|remove|set|destroy|disable|restore|storage\s+(?:cp|mv|rm)|pubsub\s+(?:topics|subscriptions)\s+(?:create|delete|update))\b/i,
+  /\baz\b[\s\S]{0,8192}\b(?:create|update|delete|set|deploy|start|stop|restart|restore|storage\s+blob\s+(?:upload|delete|copy)|group\s+(?:create|delete|update))\b/i,
+  /\brclone\b[\s\S]{0,8192}\b(?:copy|copyto|sync|move|moveto|delete|deletefile|purge|mkdir|rmdir|bisync)\b/i,
+  /\b(?:vault|op)\b[\s\S]{0,8192}\b(?:write|put|patch|delete|edit|create|rotate|revoke|destroy|share)\b/i,
+  /(?:^|[;&|]\s*|\bsudo\s+|\benv\s+)(?:rm\b|shred\b|truncate\b|find\b[\s\S]{0,8192}\s-delete\b)/i,
 ];
 const PROTECTED_ACTION_TYPES = new Set([
   'credential',
@@ -143,7 +146,7 @@ function redactedCommand(command) {
 }
 
 function isProtectedCommand(text) {
-  const value = String(text || '');
+  const value = String(text || '').slice(0, 8192);
   return HIGH_RISK_TERMS.test(value)
     || PROTECTED_COMMAND_PATTERNS.some((pattern) => pattern.test(value));
 }
