@@ -366,6 +366,28 @@ test('global-option and infrastructure command forms remain protected', () => {
     ['vault kv put secret/app token=value', 'security'],
     ['cargo yank --vers 1.0.0 package', 'general'],
     ['npm token delete token-id', 'security'],
+    ['npm access grant read-only scope:team package', 'general'],
+    ['yarn npm tag add @example/package latest', 'general'],
+    ['git branch -D stale-release', 'deploy'],
+    ['git remote set-url origin https://example.invalid/repo.git', 'general'],
+    ['gh pr close 42', 'general'],
+    ['gh api repos/acme/app/hooks -f active=true', 'general'],
+    ['kubectl --context ' + 'production-'.repeat(30) + ' apply -f deployment.yaml', 'deploy'],
+    ['oc auth reconcile -f rbac.yaml', 'general'],
+    ['terragrunt apply -auto-approve', 'general'],
+    ['pulumi config set db.password secret', 'deploy'],
+    ['curl -T artifact.tar.gz https://uploads.example.invalid/artifact', 'general'],
+    ['wget --post-data key=value https://example.invalid/write', 'security'],
+    ['http --auth-type bearer https://example.invalid/items name=value', 'general'],
+    ['sqlite3 app.db < migration.sql', 'migration'],
+    ['redis-cli UNLINK cache-key', 'security'],
+    ['aws s3 cp artifact.tar.gz s3://bucket/artifact.tar.gz', 'general'],
+    ['aws ssm put-parameter --name /app/key --value secret', 'security'],
+    ['gcloud storage cp artifact.tar.gz gs://bucket/artifact.tar.gz', 'general'],
+    ['az storage blob upload --file artifact.tar.gz --container-name releases', 'general'],
+    ['rclone copy artifact.tar.gz remote:releases', 'general'],
+    ['op item share production-credential', 'deploy'],
+    ['rm -rf generated-release', 'deploy'],
   ];
   for (const [command, expectedType] of cases) {
     assert.equal(inferType(command), expectedType);
@@ -393,6 +415,43 @@ test('git global-option push fails closed before child execution when governance
   } finally {
     globalThis.fetch = originalFetch;
     fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('adjacent protected command forms never start a child during a governance outage', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-runner-adjacent-'));
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error('governance unavailable'); };
+  const cases = [
+    ['git', ['branch', '-D', 'stale-release']],
+    ['curl', ['-T', 'artifact.tar.gz', 'https://uploads.example.invalid/artifact']],
+    ['aws', ['s3', 'cp', 'artifact.tar.gz', 's3://bucket/artifact.tar.gz']],
+    ['kubectl', ['--context', 'production-'.repeat(30), 'apply', '-f', 'deployment.yaml']],
+  ];
+  try {
+    for (const [name, args] of cases) {
+      const directory = path.join(root, name);
+      fs.mkdirSync(directory);
+      const marker = path.join(directory, 'executed');
+      const executable = path.join(directory, name);
+      fs.writeFileSync(
+        executable,
+        '#!/usr/bin/env node\nrequire("node:fs").writeFileSync(' + JSON.stringify(marker) + ', "ran");\n',
+        { mode: 0o700 },
+      );
+      const parsed = parseArgs([
+        'run', '--key', 'test-key', '--agent', 'release-agent',
+        '--policy', 'enforce', '--fail-open', '--', executable, ...args,
+      ]);
+      const result = await runGoverned(parsed);
+      assert.equal(result.blocked, true, name);
+      assert.equal(result.exitCode, 13, name);
+      assert.equal(result.risky, true, name);
+      assert.equal(fs.existsSync(marker), false, name);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
