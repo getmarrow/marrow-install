@@ -17,6 +17,15 @@ const { startGovernanceSidecar } = require('./governance-sidecar');
 
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const HIGH_RISK_TERMS = /\b(deploy|prod|production|publish|release|merge|migration|migrate|secret|token|key|cloudflare|wrangler|npm publish|gh pr merge|git push|terraform apply|kubectl apply|delete|destroy|drop)\b/i;
+const PROTECTED_COMMAND_PATTERNS = [
+  /\bgit\b[^\n;&|]{0,240}\b(?:push|merge|commit|rebase|reset|tag)\b/i,
+  /\bgh\b[^\n;&|]{0,160}\b(?:pr\s+merge|release\s+(?:create|delete)|repo\s+(?:archive|delete))\b/i,
+  /\bkubectl\b[^\n;&|]{0,160}\b(?:apply|create|delete|edit|patch|replace|rollout|scale|set)\b/i,
+  /\bterraform\b[^\n;&|]{0,160}\b(?:apply|destroy|import|taint|untaint|state\s+(?:mv|rm))\b/i,
+  /\bpulumi\b[^\n;&|]{0,160}\b(?:up|destroy|import|refresh|stack\s+rm)\b/i,
+  /\bhelm\b[^\n;&|]{0,160}\b(?:install|upgrade|uninstall|rollback)\b/i,
+  /\b(?:docker|podman)\b[^\n;&|]{0,160}\bpush\b/i,
+];
 const PROTECTED_ACTION_TYPES = new Set([
   'credential',
   'credentials',
@@ -121,6 +130,12 @@ function redactedCommand(command) {
   return command.map((part) => shellQuote(redact(part))).join(' ');
 }
 
+function isProtectedCommand(text) {
+  const value = String(text || '');
+  return HIGH_RISK_TERMS.test(value)
+    || PROTECTED_COMMAND_PATTERNS.some((pattern) => pattern.test(value));
+}
+
 function normalizeClientLabel(value) {
   const raw = String(value || '').trim().toLowerCase();
   if (!raw) return '';
@@ -171,9 +186,11 @@ function shellQuoteDisplay(value) {
 
 function inferType(text) {
   const value = String(text || '').toLowerCase();
-  if (/\b(deploy|wrangler|cloudflare|production|prod|release)\b/.test(value)) return 'deploy';
+  if (/\b(deploy|wrangler|cloudflare|production|prod|release)\b/.test(value)
+    || /\b(?:kubectl|terraform|pulumi|helm)\b/.test(value) && isProtectedCommand(value)) return 'deploy';
   if (/\b(publish|npm publish)\b/.test(value)) return 'publish';
-  if (/\b(merge|gh pr merge)\b/.test(value)) return 'merge';
+  if (/\b(merge|gh pr merge)\b/.test(value)
+    || /\bgit\b[^\n;&|]{0,240}\bpush\b/.test(value)) return 'merge';
   if (/\b(migration|migrate|schema|d1 execute|drop table)\b/.test(value)) return 'migration';
   if (/\b(secret|token|key|password)\b/.test(value)) return 'security';
   if (/\b(test|check|lint|typecheck|smoke)\b/.test(value)) return 'verification';
@@ -185,6 +202,7 @@ function inferSurfaces(text) {
   const surfaces = new Set();
   if (/\b(git|gh|github)\b/.test(value)) surfaces.add('github');
   if (/\b(wrangler|cloudflare|worker|d1|r2)\b/.test(value)) surfaces.add('cloudflare');
+  if (/\b(kubectl|terraform|pulumi|helm|production|prod)\b/.test(value)) surfaces.add('production');
   if (/\b(npm|pnpm|yarn|publish)\b/.test(value)) surfaces.add('npm');
   if (/\b(sql|d1|migration|database|db)\b/.test(value)) surfaces.add('database');
   if (/\b(curl|api|http)\b/.test(value)) surfaces.add('api');
@@ -275,7 +293,7 @@ function detectProjectSignals(cwd = process.cwd()) {
 
 function isRisky(text, type) {
   return PROTECTED_ACTION_TYPES.has(String(type || '').trim().toLowerCase())
-    || HIGH_RISK_TERMS.test(`${type || ''} ${text || ''}`);
+    || isProtectedCommand(`${type || ''} ${text || ''}`);
 }
 
 function parseBaseOptions(argv, startIndex = 0) {
@@ -2092,6 +2110,7 @@ module.exports = {
   headers,
   inferType,
   inferSurfaces,
+  isRisky,
   commandForSelection,
   buildGovernState,
   detectProjectSignals,
