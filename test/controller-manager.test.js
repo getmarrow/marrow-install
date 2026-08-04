@@ -8,6 +8,7 @@ const test = require('node:test');
 const {
   controllerIdentity,
   controllerStatus,
+  controllerSupportedPlatform,
   ensureGovernanceController,
   readState,
   stopGovernanceController,
@@ -18,6 +19,19 @@ test('controller identity is scoped to the exact project and agent', () => {
   assert.notEqual(first, controllerIdentity({ root: '/tmp/project-b', agentId: 'agent-a' }));
   assert.notEqual(first, controllerIdentity({ root: '/tmp/project-a', agentId: 'agent-b' }));
   assert.match(first, /^[a-f0-9]{24}$/);
+});
+
+test('persistent controller lifecycle is explicit and non-destructive on unsupported platforms', async () => {
+  assert.equal(controllerSupportedPlatform('linux'), true);
+  assert.equal(controllerSupportedPlatform('darwin'), false);
+  const status = await controllerStatus({ platform: 'darwin' });
+  assert.equal(status.active, false);
+  assert.equal(status.state, 'unsupported_platform');
+  assert.match(status.exact_fix, /owner-managed service/);
+  await assert.rejects(ensureGovernanceController({
+    platform: 'darwin',
+    apiKey: 'test-controller-api-key',
+  }), /supported on Linux/);
 });
 
 test('controller survives the starting session without persisting the Marrow API key', async () => {
@@ -208,6 +222,75 @@ test('controller refuses a tampered PID without signaling either process', async
       await stopGovernanceController(options).catch(() => {});
     }
     unrelated.kill('SIGTERM');
+    if (prior === undefined) delete process.env.MARROW_SIDECAR_STATE_DIR;
+    else process.env.MARROW_SIDECAR_STATE_DIR = prior;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('controller refuses an authenticated endpoint and recorded PID mismatch', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-controller-crossed-'));
+  const projectA = path.join(root, 'project-a');
+  const projectB = path.join(root, 'project-b');
+  const stateA = path.join(root, 'state-a');
+  const stateB = path.join(root, 'state-b');
+  fs.mkdirSync(projectA, { mode: 0o700 });
+  fs.mkdirSync(projectB, { mode: 0o700 });
+  for (const project of [projectA, projectB]) {
+    fs.writeFileSync(path.join(project, 'package.json'), '{}\n');
+    fs.writeFileSync(path.join(project, 'AGENTS.md'), '# Project agents\n');
+  }
+  const prior = process.env.MARROW_SIDECAR_STATE_DIR;
+  const optionsA = {
+    apiKey: 'test-controller-api-key', baseUrl: 'https://api.example.test', agentId: 'controller-a',
+    client: 'codex', root: projectA, mode: 'md', profile: 'default', policy: 'warn',
+  };
+  const optionsB = { ...optionsA, agentId: 'controller-b', root: projectB };
+  let originalA;
+  let originalB;
+  try {
+    process.env.MARROW_SIDECAR_STATE_DIR = stateA;
+    await ensureGovernanceController(optionsA);
+    originalA = readState(optionsA);
+    process.env.MARROW_SIDECAR_STATE_DIR = stateB;
+    await ensureGovernanceController(optionsB);
+    originalB = readState(optionsB);
+
+    process.env.MARROW_SIDECAR_STATE_DIR = stateA;
+    const statePathA = path.join(stateA, 'active.json');
+    fs.writeFileSync(statePathA, JSON.stringify({ ...originalA, pid: originalB.pid }) + '\n', { mode: 0o600 });
+    fs.chmodSync(statePathA, 0o600);
+    const status = await controllerStatus(optionsA);
+    assert.equal(status.active, false);
+    assert.equal(status.state, 'identity_mismatch');
+    await assert.rejects(stopGovernanceController(optionsA), /Refusing to stop/);
+    await assert.rejects(ensureGovernanceController(optionsA), /identity is ambiguous/);
+    assert.doesNotThrow(() => process.kill(originalA.pid, 0));
+    assert.doesNotThrow(() => process.kill(originalB.pid, 0));
+    assert.equal(readState(optionsA).pid, originalB.pid);
+
+    fs.writeFileSync(statePathA, JSON.stringify(originalA) + '\n', { mode: 0o600 });
+    fs.chmodSync(statePathA, 0o600);
+    await stopGovernanceController(optionsA);
+    originalA = null;
+    process.env.MARROW_SIDECAR_STATE_DIR = stateB;
+    await stopGovernanceController(optionsB);
+    originalB = null;
+  } finally {
+    if (originalA) {
+      process.env.MARROW_SIDECAR_STATE_DIR = stateA;
+      const statePathA = path.join(stateA, 'active.json');
+      fs.writeFileSync(statePathA, JSON.stringify(originalA) + '\n', { mode: 0o600 });
+      fs.chmodSync(statePathA, 0o600);
+      await stopGovernanceController(optionsA).catch(() => {});
+    }
+    if (originalB) {
+      process.env.MARROW_SIDECAR_STATE_DIR = stateB;
+      const statePathB = path.join(stateB, 'active.json');
+      fs.writeFileSync(statePathB, JSON.stringify(originalB) + '\n', { mode: 0o600 });
+      fs.chmodSync(statePathB, 0o600);
+      await stopGovernanceController(optionsB).catch(() => {});
+    }
     if (prior === undefined) delete process.env.MARROW_SIDECAR_STATE_DIR;
     else process.env.MARROW_SIDECAR_STATE_DIR = prior;
     fs.rmSync(root, { recursive: true, force: true });

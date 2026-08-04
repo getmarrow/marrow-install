@@ -3,7 +3,7 @@ const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
 const { version: INSTALLER_ADAPTER_VERSION } = require('../package.json');
-const { controllerStatus, ensureGovernanceController } = require('./controller-manager');
+const { controllerStatus, controllerSupportedPlatform, ensureGovernanceController } = require('./controller-manager');
 
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MARROW_BLOCK_START = '<!-- marrow:passive-start -->';
@@ -1601,8 +1601,14 @@ async function install(options) {
   }
   const changedConfig = changes.some((change) => change.applied) || configRepairs.some((repair) => repair.changed);
   const selfTestPassed = Boolean(!selfTest.skipped && selfTest.active && !selfTest.error);
-  let controller = await controllerStatus({ root: detection.root, agentId: options.agentId });
+  const controllerPlatform = options.controllerPlatform || process.platform;
+  let controller = await controllerStatus({
+    root: detection.root,
+    agentId: options.agentId,
+    platform: controllerPlatform,
+  });
   const shouldEnsureController = options.controller !== false
+    && controllerSupportedPlatform(controllerPlatform)
     && Boolean(options.apiKey)
     && selfTestPassed
     && !options.dryRun
@@ -1619,6 +1625,7 @@ async function install(options) {
         mode: plan.mode,
         profile: options.governanceMode || 'default',
         policy: options.governancePolicy || 'warn',
+        platform: controllerPlatform,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
