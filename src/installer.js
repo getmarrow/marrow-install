@@ -3,13 +3,14 @@ const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
 const { version: INSTALLER_ADAPTER_VERSION } = require('../package.json');
+const { controllerStatus, ensureGovernanceController } = require('./controller-manager');
 
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MARROW_BLOCK_START = '<!-- marrow:passive-start -->';
 const MARROW_BLOCK_END = '<!-- marrow:passive-end -->';
-const MCP_ADAPTER_VERSION = '3.9.52';
-const SDK_ADAPTER_VERSION = '3.7.51';
-const SDK_ADAPTER_INTEGRITY = 'sha512-0l4UOeJLZ8izIoci4TRy22svKm3xvoyyAbU16aB3vnqxvsrdv3TDaz2EqXpo0vz62IEMlx/F+IoiQ9t9xKzdFA==';
+const MCP_ADAPTER_VERSION = '3.9.53';
+const SDK_ADAPTER_VERSION = '3.7.52';
+const SDK_ADAPTER_INTEGRITY = 'sha512-dMo5rMXP5sFTRsiRI+Oe3SOWgSsi8TTt9VrYL9gC71EQFN2UTtuH914CkYEpcS627sb02jXrUDiXxznX/2fWgA==';
 const SDK_ADAPTER_TARBALL = `https://registry.npmjs.org/@getmarrow/sdk/-/sdk-${SDK_ADAPTER_VERSION}.tgz`;
 const MCP_PACKAGE_SPEC = `@getmarrow/mcp@${MCP_ADAPTER_VERSION}`;
 const MCP_CONTEXT_HOOK_COMMAND = `npx -y ${MCP_PACKAGE_SPEC} context-hook`;
@@ -18,7 +19,7 @@ const MCP_ACTION_RESULT_HOOK_COMMAND = `npx -y ${MCP_PACKAGE_SPEC} hook`;
 const MCP_SESSION_END_HOOK_COMMAND = `npx -y ${MCP_PACKAGE_SPEC} session-hook`;
 const NATIVE_HOOK_MATCHER = 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*';
 const NATIVE_EXPECTED_HOOKS = ['prompt', 'pre_action', 'action_result', 'session_end'];
-const SOURCE_CLIENTS = new Set(['claude-code', 'cursor', 'composer', 'windsurf', 'openclaw', 'codex', 'gemini', 'grok', 'deepseek', 'qwen', 'kimi', 'minimax', 'cline', 'opencode', 'hermes', 'glm', 'custom', 'unknown']);
+const SOURCE_CLIENTS = new Set(['claude-code', 'cursor', 'composer', 'windsurf', 'openclaw', 'codex', 'gemini', 'grok', 'deepseek', 'qwen', 'kimi', 'minimax', 'cline', 'opencode', 'hermes', 'glm', 'mcp', 'ci', 'custom', 'unknown']);
 const HARNESS_CAPABILITY_REGISTRY = Object.freeze([
   { client: 'claude-code', capability_level: 'native_hooks', automatic: ['prompt', 'pre_action', 'action_result', 'session_end'], install_surface: 'mcp' },
   { client: 'cursor', capability_level: 'mcp', automatic: ['mcp_tool_calls'], install_surface: 'mcp' },
@@ -36,6 +37,8 @@ const HARNESS_CAPABILITY_REGISTRY = Object.freeze([
   { client: 'kimi', capability_level: 'governed_wrapper', automatic: ['pre_action', 'action_result', 'outcome_closure'], install_surface: 'runner' },
   { client: 'minimax', capability_level: 'governed_wrapper', automatic: ['pre_action', 'action_result', 'outcome_closure'], install_surface: 'runner' },
   { client: 'glm', capability_level: 'governed_wrapper', automatic: ['pre_action', 'action_result', 'outcome_closure'], install_surface: 'runner' },
+  { client: 'mcp', capability_level: 'mcp', automatic: ['mcp_tool_calls'], install_surface: 'mcp' },
+  { client: 'ci', capability_level: 'governed_wrapper', automatic: ['pre_action', 'action_result', 'outcome_closure'], install_surface: 'runner' },
   { client: 'custom', capability_level: 'event_contract', automatic: [], install_surface: 'event_contract' },
 ]);
 
@@ -64,6 +67,9 @@ function sourceClient() {
     hermes: 'hermes',
     'hermes-agent': 'hermes',
     glm: 'glm',
+    mcp: 'mcp',
+    ci: 'ci',
+    'github-actions': 'ci',
   };
   return aliases[raw] || (SOURCE_CLIENTS.has(raw) ? raw : 'custom');
 }
@@ -83,6 +89,7 @@ function parseArgs(argv) {
     selfTestExplicitlyDisabled: false,
     json: false,
     activate: false,
+    controller: true,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -104,6 +111,7 @@ function parseArgs(argv) {
       options.selfTest = false;
       options.selfTestExplicitlyDisabled = true;
     }
+    else if (arg === '--no-controller') options.controller = false;
     else if (arg === '--self-test') options.selfTest = true;
     else if (arg === '--cwd') options.cwd = path.resolve(argv[++i] || options.cwd);
     else if (arg === '--mode') options.mode = argv[++i] || options.mode;
@@ -157,6 +165,7 @@ Options:
   --key <key>        Marrow API key for self-test. Prefer MARROW_API_KEY because CLI args can appear in process listings.
   --base-url <url>   Marrow API base URL
   --agent-id <id>    Agent/fleet id for self-test headers
+  --no-controller    Do not start the local background controller during install/repair
   --no-self-test     Skip API smoke/self-test
 `;
 }
@@ -1263,8 +1272,13 @@ async function runSelfTest(options) {
       avoided_mistakes: performance.avoided_mistakes ?? performance.avoided_repeated_mistakes ?? 0,
       reused_winning_decisions: performance.reused_winning_decisions ?? 0,
       prevented_bad_actions: performance.prevented_bad_actions ?? 0,
-      estimated_tokens_saved: performance.token_time_saved_estimate?.estimated_tokens_saved ?? 0,
-      estimated_minutes_saved: performance.token_time_saved_estimate?.estimated_minutes_saved ?? 0,
+      estimated_tokens_saved: tokenValueProof?.savings?.estimated_tokens_saved ?? null,
+      estimated_minutes_saved: tokenValueProof?.savings?.estimated_minutes_saved ?? null,
+      token_savings_available: Number(tokenValueProof?.observed?.model_calls || 0) > 0
+        && Number(tokenValueProof?.savings?.estimated_tokens_saved || 0) > 0,
+      token_savings_source: 'agent_model_usage_events',
+      token_savings_method: tokenValueProof?.savings?.method || 'warming_up',
+      token_savings_confidence: tokenValueProof?.savings?.confidence || 'none',
       reliability_score: performance.agent_reliability_score ?? null,
     } : null,
   };
@@ -1287,10 +1301,22 @@ function buildTokenValueProof(valueProof = {}) {
   return modelUsage;
 }
 
+function tokenValueProofLine(tokenValueProof) {
+  const calls = Number(tokenValueProof?.observed?.model_calls || 0);
+  const saved = Number(tokenValueProof?.savings?.estimated_tokens_saved || 0);
+  if (calls > 0 && saved > 0) {
+    const method = tokenValueProof.savings?.method || 'unspecified';
+    const confidence = tokenValueProof.savings?.confidence || 'unknown';
+    return `Marrow observed ${calls} model call${calls === 1 ? '' : 's'} and estimates ~${saved} tokens saved (${method}, ${confidence} confidence)`;
+  }
+  return tokenValueProof?.proof_line || null;
+}
+
 function buildInstallValueMoment(firstValueSignal = {}, status = {}, runtime = {}, performance = {}, firstValue = {}, tokenValueProof = null) {
   if (firstValue && firstValue.ok !== false && firstValue.first_value) {
     const proof = Array.isArray(firstValue.first_value.proof) ? [...firstValue.first_value.proof] : [];
-    if (tokenValueProof?.proof_line && !proof.includes(tokenValueProof.proof_line)) proof.push(tokenValueProof.proof_line);
+    const tokenProofLine = tokenValueProofLine(tokenValueProof);
+    if (tokenProofLine && !proof.includes(tokenProofLine)) proof.push(tokenProofLine);
     return {
       headline: firstValue.headline || firstValue.first_value.headline || 'Your agent is no longer starting from zero.',
       proof,
@@ -1315,7 +1341,7 @@ function buildInstallValueMoment(firstValueSignal = {}, status = {}, runtime = {
       'Closed the outcome successfully',
       'Runtime gate is ' + (firstValueSignal.active ? 'active' : 'installed'),
       runtimeLesson ? 'Future risky work now gets a pre-action brief' : 'Future risky work now gets checked before action',
-      tokenValueProof?.proof_line || 'Token usage proof is active and warming up after the first model call',
+      tokenValueProofLine(tokenValueProof) || 'Token usage proof is active and warming up after the first model call',
     ],
     fleet_signal: hasFleetSignal
       ? 'Marrow already found signal: ' + proof.join('; ') + '.'
@@ -1334,9 +1360,8 @@ function buildFirstValueSignal(status, runtime, performance, firstValue = {}, to
     if (Number(proof.avoided_mistakes || 0) > 0) proofBits.push(`${proof.avoided_mistakes} avoided mistake(s)`);
     if (Number(proof.reused_winning_decisions || 0) > 0) proofBits.push(`${proof.reused_winning_decisions} reused winning decision(s)`);
     if (Number(proof.prevented_bad_actions || 0) > 0) proofBits.push(`${proof.prevented_bad_actions} prevented risky action(s)`);
-    if (Number(proof.estimated_tokens_saved || 0) > 0) proofBits.push(`~${proof.estimated_tokens_saved} tokens saved`);
-    if (Number(tokenValueProof?.savings?.estimated_tokens_saved || 0) > 0) proofBits.push(`~${tokenValueProof.savings.estimated_tokens_saved} measured model tokens saved`);
-    else if (tokenValueProof?.proof_line) proofBits.push(tokenValueProof.proof_line);
+    const tokenProofLine = tokenValueProofLine(tokenValueProof);
+    if (tokenProofLine) proofBits.push(tokenProofLine);
     return {
       active: Boolean(firstValue.active),
       headline: `Marrow active: ${(capture.surfaces || ['decisions']).join(', ')} captured.`,
@@ -1362,10 +1387,8 @@ function buildFirstValueSignal(status, runtime, performance, firstValue = {}, to
   if (Number(proof.avoided_mistakes || proof.avoided_repeated_mistakes || 0) > 0) proofBits.push(`${proof.avoided_mistakes || proof.avoided_repeated_mistakes} avoided mistake(s)`);
   if (Number(proof.reused_winning_decisions || 0) > 0) proofBits.push(`${proof.reused_winning_decisions} reused winning decision(s)`);
   if (Number(proof.prevented_bad_actions || 0) > 0) proofBits.push(`${proof.prevented_bad_actions} prevented risky action(s)`);
-  const tokens = proof.token_time_saved_estimate?.estimated_tokens_saved || 0;
-  if (tokens > 0) proofBits.push(`~${tokens} tokens saved`);
-  if (Number(tokenValueProof?.savings?.estimated_tokens_saved || 0) > 0) proofBits.push(`~${tokenValueProof.savings.estimated_tokens_saved} measured model tokens saved`);
-  else if (tokenValueProof?.proof_line) proofBits.push(tokenValueProof.proof_line);
+  const tokenProofLine = tokenValueProofLine(tokenValueProof);
+  if (tokenProofLine) proofBits.push(tokenProofLine);
 
   const firstLesson = runtime.before_you_act
     || runtime.before_you_act_injection?.message
@@ -1495,6 +1518,11 @@ function printReport(report) {
     if (report.sdkDependency.warning) process.stdout.write(`- warning: ${report.sdkDependency.warning}\n`);
   }
 
+  process.stdout.write('\nAutomatic controller:\n');
+  process.stdout.write(`- state: ${report.controller?.active ? 'active' : report.controller?.state || 'unavailable'}\n`);
+  if (report.controller?.started_at) process.stdout.write(`- started: ${report.controller.started_at}\n`);
+  if (report.controller?.exact_fix) process.stdout.write(`- exact fix: ${report.controller.exact_fix}\n`);
+
   if (report.writeMode === 'doctor') {
     process.stdout.write('\nDoctor:\n');
     process.stdout.write(`- Marrow active: ${report.doctor.active ? 'yes' : 'no'}\n`);
@@ -1573,6 +1601,36 @@ async function install(options) {
   }
   const changedConfig = changes.some((change) => change.applied) || configRepairs.some((repair) => repair.changed);
   const selfTestPassed = Boolean(!selfTest.skipped && selfTest.active && !selfTest.error);
+  let controller = await controllerStatus({ root: detection.root, agentId: options.agentId });
+  const shouldEnsureController = options.controller !== false
+    && Boolean(options.apiKey)
+    && selfTestPassed
+    && !options.dryRun
+    && !options.doctor
+    && (options.yes || options.activate || options.repair);
+  if (shouldEnsureController) {
+    try {
+      controller = await ensureGovernanceController({
+        apiKey: options.apiKey,
+        baseUrl: options.baseUrl,
+        agentId: options.agentId,
+        client,
+        root: detection.root,
+        mode: plan.mode,
+        profile: options.governanceMode || 'default',
+        policy: options.governancePolicy || 'warn',
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      controller = {
+        active: false,
+        state: 'error',
+        exact_fix: 'Run npx @getmarrow/install controller ensure after correcting the reported local controller error.',
+        error: message,
+      };
+      if (options.activate) throw new Error(`Marrow activation failed: local controller did not start: ${message}`);
+    }
+  }
   const remediation = options.repair
     ? {
       attempted: true,
@@ -1614,16 +1672,17 @@ async function install(options) {
       missingEnv: options.apiKey ? [] : ['MARROW_API_KEY'],
       envHints,
       missingHooks: changes.filter((change) => change.changed).map((change) => change.label),
-      recommendedFix: configDiagnostics.npm_token.recommended_fix || selfTest.recommended_fix || (!options.apiKey
+      recommendedFix: configDiagnostics.npm_token.recommended_fix || (!options.apiKey
         ? envHints.length
           ? `MARROW_API_KEY was found in a likely env file at ${envHints[0]}. Load that key from trusted secret storage, export only MARROW_API_KEY, then run npx @getmarrow/install --repair.`
           : 'Set MARROW_API_KEY, then run npx @getmarrow/install --repair.'
-        : null),
+        : controller.exact_fix || selfTest.recommended_fix || null),
     },
     remediation,
     configDiagnostics,
     configRepairs,
     sdkDependency,
+    controller,
     selfTest,
     warnings: options.keyFromArg
       ? ['Avoid --key in shared shells because command-line arguments can be visible in process listings. Prefer MARROW_API_KEY in your environment or secret manager.']
