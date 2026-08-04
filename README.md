@@ -78,7 +78,7 @@ npx -y @getmarrow/install@latest --repair
 
 ## Automatic Controller
 
-Successful install, repair, and activation starts a loopback-only controller that survives individual agent sessions. It keeps the signed action-permit broker available, checks installer-managed hooks every five minutes, safely restores missing managed entries, and reports an exact fix when repair is not safe. The API key remains process-only; private controller state is owner-only and contains no Marrow credential.
+On Linux, successful install, repair, and activation starts a loopback-only controller that survives individual agent sessions. It keeps the signed action-permit broker available, checks installer-managed hooks every five minutes, safely restores missing managed entries, and reports an exact fix when repair is not safe. The API key remains process-only; private controller state is owner-only and contains no Marrow credential.
 
 ```bash
 npx @getmarrow/install controller status
@@ -86,7 +86,7 @@ npx @getmarrow/install controller ensure
 npx @getmarrow/install controller stop
 ```
 
-Use `--no-controller` only when an owner-managed service already provides the same lifecycle. The controller does not silently upgrade packages, change governance policy, rotate credentials, or modify unrelated project configuration.
+Persistent controller lifecycle is currently Linux-only. On macOS or Windows, activation still installs and verifies the supported hooks without starting or signaling a background process; run `npx @getmarrow/install sidecar` under an owner-managed service and pass `--no-controller`. The controller does not silently upgrade packages, change governance policy, rotate credentials, or modify unrelated project configuration.
 
 ## What's New in v0.1.37
 

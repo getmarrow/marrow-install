@@ -95,8 +95,12 @@ function pidAlive(pid) {
   }
 }
 
-function isExpectedControllerProcess(pid) {
-  if (process.platform !== 'linux' || !Number.isInteger(pid) || pid <= 1) return false;
+function controllerSupportedPlatform(platform = process.platform) {
+  return platform === 'linux';
+}
+
+function isExpectedControllerProcess(pid, platform = process.platform) {
+  if (!controllerSupportedPlatform(platform) || !Number.isInteger(pid) || pid <= 1) return false;
   try {
     const args = fs.readFileSync(`/proc/${pid}/cmdline`).toString('utf8').split('\0').filter(Boolean);
     if (args.length < 3 || args[2] !== 'sidecar') return false;
@@ -107,6 +111,15 @@ function isExpectedControllerProcess(pid) {
 }
 
 async function controllerStatus(options = {}) {
+  if (!controllerSupportedPlatform(options.platform)) {
+    return {
+      active: false,
+      state: 'unsupported_platform',
+      started_at: null,
+      instance_id: null,
+      exact_fix: 'Persistent controller lifecycle is currently supported on Linux. Use --no-controller and run npx @getmarrow/install sidecar under an owner-managed service.',
+    };
+  }
   let state;
   try {
     state = readState(options);
@@ -138,7 +151,7 @@ async function controllerStatus(options = {}) {
       exact_fix: 'Run npx @getmarrow/install controller ensure.',
     };
   }
-  if (!isExpectedControllerProcess(state.pid)) {
+  if (!isExpectedControllerProcess(state.pid, options.platform)) {
     return {
       active: false,
       state: 'identity_mismatch',
@@ -155,9 +168,35 @@ async function controllerStatus(options = {}) {
       headers: { Authorization: `Bearer ${state.token}` },
       signal: controller.signal,
     });
-    const body = response.ok ? await response.json() : null;
-    if (!response.ok || body?.ok !== true || body?.instance_id !== state.instance_id || body?.pid !== state.pid) {
-      throw new Error('Controller health identity did not match its private state.');
+    if (!response.ok) {
+      return {
+        active: false,
+        state: 'identity_mismatch',
+        started_at: state.started_at,
+        instance_id: state.instance_id,
+        exact_fix: 'Inspect the authenticated controller endpoint and private state before retrying. Marrow will not signal either process.',
+      };
+    }
+    let body;
+    try {
+      body = await response.json();
+    } catch {
+      return {
+        active: false,
+        state: 'identity_mismatch',
+        started_at: state.started_at,
+        instance_id: state.instance_id,
+        exact_fix: 'Inspect the authenticated controller endpoint and private state before retrying. Marrow will not signal either process.',
+      };
+    }
+    if (body?.ok !== true || body?.instance_id !== state.instance_id || body?.pid !== state.pid) {
+      return {
+        active: false,
+        state: 'identity_mismatch',
+        started_at: state.started_at,
+        instance_id: state.instance_id,
+        exact_fix: 'Inspect the authenticated controller endpoint and private state before retrying. Marrow will not signal either process.',
+      };
     }
     const maintenance = body.maintenance && typeof body.maintenance === 'object'
       ? body.maintenance
@@ -292,9 +331,9 @@ function removeInvalidState(options = {}) {
   return true;
 }
 
-async function stopRecordedController(state) {
+async function stopRecordedController(state, options = {}) {
   if (!pidAlive(state.pid)) return;
-  if (!isExpectedControllerProcess(state.pid)) {
+  if (!isExpectedControllerProcess(state.pid, options.platform)) {
     throw new Error('Refusing to terminate an unreachable process that cannot be verified as the Marrow controller.');
   }
   process.kill(state.pid, 'SIGTERM');
@@ -303,6 +342,9 @@ async function stopRecordedController(state) {
 }
 
 async function startGovernanceController(options) {
+  if (!controllerSupportedPlatform(options.platform)) {
+    throw new Error('Persistent controller lifecycle is currently supported on Linux. Use --no-controller and run the sidecar under an owner-managed service.');
+  }
   if (!options.apiKey) throw new Error('MARROW_API_KEY is required to start the Marrow controller.');
   const directory = ensurePrivateDirectory(options);
   const lock = await acquireLifecycleLock(options);
@@ -312,7 +354,7 @@ async function startGovernanceController(options) {
     if (current.state === 'stale') removeStaleState(options);
     if (current.state === 'unreachable') {
       const prior = readState(options);
-      await stopRecordedController(prior);
+      await stopRecordedController(prior, options);
       removeStaleState(options);
     }
     if (current.state === 'identity_mismatch') {
@@ -362,6 +404,9 @@ async function startGovernanceController(options) {
 }
 
 async function stopGovernanceController(options = {}) {
+  if (!controllerSupportedPlatform(options.platform)) {
+    throw new Error('Persistent controller lifecycle is currently supported on Linux. No process was signaled.');
+  }
   ensurePrivateDirectory(options);
   const lock = await acquireLifecycleLock(options);
   try {
@@ -378,7 +423,7 @@ async function stopGovernanceController(options = {}) {
       throw new Error('Refusing to stop a controller whose PID is not bound to its authenticated endpoint.');
     }
     if (current.active || current.state === 'unreachable') {
-      await stopRecordedController(state);
+      await stopRecordedController(state, options);
     }
     removeStaleState(options);
     return { active: false, state: 'stopped', changed: true, exact_fix: null };
@@ -395,6 +440,7 @@ async function ensureGovernanceController(options) {
 module.exports = {
   controllerDirectory,
   controllerIdentity,
+  controllerSupportedPlatform,
   controllerStatus,
   ensureGovernanceController,
   readState,
