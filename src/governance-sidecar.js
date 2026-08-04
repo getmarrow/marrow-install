@@ -29,6 +29,9 @@ function createPrivateDirectoryWithoutSymlinks(directory) {
     if (stat.isSymbolicLink() || !stat.isDirectory() || fs.realpathSync(current) !== current) {
       throw new Error('Sidecar state directory cannot contain symlinked path components.');
     }
+    if ((stat.mode & 0o022) !== 0 && (stat.mode & 0o1000) === 0) {
+      throw new Error('Sidecar state directory cannot be nested under a non-sticky writable ancestor.');
+    }
   }
   return resolved;
 }
@@ -90,12 +93,14 @@ function writePrivateJsonAtomic(filePath, value) {
   }
 }
 
-function unlinkPrivateStateFile(filePath) {
+function unlinkPrivateStateFile(filePath, expectedInstanceId) {
   try {
     const stat = fs.lstatSync(filePath);
     const uid = currentUid();
     if (!stat.isSymbolicLink() && stat.isFile() && (uid === null || stat.uid === uid)) {
-      fs.unlinkSync(filePath);
+      const raw = stat.size <= 8 * 1024 ? fs.readFileSync(filePath, 'utf8') : '';
+      const current = raw ? JSON.parse(raw) : null;
+      if (current?.instance_id === expectedInstanceId) fs.unlinkSync(filePath);
     }
   } catch {}
 }
@@ -131,6 +136,12 @@ async function startGovernanceSidecar(options, handlers) {
   const instanceId = `sidecar-${crypto.randomUUID()}`;
   const startedAt = new Date().toISOString();
   let latestCoverage = null;
+  let latestMaintenance = {
+    state: handlers.maintain ? 'pending' : 'unavailable',
+    checked_at: null,
+    repaired: [],
+    exact_fix: handlers.maintain ? null : 'Run npx @getmarrow/install --repair in the managed project.',
+  };
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -142,7 +153,12 @@ async function startGovernanceSidecar(options, handlers) {
       }
       const url = new URL(req.url || '/', 'http://127.0.0.1');
       if (req.method === 'GET' && url.pathname === '/health') {
-        return json(res, 200, { ok: true, instance_id: instanceId, started_at: startedAt });
+        return json(res, 200, {
+          ok: true,
+          instance_id: instanceId,
+          started_at: startedAt,
+          maintenance: latestMaintenance,
+        });
       }
       if (req.method === 'GET' && url.pathname === '/coverage') {
         latestCoverage = await handlers.coverage();
@@ -184,6 +200,18 @@ async function startGovernanceSidecar(options, handlers) {
   }
 
   const heartbeat = async () => {
+    if (handlers.maintain) {
+      try {
+        latestMaintenance = await handlers.maintain();
+      } catch {
+        latestMaintenance = {
+          state: 'attention_required',
+          checked_at: new Date().toISOString(),
+          repaired: [],
+          exact_fix: 'Run npx @getmarrow/install --repair in the managed project.',
+        };
+      }
+    }
     try {
       latestCoverage = await handlers.heartbeat({ sidecarInstanceId: instanceId });
     } catch {
@@ -199,7 +227,7 @@ async function startGovernanceSidecar(options, handlers) {
     if (closed) return;
     closed = true;
     clearInterval(timer);
-    unlinkPrivateStateFile(stateFile);
+    unlinkPrivateStateFile(stateFile, instanceId);
     process.off('SIGINT', close);
     process.off('SIGTERM', close);
     server.close();

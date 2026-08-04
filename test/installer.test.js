@@ -23,16 +23,16 @@ function tempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-install-'));
 }
 
-function writeSdkLock(root, declaredSpec = '^3.7.51') {
+function writeSdkLock(root, declaredSpec = '^3.7.52') {
   fs.writeFileSync(path.join(root, 'package-lock.json'), JSON.stringify({
     name: 'fixture',
     lockfileVersion: 3,
     packages: {
       '': { dependencies: { '@getmarrow/sdk': declaredSpec } },
       'node_modules/@getmarrow/sdk': {
-        version: '3.7.51',
-        resolved: 'https://registry.npmjs.org/@getmarrow/sdk/-/sdk-3.7.51.tgz',
-        integrity: 'sha512-0l4UOeJLZ8izIoci4TRy22svKm3xvoyyAbU16aB3vnqxvsrdv3TDaz2EqXpo0vz62IEMlx/F+IoiQ9t9xKzdFA==',
+        version: '3.7.52',
+        resolved: 'https://registry.npmjs.org/@getmarrow/sdk/-/sdk-3.7.52.tgz',
+        integrity: 'sha512-dMo5rMXP5sFTRsiRI+Oe3SOWgSsi8TTt9VrYL9gC71EQFN2UTtuH914CkYEpcS627sb02jXrUDiXxznX/2fWgA==',
       },
     },
   }));
@@ -54,6 +54,10 @@ test('parseArgs defaults to dry-run unless --yes is passed', () => {
   const repair = parseArgs(['--repair']);
   assert.equal(repair.repair, true);
   assert.equal(repair.yes, true);
+  assert.equal(repair.controller, true);
+
+  const noController = parseArgs(['--repair', '--no-controller']);
+  assert.equal(noController.controller, false);
 });
 
 test('activate is the one-command write and server verification path', () => {
@@ -303,7 +307,7 @@ test('install reports missing SDK dependency for passive runtime projects', asyn
 
   assert.equal(report.sdkDependency.required, true);
   assert.equal(report.sdkDependency.present, false);
-  assert.equal(report.sdkDependency.install_command, 'npm install @getmarrow/sdk@3.7.51');
+  assert.equal(report.sdkDependency.install_command, 'npm install @getmarrow/sdk@3.7.52');
 
   fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ dependencies: { '@getmarrow/sdk': '^3.7.27' } }));
   const moduleDir = path.join(dir, 'node_modules', '@getmarrow', 'sdk');
@@ -313,12 +317,12 @@ test('install reports missing SDK dependency for passive runtime projects', asyn
   let sdk = inspectSdkDependency(detected);
   assert.equal(sdk.present, false);
   assert.equal(sdk.installed_version, '0.0.1');
-  fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({ name: '@getmarrow/sdk', version: '3.7.51' }));
+  fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({ name: '@getmarrow/sdk', version: '3.7.52' }));
   writeSdkLock(dir, '^3.7.27');
   detected = detectEnvironment(dir, {});
   sdk = inspectSdkDependency(detected);
   assert.equal(sdk.present, true);
-  assert.equal(sdk.installed_version, '3.7.51');
+  assert.equal(sdk.installed_version, '3.7.52');
 });
 
 test('doctor detects npm token config mismatches without leaking token values', async () => {
@@ -591,8 +595,8 @@ test('self-test returns first five-minute value signal and proof', async () => {
         capture_coverage: { decisions: true, tools: 'detected', commands: 'detected', deploys: 'unknown', publishes: 'unknown' },
         auto_outcome_closure: { state: 'active' },
         client_update: {
-          installed_version: '0.1.36',
-          latest_version: '0.1.36',
+          installed_version: '0.1.37',
+          latest_version: '0.1.37',
           version_status: 'behind',
           update_available: true,
           notification_state: 'recommended',
@@ -679,7 +683,7 @@ test('self-test returns first five-minute value signal and proof', async () => {
       agentId: 'installer-test',
     });
     assert.equal(requestHeaders['x-marrow-package'], '@getmarrow/install');
-    assert.equal(requestHeaders['x-marrow-package-version'], '0.1.36');
+    assert.equal(requestHeaders['x-marrow-package-version'], '0.1.37');
     assert.equal(result.first_value_signal.active, true);
     assert.match(result.first_value_signal.headline, /Marrow active/);
     assert.ok(result.first_value_signal.captured.includes('decisions'));
@@ -690,7 +694,14 @@ test('self-test returns first five-minute value signal and proof', async () => {
     assert.match(result.install_value_moment.fleet_signal, /avoided mistake/);
     assert.equal(result.first_value.headline, 'Your agent is no longer starting from zero.');
     assert.ok(result.first_value_signal.value_proof.some((line) => line.includes('avoided mistake')));
-    assert.equal(result.performance_proof.estimated_tokens_saved, 6600);
+    assert.ok(result.first_value_signal.value_proof.some((line) => line.includes('observed 3 model call')));
+    assert.ok(result.first_value_signal.value_proof.some((line) => line.includes('explicit_measurements')));
+    assert.equal(result.first_value_signal.value_proof.some((line) => line.includes('6600')), false);
+    assert.equal(result.first_value_signal.value_proof.some((line) => line.includes('measured model tokens')), false);
+    assert.equal(result.performance_proof.estimated_tokens_saved, 700);
+    assert.equal(result.performance_proof.token_savings_available, true);
+    assert.equal(result.performance_proof.token_savings_source, 'agent_model_usage_events');
+    assert.equal(result.performance_proof.token_savings_method, 'explicit_measurements');
     assert.equal(result.token_value_proof.observed.model_calls, 3);
     assert.equal(result.token_value_proof.observed.tokens.total, 2000);
     assert.equal(result.token_value_proof.savings.estimated_tokens_saved, 700);
@@ -777,7 +788,7 @@ test('activation requires a receipt bound to the exact decision, agent, and succ
       hooks_installed: ['passive runtime'],
       capture_verified: true,
       complete: true,
-      adapter_version: '0.1.36',
+      adapter_version: '0.1.37',
       capability_level: 'governed_wrapper',
       config_fingerprint: 'fixture-config-fingerprint',
       expected_hooks: ['pre_action', 'action_result', 'outcome_closure'],

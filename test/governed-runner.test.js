@@ -25,6 +25,7 @@ const {
   redactedCommand,
   renderFleetTui,
   renderIntegrationPanel,
+  integrationCoverageMatrix,
   localSupportedHarnesses,
   localIntegrationManifest,
   renderGovernTui,
@@ -186,6 +187,49 @@ test('server-classified high-risk actions ignore fail-open before permit issuanc
   }
 });
 
+test('server-classified low-risk actions remain non-blocking without an action permit', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-runner-low-risk-'));
+  const marker = path.join(directory, 'executed');
+  const originalFetch = globalThis.fetch;
+  let permitCalls = 0;
+  globalThis.fetch = async (url, init = {}) => {
+    const pathname = new URL(String(url)).pathname;
+    const body = init.body ? JSON.parse(String(init.body)) : {};
+    if (pathname === '/v1/agent/runtime') {
+      return Response.json({ data: {
+        risk_gate: { allow: true, decision: 'allow', risk_level: 'low' },
+        gate_receipt: { required: false },
+      } });
+    }
+    if (pathname === '/v1/agent/think') {
+      return Response.json({ data: { decision_id: 'decision-low-risk' } });
+    }
+    if (pathname === '/v1/agent/enforcement' && body.operation === 'issue') {
+      permitCalls += 1;
+      return Response.json({ error: 'permit service unavailable' }, { status: 503 });
+    }
+    if (pathname === '/v1/agent/commit') return Response.json({ data: { committed: true } });
+    return Response.json({ data: {} });
+  };
+  try {
+    const parsed = parseArgs([
+      'run', '--key', 'test-key', '--agent', 'general-agent', '--type', 'general',
+      '--action', 'inspect current state', '--fail-open', '--',
+      process.execPath, '-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`,
+    ]);
+    const result = await runGoverned(parsed);
+    assert.equal(result.blocked, false);
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.permit_id, null);
+    assert.equal(result.permit_verified, false);
+    assert.equal(permitCalls, 0);
+    assert.equal(fs.existsSync(marker), true);
+  } finally {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('governed runner never starts a protected child when permit verification is not exactly true', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-runner-verify-'));
   const marker = path.join(directory, 'executed');
@@ -324,11 +368,16 @@ test('permit and verifier commands bind action, target, session, and agent witho
   assert.notEqual(binding.action_hash, binding.target_hash);
 });
 
-test('coverage and sidecar commands are first-class governed surfaces', () => {
+test('coverage, sidecar, and controller commands are first-class governed surfaces', () => {
   assert.equal(parseArgs(['coverage', '--agent', 'bob']).command, 'coverage');
   const sidecar = parseArgs(['sidecar', '--sidecar-port', '43821']);
   assert.equal(sidecar.command, 'sidecar');
   assert.equal(sidecar.options.sidecarPort, '43821');
+  const controller = parseArgs(['controller', 'ensure', '--agent', 'bob', '--policy', 'warn']);
+  assert.equal(controller.command, 'controller');
+  assert.equal(controller.action, 'ensure');
+  assert.equal(controller.options.agentId, 'bob');
+  assert.equal(controller.options.policy, 'warn');
 });
 
 test('redacts API keys and tokens from command text', () => {
@@ -571,7 +620,7 @@ test('governed runner attaches stable client attribution from env and CLI', () =
     assert.equal(sourceClient(envParsed.options.client), 'qwen');
     assert.equal(headers(envParsed.options)['X-Marrow-Client'], 'qwen');
     assert.equal(headers(envParsed.options)['X-Marrow-Package'], '@getmarrow/install');
-    assert.equal(headers(envParsed.options)['X-Marrow-Package-Version'], '0.1.36');
+    assert.equal(headers(envParsed.options)['X-Marrow-Package-Version'], '0.1.37');
 
     const cliParsed = parseArgs(['run', '--client', 'Hermes', '--agent', 'hermes-agent', '--', 'hermes', '/goal']);
     const meta = sourceMeta(cliParsed.options, 'runtime', {
@@ -644,6 +693,31 @@ test('Hermes and OpenClaw add-on commands parse through governed runner', () => 
   assert.equal(integrations.command, 'integrations');
 });
 
+test('integration coverage matrix names exact lifecycle and repair limits for every harness', () => {
+  const matrix = integrationCoverageMatrix();
+  assert.ok(matrix.length >= 16);
+  const claude = matrix.find((entry) => entry.harness === 'claude-code');
+  const cursor = matrix.find((entry) => entry.harness === 'cursor');
+  const hermes = matrix.find((entry) => entry.harness === 'hermes');
+  assert.equal(claude.pre_action, 'automatic_native_hook');
+  assert.equal(claude.proof_enforcement, 'automatic_for_protected_actions');
+  assert.equal(claude.automatic_repair, 'installer_managed_config_only');
+  assert.equal(cursor.pre_action, 'mcp_routed');
+  assert.equal(cursor.automatic_repair, 'installer_managed_config_only');
+  assert.match(cursor.limitation, /MCP client/);
+  assert.equal(hermes.outcome_closure, 'adapter_required');
+  assert.equal(hermes.automatic_repair, 'adapter_owned');
+  assert.equal(matrix.find((entry) => entry.harness === 'ci').pre_action, 'automatic_in_governed_runner');
+  assert.equal(matrix.find((entry) => entry.harness === 'mcp').pre_action, 'mcp_routed');
+  for (const entry of matrix) {
+    for (const field of ['pre_action', 'action_result', 'outcome_closure', 'proof_enforcement', 'automatic_repair']) {
+      assert.equal(typeof entry[field], 'string');
+      assert.ok(entry[field].length > 0);
+    }
+    assert.equal(typeof entry.limitation, 'string');
+  }
+});
+
 test('detectProjectSignals finds Hermes and OpenClaw config evidence', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-signals-'));
   fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'harness-project' }));
@@ -683,7 +757,7 @@ test('fleet panel summarizes operator-critical account state', () => {
         merge_gate: { status: 'enforce' },
         client_update: {
           installed_version: '0.1.35',
-          latest_version: '0.1.36',
+          latest_version: '0.1.37',
           version_status: 'behind',
           update_available: true,
           notification_state: 'recommended',
@@ -738,7 +812,7 @@ test('fleet panel summarizes operator-critical account state', () => {
   assert.match(panel, /Backpressure\/capacity status: ok/);
   assert.match(panel, /Recent decisions:/);
   assert.match(panel, /Degraded hooks: command_outcome/);
-  assert.match(panel, /Marrow client update: recommended; installed=0\.1\.35; latest=0\.1\.36; operator approval required/);
+  assert.match(panel, /Marrow client update: recommended; installed=0\.1\.35; latest=0\.1\.37; operator approval required/);
   assert.match(panel, /Deploy\/publish\/merge gates: deploy=enforce publish=warn merge=enforce/);
   assert.match(panel, /Press Enter to inspect agent/);
   assert.match(panel, /Copy exact fix command:/);
@@ -751,7 +825,7 @@ test('status panel makes an available update actionable without silently applyin
     health: 'healthy',
     client_update: {
       installed_version: '0.1.35',
-      latest_version: '0.1.36',
+      latest_version: '0.1.37',
       version_status: 'behind',
       update_available: true,
       notification_state: 'recommended',
@@ -760,7 +834,7 @@ test('status panel makes an available update actionable without silently applyin
     },
   });
 
-  assert.match(panel, /Client update: recommended; installed=0\.1\.35; latest=0\.1\.36/);
+  assert.match(panel, /Client update: recommended; installed=0\.1\.35; latest=0\.1\.37/);
   assert.match(panel, /Automatic notification: yes; automatic local mutation: no/);
   assert.match(panel, /Update: npx @getmarrow\/install@latest --repair/);
   assert.match(panel, /Verify: npx @getmarrow\/install@latest doctor/);

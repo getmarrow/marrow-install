@@ -14,6 +14,18 @@ const {
   verifyActionPermit,
 } = require('./enforcement-client');
 const { startGovernanceSidecar } = require('./governance-sidecar');
+const {
+  controllerStatus,
+  ensureGovernanceController,
+  startGovernanceController,
+  stopGovernanceController,
+} = require('./controller-manager');
+const {
+  HARNESS_CAPABILITY_REGISTRY,
+  applyPlan,
+  buildPlan,
+  detectEnvironment,
+} = require('./installer');
 
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const HIGH_RISK_TERMS = /\b(deploy|prod|production|publish|release|merge|migration|migrate|secret|token|key|cloudflare|wrangler|npm publish|gh pr merge|git push|terraform apply|kubectl apply|delete|destroy|drop)\b/i;
@@ -100,6 +112,8 @@ Commands:
   verify-permit Verify a permit before CI, deploy, publish, merge, migration, or credential access
   coverage  Show enforcement, hook-health, closure, and bypass coverage
   sidecar   Run the loopback-only Marrow governance sidecar
+  controller <ensure|start|status|stop>
+            Keep the loopback governance controller active across agent sessions
   govern    Interactive setup TUI when run in a terminal; text panel in CI/non-TTY
   fleet     Fleet operator TUI for live agents, workflows, gates, proof debt, and exact fixes
   integrations List Marrow-supported harness add-ons
@@ -431,6 +445,16 @@ function parseArgs(argv) {
     return { command, options };
   }
 
+  if (command === 'controller') {
+    const action = argv[1] && !argv[1].startsWith('--') ? argv[1] : 'status';
+    if (!['ensure', 'start', 'status', 'stop'].includes(action)) {
+      throw new Error('controller action must be ensure, start, status, or stop');
+    }
+    const parsed = parseBaseOptions(argv, action === 'status' && argv[1] !== 'status' ? 1 : 2);
+    if (parsed.options.help) return { command: 'help' };
+    return { command, action, options: parsed.options };
+  }
+
   if (command === 'status' || command === 'govern' || command === 'fleet' || command === 'hermes' || command === 'openclaw' || command === 'integrations' || command === 'coverage' || command === 'sidecar') {
     const parsed = parseBaseOptions(argv, 1);
     if (parsed.options.help) return { command: 'help' };
@@ -687,13 +711,18 @@ async function runGoverned(parsed) {
   let decision = null;
   let decisionId = '';
   let actionPermit = null;
-  let permitEnforcementStarted = false;
   let permitVerified = false;
+  let degraded = false;
+  let protectedAction = risky;
   const surfaces = inferSurfaces(commandText || action);
 
   try {
     runtime = await preflightRuntime(options, action, type, commandText);
     decision = gateDecision(runtime);
+    protectedAction = risky
+      || decision?.required === true
+      || decision?.riskLevel === 'high'
+      || decision?.riskLevel === 'critical';
     printGate(decision, runtime);
     if (shouldBlock(decision, options)) {
       return {
@@ -710,38 +739,37 @@ async function runGoverned(parsed) {
     const target = options.target || commandText;
     const think = await createDecision(options, action, type, target, surfaces);
     decisionId = think.decision_id || think.id || think.decision?.id || '';
-    permitEnforcementStarted = true;
-    actionPermit = await issueActionPermit(requestJson, options, {
-      action,
-      type,
-      target,
-      surfaces,
-      decisionId,
-      gateReceiptId: decision?.receiptId || '',
-      ownerApproval: options.ownerApproval,
-      proofRequirements: decision?.proofPack?.required_fields || decision?.proofPack?.missing || [],
-    });
-    if (!actionPermit?.permit || !actionPermit?.permit_id) {
-      throw new Error('Marrow did not issue a valid action permit.');
+    if (protectedAction) {
+      actionPermit = await issueActionPermit(requestJson, options, {
+        action,
+        type,
+        target,
+        surfaces,
+        decisionId,
+        gateReceiptId: decision?.receiptId || '',
+        ownerApproval: options.ownerApproval,
+        proofRequirements: decision?.proofPack?.required_fields || decision?.proofPack?.missing || [],
+      });
+      if (!actionPermit?.permit || !actionPermit?.permit_id) {
+        throw new Error('Marrow did not issue a valid action permit.');
+      }
+      const verified = await verifyActionPermit(requestJson, options, {
+        action,
+        type,
+        target,
+        surfaces,
+        permit: actionPermit.permit,
+      });
+      if (verified?.verified !== true) throw new Error('Marrow action permit verification failed.');
+      permitVerified = true;
     }
-    const verified = await verifyActionPermit(requestJson, options, {
-      action,
-      type,
-      target,
-      surfaces,
-      permit: actionPermit.permit,
-    });
-    if (verified?.verified !== true) throw new Error('Marrow action permit verification failed.');
-    permitVerified = true;
   } catch (error) {
-    const protectedAction = risky
-      || decision?.required === true
-      || decision?.riskLevel === 'high'
-      || decision?.riskLevel === 'critical';
-    const canDegrade = !permitEnforcementStarted
-      && !protectedAction
+    const canDegrade = !protectedAction
       && (options.failOpen || !options.failClosed);
     if (canDegrade) {
+      actionPermit = null;
+      permitVerified = false;
+      degraded = true;
       process.stderr.write(`Marrow degraded: ${error.message}. Continuing because fail-open/non-risky policy allows it.\n`);
     } else {
       return {
@@ -757,7 +785,7 @@ async function runGoverned(parsed) {
     }
   }
 
-  const childEnv = scopedExecutionEnv(actionPermit);
+  const childEnv = scopedExecutionEnv(permitVerified ? actionPermit : null);
   const child = await runChild(childCommand, childEnv);
   const success = child.exitCode === 0;
   const proof = defaultProof({ options, action, childCommand, exitCode: child.exitCode, success });
@@ -796,6 +824,7 @@ async function runGoverned(parsed) {
     action,
     type,
     risky,
+    degraded,
     decision,
     decision_id: decisionId,
     outcome_committed: Boolean(commit),
@@ -853,16 +882,52 @@ async function coverageOnly(parsed) {
 
 async function sidecarOnly(parsed) {
   const options = parsed.options;
+  const root = path.resolve(process.env.MARROW_CONTROLLER_PROJECT_ROOT || process.cwd());
+  const managedMode = process.env.MARROW_CONTROLLER_MANAGED_MODE || 'auto';
+  let lastMaintenanceAt = 0;
+  let lastMaintenance = null;
+  const maintain = async () => {
+    if (lastMaintenance && Date.now() - lastMaintenanceAt < 5 * 60_000) return lastMaintenance;
+    const detection = detectEnvironment(root, process.env);
+    const plan = buildPlan(detection, { mode: managedMode });
+    const changes = applyPlan(plan, { yes: true, dryRun: false, doctor: false });
+    const repaired = changes.filter((change) => change.applied).map((change) => change.label);
+    const remaining = changes.filter((change) => change.changed && !change.applied).map((change) => change.label);
+    lastMaintenanceAt = Date.now();
+    lastMaintenance = {
+      state: remaining.length > 0 ? 'attention_required' : repaired.length > 0 ? 'repaired' : 'clear',
+      checked_at: new Date(lastMaintenanceAt).toISOString(),
+      repaired,
+      exact_fix: remaining.length > 0 ? 'Run npx @getmarrow/install --repair in the managed project.' : null,
+    };
+    return lastMaintenance;
+  };
   const sidecar = await startGovernanceSidecar(options, {
     permit: (input) => issueActionPermit(requestJson, options, input),
     verify: (input) => verifyActionPermit(requestJson, options, input),
     close: (input) => closeActionPermit(requestJson, options, input),
     coverage: () => readEnforcementCoverage(requestJson, options),
     heartbeat: (input) => recordEnforcementHeartbeat(requestJson, options, input),
+    maintain,
   });
   process.stdout.write(`Marrow governance sidecar active on 127.0.0.1:${sidecar.port}. Press Ctrl+C to stop.\n`);
   await new Promise((resolve) => sidecar.server.once('close', resolve));
   return { ok: true };
+}
+
+async function controllerOnly(parsed) {
+  const options = { ...parsed.options, root: process.cwd(), mode: 'auto' };
+  let result;
+  if (parsed.action === 'ensure') result = await ensureGovernanceController(options);
+  else if (parsed.action === 'start') result = await startGovernanceController(options);
+  else if (parsed.action === 'stop') result = await stopGovernanceController(options);
+  else result = await controllerStatus(options);
+  if (!options.json) {
+    process.stdout.write(`Marrow controller: ${result.active ? 'active' : result.state}.\n`);
+    if (result.started_at) process.stdout.write(`Started: ${result.started_at}\n`);
+    if (result.exact_fix) process.stdout.write(`Next: ${result.exact_fix}\n`);
+  }
+  return { ok: result.active || parsed.action === 'stop', controller: result };
 }
 
 async function gateOnly(parsed) {
@@ -1295,7 +1360,7 @@ function fleetPanel(snapshot) {
 const GENERIC_GOVERNED_COMMAND = 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --agent <agent-id> --profile production --policy warn -- <harness-command>';
 
 function localSupportedHarnesses() {
-  return [
+  const harnesses = [
     { display_name: 'OpenAI Codex', client_label: 'codex', category: 'agent_harness', support_level: 'governed_runner', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --agent codex-prod -- codex' },
     { display_name: 'Claude Code', client_label: 'claude-code', category: 'agent_harness', support_level: 'native_mcp_or_sdk', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/mcp setup' },
     { display_name: 'Cursor', client_label: 'cursor', category: 'ide_agent', support_level: 'native_mcp_or_sdk', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/mcp setup' },
@@ -1316,6 +1381,63 @@ function localSupportedHarnesses() {
     { display_name: 'CI scripts and deploy runners', client_label: 'ci', category: 'ci_runner', support_level: 'governed_runner', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --agent ci-release --profile production --policy enforce -- <ci-or-deploy-command>' },
     { display_name: 'Custom shell/API harness', client_label: 'custom', category: 'custom_runner', support_level: 'event_contract', install_command: 'POST /v1/agent/integrations/events with harness, event_type, agent_id, and action' },
   ];
+  return harnesses.map((harness) => {
+    const capability = HARNESS_CAPABILITY_REGISTRY.find((entry) => entry.client === harness.client_label)
+      || HARNESS_CAPABILITY_REGISTRY.find((entry) => entry.client === 'custom');
+    return { ...harness, capability_level: capability.capability_level };
+  });
+}
+
+function integrationCoverageMatrix() {
+  return HARNESS_CAPABILITY_REGISTRY.map((entry) => {
+    const native = entry.capability_level === 'native_hooks';
+    const wrapper = entry.capability_level === 'governed_wrapper';
+    const routed = entry.capability_level === 'mcp';
+    const sdk = entry.capability_level === 'sdk_passive_runtime';
+    return {
+      harness: entry.client,
+      capability_level: entry.capability_level,
+      install_surface: entry.install_surface,
+      pre_action: native
+        ? 'automatic_native_hook'
+        : wrapper
+          ? 'automatic_in_governed_runner'
+          : sdk
+            ? 'automatic_in_sdk_runtime'
+            : routed
+              ? 'mcp_routed'
+              : 'adapter_required',
+      action_result: native
+        ? 'automatic_native_hook'
+        : wrapper
+          ? 'automatic_in_governed_runner'
+          : sdk
+            ? 'automatic_in_sdk_runtime'
+            : routed
+              ? 'mcp_routed'
+              : 'adapter_required',
+      outcome_closure: wrapper || sdk
+        ? 'automatic_when_result_is_known'
+        : native
+          ? 'correlated_when_determinable'
+          : routed
+            ? 'mcp_routed'
+            : 'adapter_required',
+      proof_enforcement: native || wrapper || sdk
+        ? 'automatic_for_protected_actions'
+        : routed
+          ? 'explicit_or_governed_wrapper'
+          : 'adapter_required',
+      automatic_repair: native || routed || sdk || wrapper ? 'installer_managed_config_only' : 'adapter_owned',
+      limitation: native
+        ? 'A successful tool exit is not treated as a successful business outcome when the result cannot be proven.'
+        : routed
+          ? 'Only actions routed through the MCP client are visible automatically.'
+          : wrapper
+            ? 'Only commands launched through the governed wrapper receive full automatic coverage.'
+            : 'The harness must emit the documented lifecycle event contract.',
+    };
+  });
 }
 
 function detectHarnesses(cwd = process.cwd()) {
@@ -1448,16 +1570,22 @@ async function integrationOnly(parsed, name) {
 
 async function integrationsOnly(parsed) {
   const local = {
-    integration_registry_version: 'local.broad-harness-support-v2',
+    integration_registry_version: 'local.automatic-control-v3',
     first_class_addons: ['hermes', 'openclaw'].map((name) => localIntegrationManifest(name)),
     supported_harnesses: localSupportedHarnesses(),
+    integration_coverage: integrationCoverageMatrix(),
     exact_next_action: 'Pick the harness your team already uses. Use the install_command shown here, or send compact events to /v1/agent/integrations/events.',
   };
   let registry = local;
   let source = 'local';
   if (parsed.options.apiKey) {
     try {
-      registry = await requestJson(parsed.options, 'GET', '/v1/agent/integrations');
+      const remote = await requestJson(parsed.options, 'GET', '/v1/agent/integrations');
+      registry = {
+        ...local,
+        ...remote,
+        integration_coverage: local.integration_coverage,
+      };
       source = 'api';
     } catch (error) {
       registry = { ...local, api_warning: error instanceof Error ? error.message : String(error) };
@@ -1465,12 +1593,16 @@ async function integrationsOnly(parsed) {
   }
   if (parsed.options.json) return { ok: true, source, registry };
   const harnesses = Array.isArray(registry.supported_harnesses) ? registry.supported_harnesses : [];
+  const coverage = Array.isArray(registry.integration_coverage) ? registry.integration_coverage : [];
   process.stdout.write([
     'Marrow Harness Integrations',
     '',
     `Source: ${source}`,
     'Supported harnesses and model CLIs:',
     ...harnesses.map((harness) => `  - ${displayText(harness.display_name || harness.client_label || harness.integration || harness.title, 40)} [${displayText(harness.support_level || 'supported', 24)}]  ${displayText(harness.install_command || harness.install_commands?.[0] || '', 120)}`),
+    '',
+    'Automatic lifecycle coverage:',
+    ...coverage.map((entry) => `  - ${displayText(entry.harness, 24)}: pre=${entry.pre_action}; result=${entry.action_result}; closure=${entry.outcome_closure}; proof=${entry.proof_enforcement}; repair=${entry.automatic_repair}`),
     '',
     'First-class add-on guides: hermes, openclaw',
     `Next: ${displayText(registry.exact_next_action, 140)}`,
@@ -2102,6 +2234,7 @@ async function runCli(argv) {
   else if (parsed.command === 'verify-permit') result = await verifyPermitOnly(parsed);
   else if (parsed.command === 'coverage') result = await coverageOnly(parsed);
   else if (parsed.command === 'sidecar') result = await sidecarOnly(parsed);
+  else if (parsed.command === 'controller') result = await controllerOnly(parsed);
   else if (parsed.command === 'govern') {
     await runGovernInteractive(parsed.options);
     return;
@@ -2152,6 +2285,7 @@ module.exports = {
   verifyPermitOnly,
   coverageOnly,
   sidecarOnly,
+  controllerOnly,
   actionBinding,
   gateOnly,
   proofOnly,
@@ -2168,6 +2302,7 @@ module.exports = {
   renderFleetTui,
   runFleetInteractive,
   localSupportedHarnesses,
+  integrationCoverageMatrix,
   localIntegrationManifest,
   renderIntegrationPanel,
   integrationOnly,

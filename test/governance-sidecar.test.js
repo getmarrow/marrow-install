@@ -131,3 +131,29 @@ test('sidecar rejects symlinked state directory components before creating outsi
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('sidecar rejects state beneath a non-sticky world-writable ancestor', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-sidecar-ancestor-'));
+  const unsafeParent = path.join(root, 'unsafe');
+  const prior = process.env.MARROW_SIDECAR_STATE_DIR;
+  fs.mkdirSync(unsafeParent, { mode: 0o777 });
+  fs.chmodSync(unsafeParent, 0o777);
+  process.env.MARROW_SIDECAR_STATE_DIR = path.join(unsafeParent, 'state');
+
+  try {
+    await assert.rejects(
+      startGovernanceSidecar({ apiKey: 'test-key', sidecarPort: 0 }, {
+        permit: async () => ({ permit: 'opaque', permit_id: 'permit-1' }),
+        verify: async () => ({ verified: true }),
+        close: async () => ({ closed: true }),
+        coverage: async () => ({ status: 'pass' }),
+        heartbeat: async () => ({ accepted: true }),
+      }),
+      /non-sticky writable ancestor/,
+    );
+  } finally {
+    if (prior === undefined) delete process.env.MARROW_SIDECAR_STATE_DIR;
+    else process.env.MARROW_SIDECAR_STATE_DIR = prior;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

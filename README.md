@@ -74,9 +74,34 @@ npx -y @getmarrow/install@latest doctor
 npx -y @getmarrow/install@latest --repair
 ```
 
-`activate` reconciles Marrow-managed entries while retaining unrelated user hooks and configuration. Detection and notification are automatic; local changes remain explicit and subject to the operator's normal change policy.
+`activate` reconciles Marrow-managed entries while retaining unrelated user hooks and configuration. After that explicit activation, the local controller can restore drifted Marrow-managed hooks and configuration. Package upgrades, owner policy, credentials, and unrelated local files remain explicit and subject to the operator's normal change policy.
 
-## What's New in v0.1.36
+## Automatic Controller
+
+Successful install, repair, and activation starts a loopback-only controller that survives individual agent sessions. It keeps the signed action-permit broker available, checks installer-managed hooks every five minutes, safely restores missing managed entries, and reports an exact fix when repair is not safe. The API key remains process-only; private controller state is owner-only and contains no Marrow credential.
+
+```bash
+npx @getmarrow/install controller status
+npx @getmarrow/install controller ensure
+npx @getmarrow/install controller stop
+```
+
+Use `--no-controller` only when an owner-managed service already provides the same lifecycle. The controller does not silently upgrade packages, change governance policy, rotate credentials, or modify unrelated project configuration.
+
+## What's New in v0.1.37
+
+v0.1.37 adds the automatic local control lifecycle after explicit owner activation:
+
+- a project-and-agent-scoped loopback controller survives individual agent sessions;
+- installer-managed hooks are checked and safely restored without changing unrelated files;
+- the governed runner automatically classifies consequential commands and requires fresh signed permits for protected actions;
+- pre-action, execution, result, proof, and outcome receipts share stable correlation;
+- integration coverage states exactly what is native, MCP-routed, governed-wrapper controlled, or adapter-required;
+- in-session value messages use measured evidence only and report unavailable data instead of synthetic savings.
+
+It preserves the update and permit controls introduced in v0.1.36.
+
+## Previous: v0.1.36
 
 v0.1.36 combines guided, operator-controlled client updates with a signed permit boundary for protected actions. Installer status, activation reports, and the Fleet Operator expose request-specific update advisories with exact update and verification commands while keeping local mutation explicit:
 
@@ -200,6 +225,7 @@ npx @getmarrow/install permit --agent deploy-agent --type deploy --action "deplo
 MARROW_ACTION_PERMIT=... npx @getmarrow/install verify-permit --agent deploy-agent --type deploy --action "deploy production"
 npx @getmarrow/install coverage --agent deploy-agent
 npx @getmarrow/install sidecar --agent deploy-agent
+npx @getmarrow/install controller status
 npx @getmarrow/install status
 npx @getmarrow/install doctor
 npx @getmarrow/install --repair
@@ -224,6 +250,19 @@ The fleet view shows live agents, active workflows, agent disagreements and thei
 | Event contract | You have a custom harness that must map its lifecycle into Marrow | Advanced |
 
 These are integration surfaces for one Marrow product, not separate products.
+
+## Exact Integration Coverage
+
+Run `npx @getmarrow/install integrations --json` for the machine-readable matrix. The table below intentionally distinguishes full automatic interception from MCP-routed, wrapper-bounded, and adapter-required coverage.
+
+| Harnesses | Pre-action | Result | Outcome closure | Proof enforcement | Safe repair |
+| --- | --- | --- | --- | --- | --- |
+| Claude Code | Automatic native hook | Automatic native hook | Correlated when determinable | Automatic for protected actions | Managed config after activation |
+| Cursor, Composer, Cline, Windsurf | MCP-routed | MCP-routed | MCP-routed | Explicit or governed runner | Managed config after activation |
+| Codex, OpenCode, Gemini, Grok, DeepSeek, Qwen, Kimi, MiniMax, GLM | Automatic inside governed runner | Automatic inside governed runner | Automatic when result is known | Automatic for protected actions | Managed config after activation |
+| Hermes, OpenClaw, custom harnesses | Adapter required | Adapter required | Adapter required | Adapter required | Adapter owned |
+
+For native hooks, a successful tool exit is not treated as a successful business outcome when proof is missing. MCP coverage includes only actions routed through that MCP client. Governed-runner coverage includes only commands launched through the runner. Event-contract integrations must emit the documented lifecycle themselves.
 
 ## Always-On Lifecycle
 
