@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { spawn } = require('node:child_process');
 const test = require('node:test');
 
 const {
@@ -148,8 +149,82 @@ test('controller stop removes invalid owner state without following symlinks', a
     const outside = path.join(root, 'outside.json');
     fs.writeFileSync(outside, '{}', { mode: 0o600 });
     fs.symlinkSync(outside, path.join(root, 'active.json'));
-    await assert.rejects(stopGovernanceController(), /Refusing to remove/);
+    await assert.rejects(stopGovernanceController(), /cannot be a symlink/);
     assert.equal(fs.readFileSync(outside, 'utf8'), '{}');
+  } finally {
+    if (prior === undefined) delete process.env.MARROW_SIDECAR_STATE_DIR;
+    else process.env.MARROW_SIDECAR_STATE_DIR = prior;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('controller refuses a tampered PID without signaling either process', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-controller-pid-'));
+  const project = path.join(root, 'project');
+  const stateDirectory = path.join(root, 'state');
+  fs.mkdirSync(project, { mode: 0o700 });
+  fs.writeFileSync(path.join(project, 'package.json'), '{}\n');
+  fs.writeFileSync(path.join(project, 'AGENTS.md'), '# Project agents\n');
+  const prior = process.env.MARROW_SIDECAR_STATE_DIR;
+  process.env.MARROW_SIDECAR_STATE_DIR = stateDirectory;
+  const options = {
+    apiKey: 'test-controller-api-key',
+    baseUrl: 'https://api.example.test',
+    agentId: 'controller-pid-test',
+    client: 'codex',
+    root: project,
+    mode: 'md',
+    profile: 'default',
+    policy: 'warn',
+  };
+  const unrelated = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    stdio: 'ignore',
+  });
+  let genuineState;
+  try {
+    await ensureGovernanceController(options);
+    genuineState = readState(options);
+    const statePath = path.join(stateDirectory, 'active.json');
+    fs.writeFileSync(statePath, JSON.stringify({ ...genuineState, pid: unrelated.pid }) + '\n', { mode: 0o600 });
+    fs.chmodSync(statePath, 0o600);
+
+    const status = await controllerStatus(options);
+    assert.equal(status.active, false);
+    assert.equal(status.state, 'identity_mismatch');
+    await assert.rejects(stopGovernanceController(options), /Refusing to stop/);
+    assert.doesNotThrow(() => process.kill(unrelated.pid, 0));
+    assert.doesNotThrow(() => process.kill(genuineState.pid, 0));
+    assert.equal(readState(options).pid, unrelated.pid);
+
+    fs.writeFileSync(statePath, JSON.stringify(genuineState) + '\n', { mode: 0o600 });
+    fs.chmodSync(statePath, 0o600);
+    await stopGovernanceController(options);
+    genuineState = null;
+  } finally {
+    if (genuineState) {
+      const statePath = path.join(stateDirectory, 'active.json');
+      fs.writeFileSync(statePath, JSON.stringify(genuineState) + '\n', { mode: 0o600 });
+      fs.chmodSync(statePath, 0o600);
+      await stopGovernanceController(options).catch(() => {});
+    }
+    unrelated.kill('SIGTERM');
+    if (prior === undefined) delete process.env.MARROW_SIDECAR_STATE_DIR;
+    else process.env.MARROW_SIDECAR_STATE_DIR = prior;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('controller preserves state with broad permissions instead of deleting it', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-controller-mode-'));
+  const prior = process.env.MARROW_SIDECAR_STATE_DIR;
+  process.env.MARROW_SIDECAR_STATE_DIR = root;
+  const statePath = path.join(root, 'active.json');
+  try {
+    fs.writeFileSync(statePath, '{invalid', { mode: 0o600 });
+    fs.chmodSync(statePath, 0o644);
+    await assert.rejects(stopGovernanceController(), /permissions are too broad/);
+    assert.equal(fs.existsSync(statePath), true);
+    assert.equal(fs.statSync(statePath).mode & 0o777, 0o644);
   } finally {
     if (prior === undefined) delete process.env.MARROW_SIDECAR_STATE_DIR;
     else process.env.MARROW_SIDECAR_STATE_DIR = prior;

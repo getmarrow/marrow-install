@@ -138,6 +138,15 @@ async function controllerStatus(options = {}) {
       exact_fix: 'Run npx @getmarrow/install controller ensure.',
     };
   }
+  if (!isExpectedControllerProcess(state.pid)) {
+    return {
+      active: false,
+      state: 'identity_mismatch',
+      started_at: state.started_at,
+      instance_id: state.instance_id,
+      exact_fix: 'Inspect the recorded process and controller state before retrying. Marrow will not signal an unverified PID.',
+    };
+  }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), HEALTH_TIMEOUT_MS);
   timeout.unref?.();
@@ -147,7 +156,7 @@ async function controllerStatus(options = {}) {
       signal: controller.signal,
     });
     const body = response.ok ? await response.json() : null;
-    if (!response.ok || body?.ok !== true || body?.instance_id !== state.instance_id) {
+    if (!response.ok || body?.ok !== true || body?.instance_id !== state.instance_id || body?.pid !== state.pid) {
       throw new Error('Controller health identity did not match its private state.');
     }
     const maintenance = body.maintenance && typeof body.maintenance === 'object'
@@ -278,11 +287,7 @@ function removeStaleState(options = {}) {
 function removeInvalidState(options = {}) {
   const filePath = stateFile(options);
   if (!fs.existsSync(filePath)) return false;
-  const stat = fs.lstatSync(filePath);
-  const uid = currentUid();
-  if (stat.isSymbolicLink() || !stat.isFile() || (uid !== null && stat.uid !== uid)) {
-    throw new Error('Refusing to remove controller state that is not a regular owner file.');
-  }
+  assertPrivatePath(filePath, 'state file');
   fs.unlinkSync(filePath);
   return true;
 }
@@ -309,6 +314,9 @@ async function startGovernanceController(options) {
       const prior = readState(options);
       await stopRecordedController(prior);
       removeStaleState(options);
+    }
+    if (current.state === 'identity_mismatch') {
+      throw new Error('Controller process identity is ambiguous; refusing automatic replacement.');
     }
     if (current.state === 'invalid_state') throw new Error(current.error || 'Controller state is invalid.');
 
@@ -354,24 +362,29 @@ async function startGovernanceController(options) {
 }
 
 async function stopGovernanceController(options = {}) {
-  let state;
+  ensurePrivateDirectory(options);
+  const lock = await acquireLifecycleLock(options);
   try {
-    state = readState(options);
-  } catch {
-    const changed = removeInvalidState(options);
-    return { active: false, state: 'stopped', changed, exact_fix: null };
+    let state;
+    try {
+      state = readState(options);
+    } catch {
+      const changed = removeInvalidState(options);
+      return { active: false, state: 'stopped', changed, exact_fix: null };
+    }
+    if (!state) return { active: false, state: 'stopped', changed: false, exact_fix: null };
+    const current = await controllerStatus(options);
+    if (current.state === 'identity_mismatch') {
+      throw new Error('Refusing to stop a controller whose PID is not bound to its authenticated endpoint.');
+    }
+    if (current.active || current.state === 'unreachable') {
+      await stopRecordedController(state);
+    }
+    removeStaleState(options);
+    return { active: false, state: 'stopped', changed: true, exact_fix: null };
+  } finally {
+    releaseLifecycleLock(lock);
   }
-  if (!state) return { active: false, state: 'stopped', changed: false, exact_fix: null };
-  const current = await controllerStatus(options);
-  if (current.active) {
-    process.kill(state.pid, 'SIGTERM');
-    const stopped = await waitFor(async () => pidAlive(state.pid) ? null : true, STOP_TIMEOUT_MS);
-    if (!stopped) throw new Error('Marrow controller did not stop within the shutdown window.');
-  } else if (current.state === 'unreachable') {
-    await stopRecordedController(state);
-  }
-  removeStaleState(options);
-  return { active: false, state: 'stopped', changed: true, exact_fix: null };
 }
 
 async function ensureGovernanceController(options) {

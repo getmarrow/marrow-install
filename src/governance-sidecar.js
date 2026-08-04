@@ -156,6 +156,7 @@ async function startGovernanceSidecar(options, handlers) {
         return json(res, 200, {
           ok: true,
           instance_id: instanceId,
+          pid: process.pid,
           started_at: startedAt,
           maintenance: latestMaintenance,
         });
