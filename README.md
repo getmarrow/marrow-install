@@ -88,7 +88,17 @@ npx @getmarrow/install controller stop
 
 Persistent controller lifecycle is currently Linux-only. On macOS or Windows, activation still installs and verifies the supported hooks without starting or signaling a background process; run `npx @getmarrow/install sidecar` under an owner-managed service and pass `--no-controller`. The controller does not silently upgrade packages, change governance policy, rotate credentials, or modify unrelated project configuration.
 
-## What's New in v0.1.37
+## What's New in v0.1.38
+
+v0.1.38 makes a meaningful Marrow intervention visible without adding manual work to routine agent sessions:
+
+- generated instructions tell agents to retrieve and relay one factual intervention receipt after Marrow changes consequential work;
+- Fleet Reports surface the same receipt for owners, including the required workflow, proof status, permit follow-through, and recorded outcome;
+- agents remain quiet for routine low-risk work, and receipts exclude raw context, raw outcomes, proof values, credentials, and cross-tenant data.
+
+It preserves the automatic local control lifecycle introduced in v0.1.37.
+
+## Previous: v0.1.37
 
 v0.1.37 adds the automatic local control lifecycle after explicit owner activation:
 
@@ -270,7 +280,7 @@ Supported integrations capture a compact lifecycle without storing raw prompts, 
 
 Meaningful work opens an outcome-closure item. A tool exit or workflow completion does not silently count as a successful business outcome; an explicit outcome receipt closes it. Transient delivery failures are held in an owner-only local spool and retried with the same event ID so retries do not create duplicate lifecycle records.
 
-Owners can inspect pending outcomes in Fleet Operations. Agents can retrieve a tenant-scoped causal trace for a decision to see the prior failure, lesson, gate, proof, workflow, and outcome path that changed the action.
+Owners can inspect pending outcomes in Fleet Operations and recent intervention receipts in Reports. Agents can retrieve the same tenant-scoped receipt through the decision trace to explain what Marrow blocked, warned about, or held for review; the required workflow; proof status; permit follow-through; and the recorded outcome. The receipt excludes raw context, raw outcomes, proof values, credentials, and other tenants' data. Agents should relay one factual receipt summary after a meaningful intervention and stay quiet for routine low-risk work.
 
 ## Passive Token and Value Proof
 
