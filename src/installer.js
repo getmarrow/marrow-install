@@ -8,9 +8,9 @@ const { controllerStatus, controllerSupportedPlatform, ensureGovernanceControlle
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MARROW_BLOCK_START = '<!-- marrow:passive-start -->';
 const MARROW_BLOCK_END = '<!-- marrow:passive-end -->';
-const MCP_ADAPTER_VERSION = '3.9.53';
-const SDK_ADAPTER_VERSION = '3.7.52';
-const SDK_ADAPTER_INTEGRITY = 'sha512-dMo5rMXP5sFTRsiRI+Oe3SOWgSsi8TTt9VrYL9gC71EQFN2UTtuH914CkYEpcS627sb02jXrUDiXxznX/2fWgA==';
+const MCP_ADAPTER_VERSION = '3.9.54';
+const SDK_ADAPTER_VERSION = '3.7.53';
+const SDK_ADAPTER_INTEGRITY = 'sha512-CKPVR9gf24mNvZIcFvKhHGZSsUhxa0uDg/bN4dktLlttB/EU/p6CEVWmGqZmxDTnfp4I+qqdJUpzuQSnkNhaIA==';
 const SDK_ADAPTER_TARBALL = `https://registry.npmjs.org/@getmarrow/sdk/-/sdk-${SDK_ADAPTER_VERSION}.tgz`;
 const MCP_PACKAGE_SPEC = `@getmarrow/mcp@${MCP_ADAPTER_VERSION}`;
 const MCP_CONTEXT_HOOK_COMMAND = `npx -y ${MCP_PACKAGE_SPEC} context-hook`;
@@ -444,6 +444,7 @@ Marrow should run passively after install:
 - Keep passive token/model usage proof enabled so Marrow can show token, cost, latency, and workflow savings after real work completes.
 - Before risky work, use Marrow's decision brief or passive prompt hook.
 - After meaningful work, record the outcome so future agents learn from it.
+- After Marrow blocks, warns, or requires review, use the decision trace receipt to tell the operator what changed and which recorded workflow or proof is required. Stay quiet for routine low-risk work.
 - Check health with \`marrow_agent_status\` or \`GET /v1/agent/status\`.
 - When status/runtime returns a \`client_update\` notice, tell the operator and use its exact update and verification commands only when local change policy permits.
 
