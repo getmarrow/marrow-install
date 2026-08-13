@@ -8,9 +8,9 @@ const { controllerStatus, controllerSupportedPlatform, ensureGovernanceControlle
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MARROW_BLOCK_START = '<!-- marrow:passive-start -->';
 const MARROW_BLOCK_END = '<!-- marrow:passive-end -->';
-const MCP_ADAPTER_VERSION = '3.9.55';
-const SDK_ADAPTER_VERSION = '3.7.54';
-const SDK_ADAPTER_INTEGRITY = 'sha512-KMgZEZpKo0AVKimXi4/SmtyPDV3mfx9hrj5drCdZxdNP8P/FL7ciyvyAEGiiXIMemh5Z3D/PUUvVO4jhr16ozQ==';
+const MCP_ADAPTER_VERSION = '3.9.56';
+const SDK_ADAPTER_VERSION = '3.7.55';
+const SDK_ADAPTER_INTEGRITY = 'sha512-aq8g3srJ9EFZVvskSQVE9MLUS8SSkvx3xY3Mr9G0ZkpKxiiDBQaa3r2pb/u74BYGVvJRP6EP/oV/D9jbKb2lBA==';
 const SDK_ADAPTER_TARBALL = `https://registry.npmjs.org/@getmarrow/sdk/-/sdk-${SDK_ADAPTER_VERSION}.tgz`;
 const MCP_PACKAGE_SPEC = `@getmarrow/mcp@${MCP_ADAPTER_VERSION}`;
 const MCP_CONTEXT_HOOK_COMMAND = `npx -y ${MCP_PACKAGE_SPEC} context-hook`;
