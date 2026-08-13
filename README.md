@@ -91,15 +91,18 @@ npx @getmarrow/install controller stop
 
 Persistent controller lifecycle is currently Linux-only. On macOS or Windows, activation still installs and verifies the supported hooks without starting or signaling a background process; run `npx @getmarrow/install sidecar` under an owner-managed service and pass `--no-controller`. The controller does not silently upgrade packages, change governance policy, rotate credentials, or modify unrelated project configuration.
 
-## What's New in v0.1.39
+## What's New in v0.1.40
 
-v0.1.39 installs the bounded one-call passive read contract from day one:
+v0.1.40 binds governed runs to a privacy-safe workspace fingerprint and separates observed execution from verified completion:
 
 - ordinary prompts receive one compact context read; risky or mutating prompts receive one fresh runtime gate instead;
 - passive prompt telemetry is buffered locally rather than delaying the agent turn;
 - transient read failures can use clearly labeled owner-only last-known guidance, while authentication failures never use cache;
 - `doctor` prints the exact `npx -y @getmarrow/mcp@latest ping` command for measured current/p50/p99 latency, last success, and backlog health;
-- certified hook commands pin MCP `3.9.55` and SDK `3.7.54` so advertised behavior matches the deployed server contract.
+- certified hook commands pin MCP `3.9.56` and SDK `3.7.55` so advertised behavior matches the deployed server contract;
+- governed runtime requests attach a stable privacy-safe project fingerprint and harness label without sending the raw working-directory path;
+- successful command exit remains observed execution, not verified business completion, unless a verification command or explicit proof file supplies evidence;
+- the integration matrix now reports prompt injection, pre-action, action result, closure, proof, cached brief, restart survival, evidence adapter, and safe repair separately.
 
 It preserves the intervention receipts introduced in v0.1.38.
 
@@ -280,12 +283,12 @@ These are integration surfaces for one Marrow product, not separate products.
 
 Run `npx @getmarrow/install integrations --json` for the machine-readable matrix. The table below intentionally distinguishes full automatic interception from MCP-routed, wrapper-bounded, and adapter-required coverage.
 
-| Harnesses | Pre-action | Result | Outcome closure | Proof enforcement | Safe repair |
-| --- | --- | --- | --- | --- | --- |
-| Claude Code | Automatic native hook | Automatic native hook | Correlated when determinable | Automatic for protected actions | Managed config after activation |
-| Cursor, Composer, Cline, Windsurf | MCP-routed | MCP-routed | MCP-routed | Explicit or governed runner | Managed config after activation |
-| Codex, OpenCode, Gemini, Grok, DeepSeek, Qwen, Kimi, MiniMax, GLM | Automatic inside governed runner | Automatic inside governed runner | Automatic when result is known | Automatic for protected actions | Managed config after activation |
-| Hermes, OpenClaw, custom harnesses | Adapter required | Adapter required | Adapter required | Adapter required | Adapter owned |
+| Harnesses | Prompt / pre-action / result | Closure and proof | Cached brief | Restart survival | Evidence adapter | Safe repair |
+| --- | --- | --- | --- | --- | --- | --- |
+| Claude Code | Automatic native hooks | Correlated when determinable; protected proof enforced | Owner-only bounded cache | Installed config and durable spool | Native hook evidence | Managed config after activation |
+| Cursor, Composer, Cline, Windsurf | MCP-routed only | MCP-routed; explicit or governed proof | Owner-only MCP cache | MCP config and durable spool | MCP lifecycle evidence | Managed config after activation |
+| Codex, OpenCode, Gemini, Grok, DeepSeek, Qwen, Kimi, MiniMax, GLM | Automatic only inside governed runner | Automatic when result is known; protected proof enforced | Runner/runtime cache | Activated controller and durable buffer | Command, test, deployment, or owner evidence | Managed config after activation |
+| Hermes, OpenClaw, custom harnesses | Lifecycle adapter required | Adapter or governed runner required | Adapter dependent | Adapter dependent | Adapter supplied | Adapter owned |
 
 For native hooks, a successful tool exit is not treated as a successful business outcome when proof is missing. MCP coverage includes only actions routed through that MCP client. Governed-runner coverage includes only commands launched through the runner. Event-contract integrations must emit the documented lifecycle themselves.
 

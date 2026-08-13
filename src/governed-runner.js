@@ -319,7 +319,7 @@ function detectProjectSignals(cwd = process.cwd()) {
     }
   }
 
-  return {
+  const project = {
     name: packageJson?.name || path.basename(cwd),
     key: packageJson?.name || path.basename(cwd),
     type: packageJson ? 'node' : fs.existsSync(path.join(cwd, 'pyproject.toml')) ? 'python' : 'workspace',
@@ -328,6 +328,15 @@ function detectProjectSignals(cwd = process.cwd()) {
     package_scripts: packageScripts.slice(0, 30),
     config_files: configFiles.slice(0, 30),
   };
+  project.fingerprint = crypto.createHash('sha256').update(JSON.stringify({
+    name: project.name,
+    type: project.type,
+    frameworks: [...project.frameworks].sort(),
+    signals: [...project.signals].sort(),
+    package_scripts: [...project.package_scripts].sort(),
+    config_files: [...project.config_files].sort(),
+  })).digest('hex');
+  return project;
 }
 
 function isRisky(text, type) {
@@ -525,12 +534,25 @@ function proofFromFile(filePath) {
 
 function defaultProof(input) {
   const proof = proofFromFile(input.options.proofFile) || {};
+  const command = redactedCommand(input.childCommand || []);
+  const verificationCommand = /\b(test|smoke|check|verify|lint|typecheck|audit)\b/i.test(command);
+  const suppliedChecks = Array.isArray(proof.checks) && proof.checks.length > 0;
+  const evidenceState = typeof proof.evidence_state === 'string'
+    ? proof.evidence_state
+    : input.success && (suppliedChecks || verificationCommand)
+    ? 'verified'
+    : input.success
+    ? 'observed_only'
+    : 'failed';
   return {
     summary: proof.summary || `Marrow governed runner completed ${input.action}.`,
-    checks: Array.isArray(proof.checks) ? proof.checks : ['marrow runtime gate', 'command exit captured'],
+    checks: suppliedChecks ? proof.checks : [`command_exit_code=${Number(input.exitCode)}`],
+    evidence_source: proof.evidence_source || (verificationCommand ? 'verification_command_result' : 'governed_command_result'),
+    evidence_state: evidenceState,
+    verified_completion: evidenceState === 'verified',
     outcome: proof.outcome || (input.success ? 'success' : 'failure'),
     blockers: Array.isArray(proof.blockers) ? proof.blockers : [],
-    command: redactedCommand(input.childCommand || []),
+    command,
     exit_code: input.exitCode,
     runner: '@getmarrow/install run',
     profile: input.options.profile,
@@ -544,11 +566,14 @@ async function preflightRuntime(options, action, type, commandText) {
   const target = options.target || commandText || action;
   const surfaces = inferSurfaces(commandText || action);
   const meta = sourceMeta(options, 'runtime', { action, command: commandText, action_type: type });
+  const project = detectProjectSignals(options.root || process.cwd());
   return requestJson(options, 'POST', '/v1/agent/runtime', {
     action,
     type,
     target,
     surfaces,
+    harness: sourceClient(options.client),
+    project: { ...project, harness: sourceClient(options.client) },
     source_meta: meta,
     context: {
       runner: '@getmarrow/install run',
@@ -1398,6 +1423,15 @@ function integrationCoverageMatrix() {
       harness: entry.client,
       capability_level: entry.capability_level,
       install_surface: entry.install_surface,
+      prompt_injection: native
+        ? 'automatic_native_hook'
+        : wrapper
+          ? 'automatic_in_governed_runner'
+          : sdk
+            ? 'automatic_in_sdk_runtime'
+            : routed
+              ? 'mcp_routed'
+              : 'adapter_required',
       pre_action: native
         ? 'automatic_native_hook'
         : wrapper
@@ -1429,6 +1463,15 @@ function integrationCoverageMatrix() {
           ? 'explicit_or_governed_wrapper'
           : 'adapter_required',
       automatic_repair: native || routed || sdk || wrapper ? 'installer_managed_config_only' : 'adapter_owned',
+      cached_brief: native || routed ? 'mcp_local_last_known' : wrapper || sdk ? 'server_cache_only' : 'adapter_owned',
+      restart_survival: native || routed || sdk || wrapper ? 'installer_managed_credentials_and_hooks' : 'adapter_owned',
+      evidence_adapter: native
+        ? 'tool_result_and_explicit_verification'
+        : routed
+          ? 'mcp_tool_and_explicit_verification'
+          : wrapper || sdk
+            ? 'command_exit_and_verification_command'
+            : 'adapter_owned',
       limitation: native
         ? 'A successful tool exit is not treated as a successful business outcome when the result cannot be proven.'
         : routed
@@ -2272,6 +2315,7 @@ module.exports = {
   commandForSelection,
   buildGovernState,
   detectProjectSignals,
+  defaultProof,
   recommendGovernanceMode,
   recordGovernanceModeSelection,
   gateDecision,
