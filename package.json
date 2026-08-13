@@ -1,6 +1,6 @@
 {
   "name": "@getmarrow/install",
-  "version": "0.1.38",
+  "version": "0.1.39",
   "description": "Universal installer and governed runner for Marrow agent fleets.",
   "bin": {
     "marrow-install": "bin/marrow-install.js"
