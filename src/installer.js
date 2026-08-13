@@ -8,9 +8,9 @@ const { controllerStatus, controllerSupportedPlatform, ensureGovernanceControlle
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MARROW_BLOCK_START = '<!-- marrow:passive-start -->';
 const MARROW_BLOCK_END = '<!-- marrow:passive-end -->';
-const MCP_ADAPTER_VERSION = '3.9.54';
-const SDK_ADAPTER_VERSION = '3.7.53';
-const SDK_ADAPTER_INTEGRITY = 'sha512-CKPVR9gf24mNvZIcFvKhHGZSsUhxa0uDg/bN4dktLlttB/EU/p6CEVWmGqZmxDTnfp4I+qqdJUpzuQSnkNhaIA==';
+const MCP_ADAPTER_VERSION = '3.9.55';
+const SDK_ADAPTER_VERSION = '3.7.54';
+const SDK_ADAPTER_INTEGRITY = 'sha512-KMgZEZpKo0AVKimXi4/SmtyPDV3mfx9hrj5drCdZxdNP8P/FL7ciyvyAEGiiXIMemh5Z3D/PUUvVO4jhr16ozQ==';
 const SDK_ADAPTER_TARBALL = `https://registry.npmjs.org/@getmarrow/sdk/-/sdk-${SDK_ADAPTER_VERSION}.tgz`;
 const MCP_PACKAGE_SPEC = `@getmarrow/mcp@${MCP_ADAPTER_VERSION}`;
 const MCP_CONTEXT_HOOK_COMMAND = `npx -y ${MCP_PACKAGE_SPEC} context-hook`;
@@ -1531,6 +1531,7 @@ function printReport(report) {
     if (report.doctor.envHints.length) process.stdout.write(`- possible env files: ${report.doctor.envHints.join(', ')}\n`);
     process.stdout.write(`- missing hooks/config: ${report.doctor.missingHooks.length ? report.doctor.missingHooks.join('; ') : 'none'}\n`);
     if (report.doctor.recommendedFix) process.stdout.write(`- recommended fix: ${report.doctor.recommendedFix}\n`);
+    process.stdout.write(`- live health: ${report.doctor.healthCommand}\n`);
   }
 
   if (report.writeMode === 'dry-run') {
@@ -1685,6 +1686,7 @@ async function install(options) {
           ? `MARROW_API_KEY was found in a likely env file at ${envHints[0]}. Load that key from trusted secret storage, export only MARROW_API_KEY, then run npx @getmarrow/install --repair.`
           : 'Set MARROW_API_KEY, then run npx @getmarrow/install --repair.'
         : controller.exact_fix || selfTest.recommended_fix || null),
+      healthCommand: 'npx -y @getmarrow/mcp@latest ping',
     },
     remediation,
     configDiagnostics,

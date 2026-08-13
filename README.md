@@ -70,6 +70,9 @@ Marrow's hosted API, website, and dashboard update automatically; local SDK depe
 npx -y @getmarrow/install@latest activate
 npx -y @getmarrow/install@latest doctor
 
+# Measured API read health and local backlog
+npx -y @getmarrow/mcp@latest ping
+
 # Use only when doctor reports drift
 npx -y @getmarrow/install@latest --repair
 ```
@@ -88,7 +91,19 @@ npx @getmarrow/install controller stop
 
 Persistent controller lifecycle is currently Linux-only. On macOS or Windows, activation still installs and verifies the supported hooks without starting or signaling a background process; run `npx @getmarrow/install sidecar` under an owner-managed service and pass `--no-controller`. The controller does not silently upgrade packages, change governance policy, rotate credentials, or modify unrelated project configuration.
 
-## What's New in v0.1.38
+## What's New in v0.1.39
+
+v0.1.39 installs the bounded one-call passive read contract from day one:
+
+- ordinary prompts receive one compact context read; risky or mutating prompts receive one fresh runtime gate instead;
+- passive prompt telemetry is buffered locally rather than delaying the agent turn;
+- transient read failures can use clearly labeled owner-only last-known guidance, while authentication failures never use cache;
+- `doctor` prints the exact `npx -y @getmarrow/mcp@latest ping` command for measured current/p50/p99 latency, last success, and backlog health;
+- certified hook commands pin MCP `3.9.55` and SDK `3.7.54` so advertised behavior matches the deployed server contract.
+
+It preserves the intervention receipts introduced in v0.1.38.
+
+## Previous: v0.1.38
 
 v0.1.38 makes a meaningful Marrow intervention visible without adding manual work to routine agent sessions:
 
