@@ -414,6 +414,7 @@ test('doctor detects npm token config mismatches without leaking token values', 
       apiKey: 'mrw_test_key',
       baseUrl: 'https://api.getmarrow.ai',
       agentId: '',
+      processCommands: [],
     });
 
     const text = JSON.stringify(report);
@@ -616,6 +617,7 @@ test('doctor reports likely env files when MARROW_API_KEY is not loaded', async 
     apiKey: '',
     baseUrl: 'https://api.getmarrow.ai',
     agentId: '',
+    processCommands: [],
   });
 
   assert.equal(report.selfTest.skipped, true);
@@ -665,8 +667,8 @@ test('self-test returns first five-minute value signal and proof', async () => {
         capture_coverage: { decisions: true, tools: 'detected', commands: 'detected', deploys: 'unknown', publishes: 'unknown' },
         auto_outcome_closure: { state: 'active' },
         client_update: {
-          installed_version: '0.1.41',
-          latest_version: '0.1.41',
+          installed_version: '0.1.42',
+          latest_version: '0.1.42',
           version_status: 'behind',
           update_available: true,
           notification_state: 'recommended',
@@ -753,7 +755,7 @@ test('self-test returns first five-minute value signal and proof', async () => {
       agentId: 'installer-test',
     });
     assert.equal(requestHeaders['x-marrow-package'], '@getmarrow/install');
-    assert.equal(requestHeaders['x-marrow-package-version'], '0.1.41');
+    assert.equal(requestHeaders['x-marrow-package-version'], '0.1.42');
     assert.equal(result.first_value_signal.active, true);
     assert.match(result.first_value_signal.headline, /Marrow active/);
     assert.ok(result.first_value_signal.captured.includes('decisions'));
@@ -858,7 +860,7 @@ test('activation requires a receipt bound to the exact decision, agent, and succ
       hooks_installed: ['passive runtime'],
       capture_verified: true,
       complete: true,
-      adapter_version: '0.1.41',
+      adapter_version: '0.1.42',
       capability_level: 'governed_wrapper',
       config_fingerprint: 'fixture-config-fingerprint',
       expected_hooks: ['pre_action', 'action_result', 'outcome_closure'],
