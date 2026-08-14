@@ -91,9 +91,9 @@ npx @getmarrow/install controller stop
 
 Persistent controller lifecycle is currently Linux-only. On macOS or Windows, activation still installs and verifies the supported hooks without starting or signaling a background process; run `npx @getmarrow/install sidecar` under an owner-managed service and pass `--no-controller`. The controller does not silently upgrade packages, change governance policy, rotate credentials, or modify unrelated project configuration.
 
-## What's New in v0.1.41
+## What's New in v0.1.42
 
-v0.1.41 makes stale client detection and recovery part of normal installation health:
+v0.1.42 keeps stale client detection and recovery deterministic even when other Marrow MCP clients are running on the installation host:
 
 - `doctor` detects active stale, mixed, or version-unknown Marrow MCP processes, including direct `node_modules/.bin/marrow-mcp` launches, without exposing command lines or credentials;
 - when repair is needed, `doctor` reports the executable pinned setup command, the separate owning-harness restart requirement, and the executable verification command; it does not terminate harness processes itself;
