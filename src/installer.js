@@ -8,9 +8,9 @@ const { controllerStatus, controllerSupportedPlatform, ensureGovernanceControlle
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MARROW_BLOCK_START = '<!-- marrow:passive-start -->';
 const MARROW_BLOCK_END = '<!-- marrow:passive-end -->';
-const MCP_ADAPTER_VERSION = '3.9.56';
-const SDK_ADAPTER_VERSION = '3.7.55';
-const SDK_ADAPTER_INTEGRITY = 'sha512-aq8g3srJ9EFZVvskSQVE9MLUS8SSkvx3xY3Mr9G0ZkpKxiiDBQaa3r2pb/u74BYGVvJRP6EP/oV/D9jbKb2lBA==';
+const MCP_ADAPTER_VERSION = '3.9.57';
+const SDK_ADAPTER_VERSION = '3.7.56';
+const SDK_ADAPTER_INTEGRITY = 'sha512-5htliY4wfn8a1mbLT9N4OWXqhp9fWzMHuAQgUetc3RUKjOes5mWB3t91/leRKFRRIgCnEczJN6jHXg7Aw489Mw==';
 const SDK_ADAPTER_TARBALL = `https://registry.npmjs.org/@getmarrow/sdk/-/sdk-${SDK_ADAPTER_VERSION}.tgz`;
 const MCP_PACKAGE_SPEC = `@getmarrow/mcp@${MCP_ADAPTER_VERSION}`;
 const MCP_CONTEXT_HOOK_COMMAND = `npx -y ${MCP_PACKAGE_SPEC} context-hook`;
@@ -41,6 +41,70 @@ const HARNESS_CAPABILITY_REGISTRY = Object.freeze([
   { client: 'ci', capability_level: 'governed_wrapper', automatic: ['pre_action', 'action_result', 'outcome_closure'], install_surface: 'runner' },
   { client: 'custom', capability_level: 'event_contract', automatic: [], install_surface: 'event_contract' },
 ]);
+
+function explicitMcpVersion(command) {
+  const match = String(command || '').match(/@getmarrow\/mcp@(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/);
+  return match ? match[1] : null;
+}
+
+function packageMcpVersion(command) {
+  const normalized = String(command || '').replace(/\0/g, ' ');
+  const match = normalized.match(/(\/[^\s]+\/node_modules\/@getmarrow\/mcp)(?:\/|\s)/);
+  if (!match) return null;
+  try {
+    const packagePath = path.join(match[1], 'package.json');
+    const pkg = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+    return typeof pkg.version === 'string' && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(pkg.version)
+      ? pkg.version
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function readLinuxProcessCommands(procRoot = '/proc') {
+  if (process.platform !== 'linux') return [];
+  try {
+    return fs.readdirSync(procRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name))
+      .map((entry) => {
+        try {
+          return fs.readFileSync(path.join(procRoot, entry.name, 'cmdline'), 'utf8');
+        } catch {
+          return '';
+        }
+      })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function inspectMcpProcesses(options = {}) {
+  const commands = Array.isArray(options.commands)
+    ? options.commands.map(String)
+    : readLinuxProcessCommands(options.procRoot);
+  const active = commands
+    .filter((command) => /@getmarrow\/mcp|node_modules\/@getmarrow\/mcp/.test(command))
+    .map((command) => explicitMcpVersion(command) || packageMcpVersion(command) || 'unknown');
+  const versions = [...new Set(active.filter((version) => version !== 'unknown'))].sort();
+  const staleVersions = versions.filter((version) => version !== MCP_ADAPTER_VERSION);
+  const mixedVersions = versions.length > 1;
+  const stale = staleVersions.length > 0;
+  return {
+    available: process.platform === 'linux' || Array.isArray(options.commands),
+    expected_version: MCP_ADAPTER_VERSION,
+    active_processes: active.length,
+    active_versions: versions,
+    unknown_version_processes: active.filter((version) => version === 'unknown').length,
+    stale_versions: staleVersions,
+    mixed_versions: mixedVersions,
+    healthy: !stale && !mixedVersions,
+    exact_fix: stale || mixedVersions
+      ? `Stop stale Marrow MCP processes through their owning harness, run npx -y @getmarrow/mcp@${MCP_ADAPTER_VERSION} setup, then restart the harness and run npx -y @getmarrow/install@latest doctor.`
+      : null,
+  };
+}
 
 function sourceClient() {
   const raw = String(process.env.MARROW_CLIENT || process.env.MARROW_HARNESS || process.env.MARROW_AGENT_CLIENT || '').trim().toLowerCase().replace(/\s+/g, '-').replace(/^@/, '');
@@ -1530,6 +1594,11 @@ function printReport(report) {
     process.stdout.write(`- missing env: ${report.doctor.missingEnv.length ? report.doctor.missingEnv.join(', ') : 'none'}\n`);
     if (report.doctor.envHints.length) process.stdout.write(`- possible env files: ${report.doctor.envHints.join(', ')}\n`);
     process.stdout.write(`- missing hooks/config: ${report.doctor.missingHooks.length ? report.doctor.missingHooks.join('; ') : 'none'}\n`);
+    if (report.doctor.mcpProcesses?.available) {
+      const processes = report.doctor.mcpProcesses;
+      process.stdout.write(`- MCP process versions: ${processes.active_versions.length ? processes.active_versions.join(', ') : processes.active_processes ? 'unknown' : 'none'}\n`);
+      process.stdout.write(`- stale/mixed MCP clients: ${processes.healthy ? 'no' : 'yes'}\n`);
+    }
     if (report.doctor.recommendedFix) process.stdout.write(`- recommended fix: ${report.doctor.recommendedFix}\n`);
     process.stdout.write(`- live health: ${report.doctor.healthCommand}\n`);
   }
@@ -1590,6 +1659,7 @@ async function install(options) {
     ? repairConfigDiagnostics(configDiagnostics)
     : [];
   const envHints = options.apiKey ? [] : findLikelyEnvFiles(detection);
+  const mcpProcesses = inspectMcpProcesses({ commands: options.processCommands });
   let selfTest;
   try {
     selfTest = await runSelfTest(options);
@@ -1681,7 +1751,8 @@ async function install(options) {
       missingEnv: options.apiKey ? [] : ['MARROW_API_KEY'],
       envHints,
       missingHooks: changes.filter((change) => change.changed).map((change) => change.label),
-      recommendedFix: configDiagnostics.npm_token.recommended_fix || (!options.apiKey
+      mcpProcesses,
+      recommendedFix: mcpProcesses.exact_fix || configDiagnostics.npm_token.recommended_fix || (!options.apiKey
         ? envHints.length
           ? `MARROW_API_KEY was found in a likely env file at ${envHints[0]}. Load that key from trusted secret storage, export only MARROW_API_KEY, then run npx @getmarrow/install --repair.`
           : 'Set MARROW_API_KEY, then run npx @getmarrow/install --repair.'
@@ -1696,7 +1767,9 @@ async function install(options) {
     selfTest,
     warnings: options.keyFromArg
       ? ['Avoid --key in shared shells because command-line arguments can be visible in process listings. Prefer MARROW_API_KEY in your environment or secret manager.']
-      : [],
+      : mcpProcesses.healthy
+      ? []
+      : ['Stale or mixed Marrow MCP client versions are active. Restart the owning harnesses after running the exact repair command.'],
   };
 }
 
@@ -1725,6 +1798,7 @@ module.exports = {
   passiveRuntimeSource,
   inspectNpmTokenConfig,
   inspectSdkDependency,
+  inspectMcpProcesses,
   buildInstallValueMoment,
   buildTokenValueProof,
   stableAgentId,

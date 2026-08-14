@@ -91,7 +91,17 @@ npx @getmarrow/install controller stop
 
 Persistent controller lifecycle is currently Linux-only. On macOS or Windows, activation still installs and verifies the supported hooks without starting or signaling a background process; run `npx @getmarrow/install sidecar` under an owner-managed service and pass `--no-controller`. The controller does not silently upgrade packages, change governance policy, rotate credentials, or modify unrelated project configuration.
 
-## What's New in v0.1.40
+## What's New in v0.1.41
+
+v0.1.41 makes stale client detection and recovery part of normal installation health:
+
+- `doctor` detects active stale or mixed Marrow MCP versions without exposing process command lines or credentials;
+- the repair path stops stale processes through their owning harness, installs MCP `3.9.57`, restarts the harness, and verifies live health;
+- certified hooks pin MCP `3.9.57` and SDK `3.7.56` so the installed runtime matches the advertised control contract;
+- existing harnesses retain their honest coverage level: native hooks where supported, MCP calls where available, and governed wrappers or event contracts elsewhere;
+- package upgrades remain operator-approved and never rotate keys or rewrite unrelated configuration.
+
+## Previous: v0.1.40
 
 v0.1.40 binds governed runs to a privacy-safe workspace fingerprint and separates observed execution from verified completion:
 
@@ -99,7 +109,7 @@ v0.1.40 binds governed runs to a privacy-safe workspace fingerprint and separate
 - passive prompt telemetry is buffered locally rather than delaying the agent turn;
 - transient read failures can use clearly labeled owner-only last-known guidance, while authentication failures never use cache;
 - `doctor` prints the exact `npx -y @getmarrow/mcp@latest ping` command for measured current/p50/p99 latency, last success, and backlog health;
-- certified hook commands pin MCP `3.9.56` and SDK `3.7.55` so advertised behavior matches the deployed server contract;
+- certified hook commands pin MCP `3.9.56` and SDK `3.7.55` so advertised behavior matches that release's deployed server contract;
 - governed runtime requests attach a stable privacy-safe project fingerprint and harness label without sending the raw working-directory path;
 - successful command exit remains observed execution, not verified business completion, unless a verification command or explicit proof file supplies evidence;
 - the integration matrix now reports prompt injection, pre-action, action result, closure, proof, cached brief, restart survival, evidence adapter, and safe repair separately.
