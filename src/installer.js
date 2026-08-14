@@ -92,7 +92,9 @@ function isMcpProcessCommand(command) {
   if (new Set(['bash', 'bwrap', 'dash', 'fish', 'sh', 'zsh']).has(executable)) return false;
   if (executable === 'marrow-mcp') return true;
 
-  if (args.some((arg) => /(?:^|\/)node_modules\/(?:@getmarrow\/mcp(?:\/|$)|\.bin\/marrow-mcp$)/.test(arg))) {
+  if (executable === 'node'
+    && args[1]
+    && /(?:^|\/)node_modules\/(?:@getmarrow\/mcp(?:\/|$)|\.bin\/marrow-mcp$)/.test(args[1])) {
     return true;
   }
 
