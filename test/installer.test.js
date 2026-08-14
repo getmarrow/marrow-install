@@ -61,6 +61,7 @@ test('doctor ignores parent shells and sandbox wrappers that only mention MCP co
     '/usr/bin/bwrap --ro-bind / / /bin/bash -lc npx -y @getmarrow/mcp@3.9.57 setup',
     '/bin/bash -lc npx -y @getmarrow/mcp@2.8.0',
     'rg @getmarrow/mcp package.json',
+    'rg /tmp/node_modules/@getmarrow/mcp package-lock.json',
   ] });
   assert.equal(report.active_processes, 0);
   assert.equal(report.unknown_version_processes, 0);
