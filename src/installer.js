@@ -84,8 +84,22 @@ function packageMcpVersion(command) {
 }
 
 function isMcpProcessCommand(command) {
-  const normalized = String(command || '').replace(/\0/g, ' ');
-  return /@getmarrow\/mcp(?:@|\/|\s|$)|node_modules\/\.bin\/marrow-mcp(?:\s|$)|(?:^|\s)marrow-mcp(?:\s|$)/.test(normalized);
+  const raw = String(command || '');
+  const args = (raw.includes('\0') ? raw.split('\0') : raw.trim().split(/\s+/)).filter(Boolean);
+  if (!args.length) return false;
+
+  const executable = path.basename(args[0]);
+  if (new Set(['bash', 'bwrap', 'dash', 'fish', 'sh', 'zsh']).has(executable)) return false;
+  if (executable === 'marrow-mcp') return true;
+
+  if (args.some((arg) => /(?:^|\/)node_modules\/(?:@getmarrow\/mcp(?:\/|$)|\.bin\/marrow-mcp$)/.test(arg))) {
+    return true;
+  }
+
+  const packageManagers = new Set(['bun', 'bunx', 'npm', 'npm-cli.js', 'npx', 'npx-cli.js', 'pnpm', 'pnpx', 'yarn']);
+  const runner = executable === 'node' && args[1] ? path.basename(args[1]) : executable;
+  return packageManagers.has(runner)
+    && args.some((arg) => /^@getmarrow\/mcp(?:@[^\s]+)?$/.test(arg));
 }
 
 function readLinuxProcessCommands(procRoot = '/proc') {
