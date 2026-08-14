@@ -56,6 +56,18 @@ test('doctor treats version-unknown MCP processes as unhealthy with executable r
   assert.equal(report.verification_command, 'npx -y @getmarrow/install@latest doctor');
 });
 
+test('doctor ignores parent shells and sandbox wrappers that only mention MCP commands', () => {
+  const report = inspectMcpProcesses({ commands: [
+    '/usr/bin/bwrap --ro-bind / / /bin/bash -lc npx -y @getmarrow/mcp@3.9.57 setup',
+    '/bin/bash -lc npx -y @getmarrow/mcp@2.8.0',
+    'rg @getmarrow/mcp package.json',
+  ] });
+  assert.equal(report.active_processes, 0);
+  assert.equal(report.unknown_version_processes, 0);
+  assert.equal(report.healthy, true);
+  assert.equal(report.exact_fix, null);
+});
+
 test('doctor resolves direct node_modules bin MCP process versions', () => {
   const root = tempDir();
   const packageRoot = path.join(root, 'node_modules', '@getmarrow', 'mcp');
