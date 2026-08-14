@@ -31,12 +31,53 @@ test('doctor identifies stale and mixed MCP processes without exposing command l
   assert.deepEqual(report.stale_versions, ['2.8.0']);
   assert.deepEqual(report.active_versions, ['2.8.0', '3.9.57']);
   assert.doesNotMatch(JSON.stringify(report), /must-not-appear|unrelated\.js/);
-  assert.match(report.exact_fix, /restart the harness/i);
+  assert.equal(report.exact_fix, 'npx -y @getmarrow/mcp@3.9.57 setup');
+  assert.equal(report.restart_required, true);
+  assert.match(report.restart_instruction, /restart every owning harness/i);
+  assert.equal(report.verification_command, 'npx -y @getmarrow/install@latest doctor');
 });
 
 function tempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-install-'));
 }
+
+test('doctor treats version-unknown MCP processes as unhealthy with executable repair', () => {
+  const report = inspectMcpProcesses({ commands: [
+    'npx -y @getmarrow/mcp@latest',
+    'marrow-mcp --transport stdio --token=must-not-appear',
+  ] });
+  assert.equal(report.active_processes, 2);
+  assert.equal(report.unknown_version_processes, 2);
+  assert.equal(report.healthy, false);
+  assert.equal(report.exact_fix, 'npx -y @getmarrow/mcp@3.9.57 setup');
+  assert.doesNotMatch(report.exact_fix, /stop|restart|then/i);
+  assert.doesNotMatch(JSON.stringify(report), /must-not-appear/);
+  assert.equal(report.restart_required, true);
+  assert.equal(report.verification_command, 'npx -y @getmarrow/install@latest doctor');
+});
+
+test('doctor resolves direct node_modules bin MCP process versions', () => {
+  const root = tempDir();
+  const packageRoot = path.join(root, 'node_modules', '@getmarrow', 'mcp');
+  const binRoot = path.join(root, 'node_modules', '.bin');
+  fs.mkdirSync(path.join(packageRoot, 'dist'), { recursive: true });
+  fs.mkdirSync(binRoot, { recursive: true });
+  fs.writeFileSync(path.join(packageRoot, 'package.json'), JSON.stringify({ name: '@getmarrow/mcp', version: '3.9.56' }));
+  fs.writeFileSync(path.join(packageRoot, 'dist', 'cli.js'), '#!/usr/bin/env node\n');
+  fs.symlinkSync('../@getmarrow/mcp/dist/cli.js', path.join(binRoot, 'marrow-mcp'));
+  try {
+    const report = inspectMcpProcesses({ commands: [
+      `node ${path.join(binRoot, 'marrow-mcp')} --transport stdio`,
+    ] });
+    assert.equal(report.active_processes, 1);
+    assert.equal(report.unknown_version_processes, 0);
+    assert.deepEqual(report.active_versions, ['3.9.56']);
+    assert.deepEqual(report.stale_versions, ['3.9.56']);
+    assert.equal(report.healthy, false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 function writeSdkLock(root, declaredSpec = '^3.7.56') {
   fs.writeFileSync(path.join(root, 'package-lock.json'), JSON.stringify({

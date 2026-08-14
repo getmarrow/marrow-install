@@ -95,8 +95,8 @@ Persistent controller lifecycle is currently Linux-only. On macOS or Windows, ac
 
 v0.1.41 makes stale client detection and recovery part of normal installation health:
 
-- `doctor` detects active stale or mixed Marrow MCP versions without exposing process command lines or credentials;
-- the repair path stops stale processes through their owning harness, installs MCP `3.9.57`, restarts the harness, and verifies live health;
+- `doctor` detects active stale, mixed, or version-unknown Marrow MCP processes, including direct `node_modules/.bin/marrow-mcp` launches, without exposing command lines or credentials;
+- when repair is needed, `doctor` reports the executable pinned setup command, the separate owning-harness restart requirement, and the executable verification command; it does not terminate harness processes itself;
 - certified hooks pin MCP `3.9.57` and SDK `3.7.56` so the installed runtime matches the advertised control contract;
 - existing harnesses retain their honest coverage level: native hooks where supported, MCP calls where available, and governed wrappers or event contracts elsewhere;
 - package upgrades remain operator-approved and never rotate keys or rewrite unrelated configuration.

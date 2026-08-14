@@ -47,19 +47,45 @@ function explicitMcpVersion(command) {
   return match ? match[1] : null;
 }
 
-function packageMcpVersion(command) {
-  const normalized = String(command || '').replace(/\0/g, ' ');
-  const match = normalized.match(/(\/[^\s]+\/node_modules\/@getmarrow\/mcp)(?:\/|\s)/);
-  if (!match) return null;
+function readMcpPackageVersion(packageRoot) {
   try {
-    const packagePath = path.join(match[1], 'package.json');
-    const pkg = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+    const pkg = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8'));
     return typeof pkg.version === 'string' && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(pkg.version)
       ? pkg.version
       : null;
   } catch {
     return null;
   }
+}
+
+function packageMcpVersion(command) {
+  const normalized = String(command || '').replace(/\0/g, ' ');
+  const packageRoots = [];
+  for (const match of normalized.matchAll(/(\/[^\s]+\/node_modules\/@getmarrow\/mcp)(?:\/|\s|$)/g)) {
+    packageRoots.push(match[1]);
+  }
+  for (const match of normalized.matchAll(/(\/[^\s]+\/node_modules\/\.bin\/marrow-mcp)(?:\s|$)/g)) {
+    const binPath = match[1];
+    packageRoots.push(path.resolve(path.dirname(binPath), '..', '@getmarrow', 'mcp'));
+    try {
+      const resolved = fs.realpathSync(binPath);
+      const marker = `${path.sep}node_modules${path.sep}@getmarrow${path.sep}mcp${path.sep}`;
+      const markerIndex = resolved.indexOf(marker);
+      if (markerIndex >= 0) packageRoots.push(resolved.slice(0, markerIndex + marker.length - 1));
+    } catch {
+      // The derived package root still gives a deterministic best-effort lookup.
+    }
+  }
+  for (const packageRoot of [...new Set(packageRoots)]) {
+    const version = readMcpPackageVersion(packageRoot);
+    if (version) return version;
+  }
+  return null;
+}
+
+function isMcpProcessCommand(command) {
+  const normalized = String(command || '').replace(/\0/g, ' ');
+  return /@getmarrow\/mcp(?:@|\/|\s|$)|node_modules\/\.bin\/marrow-mcp(?:\s|$)|(?:^|\s)marrow-mcp(?:\s|$)/.test(normalized);
 }
 
 function readLinuxProcessCommands(procRoot = '/proc') {
@@ -85,24 +111,28 @@ function inspectMcpProcesses(options = {}) {
     ? options.commands.map(String)
     : readLinuxProcessCommands(options.procRoot);
   const active = commands
-    .filter((command) => /@getmarrow\/mcp|node_modules\/@getmarrow\/mcp/.test(command))
+    .filter(isMcpProcessCommand)
     .map((command) => explicitMcpVersion(command) || packageMcpVersion(command) || 'unknown');
   const versions = [...new Set(active.filter((version) => version !== 'unknown'))].sort();
+  const unknownVersionProcesses = active.filter((version) => version === 'unknown').length;
   const staleVersions = versions.filter((version) => version !== MCP_ADAPTER_VERSION);
-  const mixedVersions = versions.length > 1;
+  const mixedVersions = versions.length > 1 || (versions.length > 0 && unknownVersionProcesses > 0);
   const stale = staleVersions.length > 0;
+  const needsRepair = stale || mixedVersions || unknownVersionProcesses > 0;
+  const repairCommand = `npx -y @getmarrow/mcp@${MCP_ADAPTER_VERSION} setup`;
   return {
     available: process.platform === 'linux' || Array.isArray(options.commands),
     expected_version: MCP_ADAPTER_VERSION,
     active_processes: active.length,
     active_versions: versions,
-    unknown_version_processes: active.filter((version) => version === 'unknown').length,
+    unknown_version_processes: unknownVersionProcesses,
     stale_versions: staleVersions,
     mixed_versions: mixedVersions,
-    healthy: !stale && !mixedVersions,
-    exact_fix: stale || mixedVersions
-      ? `Stop stale Marrow MCP processes through their owning harness, run npx -y @getmarrow/mcp@${MCP_ADAPTER_VERSION} setup, then restart the harness and run npx -y @getmarrow/install@latest doctor.`
-      : null,
+    healthy: !needsRepair,
+    exact_fix: needsRepair ? repairCommand : null,
+    restart_required: needsRepair,
+    restart_instruction: needsRepair ? 'Restart every owning harness to replace its active Marrow MCP process.' : null,
+    verification_command: needsRepair ? 'npx -y @getmarrow/install@latest doctor' : null,
   };
 }
 
@@ -1597,7 +1627,9 @@ function printReport(report) {
     if (report.doctor.mcpProcesses?.available) {
       const processes = report.doctor.mcpProcesses;
       process.stdout.write(`- MCP process versions: ${processes.active_versions.length ? processes.active_versions.join(', ') : processes.active_processes ? 'unknown' : 'none'}\n`);
-      process.stdout.write(`- stale/mixed MCP clients: ${processes.healthy ? 'no' : 'yes'}\n`);
+      process.stdout.write(`- stale/mixed/version-unknown MCP clients: ${processes.healthy ? 'no' : 'yes'}\n`);
+      if (processes.restart_instruction) process.stdout.write(`- restart required: ${processes.restart_instruction}\n`);
+      if (processes.verification_command) process.stdout.write(`- verify repair: ${processes.verification_command}\n`);
     }
     if (report.doctor.recommendedFix) process.stdout.write(`- recommended fix: ${report.doctor.recommendedFix}\n`);
     process.stdout.write(`- live health: ${report.doctor.healthCommand}\n`);
@@ -1765,11 +1797,14 @@ async function install(options) {
     sdkDependency,
     controller,
     selfTest,
-    warnings: options.keyFromArg
-      ? ['Avoid --key in shared shells because command-line arguments can be visible in process listings. Prefer MARROW_API_KEY in your environment or secret manager.']
-      : mcpProcesses.healthy
-      ? []
-      : ['Stale or mixed Marrow MCP client versions are active. Restart the owning harnesses after running the exact repair command.'],
+    warnings: [
+      ...(options.keyFromArg
+        ? ['Avoid --key in shared shells because command-line arguments can be visible in process listings. Prefer MARROW_API_KEY in your environment or secret manager.']
+        : []),
+      ...(!mcpProcesses.healthy
+        ? ['Stale, mixed, or version-unknown Marrow MCP clients are active. Run the exact repair command, then restart every owning harness.']
+        : []),
+    ],
   };
 }
 
