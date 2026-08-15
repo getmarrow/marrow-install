@@ -8,15 +8,15 @@ const { controllerStatus, controllerSupportedPlatform, ensureGovernanceControlle
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MARROW_BLOCK_START = '<!-- marrow:passive-start -->';
 const MARROW_BLOCK_END = '<!-- marrow:passive-end -->';
-const MCP_ADAPTER_VERSION = '3.9.57';
+const MCP_ADAPTER_VERSION = '3.9.59';
 const SDK_ADAPTER_VERSION = '3.7.56';
 const SDK_ADAPTER_INTEGRITY = 'sha512-5htliY4wfn8a1mbLT9N4OWXqhp9fWzMHuAQgUetc3RUKjOes5mWB3t91/leRKFRRIgCnEczJN6jHXg7Aw489Mw==';
 const SDK_ADAPTER_TARBALL = `https://registry.npmjs.org/@getmarrow/sdk/-/sdk-${SDK_ADAPTER_VERSION}.tgz`;
 const MCP_PACKAGE_SPEC = `@getmarrow/mcp@${MCP_ADAPTER_VERSION}`;
-const MCP_CONTEXT_HOOK_COMMAND = `npx -y ${MCP_PACKAGE_SPEC} context-hook`;
-const MCP_PRE_ACTION_HOOK_COMMAND = `npx -y ${MCP_PACKAGE_SPEC} pre-action-hook`;
-const MCP_ACTION_RESULT_HOOK_COMMAND = `npx -y ${MCP_PACKAGE_SPEC} hook`;
-const MCP_SESSION_END_HOOK_COMMAND = `npx -y ${MCP_PACKAGE_SPEC} session-hook`;
+const MCP_CONTEXT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp context-hook`;
+const MCP_PRE_ACTION_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp pre-action-hook`;
+const MCP_ACTION_RESULT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp hook`;
+const MCP_SESSION_END_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp session-hook`;
 const NATIVE_HOOK_MATCHER = 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*';
 const NATIVE_EXPECTED_HOOKS = ['prompt', 'pre_action', 'action_result', 'session_end'];
 const SOURCE_CLIENTS = new Set(['claude-code', 'cursor', 'composer', 'windsurf', 'openclaw', 'codex', 'gemini', 'grok', 'deepseek', 'qwen', 'kimi', 'minimax', 'cline', 'opencode', 'hermes', 'glm', 'mcp', 'ci', 'custom', 'unknown']);
@@ -101,7 +101,7 @@ function isMcpProcessCommand(command) {
   const packageManagers = new Set(['bun', 'bunx', 'npm', 'npm-cli.js', 'npx', 'npx-cli.js', 'pnpm', 'pnpx', 'yarn']);
   const runner = executable === 'node' && args[1] ? path.basename(args[1]) : executable;
   return packageManagers.has(runner)
-    && args.some((arg) => /^@getmarrow\/mcp(?:@[^\s]+)?$/.test(arg));
+    && args.some((arg) => /^(?:--package=)?@getmarrow\/mcp(?:@[^\s]+)?$/.test(arg));
 }
 
 function readLinuxProcessCommands(procRoot = '/proc') {
@@ -135,7 +135,7 @@ function inspectMcpProcesses(options = {}) {
   const mixedVersions = versions.length > 1 || (versions.length > 0 && unknownVersionProcesses > 0);
   const stale = staleVersions.length > 0;
   const needsRepair = stale || mixedVersions || unknownVersionProcesses > 0;
-  const repairCommand = `npx -y @getmarrow/mcp@${MCP_ADAPTER_VERSION} setup`;
+  const repairCommand = `npx -y --package=@getmarrow/mcp@${MCP_ADAPTER_VERSION} marrow-mcp setup`;
   return {
     available: process.platform === 'linux' || Array.isArray(options.commands),
     expected_version: MCP_ADAPTER_VERSION,
@@ -148,7 +148,59 @@ function inspectMcpProcesses(options = {}) {
     exact_fix: needsRepair ? repairCommand : null,
     restart_required: needsRepair,
     restart_instruction: needsRepair ? 'Restart every owning harness to replace its active Marrow MCP process.' : null,
-    verification_command: needsRepair ? 'npx -y @getmarrow/install@latest doctor' : null,
+    verification_command: needsRepair ? 'npx -y @getmarrow/install@latest doctor --self-test' : null,
+  };
+}
+
+function inspectMcpConfigurations(detection, options = {}) {
+  const home = options.home || process.env.HOME || process.env.USERPROFILE || os.homedir();
+  const configuredPaths = Array.isArray(options.paths) ? options.paths : [
+    detection?.paths?.claudeSettings,
+    detection?.paths?.cursorMcp,
+    detection?.paths?.mcpJson,
+    path.join(home, '.claude', 'settings.json'),
+    path.join(home, '.claude.json'),
+    path.join(home, '.cursor', 'mcp.json'),
+    path.join(home, '.mcp.json'),
+  ];
+  const versions = [];
+  let filesChecked = 0;
+  let configurationsFound = 0;
+  let unknownVersionConfigurations = 0;
+  for (const filePath of [...new Set(configuredPaths.filter(Boolean).map((entry) => path.resolve(String(entry))))]) {
+    try {
+      if (!fs.existsSync(filePath)) continue;
+      const stat = fs.lstatSync(filePath);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 2 * 1024 * 1024) continue;
+      filesChecked += 1;
+      const raw = fs.readFileSync(filePath, 'utf8');
+      const specs = [...raw.matchAll(/@getmarrow\/mcp@(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/g)]
+        .map((match) => match[1]);
+      if (/@getmarrow\/mcp(?:@|["'\s])/.test(raw)) {
+        configurationsFound += 1;
+        if (specs.length === 0) unknownVersionConfigurations += 1;
+      }
+      versions.push(...specs);
+    } catch {
+      // Doctor remains read-only and ignores inaccessible or malformed owner configuration.
+    }
+  }
+  const configuredVersions = [...new Set(versions)].sort();
+  const staleVersions = configuredVersions.filter((version) => version !== MCP_ADAPTER_VERSION);
+  const mixedVersions = configuredVersions.length > 1
+    || (configuredVersions.length > 0 && unknownVersionConfigurations > 0);
+  const healthy = staleVersions.length === 0 && !mixedVersions && unknownVersionConfigurations === 0;
+  return {
+    expected_version: MCP_ADAPTER_VERSION,
+    files_checked: filesChecked,
+    configurations_found: configurationsFound,
+    configured_versions: configuredVersions,
+    unknown_version_configurations: unknownVersionConfigurations,
+    stale_versions: staleVersions,
+    mixed_versions: mixedVersions,
+    healthy,
+    exact_fix: healthy ? null : `Run npx -y --package=@getmarrow/mcp@${MCP_ADAPTER_VERSION} marrow-mcp setup in each owning workspace, update its MCP launch to npx -y --package=@getmarrow/mcp@${MCP_ADAPTER_VERSION} marrow-mcp, then restart that harness.`,
+    verification_command: healthy ? null : 'npx -y @getmarrow/install@latest doctor --self-test',
   };
 }
 
@@ -549,7 +601,7 @@ function passiveInstructions() {
 
 Marrow should run passively after install:
 
-- Use MCP hooks when available: \`npx -y @getmarrow/mcp setup\`.
+- Use MCP hooks when available: \`npx -y --package=@getmarrow/mcp@latest marrow-mcp setup\`.
 - Use SDK passive runtime in owned Node processes: \`createPassiveRuntime().install()\`.
 - Keep passive token/model usage proof enabled so Marrow can show token, cost, latency, and workflow savings after real work completes.
 - Before risky work, use Marrow's decision brief or passive prompt hook.
@@ -674,7 +726,7 @@ function exactHookDescriptors(settings, eventName, command, matcher) {
 function marrowHookSubcommand(command) {
   if (typeof command !== 'string') return null;
   const match = command.trim().match(
-    /^npx\s+(?:-y\s+)?@getmarrow\/mcp(?:@[^\s]+)?\s+(context-hook|pre-action-hook|hook|session-hook)$/,
+    /^npx\s+(?:-y\s+)?(?:--package=@getmarrow\/mcp(?:@[^\s]+)?\s+marrow-mcp|@getmarrow\/mcp(?:@[^\s]+)?)\s+(context-hook|pre-action-hook|hook|session-hook)$/,
   );
   return match?.[1] || null;
 }
@@ -839,7 +891,7 @@ function activationProfile(detection, plan, changes, client) {
   if (capabilityLevel === 'mcp' && mcpConfigs.some((config) => (
     config?.mcpServers?.marrow?.command === 'npx'
     && Array.isArray(config.mcpServers.marrow.args)
-    && config.mcpServers.marrow.args.join(' ') === `-y ${MCP_PACKAGE_SPEC}`
+    && config.mcpServers.marrow.args.join(' ') === `-y --package=${MCP_PACKAGE_SPEC} marrow-mcp`
   ))) observedHooks.push('mcp_tool_calls');
   const fingerprintMaterial = changes
     .filter((change) => change.applied || change.already_present)
@@ -877,7 +929,7 @@ function upsertMcpServerConfig(filePath) {
     : {};
   servers.marrow = {
     command: 'npx',
-    args: ['-y', MCP_PACKAGE_SPEC],
+    args: ['-y', `--package=${MCP_PACKAGE_SPEC}`, 'marrow-mcp'],
     env: {
       MARROW_API_KEY: '${MARROW_API_KEY}',
       MARROW_BASE_URL: '${MARROW_BASE_URL}',
@@ -1647,6 +1699,11 @@ function printReport(report) {
       if (processes.restart_instruction) process.stdout.write(`- restart required: ${processes.restart_instruction}\n`);
       if (processes.verification_command) process.stdout.write(`- verify repair: ${processes.verification_command}\n`);
     }
+    if (report.doctor.mcpConfigurations) {
+      const configurations = report.doctor.mcpConfigurations;
+      process.stdout.write(`- configured MCP versions: ${configurations.configured_versions.length ? configurations.configured_versions.join(', ') : 'none pinned'}\n`);
+      process.stdout.write(`- stale/mixed/version-unknown MCP configuration: ${configurations.healthy ? 'no' : 'yes'}\n`);
+    }
     if (report.doctor.recommendedFix) process.stdout.write(`- recommended fix: ${report.doctor.recommendedFix}\n`);
     process.stdout.write(`- live health: ${report.doctor.healthCommand}\n`);
   }
@@ -1708,6 +1765,7 @@ async function install(options) {
     : [];
   const envHints = options.apiKey ? [] : findLikelyEnvFiles(detection);
   const mcpProcesses = inspectMcpProcesses({ commands: options.processCommands });
+  const mcpConfigurations = inspectMcpConfigurations(detection, { paths: options.mcpConfigPaths });
   let selfTest;
   try {
     selfTest = await runSelfTest(options);
@@ -1800,12 +1858,13 @@ async function install(options) {
       envHints,
       missingHooks: changes.filter((change) => change.changed).map((change) => change.label),
       mcpProcesses,
-      recommendedFix: mcpProcesses.exact_fix || configDiagnostics.npm_token.recommended_fix || (!options.apiKey
+      mcpConfigurations,
+      recommendedFix: mcpProcesses.exact_fix || mcpConfigurations.exact_fix || configDiagnostics.npm_token.recommended_fix || (!options.apiKey
         ? envHints.length
           ? `MARROW_API_KEY was found in a likely env file at ${envHints[0]}. Load that key from trusted secret storage, export only MARROW_API_KEY, then run npx @getmarrow/install --repair.`
           : 'Set MARROW_API_KEY, then run npx @getmarrow/install --repair.'
         : controller.exact_fix || selfTest.recommended_fix || null),
-      healthCommand: 'npx -y @getmarrow/mcp@latest ping',
+      healthCommand: 'npx -y --package=@getmarrow/mcp@latest marrow-mcp ping',
     },
     remediation,
     configDiagnostics,
@@ -1819,6 +1878,9 @@ async function install(options) {
         : []),
       ...(!mcpProcesses.healthy
         ? ['Stale, mixed, or version-unknown Marrow MCP clients are active. Run the exact repair command, then restart every owning harness.']
+        : []),
+      ...(!mcpConfigurations.healthy
+        ? ['Stale, mixed, or version-unknown Marrow MCP versions remain in owner configuration. Repair each owning workspace and restart its harness.']
         : []),
     ],
   };
@@ -1850,6 +1912,7 @@ module.exports = {
   inspectNpmTokenConfig,
   inspectSdkDependency,
   inspectMcpProcesses,
+  inspectMcpConfigurations,
   buildInstallValueMoment,
   buildTokenValueProof,
   stableAgentId,

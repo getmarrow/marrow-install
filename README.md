@@ -71,7 +71,7 @@ npx -y @getmarrow/install@latest activate
 npx -y @getmarrow/install@latest doctor
 
 # Measured API read health and local backlog
-npx -y @getmarrow/mcp@latest ping
+npx -y --package=@getmarrow/mcp@latest marrow-mcp ping
 
 # Use only when doctor reports drift
 npx -y @getmarrow/install@latest --repair
@@ -91,15 +91,20 @@ npx @getmarrow/install controller stop
 
 Persistent controller lifecycle is currently Linux-only. On macOS or Windows, activation still installs and verifies the supported hooks without starting or signaling a background process; run `npx @getmarrow/install sidecar` under an owner-managed service and pass `--no-controller`. The controller does not silently upgrade packages, change governance policy, rotate credentials, or modify unrelated project configuration.
 
-## What's New in v0.1.42
+## What's New in v0.1.43
 
-v0.1.42 keeps stale client detection and recovery deterministic even when other Marrow MCP clients are running on the installation host:
+v0.1.43 hardens the MCP control path and makes stale client recovery explicit:
 
-- `doctor` detects active stale, mixed, or version-unknown Marrow MCP processes, including direct `node_modules/.bin/marrow-mcp` launches, without exposing command lines or credentials;
-- when repair is needed, `doctor` reports the executable pinned setup command, the separate owning-harness restart requirement, and the executable verification command; it does not terminate harness processes itself;
-- certified hooks pin MCP `3.9.57` and SDK `3.7.56` so the installed runtime matches the advertised control contract;
+- `doctor` detects active and configured stale, mixed, or version-unknown Marrow MCP clients without exposing command lines, file paths, configuration contents, or credentials;
+- every generated MCP launch and hook uses the package-explicit `npx --package ... marrow-mcp` form so npm can resolve the executable reliably;
+- when repair is needed, `doctor` reports the pinned setup command, the separate owning-harness restart requirement, and a self-test verification command; it does not terminate harness processes itself;
+- certified hooks pin MCP `3.9.59` and SDK `3.7.56` so the installed runtime matches the advertised control contract;
 - existing harnesses retain their honest coverage level: native hooks where supported, MCP calls where available, and governed wrappers or event contracts elsewhere;
 - package upgrades remain operator-approved and never rotate keys or rewrite unrelated configuration.
+
+## Previous: v0.1.42
+
+v0.1.42 added deterministic active-process detection, including direct `node_modules/.bin/marrow-mcp` launches, while keeping repair operator-approved.
 
 ## Previous: v0.1.40
 
@@ -108,7 +113,7 @@ v0.1.40 binds governed runs to a privacy-safe workspace fingerprint and separate
 - ordinary prompts receive one compact context read; risky or mutating prompts receive one fresh runtime gate instead;
 - passive prompt telemetry is buffered locally rather than delaying the agent turn;
 - transient read failures can use clearly labeled owner-only last-known guidance, while authentication failures never use cache;
-- `doctor` prints the exact `npx -y @getmarrow/mcp@latest ping` command for measured current/p50/p99 latency, last success, and backlog health;
+- `doctor` prints the exact `npx -y --package=@getmarrow/mcp@latest marrow-mcp ping` command for measured current/p50/p99 latency, last success, and backlog health;
 - certified hook commands pin MCP `3.9.56` and SDK `3.7.55` so advertised behavior matches that release's deployed server contract;
 - governed runtime requests attach a stable privacy-safe project fingerprint and harness label without sending the raw working-directory path;
 - successful command exit remains observed execution, not verified business completion, unless a verification command or explicit proof file supplies evidence;
