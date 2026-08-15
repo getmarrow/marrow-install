@@ -25,13 +25,18 @@ printf '{"name":"marrow-fresh-install-smoke","private":true}\n' > "${workdir}/pa
 
 echo "RUN fresh_install_smoke: @getmarrow/install@${PACKAGE_VERSION}"
 if [[ "${PACKAGE_VERSION}" == "local" ]]; then
-  node "$(dirname "$0")/../bin/marrow-install.js" --cwd "${workdir}" doctor --self-test > "${workdir}/doctor.out"
+  node "$(dirname "$0")/../bin/marrow-install.js" --cwd "${workdir}" doctor --self-test --json > "${workdir}/doctor.out"
 else
-  npx -y -p "@getmarrow/install@${PACKAGE_VERSION}" marrow-install --cwd "${workdir}" doctor --self-test > "${workdir}/doctor.out"
+  (cd "${workdir}" && npx -y -p "@getmarrow/install@${PACKAGE_VERSION}" marrow-install --cwd "${workdir}" doctor --self-test --json) > "${workdir}/doctor.out"
 fi
 
-grep -q "write test event: passed" "${workdir}/doctor.out"
-grep -q "outcome closed: passed" "${workdir}/doctor.out"
-grep -q "key valid: yes" "${workdir}/doctor.out"
+jq -e '
+  .doctor.active == true
+  and .selfTest.active == true
+  and .selfTest.runtime_active == true
+  and (.selfTest.decision_id | type == "string" and length > 0)
+  and .selfTest.first_value.active == true
+  and .selfTest.client_update.version_status == "current"
+' "${workdir}/doctor.out" >/dev/null
 
 echo "PASS fresh_install_smoke"

@@ -6,6 +6,7 @@ const test = require('node:test');
 const root = path.resolve(__dirname, '..');
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf8');
+const freshInstallSmoke = fs.readFileSync(path.join(root, 'scripts', 'fresh-install-smoke.sh'), 'utf8');
 const canonical = 'Marrow is the runtime control and proof layer for teams running AI agents.';
 const governanceSignals = [
   'multiple_autonomous_agents',
@@ -42,4 +43,12 @@ test('npm entry point matches the product positioning contract', () => {
   assert.notEqual(firstRunHeading, -1, 'README must contain the first-run activation section');
   assert.notEqual(trustHeading, -1, 'README must contain the trust and data-boundaries section');
   assert.ok(firstRunHeading < trustHeading, 'first-run activation must precede trust boundaries');
+});
+
+test('fresh-install smoke verifies the current structured self-test contract', () => {
+  assert.match(freshInstallSmoke, /doctor --self-test --json/);
+  assert.match(freshInstallSmoke, /cd "\$\{workdir\}" && npx/);
+  assert.match(freshInstallSmoke, /\.selfTest\.runtime_active == true/);
+  assert.match(freshInstallSmoke, /\.selfTest\.client_update\.version_status == "current"/);
+  assert.doesNotMatch(freshInstallSmoke, /write test event: passed|outcome closed: passed|key valid: yes/);
 });
