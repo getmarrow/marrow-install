@@ -8,11 +8,26 @@ const { controllerStatus, controllerSupportedPlatform, ensureGovernanceControlle
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MARROW_BLOCK_START = '<!-- marrow:passive-start -->';
 const MARROW_BLOCK_END = '<!-- marrow:passive-end -->';
-const MCP_ADAPTER_VERSION = '3.9.59';
+const MCP_ADAPTER_VERSION = '3.9.61';
+const MCP_ADAPTER_SOURCE_SHA = 'ebe06a5c78895e70ceea7b7383ac31d5aaacbd41';
+const MCP_ADAPTER_INTEGRITY = 'sha512-6ojhKztiJp8/mZecuSnt+kiEe41COPBOjrka9j+r+yFacNl4uapW9quq/wEVo5SxuDmxolFIBaqkX6xIdaD2rA==';
 const SDK_ADAPTER_VERSION = '3.7.56';
-const SDK_ADAPTER_INTEGRITY = 'sha512-5htliY4wfn8a1mbLT9N4OWXqhp9fWzMHuAQgUetc3RUKjOes5mWB3t91/leRKFRRIgCnEczJN6jHXg7Aw489Mw==';
+const SDK_ADAPTER_INTEGRITY = 'sha512-mllohsI4DHpcVuEL58303kpGwS/pl/HMZ99mGNo3swYLomZwwfVzcner9Bn+p0b72989NOpS1l2frY/vra1gfQ==';
 const SDK_ADAPTER_TARBALL = `https://registry.npmjs.org/@getmarrow/sdk/-/sdk-${SDK_ADAPTER_VERSION}.tgz`;
 const MCP_PACKAGE_SPEC = `@getmarrow/mcp@${MCP_ADAPTER_VERSION}`;
+const ADAPTER_PROVENANCE = Object.freeze({
+  mcp: Object.freeze({
+    package: '@getmarrow/mcp',
+    version: MCP_ADAPTER_VERSION,
+    source_sha: MCP_ADAPTER_SOURCE_SHA,
+    integrity: MCP_ADAPTER_INTEGRITY,
+  }),
+  sdk: Object.freeze({
+    package: '@getmarrow/sdk',
+    version: SDK_ADAPTER_VERSION,
+    integrity: SDK_ADAPTER_INTEGRITY,
+  }),
+});
 const MCP_CONTEXT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp context-hook`;
 const MCP_PRE_ACTION_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp pre-action-hook`;
 const MCP_ACTION_RESULT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp hook`;
@@ -1833,6 +1848,7 @@ async function install(options) {
 
   return {
     root: detection.root,
+    adapterProvenance: ADAPTER_PROVENANCE,
     mode: plan.mode,
     writeMode,
     detected: {
@@ -1919,5 +1935,6 @@ module.exports = {
   activationProfile,
   claudeNativeHookFingerprint,
   printReport,
+  ADAPTER_PROVENANCE,
   HARNESS_CAPABILITY_REGISTRY,
 };

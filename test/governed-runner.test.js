@@ -645,7 +645,7 @@ test('governed runner attaches stable client attribution from env and CLI', () =
     assert.equal(sourceClient(envParsed.options.client), 'qwen');
     assert.equal(headers(envParsed.options)['X-Marrow-Client'], 'qwen');
     assert.equal(headers(envParsed.options)['X-Marrow-Package'], '@getmarrow/install');
-    assert.equal(headers(envParsed.options)['X-Marrow-Package-Version'], '0.1.43');
+    assert.equal(headers(envParsed.options)['X-Marrow-Package-Version'], '0.1.44');
 
     const cliParsed = parseArgs(['run', '--client', 'Hermes', '--agent', 'hermes-agent', '--', 'hermes', '/goal']);
     const meta = sourceMeta(cliParsed.options, 'runtime', {
