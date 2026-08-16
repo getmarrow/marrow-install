@@ -91,14 +91,23 @@ npx @getmarrow/install controller stop
 
 Persistent controller lifecycle is currently Linux-only. On macOS or Windows, activation still installs and verifies the supported hooks without starting or signaling a background process; run `npx @getmarrow/install sidecar` under an owner-managed service and pass `--no-controller`. The controller does not silently upgrade packages, change governance policy, rotate credentials, or modify unrelated project configuration.
 
-## What's New in v0.1.43
+## What's New in v0.1.44
+
+v0.1.44 restores exact package-chain detection and current MCP setup truth:
+
+- exact declared, locked, and installed SDK `3.7.56` dependencies are recognized using the live public registry integrity;
+- generated MCP setup, launch, and certified hook commands pin current MCP `3.9.61`;
+- the installer exposes the certified MCP source SHA and public registry integrity in its programmatic adapter provenance without changing credentials, policy, or unrelated configuration;
+- regression coverage rejects stale SDK lock integrity and treats MCP versions older than `3.9.61` as stale.
+
+## Previous: v0.1.43
 
 v0.1.43 hardens the MCP control path and makes stale client recovery explicit:
 
 - `doctor` detects active and configured stale, mixed, or version-unknown Marrow MCP clients without exposing command lines, file paths, configuration contents, or credentials;
 - every generated MCP launch and hook uses the package-explicit `npx --package ... marrow-mcp` form so npm can resolve the executable reliably;
 - when repair is needed, `doctor` reports the pinned setup command, the separate owning-harness restart requirement, and a self-test verification command; it does not terminate harness processes itself;
-- certified hooks pin MCP `3.9.59` and SDK `3.7.56` so the installed runtime matches the advertised control contract;
+- certified hooks pinned MCP `3.9.59` and SDK `3.7.56` so the installed runtime matched that release's advertised control contract;
 - existing harnesses retain their honest coverage level: native hooks where supported, MCP calls where available, and governed wrappers or event contracts elsewhere;
 - package upgrades remain operator-approved and never rotate keys or rewrite unrelated configuration.
 
