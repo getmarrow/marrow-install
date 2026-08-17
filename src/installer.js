@@ -277,9 +277,10 @@ function parseArgs(argv) {
       options.selfTest = true;
     }
     else if (arg === '--yes' || arg === '-y') options.yes = true;
-    else if (arg === '--repair' || arg === 'repair') {
+    else if (arg === '--repair' || arg === 'repair' || arg === 'update' || arg === '--update') {
       options.repair = true;
       options.yes = true;
+      options.update = true;
     }
     else if (arg === '--dry-run') options.dryRun = true;
     else if (arg === '--doctor' || arg === 'doctor' || arg === 'check') options.doctor = true;
@@ -328,6 +329,7 @@ function usage() {
   npx @getmarrow/install activate
   npx @getmarrow/install --yes
   npx @getmarrow/install --repair
+  npx @getmarrow/install update
   npx @getmarrow/install doctor
   npx @getmarrow/install --mcp --yes
   npx @getmarrow/install --sdk --yes
@@ -337,6 +339,7 @@ Options:
   --dry-run          Print planned changes without writing
   --doctor           Check install health without writing
   --repair           Write missing hooks/config, then run self-test and status check
+  update             Same as --repair: refresh certified MCP/SDK/install pins after owner approval
   --yes, -y          Write detected config files
   --mode <mode>      auto, mcp, sdk, both, or md
   --key <key>        Marrow API key for self-test. Prefer MARROW_API_KEY because CLI args can appear in process listings.
@@ -1258,6 +1261,9 @@ async function runSelfTest(options) {
     'x-marrow-client': options.client || sourceClient(),
     'x-marrow-package': '@getmarrow/install',
     'x-marrow-package-version': INSTALLER_ADAPTER_VERSION,
+    'x-marrow-install-version': INSTALLER_ADAPTER_VERSION,
+    'x-marrow-sdk-version': SDK_ADAPTER_VERSION,
+    'x-marrow-mcp-version': MCP_ADAPTER_VERSION,
   };
   if (options.agentId) headers['x-marrow-agent-id'] = options.agentId;
 
@@ -1627,7 +1633,11 @@ function printReport(report) {
       process.stdout.write(`- latest: ${update.latest_version || 'unknown'}\n`);
       process.stdout.write('- automatic notification: yes\n');
       process.stdout.write('- automatic local mutation: no; operator policy applies\n');
-      if (update.update_command || update.exact_update_command) process.stdout.write(`- update: ${update.update_command || update.exact_update_command}\n`);
+      if (update.owner_notice) process.stdout.write(`- tell owner: ${update.owner_notice}\n`);
+      if (update.agent_instruction) process.stdout.write(`- agent instruction: ${update.agent_instruction}\n`);
+      if (update.update_command || update.exact_update_command || update.auto_update_command) {
+        process.stdout.write(`- update: ${update.auto_update_command || update.update_command || update.exact_update_command}\n`);
+      }
       if (update.verification_command || update.exact_verification_command) process.stdout.write(`- verify: ${update.verification_command || update.exact_verification_command}\n`);
     }
     if (report.selfTest.first_value_signal) {

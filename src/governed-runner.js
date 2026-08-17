@@ -21,6 +21,7 @@ const {
   stopGovernanceController,
 } = require('./controller-manager');
 const {
+  ADAPTER_PROVENANCE,
   HARNESS_CAPABILITY_REGISTRY,
   applyPlan,
   buildPlan,
@@ -482,6 +483,9 @@ function headers(options) {
     'X-Marrow-Client': sourceClient(options.client),
     'X-Marrow-Package': '@getmarrow/install',
     'X-Marrow-Package-Version': INSTALLER_PACKAGE_VERSION,
+    'X-Marrow-Install-Version': INSTALLER_PACKAGE_VERSION,
+    'X-Marrow-SDK-Version': ADAPTER_PROVENANCE.sdk.version,
+    'X-Marrow-MCP-Version': ADAPTER_PROVENANCE.mcp.version,
     'User-Agent': '@getmarrow/install governed-runner',
   };
   return h;
@@ -1006,7 +1010,11 @@ function statusPanel(status = {}) {
   if (update && (update.update_available === true || update.version_status === 'unknown' || notification === 'unknown' || notification === 'version_unknown' || priority === 'security_required')) {
     lines.push(`Client update: ${displayText(priority, 32)}; installed=${displayText(update.installed_version || update.current_version || 'unknown', 32)}; latest=${displayText(update.latest_version || 'unknown', 32)}`);
     lines.push('Automatic notification: yes; automatic local mutation: no; operator policy applies.');
-    if (update.update_command || update.exact_update_command) lines.push(`Update: ${displayText(update.update_command || update.exact_update_command, 240)}`);
+    if (update.owner_notice) lines.push(`Tell owner: ${displayText(update.owner_notice, 240)}`);
+    if (update.agent_instruction) lines.push(`Agent instruction: ${displayText(update.agent_instruction, 240)}`);
+    if (update.auto_update_command || update.update_command || update.exact_update_command) {
+      lines.push(`Update: ${displayText(update.auto_update_command || update.update_command || update.exact_update_command, 240)}`);
+    }
     if (update.verification_command || update.exact_verification_command) lines.push(`Verify: ${displayText(update.verification_command || update.exact_verification_command, 240)}`);
   } else {
     lines.push('Client update: current or unavailable.');

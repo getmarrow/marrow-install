@@ -98,6 +98,8 @@ v0.1.45 pins the one-command setup path to the published receipt-safe MCP releas
 - generated MCP setup, launch, and certified hook commands pin current MCP `3.9.62`;
 - adapter provenance records exact MCP source `c025d720af8fe9b16702ba764ff85c822adc2a26` and the live public registry integrity;
 - MCP versions older than `3.9.62` are treated as stale so new installs receive the fail-closed runtime authorization contract;
+- `npx @getmarrow/install@latest update` is the owner-approved one-command refresh of certified install/SDK/MCP pins; doctor and status print an owner notice so agents can tell the user to update;
+- self-test and governed-runner requests report install, SDK, and MCP versions together so the API can notify on any stale package;
 - SDK `3.7.56` detection and operator-approved upgrade rules are unchanged.
 
 ## Previous: v0.1.44
