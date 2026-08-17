@@ -204,6 +204,11 @@ test('parseArgs defaults to dry-run unless --yes is passed', () => {
   assert.equal(repair.yes, true);
   assert.equal(repair.controller, true);
 
+  const update = parseArgs(['update']);
+  assert.equal(update.repair, true);
+  assert.equal(update.yes, true);
+  assert.equal(update.update, true);
+
   const noController = parseArgs(['--repair', '--no-controller']);
   assert.equal(noController.controller, false);
 });
@@ -863,6 +868,9 @@ test('self-test returns first five-minute value signal and proof', async () => {
     });
     assert.equal(requestHeaders['x-marrow-package'], '@getmarrow/install');
     assert.equal(requestHeaders['x-marrow-package-version'], '0.1.45');
+    assert.equal(requestHeaders['x-marrow-install-version'], '0.1.45');
+    assert.equal(requestHeaders['x-marrow-sdk-version'], '3.7.56');
+    assert.equal(requestHeaders['x-marrow-mcp-version'], '3.9.62');
     assert.equal(result.first_value_signal.active, true);
     assert.match(result.first_value_signal.headline, /Marrow active/);
     assert.ok(result.first_value_signal.captured.includes('decisions'));
