@@ -91,7 +91,16 @@ npx @getmarrow/install controller stop
 
 Persistent controller lifecycle is currently Linux-only. On macOS or Windows, activation still installs and verifies the supported hooks without starting or signaling a background process; run `npx @getmarrow/install sidecar` under an owner-managed service and pass `--no-controller`. The controller does not silently upgrade packages, change governance policy, rotate credentials, or modify unrelated project configuration.
 
-## What's New in v0.1.44
+## What's New in v0.1.45
+
+v0.1.45 pins the one-command setup path to the published receipt-safe MCP release:
+
+- generated MCP setup, launch, and certified hook commands pin current MCP `3.9.62`;
+- adapter provenance records exact MCP source `c025d720af8fe9b16702ba764ff85c822adc2a26` and the live public registry integrity;
+- MCP versions older than `3.9.62` are treated as stale so new installs receive the fail-closed runtime authorization contract;
+- SDK `3.7.56` detection and operator-approved upgrade rules are unchanged.
+
+## Previous: v0.1.44
 
 v0.1.44 restores exact package-chain detection and current MCP setup truth:
 
