@@ -8,9 +8,9 @@ const { controllerStatus, controllerSupportedPlatform, ensureGovernanceControlle
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MARROW_BLOCK_START = '<!-- marrow:passive-start -->';
 const MARROW_BLOCK_END = '<!-- marrow:passive-end -->';
-const MCP_ADAPTER_VERSION = '3.9.61';
-const MCP_ADAPTER_SOURCE_SHA = 'ebe06a5c78895e70ceea7b7383ac31d5aaacbd41';
-const MCP_ADAPTER_INTEGRITY = 'sha512-6ojhKztiJp8/mZecuSnt+kiEe41COPBOjrka9j+r+yFacNl4uapW9quq/wEVo5SxuDmxolFIBaqkX6xIdaD2rA==';
+const MCP_ADAPTER_VERSION = '3.9.62';
+const MCP_ADAPTER_SOURCE_SHA = 'c025d720af8fe9b16702ba764ff85c822adc2a26';
+const MCP_ADAPTER_INTEGRITY = 'sha512-XwvwptwMHnH2cchrt242iQGng8t8OVDHGYORHmD04cfSn2NQoH1Y3bPoxkvlf/j/ujPtqSPpT+uZGEFNRpecZQ==';
 const SDK_ADAPTER_VERSION = '3.7.56';
 const SDK_ADAPTER_INTEGRITY = 'sha512-mllohsI4DHpcVuEL58303kpGwS/pl/HMZ99mGNo3swYLomZwwfVzcner9Bn+p0b72989NOpS1l2frY/vra1gfQ==';
 const SDK_ADAPTER_TARBALL = `https://registry.npmjs.org/@getmarrow/sdk/-/sdk-${SDK_ADAPTER_VERSION}.tgz`;
