@@ -26,14 +26,14 @@ test('published adapter provenance matches the certified MCP and SDK package cha
   assert.deepEqual(ADAPTER_PROVENANCE, {
     mcp: {
       package: '@getmarrow/mcp',
-      version: '3.9.62',
-      source_sha: 'c025d720af8fe9b16702ba764ff85c822adc2a26',
-      integrity: 'sha512-XwvwptwMHnH2cchrt242iQGng8t8OVDHGYORHmD04cfSn2NQoH1Y3bPoxkvlf/j/ujPtqSPpT+uZGEFNRpecZQ==',
+      version: '3.9.64',
+      source_sha: 'ed8293165247e89161045c7fbf68aeee4d51c6da',
+      integrity: 'sha512-D654txYXhEciNl3xqm3o5TdH8S3rkPfuVcnoQqSjc1dqAGKbq90BuyZqcUVMxO6dkSbQ3QS++Sg++zhySqSN/w==',
     },
     sdk: {
       package: '@getmarrow/sdk',
-      version: '3.7.56',
-      integrity: 'sha512-mllohsI4DHpcVuEL58303kpGwS/pl/HMZ99mGNo3swYLomZwwfVzcner9Bn+p0b72989NOpS1l2frY/vra1gfQ==',
+      version: '3.7.59',
+      integrity: 'sha512-Ba4kqOYP1tEfMoiz4ddrOP86Q5Q1ANDQpZ8rvDJwh5BLaSVKamSbyOUAQ9lNSt7S5IzlhhTHO5HrOQq35xahDg==',
     },
   });
 });
@@ -41,15 +41,15 @@ test('published adapter provenance matches the certified MCP and SDK package cha
 test('doctor identifies stale and mixed MCP processes without exposing command lines', () => {
   const report = inspectMcpProcesses({ commands: [
     'npx -y @getmarrow/mcp@2.8.0',
-    'npx -y --package=@getmarrow/mcp@3.9.62 marrow-mcp',
+    'npx -y --package=@getmarrow/mcp@3.9.64 marrow-mcp',
     'node unrelated.js --token=must-not-appear',
   ] });
   assert.equal(report.healthy, false);
   assert.equal(report.mixed_versions, true);
   assert.deepEqual(report.stale_versions, ['2.8.0']);
-  assert.deepEqual(report.active_versions, ['2.8.0', '3.9.62']);
+  assert.deepEqual(report.active_versions, ['2.8.0', '3.9.64']);
   assert.doesNotMatch(JSON.stringify(report), /must-not-appear|unrelated\.js/);
-  assert.equal(report.exact_fix, 'npx -y --package=@getmarrow/mcp@3.9.62 marrow-mcp setup');
+  assert.equal(report.exact_fix, 'npx -y --package=@getmarrow/mcp@3.9.64 marrow-mcp setup');
   assert.equal(report.restart_required, true);
   assert.match(report.restart_instruction, /restart every owning harness/i);
   assert.equal(report.verification_command, 'npx -y @getmarrow/install@latest doctor --self-test');
@@ -67,7 +67,7 @@ test('doctor treats version-unknown MCP processes as unhealthy with executable r
   assert.equal(report.active_processes, 2);
   assert.equal(report.unknown_version_processes, 2);
   assert.equal(report.healthy, false);
-  assert.equal(report.exact_fix, 'npx -y --package=@getmarrow/mcp@3.9.62 marrow-mcp setup');
+  assert.equal(report.exact_fix, 'npx -y --package=@getmarrow/mcp@3.9.64 marrow-mcp setup');
   assert.doesNotMatch(report.exact_fix, /stop|restart|then/i);
   assert.doesNotMatch(JSON.stringify(report), /must-not-appear/);
   assert.equal(report.restart_required, true);
@@ -76,7 +76,7 @@ test('doctor treats version-unknown MCP processes as unhealthy with executable r
 
 test('doctor ignores parent shells and sandbox wrappers that only mention MCP commands', () => {
   const report = inspectMcpProcesses({ commands: [
-    '/usr/bin/bwrap --ro-bind / / /bin/bash -lc npx -y --package=@getmarrow/mcp@3.9.62 marrow-mcp setup',
+    '/usr/bin/bwrap --ro-bind / / /bin/bash -lc npx -y --package=@getmarrow/mcp@3.9.64 marrow-mcp setup',
     '/bin/bash -lc npx -y @getmarrow/mcp@2.8.0',
     'rg @getmarrow/mcp package.json',
     'rg /tmp/node_modules/@getmarrow/mcp package-lock.json',
@@ -92,14 +92,14 @@ test('doctor flags stale and mixed MCP owner configurations without exposing pat
   const stale = path.join(root, 'claude.json');
   const current = path.join(root, 'cursor.json');
   fs.writeFileSync(stale, JSON.stringify({ mcp: { command: 'npx', args: ['-y', '@getmarrow/mcp@2.8.0'], secret: 'must-not-appear' } }));
-  fs.writeFileSync(current, JSON.stringify({ mcp: { command: 'npx', args: ['-y', '--package=@getmarrow/mcp@3.9.62', 'marrow-mcp'] } }));
+  fs.writeFileSync(current, JSON.stringify({ mcp: { command: 'npx', args: ['-y', '--package=@getmarrow/mcp@3.9.64', 'marrow-mcp'] } }));
   try {
     const report = inspectMcpConfigurations({}, { paths: [stale, current] });
     assert.equal(report.healthy, false);
     assert.equal(report.mixed_versions, true);
-    assert.deepEqual(report.configured_versions, ['2.8.0', '3.9.62']);
+    assert.deepEqual(report.configured_versions, ['2.8.0', '3.9.64']);
     assert.deepEqual(report.stale_versions, ['2.8.0']);
-    assert.match(report.exact_fix, /--package=@getmarrow\/mcp@3\.9\.62 marrow-mcp setup/);
+    assert.match(report.exact_fix, /--package=@getmarrow\/mcp@3\.9\.64 marrow-mcp setup/);
     assert.equal(report.verification_command, 'npx -y @getmarrow/install@latest doctor --self-test');
     assert.doesNotMatch(JSON.stringify(report), /must-not-appear|claude\.json|cursor\.json/);
   } finally {
@@ -110,12 +110,12 @@ test('doctor flags stale and mixed MCP owner configurations without exposing pat
 test('doctor accepts a current-only MCP owner configuration', () => {
   const root = tempDir();
   const current = path.join(root, '.mcp.json');
-  fs.writeFileSync(current, JSON.stringify({ mcpServers: { marrow: { command: 'npx', args: ['-y', '--package=@getmarrow/mcp@3.9.62', 'marrow-mcp'] } } }));
+  fs.writeFileSync(current, JSON.stringify({ mcpServers: { marrow: { command: 'npx', args: ['-y', '--package=@getmarrow/mcp@3.9.64', 'marrow-mcp'] } } }));
   try {
     const report = inspectMcpConfigurations({}, { paths: [current] });
     assert.equal(report.healthy, true);
     assert.equal(report.mixed_versions, false);
-    assert.deepEqual(report.configured_versions, ['3.9.62']);
+    assert.deepEqual(report.configured_versions, ['3.9.64']);
     assert.equal(report.exact_fix, null);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -126,11 +126,11 @@ test('doctor treats the previously pinned MCP 3.9.59 as stale', () => {
   const report = inspectMcpProcesses({ commands: [
     'npx -y --package=@getmarrow/mcp@3.9.59 marrow-mcp',
   ] });
-  assert.equal(report.expected_version, '3.9.62');
+  assert.equal(report.expected_version, '3.9.64');
   assert.deepEqual(report.active_versions, ['3.9.59']);
   assert.deepEqual(report.stale_versions, ['3.9.59']);
   assert.equal(report.healthy, false);
-  assert.equal(report.exact_fix, 'npx -y --package=@getmarrow/mcp@3.9.62 marrow-mcp setup');
+  assert.equal(report.exact_fix, 'npx -y --package=@getmarrow/mcp@3.9.64 marrow-mcp setup');
 });
 
 test('doctor flags an unpinned MCP owner configuration as version-unknown', () => {
@@ -142,7 +142,7 @@ test('doctor flags an unpinned MCP owner configuration as version-unknown', () =
     assert.equal(report.healthy, false);
     assert.equal(report.unknown_version_configurations, 1);
     assert.deepEqual(report.configured_versions, []);
-    assert.match(report.exact_fix, /@getmarrow\/mcp@3\.9\.62/);
+    assert.match(report.exact_fix, /@getmarrow\/mcp@3\.9\.64/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -171,15 +171,15 @@ test('doctor resolves direct node_modules bin MCP process versions', () => {
   }
 });
 
-function writeSdkLock(root, declaredSpec = '^3.7.56') {
+function writeSdkLock(root, declaredSpec = '^3.7.59') {
   fs.writeFileSync(path.join(root, 'package-lock.json'), JSON.stringify({
     name: 'fixture',
     lockfileVersion: 3,
     packages: {
       '': { dependencies: { '@getmarrow/sdk': declaredSpec } },
       'node_modules/@getmarrow/sdk': {
-        version: '3.7.56',
-        resolved: 'https://registry.npmjs.org/@getmarrow/sdk/-/sdk-3.7.56.tgz',
+        version: '3.7.59',
+        resolved: 'https://registry.npmjs.org/@getmarrow/sdk/-/sdk-3.7.59.tgz',
         integrity: ADAPTER_PROVENANCE.sdk.integrity,
       },
     },
@@ -213,13 +213,13 @@ test('parseArgs defaults to dry-run unless --yes is passed', () => {
   assert.equal(noController.controller, false);
 });
 
-test('SDK detection accepts the exact public 3.7.56 package and rejects the superseded integrity', () => {
+test('SDK detection accepts the exact public 3.7.59 package and rejects the superseded integrity', () => {
   const dir = tempDir();
   const moduleDir = path.join(dir, 'node_modules', '@getmarrow', 'sdk');
-  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ dependencies: { '@getmarrow/sdk': '3.7.56' } }));
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ dependencies: { '@getmarrow/sdk': '3.7.59' } }));
   fs.mkdirSync(moduleDir, { recursive: true });
-  fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({ name: '@getmarrow/sdk', version: '3.7.56' }));
-  writeSdkLock(dir, '3.7.56');
+  fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({ name: '@getmarrow/sdk', version: '3.7.59' }));
+  writeSdkLock(dir, '3.7.59');
 
   let report = inspectSdkDependency(detectEnvironment(dir, {}));
   assert.equal(report.present, true);
@@ -233,7 +233,7 @@ test('SDK detection accepts the exact public 3.7.56 package and rejects the supe
   report = inspectSdkDependency(detectEnvironment(dir, {}));
   assert.equal(report.present, false);
   assert.equal(report.lock_verified, false);
-  assert.equal(report.install_command, 'npm install @getmarrow/sdk@3.7.56');
+  assert.equal(report.install_command, 'npm install @getmarrow/sdk@3.7.59');
 });
 
 test('activate is the one-command write and server verification path', () => {
@@ -483,7 +483,7 @@ test('install reports missing SDK dependency for passive runtime projects', asyn
 
   assert.equal(report.sdkDependency.required, true);
   assert.equal(report.sdkDependency.present, false);
-  assert.equal(report.sdkDependency.install_command, 'npm install @getmarrow/sdk@3.7.56');
+  assert.equal(report.sdkDependency.install_command, 'npm install @getmarrow/sdk@3.7.59');
   assert.deepEqual(report.adapterProvenance, ADAPTER_PROVENANCE);
 
   fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ dependencies: { '@getmarrow/sdk': '^3.7.27' } }));
@@ -494,13 +494,13 @@ test('install reports missing SDK dependency for passive runtime projects', asyn
   let sdk = inspectSdkDependency(detected);
   assert.equal(sdk.present, false);
   assert.equal(sdk.installed_version, '0.0.1');
-  fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({ name: '@getmarrow/sdk', version: '3.7.56' }));
+  fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({ name: '@getmarrow/sdk', version: '3.7.59' }));
   writeSdkLock(dir, '^3.7.27');
   detected = detectEnvironment(dir, {});
   sdk = inspectSdkDependency(detected);
   assert.equal(sdk.present, true);
   assert.equal(sdk.lock_verified, true);
-  assert.equal(sdk.installed_version, '3.7.56');
+  assert.equal(sdk.installed_version, '3.7.59');
   assert.equal(sdk.install_command, null);
 });
 
@@ -867,10 +867,10 @@ test('self-test returns first five-minute value signal and proof', async () => {
       agentId: 'installer-test',
     });
     assert.equal(requestHeaders['x-marrow-package'], '@getmarrow/install');
-    assert.equal(requestHeaders['x-marrow-package-version'], '0.1.45');
-    assert.equal(requestHeaders['x-marrow-install-version'], '0.1.45');
-    assert.equal(requestHeaders['x-marrow-sdk-version'], '3.7.56');
-    assert.equal(requestHeaders['x-marrow-mcp-version'], '3.9.62');
+    assert.equal(requestHeaders['x-marrow-package-version'], '0.1.46');
+    assert.equal(requestHeaders['x-marrow-install-version'], '0.1.46');
+    assert.equal(requestHeaders['x-marrow-sdk-version'], '3.7.59');
+    assert.equal(requestHeaders['x-marrow-mcp-version'], '3.9.64');
     assert.equal(result.first_value_signal.active, true);
     assert.match(result.first_value_signal.headline, /Marrow active/);
     assert.ok(result.first_value_signal.captured.includes('decisions'));
