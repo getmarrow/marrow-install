@@ -13,6 +13,8 @@ const {
   claudeNativeHookFingerprint,
   defaultHarnessInstallMatrix,
   detectEnvironment,
+  firstCapturePath,
+  harnessReloadPlan,
   inspectSdkDependency,
 } = require('../src/installer');
 
@@ -48,6 +50,50 @@ test('default auto install uses MCP plus SDK passive runtime on Node workspaces'
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('activate writes require a harness reload and do not claim this process is live', () => {
+  const detection = { node: true, claudeCode: false, cursor: false, codex: true };
+  const plan = harnessReloadPlan(detection, [
+    { label: 'Project MCP server config', applied: true, changed: true },
+    { label: 'Agent instructions', applied: true, changed: true },
+  ]);
+  assert.equal(plan.required, true);
+  assert.equal(plan.live_in_this_process, false);
+  assert.match(plan.instruction, /Codex or Grok/);
+  assert.match(plan.prove_command, /doctor --self-test/);
+});
+
+test('Cursor first capture is on-demand MCP runtime, not native hooks', () => {
+  const capture = firstCapturePath({ cursor: true, claudeCode: false, codex: false }, 'fleet-1');
+  assert.equal(capture.client, 'cursor');
+  assert.equal(capture.capability_level, 'mcp');
+  assert.equal(capture.command, 'marrow_agent_runtime');
+  assert.match(capture.instruction, /on demand/);
+  assert.match(capture.instruction, /marrow_session_end/);
+});
+
+test('Codex first capture is the governed runner', () => {
+  const capture = firstCapturePath({ cursor: false, claudeCode: false, codex: true }, 'codex');
+  assert.equal(capture.capability_level, 'governed_wrapper');
+  assert.match(capture.command, /@getmarrow\/install run --agent codex/);
+  assert.match(capture.instruction, /marrow_session_end|marrow_commit/);
+});
+
+test('Claude first capture uses native hooks even when Cursor is also present', () => {
+  const capture = firstCapturePath({ claudeCode: true, cursor: true, codex: false }, 'claude');
+  assert.equal(capture.client, 'claude-code');
+  assert.equal(capture.capability_level, 'native_hooks');
+  assert.equal(capture.command, null);
+  assert.match(capture.instruction, /native hooks/);
+});
+
+test('unchanged config does not claim a reload or that this process is live', () => {
+  const plan = harnessReloadPlan({ node: true, codex: true }, [
+    { label: 'Project MCP server config', applied: false, changed: false },
+  ]);
+  assert.equal(plan.required, false);
+  assert.equal(plan.live_in_this_process, true);
 });
 
 test('detected Cursor workspaces also receive Cursor MCP config', () => {

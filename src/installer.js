@@ -4,6 +4,7 @@ const os = require('node:os');
 const crypto = require('node:crypto');
 const { version: INSTALLER_ADAPTER_VERSION } = require('../package.json');
 const { controllerStatus, controllerSupportedPlatform, ensureGovernanceController } = require('./controller-manager');
+const { firstCapturePath, harnessReloadPlan } = require('./first-hour');
 
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MARROW_BLOCK_START = '<!-- marrow:passive-start -->';
@@ -624,6 +625,10 @@ Marrow should run passively after install:
 - Native Claude hooks install only when \`.claude\` is present. Cursor, Composer, Cline, and Windsurf get MCP tools on demand. Codex, Grok, Gemini, and similar CLI harnesses use the governed wrapper. Hermes, OpenClaw, and custom hosts need a bounded event adapter.
 - Keep passive token/model usage proof enabled. Empty savings stay zero until observed model usage lands. Do not invent token, cost, or time savings.
 - Before risky work, use Marrow's decision brief or passive prompt hook.
+- After activate writes MCP or hooks, restart this harness, then run \`npx @getmarrow/install@latest doctor --self-test\`. Do not claim Marrow is live in a process that has not reloaded.
+- First turn: tell the owner the gate is live and empty savings are honest. The next deploy, merge, or publish must go through Marrow.
+- Cursor, Composer, Cline, and Windsurf: call \`marrow_agent_runtime\` before those actions. Codex, Grok, Gemini, and similar CLIs: wrap them with \`npx @getmarrow/install run --agent <agent-id> -- -- <command>\`.
+- Before the session ends, close open work with session-end auto-commit or \`marrow_commit\`. Record model usage only when the host response includes counts.
 - After meaningful work, record the outcome so future agents learn from it.
 - After Marrow blocks, warns, or requires review, use the decision trace receipt to tell the operator what changed and which recorded workflow or proof is required. Stay quiet for routine low-risk work.
 - Check health with \`marrow_agent_status\` or \`GET /v1/agent/status\`.
@@ -1707,6 +1712,21 @@ function printReport(report) {
     }
   }
 
+  if (report.harnessReload) {
+    process.stdout.write('\nHarness reload:\n');
+    process.stdout.write(`- required: ${report.harnessReload.required ? 'yes' : 'no'}\n`);
+    process.stdout.write(`- live in this process: ${report.harnessReload.live_in_this_process ? 'yes' : 'no'}\n`);
+    if (report.harnessReload.instruction) process.stdout.write(`- restart: ${report.harnessReload.instruction}\n`);
+    if (report.harnessReload.prove_command) process.stdout.write(`- prove after restart: ${report.harnessReload.prove_command}\n`);
+  }
+  if (report.firstCapture) {
+    process.stdout.write('\nFirst capture:\n');
+    process.stdout.write(`- client: ${report.firstCapture.client}\n`);
+    process.stdout.write(`- capability: ${report.firstCapture.capability_level}\n`);
+    if (report.firstCapture.command) process.stdout.write(`- command: ${report.firstCapture.command}\n`);
+    process.stdout.write(`- ${report.firstCapture.instruction}\n`);
+  }
+
   if (report.remediation) {
     process.stdout.write('\nRemediation:\n');
     process.stdout.write(`- attempted: ${report.remediation.attempted ? 'yes' : 'no'}\n`);
@@ -1744,8 +1764,14 @@ function printReport(report) {
   if (report.controller?.exact_fix) process.stdout.write(`- exact fix: ${report.controller.exact_fix}\n`);
 
   if (report.writeMode === 'doctor') {
+    const liveHere = !report.harnessReload?.required;
+    const activeLabel = report.doctor.active && liveHere
+      ? 'yes'
+      : report.doctor.active
+        ? 'server confirmed, restart required'
+        : 'no';
     process.stdout.write('\nDoctor:\n');
-    process.stdout.write(`- Marrow active: ${report.doctor.active ? 'yes' : 'no'}\n`);
+    process.stdout.write(`- Marrow active: ${activeLabel}\n`);
     process.stdout.write(`- missing env: ${report.doctor.missingEnv.length ? report.doctor.missingEnv.join(', ') : 'none'}\n`);
     if (report.doctor.envHints.length) process.stdout.write(`- possible env files: ${report.doctor.envHints.join(', ')}\n`);
     process.stdout.write(`- missing hooks/config: ${report.doctor.missingHooks.length ? report.doctor.missingHooks.join('; ') : 'none'}\n`);
@@ -1909,6 +1935,8 @@ async function install(options) {
       receipt: selfTest.activation_receipt || null,
       profile,
     },
+    harnessReload: harnessReloadPlan(detection, changes),
+    firstCapture: firstCapturePath(detection, options.agentId),
     changes,
     doctor: {
       active: Boolean(!selfTest.skipped && selfTest.active),
@@ -1980,4 +2008,6 @@ module.exports = {
   ADAPTER_PROVENANCE,
   HARNESS_CAPABILITY_REGISTRY,
   defaultHarnessInstallMatrix,
+  harnessReloadPlan,
+  firstCapturePath,
 };
