@@ -11,28 +11,77 @@ const {
   applyPlan,
   buildPlan,
   claudeNativeHookFingerprint,
+  defaultHarnessInstallMatrix,
   detectEnvironment,
   inspectSdkDependency,
 } = require('../src/installer');
 
 const NATIVE_HOOK_MATCHER = 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*';
-const MCP_ACTION_RESULT_HOOK_COMMAND = 'npx -y --package=@getmarrow/mcp@3.9.62 marrow-mcp hook';
-const SDK_INTEGRITY = 'sha512-mllohsI4DHpcVuEL58303kpGwS/pl/HMZ99mGNo3swYLomZwwfVzcner9Bn+p0b72989NOpS1l2frY/vra1gfQ==';
+const MCP_ACTION_RESULT_HOOK_COMMAND = 'npx -y --package=@getmarrow/mcp@3.9.64 marrow-mcp hook';
+const SDK_INTEGRITY = 'sha512-Ba4kqOYP1tEfMoiz4ddrOP86Q5Q1ANDQpZ8rvDJwh5BLaSVKamSbyOUAQ9lNSt7S5IzlhhTHO5HrOQq35xahDg==';
 
-function writeSdkLock(root, declaredSpec = '^3.7.56') {
+function writeSdkLock(root, declaredSpec = '^3.7.59') {
   fs.writeFileSync(path.join(root, 'package-lock.json'), JSON.stringify({
     name: 'fixture',
     lockfileVersion: 3,
     packages: {
       '': { dependencies: { '@getmarrow/sdk': declaredSpec } },
       'node_modules/@getmarrow/sdk': {
-        version: '3.7.56',
-        resolved: 'https://registry.npmjs.org/@getmarrow/sdk/-/sdk-3.7.56.tgz',
+        version: '3.7.59',
+        resolved: 'https://registry.npmjs.org/@getmarrow/sdk/-/sdk-3.7.59.tgz',
         integrity: SDK_INTEGRITY,
       },
     },
   }));
 }
+
+test('default auto install uses MCP plus SDK passive runtime on Node workspaces', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-default-passive-'));
+  try {
+    fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
+    const detection = detectEnvironment(root, { ...process.env, HOME: root });
+    const plan = buildPlan(detection, { mode: 'auto' });
+    assert.equal(plan.mode, 'both');
+    assert.ok(plan.writes.some((item) => item.label === 'SDK passive runtime preload'));
+    assert.ok(plan.writes.some((item) => item.label === 'Project MCP server config'));
+    assert.ok(plan.writes.some((item) => item.label === 'Agent instructions'));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('detected Cursor workspaces also receive Cursor MCP config', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-cursor-mcp-'));
+  try {
+    fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
+    fs.mkdirSync(path.join(root, '.cursor'), { recursive: true });
+    const detection = detectEnvironment(root, { ...process.env, HOME: root });
+    const plan = buildPlan(detection, { mode: 'auto' });
+    assert.ok(plan.writes.some((item) => item.label === 'Cursor MCP server config'));
+    assert.ok(plan.writes.some((item) => item.label === 'Project MCP server config'));
+    assert.ok(plan.writes.some((item) => item.label === 'SDK passive runtime preload'));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('default harness matrix lists every advertised client without claiming native hooks everywhere', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-default-matrix-'));
+  try {
+    fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
+    const detection = detectEnvironment(root, { ...process.env, HOME: root });
+    const matrix = defaultHarnessInstallMatrix(detection);
+    assert.ok(matrix.length >= 16);
+    assert.ok(matrix.every((entry) => entry.default_install.mcp === true));
+    assert.ok(matrix.every((entry) => entry.default_install.sdk_passive_runtime === true));
+    const claude = matrix.find((entry) => entry.client === 'claude-code');
+    const hermes = matrix.find((entry) => entry.client === 'hermes');
+    assert.equal(claude.default_install.native_hooks, false);
+    assert.match(hermes.unsupported_claim, /event adapter/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('capability registry certifies every advertised harness without overstating automatic coverage', () => {
   const clients = new Set(HARNESS_CAPABILITY_REGISTRY.map((entry) => entry.client));
@@ -60,7 +109,7 @@ test('Claude native-hook activation certifies pre-action, result, and session-en
     const changes = applyPlan(plan, { yes: true, dryRun: false, doctor: false });
     const profile = activationProfile(detection, plan, changes, 'claude-code');
     assert.equal(profile.capability_level, 'native_hooks');
-    assert.equal(profile.adapter_version, '3.9.62');
+    assert.equal(profile.adapter_version, '3.9.64');
     assert.deepEqual(profile.expected_hooks, ['prompt', 'pre_action', 'action_result', 'session_end']);
     assert.deepEqual(profile.observed_hooks.sort(), ['action_result', 'pre_action', 'prompt', 'session_end'].sort());
     assert.equal(profile.complete, true);
@@ -69,7 +118,7 @@ test('Claude native-hook activation certifies pre-action, result, and session-en
     const parsedSettings = JSON.parse(settings);
     const canonicalFingerprint = crypto.createHash('sha256').update(JSON.stringify({
       schema: 'marrow-claude-native-hooks.v3',
-      adapter_version: '3.9.62',
+      adapter_version: '3.9.64',
       expected_hooks: ['prompt', 'pre_action', 'action_result', 'session_end'],
       configured: {
         prompt: true,
@@ -79,18 +128,18 @@ test('Claude native-hook activation certifies pre-action, result, and session-en
         session_end: true,
       },
       descriptors: {
-        prompt: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.62 marrow-mcp context-hook', timeout: null }],
-        pre_action: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.62 marrow-mcp pre-action-hook', timeout: null }],
-        action_result_success: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.62 marrow-mcp hook', timeout: null }],
-        action_result_failure: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.62 marrow-mcp hook', timeout: null }],
-        session_end: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.62 marrow-mcp session-hook', timeout: null }],
+        prompt: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.64 marrow-mcp context-hook', timeout: null }],
+        pre_action: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.64 marrow-mcp pre-action-hook', timeout: null }],
+        action_result_success: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.64 marrow-mcp hook', timeout: null }],
+        action_result_failure: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.64 marrow-mcp hook', timeout: null }],
+        session_end: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.64 marrow-mcp session-hook', timeout: null }],
       },
       active_marrow_handlers: {
-        prompt: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.62 marrow-mcp context-hook', timeout: null }],
-        pre_action: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.62 marrow-mcp pre-action-hook', timeout: null }],
-        action_result_success: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.62 marrow-mcp hook', timeout: null }],
-        action_result_failure: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.62 marrow-mcp hook', timeout: null }],
-        session_end: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.62 marrow-mcp session-hook', timeout: null }],
+        prompt: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.64 marrow-mcp context-hook', timeout: null }],
+        pre_action: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.64 marrow-mcp pre-action-hook', timeout: null }],
+        action_result_success: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.64 marrow-mcp hook', timeout: null }],
+        action_result_failure: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.64 marrow-mcp hook', timeout: null }],
+        session_end: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.64 marrow-mcp session-hook', timeout: null }],
       },
     })).digest('hex');
     assert.equal(profile.config_fingerprint, canonicalFingerprint);
@@ -99,7 +148,7 @@ test('Claude native-hook activation certifies pre-action, result, and session-en
     assert.match(settings, /pre-action-hook/);
     assert.match(settings, /PostToolUseFailure/);
     assert.match(settings, /session-hook/);
-    assert.match(settings, /getmarrow\/mcp@3\.9\.62.*marrow-mcp hook/);
+    assert.match(settings, /getmarrow\/mcp@3\.9\.64.*marrow-mcp hook/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -140,7 +189,7 @@ test('Claude setup replaces old Marrow hooks without duplicate execution', () =>
       .flatMap((entry) => entry.hooks || [])
       .filter((hook) => /^npx\s+(?:-y\s+)?(?:--package=)?@getmarrow\/mcp(?:@[^\s]+)?\s+(?:marrow-mcp\s+)?/.test(hook.command || ''));
     assert.equal(commandCounts.length, 5);
-    assert.ok(commandCounts.every((hook) => hook.command.includes('@getmarrow/mcp@3.9.62')));
+    assert.ok(commandCounts.every((hook) => hook.command.includes('@getmarrow/mcp@3.9.64')));
     assert.deepEqual(settings.permissions, { allow: ['Read'] });
     assert.match(first, /printf unrelated/);
     assert.equal(settings.hooks.PostToolUseFailure.at(-1).hooks[0].timeout, 14);
@@ -266,10 +315,10 @@ test('custom SDK activation requires both dependency and exact generated runtime
     assert.equal(profile.complete, false);
     assert.match(profile.exact_fix, /npm install @getmarrow\/sdk/);
 
-    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ dependencies: { '@getmarrow/sdk': '^3.7.56' } }));
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ dependencies: { '@getmarrow/sdk': '^3.7.59' } }));
     const moduleDir = path.join(root, 'node_modules', '@getmarrow', 'sdk');
     fs.mkdirSync(moduleDir, { recursive: true });
-    fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({ name: '@getmarrow/sdk', version: '3.7.56' }));
+    fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({ name: '@getmarrow/sdk', version: '3.7.59' }));
     writeSdkLock(root);
     detection = detectEnvironment(root, { ...process.env, HOME: root });
     plan = buildPlan(detection, { mode: 'sdk' });
@@ -286,13 +335,13 @@ test('custom SDK activation rejects npm aliases even when version and installed 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-sdk-alias-'));
   try {
     fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({
-      dependencies: { '@getmarrow/sdk': 'npm:untrusted-sdk@3.7.56' },
+      dependencies: { '@getmarrow/sdk': 'npm:untrusted-sdk@3.7.59' },
     }));
     const moduleDir = path.join(root, 'node_modules', '@getmarrow', 'sdk');
     fs.mkdirSync(moduleDir, { recursive: true });
     fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({
       name: '@getmarrow/sdk',
-      version: '3.7.56',
+      version: '3.7.59',
     }));
 
     const detection = detectEnvironment(root, { ...process.env, HOME: root });
@@ -315,15 +364,15 @@ test('custom SDK activation rejects override impersonation despite forged instal
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-sdk-override-'));
   try {
     fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({
-      dependencies: { '@getmarrow/sdk': '^3.7.56' },
-      overrides: { '@getmarrow/sdk': 'npm:untrusted-sdk@3.7.56' },
+      dependencies: { '@getmarrow/sdk': '^3.7.59' },
+      overrides: { '@getmarrow/sdk': 'npm:untrusted-sdk@3.7.59' },
     }));
     writeSdkLock(root);
     const moduleDir = path.join(root, 'node_modules', '@getmarrow', 'sdk');
     fs.mkdirSync(moduleDir, { recursive: true });
     fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({
       name: '@getmarrow/sdk',
-      version: '3.7.56',
+      version: '3.7.59',
     }));
 
     const detection = detectEnvironment(root, { ...process.env, HOME: root });

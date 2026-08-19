@@ -8,11 +8,11 @@ const { controllerStatus, controllerSupportedPlatform, ensureGovernanceControlle
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MARROW_BLOCK_START = '<!-- marrow:passive-start -->';
 const MARROW_BLOCK_END = '<!-- marrow:passive-end -->';
-const MCP_ADAPTER_VERSION = '3.9.62';
-const MCP_ADAPTER_SOURCE_SHA = 'c025d720af8fe9b16702ba764ff85c822adc2a26';
-const MCP_ADAPTER_INTEGRITY = 'sha512-XwvwptwMHnH2cchrt242iQGng8t8OVDHGYORHmD04cfSn2NQoH1Y3bPoxkvlf/j/ujPtqSPpT+uZGEFNRpecZQ==';
-const SDK_ADAPTER_VERSION = '3.7.56';
-const SDK_ADAPTER_INTEGRITY = 'sha512-mllohsI4DHpcVuEL58303kpGwS/pl/HMZ99mGNo3swYLomZwwfVzcner9Bn+p0b72989NOpS1l2frY/vra1gfQ==';
+const MCP_ADAPTER_VERSION = '3.9.64';
+const MCP_ADAPTER_SOURCE_SHA = 'ed8293165247e89161045c7fbf68aeee4d51c6da';
+const MCP_ADAPTER_INTEGRITY = 'sha512-D654txYXhEciNl3xqm3o5TdH8S3rkPfuVcnoQqSjc1dqAGKbq90BuyZqcUVMxO6dkSbQ3QS++Sg++zhySqSN/w==';
+const SDK_ADAPTER_VERSION = '3.7.59';
+const SDK_ADAPTER_INTEGRITY = 'sha512-Ba4kqOYP1tEfMoiz4ddrOP86Q5Q1ANDQpZ8rvDJwh5BLaSVKamSbyOUAQ9lNSt7S5IzlhhTHO5HrOQq35xahDg==';
 const SDK_ADAPTER_TARBALL = `https://registry.npmjs.org/@getmarrow/sdk/-/sdk-${SDK_ADAPTER_VERSION}.tgz`;
 const MCP_PACKAGE_SPEC = `@getmarrow/mcp@${MCP_ADAPTER_VERSION}`;
 const ADAPTER_PROVENANCE = Object.freeze({
@@ -619,9 +619,10 @@ function passiveInstructions() {
 
 Marrow should run passively after install:
 
-- Use MCP hooks when available: \`npx -y --package=@getmarrow/mcp@latest marrow-mcp setup\`.
+- Use MCP plus these instructions in every workspace: \`npx -y --package=@getmarrow/mcp@latest marrow-mcp setup\`.
 - Use SDK passive runtime in owned Node processes: \`createPassiveRuntime().install()\`.
-- Keep passive token/model usage proof enabled so Marrow can show token, cost, latency, and workflow savings after real work completes.
+- Native Claude hooks install only when \`.claude\` is present. Cursor, Composer, Cline, and Windsurf get MCP tools on demand. Codex, Grok, Gemini, and similar CLI harnesses use the governed wrapper. Hermes, OpenClaw, and custom hosts need a bounded event adapter.
+- Keep passive token/model usage proof enabled. Empty savings stay zero until observed model usage lands. Do not invent token, cost, or time savings.
 - Before risky work, use Marrow's decision brief or passive prompt hook.
 - After meaningful work, record the outcome so future agents learn from it.
 - After Marrow blocks, warns, or requires review, use the decision trace receipt to tell the operator what changed and which recorded workflow or proof is required. Stay quiet for routine low-risk work.
@@ -1051,13 +1052,36 @@ function inspectSdkDependency(detection) {
   };
 }
 
+function defaultHarnessInstallMatrix(detection = detectEnvironment(process.cwd())) {
+  const node = Boolean(detection.node);
+  return HARNESS_CAPABILITY_REGISTRY.map((entry) => {
+    const detected = detectedClient(detection) === entry.client
+      || (entry.client === 'claude-code' && detection.claudeCode)
+      || (entry.client === 'cursor' && detection.cursor)
+      || (entry.client === 'codex' && detection.codex);
+    return {
+      client: entry.client,
+      capability_level: entry.capability_level,
+      automatic: entry.automatic,
+      install_surface: entry.install_surface,
+      default_install: {
+        mcp: true,
+        instructions: true,
+        sdk_passive_runtime: node,
+        native_hooks: entry.capability_level === 'native_hooks' && Boolean(detection.claudeCode),
+        governed_wrapper: entry.capability_level === 'governed_wrapper',
+      },
+      verified_passive: detected && entry.automatic.length > 0,
+      unsupported_claim: entry.capability_level === 'event_contract'
+        ? 'Needs a bounded event adapter. MCP tools remain on demand.'
+        : null,
+    };
+  });
+}
+
 function buildPlan(detection, options) {
   const mode = options.mode === 'auto'
-    ? detection.node && (detection.claudeCode || detection.cursor || detection.codex || detection.openclaw)
-      ? 'both'
-      : detection.node
-      ? 'sdk'
-      : 'mcp'
+    ? detection.node ? 'both' : 'mcp'
     : options.mode;
   const writes = [];
 
@@ -1092,6 +1116,14 @@ function buildPlan(detection, options) {
       label: 'Project MCP server config',
       transform: upsertMcpServerConfig,
     });
+    if (detection.cursor) {
+      writes.push({
+        type: 'json-transform',
+        path: detection.paths.cursorMcp,
+        label: 'Cursor MCP server config',
+        transform: upsertMcpServerConfig,
+      });
+    }
   }
 
   if (mode === 'md' || mode === 'both' || mode === 'mcp') {
@@ -1947,4 +1979,5 @@ module.exports = {
   printReport,
   ADAPTER_PROVENANCE,
   HARNESS_CAPABILITY_REGISTRY,
+  defaultHarnessInstallMatrix,
 };

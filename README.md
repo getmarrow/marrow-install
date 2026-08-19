@@ -91,7 +91,18 @@ npx @getmarrow/install controller stop
 
 Persistent controller lifecycle is currently Linux-only. On macOS or Windows, activation still installs and verifies the supported hooks without starting or signaling a background process; run `npx @getmarrow/install sidecar` under an owner-managed service and pass `--no-controller`. The controller does not silently upgrade packages, change governance policy, rotate credentials, or modify unrelated project configuration.
 
-## What's New in v0.1.45
+## What's New in v0.1.46
+
+v0.1.46 makes default install cover every workspace honestly:
+
+- auto mode now writes MCP plus agent instructions in every project, and the SDK passive runtime whenever Node is present;
+- Claude native hooks still install only when `.claude` is present; detected Cursor workspaces also get `.cursor/mcp.json`;
+- Hermes, OpenClaw, and custom hosts stay event-contract only and are not claimed as native interception;
+- generated MCP setup, launch, and certified hook commands pin current MCP `3.9.64` from source `ed8293165247e89161045c7fbf68aeee4d51c6da`;
+- SDK detection and operator-approved upgrade rules pin exact public `3.7.59`;
+- empty token savings stay zero until observed model usage lands.
+
+## Previous: v0.1.45
 
 v0.1.45 pins the one-command setup path to the published receipt-safe MCP release:
 
