@@ -91,14 +91,18 @@ npx @getmarrow/install controller stop
 
 Persistent controller lifecycle is currently Linux-only. On macOS or Windows, activation still installs and verifies the supported hooks without starting or signaling a background process; run `npx @getmarrow/install sidecar` under an owner-managed service and pass `--no-controller`. The controller does not silently upgrade packages, change governance policy, rotate credentials, or modify unrelated project configuration.
 
-## What's New in v0.1.47
+## What's New in v0.1.48
+
+v0.1.48 pins MCP `3.9.71` and SDK `3.7.61`. The SDK keeps passive capture enabled without intercepting its own Marrow control-plane requests, while every generated MCP setup and repair command now uses the supported MCP release.
+
+## Previous: v0.1.47
 
 v0.1.47 makes activate honest about reload and the first capture path:
 
 - after writing MCP or hooks, activate reports that this process is not live until harness restart and `doctor --self-test`;
 - first capture is Claude native hooks, Cursor on-demand `marrow_agent_runtime`, or the Codex/Grok governed runner;
-- generated MCP setup, launch, and certified hook commands pin current MCP `3.9.65` from source `a314794b606c30cd750f01c672eab9b2c42e9862`;
-- SDK detection and operator-approved upgrade rules pin exact public `3.7.60`;
+- generated MCP setup, launch, and certified hook commands pin the release current at that time;
+- SDK detection and operator-approved upgrade rules pinned the release current at that time;
 - empty token savings stay zero until observed model usage lands.
 
 ## Previous: v0.1.46

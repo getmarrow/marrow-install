@@ -9,11 +9,11 @@ const { firstCapturePath, harnessReloadPlan } = require('./first-hour');
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MARROW_BLOCK_START = '<!-- marrow:passive-start -->';
 const MARROW_BLOCK_END = '<!-- marrow:passive-end -->';
-const MCP_ADAPTER_VERSION = '3.9.65';
-const MCP_ADAPTER_SOURCE_SHA = 'a314794b606c30cd750f01c672eab9b2c42e9862';
-const MCP_ADAPTER_INTEGRITY = 'sha512-OMsuv8qY7S3PHSEl1kJOPPAQuiCKYPtHng6Dzhq8U7FzY3eICPQgHsYwMtoBjHA+/BIBoNoLyLof7qU2sC1qOQ==';
-const SDK_ADAPTER_VERSION = '3.7.60';
-const SDK_ADAPTER_INTEGRITY = 'sha512-w6QeazGjfDXzw55IBMs85vb0LoMvm1JZLfDeilNm8NEq0081XN6MX574aFo10ZBiMd82GYRMY4vMdJ9FuxtXnQ==';
+const MCP_ADAPTER_VERSION = '3.9.71';
+const MCP_ADAPTER_SOURCE_SHA = '8d264da1553eafb71c37e31eeb42a0b961e184aa';
+const MCP_ADAPTER_INTEGRITY = 'sha512-7aG19MXi+1PzrNS7vmu47+9ee/WQvwN85Zzoifn2U+nRfxA4/foLp43d4eidSXkHRmmpghK7rD80G1PeHE8ESg==';
+const SDK_ADAPTER_VERSION = '3.7.61';
+const SDK_ADAPTER_INTEGRITY = 'sha512-1dXf/Px4mMN4lOehrRkBOF/dC6N9kjQ5R4eb8ohAACx5CvLTS32zSTelfMNjnRcdOknSKMjLnbh7aGFhulVo/Q==';
 const SDK_ADAPTER_TARBALL = `https://registry.npmjs.org/@getmarrow/sdk/-/sdk-${SDK_ADAPTER_VERSION}.tgz`;
 const MCP_PACKAGE_SPEC = `@getmarrow/mcp@${MCP_ADAPTER_VERSION}`;
 const ADAPTER_PROVENANCE = Object.freeze({
