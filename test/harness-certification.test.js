@@ -19,7 +19,7 @@ const {
 } = require('../src/installer');
 
 const NATIVE_HOOK_MATCHER = 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*';
-const MCP_ACTION_RESULT_HOOK_COMMAND = 'npx -y --package=@getmarrow/mcp@3.9.71 marrow-mcp hook';
+const MCP_ACTION_RESULT_HOOK_COMMAND = 'npx -y --package=@getmarrow/mcp@3.9.72 marrow-mcp hook';
 const SDK_INTEGRITY = 'sha512-1dXf/Px4mMN4lOehrRkBOF/dC6N9kjQ5R4eb8ohAACx5CvLTS32zSTelfMNjnRcdOknSKMjLnbh7aGFhulVo/Q==';
 
 function writeSdkLock(root, declaredSpec = '^3.7.61') {
@@ -155,7 +155,7 @@ test('Claude native-hook activation certifies pre-action, result, and session-en
     const changes = applyPlan(plan, { yes: true, dryRun: false, doctor: false });
     const profile = activationProfile(detection, plan, changes, 'claude-code');
     assert.equal(profile.capability_level, 'native_hooks');
-    assert.equal(profile.adapter_version, '3.9.71');
+    assert.equal(profile.adapter_version, '3.9.72');
     assert.deepEqual(profile.expected_hooks, ['prompt', 'pre_action', 'action_result', 'session_end']);
     assert.deepEqual(profile.observed_hooks.sort(), ['action_result', 'pre_action', 'prompt', 'session_end'].sort());
     assert.equal(profile.complete, true);
@@ -164,7 +164,7 @@ test('Claude native-hook activation certifies pre-action, result, and session-en
     const parsedSettings = JSON.parse(settings);
     const canonicalFingerprint = crypto.createHash('sha256').update(JSON.stringify({
       schema: 'marrow-claude-native-hooks.v3',
-      adapter_version: '3.9.71',
+      adapter_version: '3.9.72',
       expected_hooks: ['prompt', 'pre_action', 'action_result', 'session_end'],
       configured: {
         prompt: true,
@@ -174,18 +174,18 @@ test('Claude native-hook activation certifies pre-action, result, and session-en
         session_end: true,
       },
       descriptors: {
-        prompt: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.71 marrow-mcp context-hook', timeout: null }],
-        pre_action: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.71 marrow-mcp pre-action-hook', timeout: null }],
-        action_result_success: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.71 marrow-mcp hook', timeout: null }],
-        action_result_failure: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.71 marrow-mcp hook', timeout: null }],
-        session_end: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.71 marrow-mcp session-hook', timeout: null }],
+        prompt: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.72 marrow-mcp context-hook', timeout: null }],
+        pre_action: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.72 marrow-mcp pre-action-hook', timeout: null }],
+        action_result_success: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.72 marrow-mcp hook', timeout: null }],
+        action_result_failure: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.72 marrow-mcp hook', timeout: null }],
+        session_end: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.72 marrow-mcp session-hook', timeout: null }],
       },
       active_marrow_handlers: {
-        prompt: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.71 marrow-mcp context-hook', timeout: null }],
-        pre_action: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.71 marrow-mcp pre-action-hook', timeout: null }],
-        action_result_success: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.71 marrow-mcp hook', timeout: null }],
-        action_result_failure: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.71 marrow-mcp hook', timeout: null }],
-        session_end: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.71 marrow-mcp session-hook', timeout: null }],
+        prompt: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.72 marrow-mcp context-hook', timeout: null }],
+        pre_action: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.72 marrow-mcp pre-action-hook', timeout: null }],
+        action_result_success: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.72 marrow-mcp hook', timeout: null }],
+        action_result_failure: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.72 marrow-mcp hook', timeout: null }],
+        session_end: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.72 marrow-mcp session-hook', timeout: null }],
       },
     })).digest('hex');
     assert.equal(profile.config_fingerprint, canonicalFingerprint);
@@ -194,7 +194,7 @@ test('Claude native-hook activation certifies pre-action, result, and session-en
     assert.match(settings, /pre-action-hook/);
     assert.match(settings, /PostToolUseFailure/);
     assert.match(settings, /session-hook/);
-    assert.match(settings, /getmarrow\/mcp@3\.9\.71.*marrow-mcp hook/);
+    assert.match(settings, /getmarrow\/mcp@3\.9\.72.*marrow-mcp hook/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -235,7 +235,7 @@ test('Claude setup replaces old Marrow hooks without duplicate execution', () =>
       .flatMap((entry) => entry.hooks || [])
       .filter((hook) => /^npx\s+(?:-y\s+)?(?:--package=)?@getmarrow\/mcp(?:@[^\s]+)?\s+(?:marrow-mcp\s+)?/.test(hook.command || ''));
     assert.equal(commandCounts.length, 5);
-    assert.ok(commandCounts.every((hook) => hook.command.includes('@getmarrow/mcp@3.9.71')));
+    assert.ok(commandCounts.every((hook) => hook.command.includes('@getmarrow/mcp@3.9.72')));
     assert.deepEqual(settings.permissions, { allow: ['Read'] });
     assert.match(first, /printf unrelated/);
     assert.equal(settings.hooks.PostToolUseFailure.at(-1).hooks[0].timeout, 14);
