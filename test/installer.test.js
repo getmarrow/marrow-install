@@ -285,6 +285,17 @@ test('buildPlan chooses both mode for Node agent projects', () => {
   assert.ok(plan.writes.some((w) => w.path.endsWith('AGENTS.md')));
 });
 
+test('generated passive instructions pin the supported MCP release', () => {
+  const dir = tempDir();
+  fs.writeFileSync(path.join(dir, 'AGENTS.md'), '# Agents\n');
+  const detected = detectEnvironment(dir, {});
+  const plan = buildPlan(detected, { mode: 'mcp' });
+  const instructions = plan.writes.find((write) => write.path.endsWith('AGENTS.md'))?.block;
+
+  assert.match(instructions, /npx -y --package=@getmarrow\/mcp@3\.9\.72 marrow-mcp setup/);
+  assert.doesNotMatch(instructions, /@getmarrow\/mcp@latest/);
+});
+
 test('install dry-run does not write files', async () => {
   const dir = tempDir();
   fs.writeFileSync(path.join(dir, 'package.json'), '{}');

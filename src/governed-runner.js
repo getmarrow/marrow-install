@@ -29,6 +29,7 @@ const {
 } = require('./installer');
 
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
+const MCP_SETUP_COMMAND = `npx -y --package=${ADAPTER_PROVENANCE.mcp.package}@${ADAPTER_PROVENANCE.mcp.version} marrow-mcp setup`;
 const HIGH_RISK_TERMS = /\b(deploy|prod|production|publish|release|merge|migration|migrate|secret|token|key|cloudflare|wrangler|npm publish|gh pr merge|git push|terraform apply|kubectl apply|delete|destroy|drop)\b/i;
 const PROTECTED_COMMAND_PATTERNS = [
   /\b(?:npm|pnpm|yarn)(?:\s+npm)?\b[\s\S]{0,8192}\b(?:publish|unpublish|deprecate|access|owner|team|token|login|logout|profile\s+(?:set|enable-2fa|disable-2fa)|dist-tag|tag\s+(?:add|remove))\b/i,
@@ -1395,11 +1396,11 @@ const GENERIC_GOVERNED_COMMAND = 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/ins
 function localSupportedHarnesses() {
   const harnesses = [
     { display_name: 'OpenAI Codex', client_label: 'codex', category: 'agent_harness', support_level: 'governed_runner', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --agent codex-prod -- codex' },
-    { display_name: 'Claude Code', client_label: 'claude-code', category: 'agent_harness', support_level: 'native_mcp_or_sdk', install_command: 'MARROW_API_KEY=mrw_live_xxx npx -y --package=@getmarrow/mcp@latest marrow-mcp setup' },
-    { display_name: 'Cursor', client_label: 'cursor', category: 'ide_agent', support_level: 'native_mcp_or_sdk', install_command: 'MARROW_API_KEY=mrw_live_xxx npx -y --package=@getmarrow/mcp@latest marrow-mcp setup' },
-    { display_name: 'Cursor Composer', client_label: 'composer', category: 'ide_agent', support_level: 'native_mcp_or_sdk', install_command: 'MARROW_API_KEY=mrw_live_xxx npx -y --package=@getmarrow/mcp@latest marrow-mcp setup' },
-    { display_name: 'Windsurf', client_label: 'windsurf', category: 'ide_agent', support_level: 'native_mcp_or_sdk', install_command: 'MARROW_API_KEY=mrw_live_xxx npx -y --package=@getmarrow/mcp@latest marrow-mcp setup' },
-    { display_name: 'Cline', client_label: 'cline', category: 'ide_agent', support_level: 'native_mcp_or_sdk', install_command: 'MARROW_API_KEY=mrw_live_xxx npx -y --package=@getmarrow/mcp@latest marrow-mcp setup' },
+    { display_name: 'Claude Code', client_label: 'claude-code', category: 'agent_harness', support_level: 'native_mcp_or_sdk', install_command: `MARROW_API_KEY=mrw_live_xxx ${MCP_SETUP_COMMAND}` },
+    { display_name: 'Cursor', client_label: 'cursor', category: 'ide_agent', support_level: 'native_mcp_or_sdk', install_command: `MARROW_API_KEY=mrw_live_xxx ${MCP_SETUP_COMMAND}` },
+    { display_name: 'Cursor Composer', client_label: 'composer', category: 'ide_agent', support_level: 'native_mcp_or_sdk', install_command: `MARROW_API_KEY=mrw_live_xxx ${MCP_SETUP_COMMAND}` },
+    { display_name: 'Windsurf', client_label: 'windsurf', category: 'ide_agent', support_level: 'native_mcp_or_sdk', install_command: `MARROW_API_KEY=mrw_live_xxx ${MCP_SETUP_COMMAND}` },
+    { display_name: 'Cline', client_label: 'cline', category: 'ide_agent', support_level: 'native_mcp_or_sdk', install_command: `MARROW_API_KEY=mrw_live_xxx ${MCP_SETUP_COMMAND}` },
     { display_name: 'OpenCode', client_label: 'opencode', category: 'agent_harness', support_level: 'governed_runner', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --agent opencode-prod -- opencode' },
     { display_name: 'Hermes Agent', client_label: 'hermes', category: 'agent_harness', support_level: 'first_class_addon', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install hermes' },
     { display_name: 'OpenClaw', client_label: 'openclaw', category: 'agent_harness', support_level: 'first_class_addon', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install openclaw' },
@@ -1410,7 +1411,7 @@ function localSupportedHarnesses() {
     { display_name: 'Kimi', client_label: 'kimi', category: 'model_cli', support_level: 'governed_runner', install_command: GENERIC_GOVERNED_COMMAND },
     { display_name: 'MiniMax', client_label: 'minimax', category: 'model_cli', support_level: 'governed_runner', install_command: GENERIC_GOVERNED_COMMAND },
     { display_name: 'GLM', client_label: 'glm', category: 'model_cli', support_level: 'governed_runner', install_command: GENERIC_GOVERNED_COMMAND },
-    { display_name: 'MCP-compatible clients', client_label: 'mcp', category: 'mcp_client', support_level: 'native_mcp_or_sdk', install_command: 'MARROW_API_KEY=mrw_live_xxx npx -y --package=@getmarrow/mcp@latest marrow-mcp setup' },
+    { display_name: 'MCP-compatible clients', client_label: 'mcp', category: 'mcp_client', support_level: 'native_mcp_or_sdk', install_command: `MARROW_API_KEY=mrw_live_xxx ${MCP_SETUP_COMMAND}` },
     { display_name: 'CI scripts and deploy runners', client_label: 'ci', category: 'ci_runner', support_level: 'governed_runner', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --agent ci-release --profile production --policy enforce -- <ci-or-deploy-command>' },
     { display_name: 'Custom shell/API harness', client_label: 'custom', category: 'custom_runner', support_level: 'event_contract', install_command: 'POST /v1/agent/integrations/events with harness, event_type, agent_id, and action' },
   ];
