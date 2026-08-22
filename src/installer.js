@@ -620,7 +620,7 @@ function passiveInstructions() {
 
 Marrow should run passively after install:
 
-- Use MCP plus these instructions in every workspace: \`npx -y --package=@getmarrow/mcp@latest marrow-mcp setup\`.
+- Use MCP plus these instructions in every workspace: \`npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp setup\`.
 - Use SDK passive runtime in owned Node processes: \`createPassiveRuntime().install()\`.
 - Native Claude hooks install only when \`.claude\` is present. Cursor, Composer, Cline, and Windsurf get MCP tools on demand. Codex, Grok, Gemini, and similar CLI harnesses use the governed wrapper. Hermes, OpenClaw, and custom hosts need a bounded event adapter.
 - Keep passive token/model usage proof enabled. Empty savings stay zero until observed model usage lands. Do not invent token, cost, or time savings.

@@ -611,6 +611,9 @@ test('governPanel presents harness selection without becoming a model host', () 
 test('local integration registry covers major harnesses and model CLIs', () => {
   const supported = localSupportedHarnesses();
   const labels = supported.map((item) => item.client_label);
+  const mcpSetupCommands = supported
+    .map((item) => item.install_command)
+    .filter((command) => command.includes('marrow-mcp setup'));
 
   assert.ok(labels.includes('codex'));
   assert.ok(labels.includes('claude-code'));
@@ -630,6 +633,9 @@ test('local integration registry covers major harnesses and model CLIs', () => {
   assert.ok(labels.includes('mcp'));
   assert.ok(labels.includes('ci'));
   assert.ok(labels.includes('custom'));
+  assert.ok(mcpSetupCommands.length > 0);
+  assert.ok(mcpSetupCommands.every((command) => command.includes('--package=@getmarrow/mcp@3.9.72')));
+  assert.ok(mcpSetupCommands.every((command) => !command.includes('@getmarrow/mcp@latest')));
 });
 
 test('governed runner attaches stable client attribution from env and CLI', () => {
