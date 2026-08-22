@@ -93,7 +93,7 @@ Persistent controller lifecycle is currently Linux-only. On macOS or Windows, ac
 
 ## What's New in v0.1.48
 
-v0.1.48 pins MCP `3.9.71` and SDK `3.7.61`. The SDK keeps passive capture enabled without intercepting its own Marrow control-plane requests, while every generated MCP setup and repair command now uses the supported MCP release.
+v0.1.48 pins MCP `3.9.72` and SDK `3.7.61`. The SDK keeps passive capture enabled without intercepting its own Marrow control-plane requests, while every generated MCP setup and repair command now uses the supported MCP release.
 
 ## Previous: v0.1.47
 
