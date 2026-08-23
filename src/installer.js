@@ -642,14 +642,18 @@ Required environment:
 ${MARROW_BLOCK_END}`;
 }
 
-function passiveRuntimeSource() {
+function passiveRuntimeSource(options = {}) {
+  const installedAgentId = String(options.agentId || '').trim();
+  const installedBaseUrl = String(options.baseUrl || DEFAULT_BASE_URL).trim() || DEFAULT_BASE_URL;
   return `const apiKey = process.env.MARROW_API_KEY;
+const installedAgentId = ${JSON.stringify(installedAgentId)};
+const installedBaseUrl = ${JSON.stringify(installedBaseUrl)};
 if (apiKey && !globalThis.__MARROW_PASSIVE_RUNTIME__) {
   try {
     const { MarrowClient } = await import('@getmarrow/sdk');
     const marrow = new MarrowClient(apiKey, {
-      baseUrl: process.env.MARROW_BASE_URL,
-      agentId: process.env.MARROW_FLEET_AGENT_ID || process.env.MARROW_AGENT_ID,
+      baseUrl: installedBaseUrl,
+      agentId: installedAgentId || process.env.MARROW_FLEET_AGENT_ID || process.env.MARROW_AGENT_ID,
       sessionId: process.env.MARROW_SESSION_ID,
       mode: process.env.MARROW_ENFORCEMENT_MODE || 'auto',
     });
@@ -672,11 +676,14 @@ if (apiKey && !globalThis.__MARROW_PASSIVE_RUNTIME__) {
 `;
 }
 
-function envExample() {
+function envExample(options = {}) {
+  const agentId = String(options.agentId || 'agent-or-fleet-id').trim() || 'agent-or-fleet-id';
+  const client = String(options.client || 'custom').trim() || 'custom';
+  const baseUrl = String(options.baseUrl || DEFAULT_BASE_URL).trim() || DEFAULT_BASE_URL;
   return `MARROW_API_KEY=mrw_live_replace_me
-MARROW_BASE_URL=${DEFAULT_BASE_URL}
-MARROW_FLEET_AGENT_ID=agent-or-fleet-id
-MARROW_CLIENT=codex
+MARROW_BASE_URL=${JSON.stringify(baseUrl)}
+MARROW_FLEET_AGENT_ID=${JSON.stringify(agentId)}
+MARROW_CLIENT=${JSON.stringify(client)}
 MARROW_ENFORCEMENT_MODE=auto
 MARROW_PASSIVE_BRIEF=auto
 MARROW_PASSIVE_VALUE_REPORT=true
@@ -946,7 +953,10 @@ function activationProfile(detection, plan, changes, client) {
   };
 }
 
-function upsertMcpServerConfig(filePath) {
+function upsertMcpServerConfig(filePath, options = {}) {
+  const agentId = String(options.agentId || '').trim();
+  if (!agentId) throw new Error('Refusing to generate Marrow MCP config without an agent identity');
+  const baseUrl = String(options.baseUrl || DEFAULT_BASE_URL).trim() || DEFAULT_BASE_URL;
   const config = parseJsonObject(filePath);
   const servers = config.mcpServers && typeof config.mcpServers === 'object' && !Array.isArray(config.mcpServers)
     ? config.mcpServers
@@ -955,9 +965,8 @@ function upsertMcpServerConfig(filePath) {
     command: 'npx',
     args: ['-y', `--package=${MCP_PACKAGE_SPEC}`, 'marrow-mcp'],
     env: {
-      MARROW_API_KEY: '${MARROW_API_KEY}',
-      MARROW_BASE_URL: '${MARROW_BASE_URL}',
-      MARROW_FLEET_AGENT_ID: '${MARROW_FLEET_AGENT_ID}',
+      MARROW_BASE_URL: baseUrl,
+      MARROW_FLEET_AGENT_ID: agentId,
     },
   };
   config.mcpServers = servers;
@@ -1085,6 +1094,9 @@ function defaultHarnessInstallMatrix(detection = detectEnvironment(process.cwd()
 }
 
 function buildPlan(detection, options) {
+  const client = options.client || detectedClient(detection);
+  const agentId = String(options.agentId || '').trim() || stableAgentId(detection.root, client);
+  const baseUrl = String(options.baseUrl || DEFAULT_BASE_URL).trim() || DEFAULT_BASE_URL;
   const mode = options.mode === 'auto'
     ? detection.node ? 'both' : 'mcp'
     : options.mode;
@@ -1095,13 +1107,13 @@ function buildPlan(detection, options) {
       type: 'file',
       path: detection.paths.passiveRuntime,
       label: 'SDK passive runtime preload',
-      content: passiveRuntimeSource(),
+      content: passiveRuntimeSource({ agentId, baseUrl }),
     });
     writes.push({
       type: 'file',
       path: detection.paths.passiveEnv,
       label: 'Marrow passive env example',
-      content: envExample(),
+      content: envExample({ agentId, baseUrl, client }),
       overwrite: false,
     });
   }
@@ -1119,14 +1131,14 @@ function buildPlan(detection, options) {
       type: 'json-transform',
       path: detection.paths.mcpJson,
       label: 'Project MCP server config',
-      transform: upsertMcpServerConfig,
+      transform: (filePath) => upsertMcpServerConfig(filePath, { agentId, baseUrl }),
     });
     if (detection.cursor) {
       writes.push({
         type: 'json-transform',
         path: detection.paths.cursorMcp,
         label: 'Cursor MCP server config',
-        transform: upsertMcpServerConfig,
+        transform: (filePath) => upsertMcpServerConfig(filePath, { agentId, baseUrl }),
       });
     }
   }
@@ -1814,12 +1826,12 @@ async function install(options) {
     throw new Error('repair requires explicit write authorization (--yes)');
   }
   const detection = detectEnvironment(options.cwd);
+  const client = detectedClient(detection);
+  options.client = client;
+  options.agentId = String(options.agentId || '').trim() || stableAgentId(detection.root, client);
   const plan = buildPlan(detection, options);
   const writeMode = options.doctor ? 'doctor' : options.dryRun ? 'dry-run' : options.repair ? 'repair' : options.yes ? 'write' : 'dry-run';
   const changes = applyPlan(plan, options);
-  const client = detectedClient(detection);
-  options.client = client;
-  if (!options.agentId) options.agentId = stableAgentId(detection.root, client);
   const profile = activationProfile(detection, plan, changes, client);
   options.activation = options.activate ? {
     harness: client,

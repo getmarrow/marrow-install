@@ -429,6 +429,161 @@ test('install --yes writes passive runtime and instructions idempotently', async
   assert.ok(settings.hooks.UserPromptSubmit);
 });
 
+test('installed MCP and SDK runtime use one stable identity without persisting the API key', async () => {
+  const dir = tempDir();
+  const sdkDir = path.join(dir, 'node_modules', '@getmarrow', 'sdk');
+  fs.writeFileSync(path.join(dir, 'package.json'), '{}');
+  fs.writeFileSync(path.join(dir, 'AGENTS.md'), '# Agents\n');
+  fs.writeFileSync(path.join(dir, '.mcp.json'), JSON.stringify({
+    mcpServers: {
+      marrow: {
+        command: 'npx',
+        args: ['-y', '--package=@getmarrow/mcp@3.9.72', 'marrow-mcp'],
+        env: {
+          MARROW_API_KEY: 'fixture-old-credential',
+          MARROW_BASE_URL: '${MARROW_BASE_URL}',
+          MARROW_FLEET_AGENT_ID: '${MARROW_FLEET_AGENT_ID}',
+        },
+      },
+    },
+  }));
+  fs.mkdirSync(sdkDir, { recursive: true });
+  fs.writeFileSync(path.join(sdkDir, 'package.json'), JSON.stringify({ type: 'module', main: 'index.js' }));
+  fs.writeFileSync(path.join(sdkDir, 'index.js'), `export class MarrowClient {
+  constructor(apiKey, options) { globalThis.__MARROW_INSTALL_IDENTITY_CAPTURE__ = { apiKey, options }; }
+  createPassiveRuntime() { return { install() {} }; }
+}
+`);
+
+  const installKey = 'fixture-install-credential';
+  const originalFetch = global.fetch;
+  const selfTestAgentIds = [];
+  let report;
+  global.fetch = async (url, request = {}) => {
+    selfTestAgentIds.push(request.headers?.['x-marrow-agent-id']);
+    const href = String(url);
+    if (href.endsWith('/v1/agent/think')) {
+      return new Response(JSON.stringify({ data: { decision_id: 'installer-identity-decision' } }), { status: 200 });
+    }
+    if (href.endsWith('/v1/agent/status')) {
+      return new Response(JSON.stringify({ data: { ok: true, enabled: true, health: 'healthy' } }), { status: 200 });
+    }
+    if (href.endsWith('/v1/agent/runtime')) {
+      return new Response(JSON.stringify({ data: { ok: true, risk_gate: { allow: true } } }), { status: 200 });
+    }
+    if (href.endsWith('/v1/agent/first-value')) {
+      return new Response(JSON.stringify({ data: { ok: true, active: true } }), { status: 200 });
+    }
+    if (href.endsWith('/v1/agent/commit')
+      || href.includes('/v1/analytics/agent-performance')
+      || href.includes('/v1/agent/value/proof')) {
+      return new Response(JSON.stringify({ data: { ok: true } }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ error: 'unexpected URL' }), { status: 404 });
+  };
+  try {
+    report = await install({
+      cwd: dir,
+      mode: 'both',
+      yes: true,
+      repair: true,
+      dryRun: false,
+      selfTest: true,
+      controller: false,
+      apiKey: installKey,
+      baseUrl: 'https://api.identity.example.test',
+      agentId: '',
+      processCommands: [],
+      mcpConfigPaths: [],
+    });
+  } finally {
+    global.fetch = originalFetch;
+  }
+  const mcpPath = path.join(dir, '.mcp.json');
+  const runtimePath = path.join(dir, '.marrow', 'passive-runtime.mjs');
+  const mcpRaw = fs.readFileSync(mcpPath, 'utf8');
+  const runtimeRaw = fs.readFileSync(runtimePath, 'utf8');
+  const mcp = JSON.parse(mcpRaw);
+  const generatedAgentId = report.activation.agent_id;
+
+  assert.ok(generatedAgentId);
+  assert.ok(selfTestAgentIds.length > 0);
+  assert.equal(selfTestAgentIds.every((agentId) => agentId === generatedAgentId), true);
+  assert.equal(mcp.mcpServers.marrow.env.MARROW_FLEET_AGENT_ID, generatedAgentId);
+  assert.equal(mcp.mcpServers.marrow.env.MARROW_BASE_URL, 'https://api.identity.example.test');
+  assert.equal('MARROW_API_KEY' in mcp.mcpServers.marrow.env, false);
+  assert.doesNotMatch(mcpRaw, /MARROW_API_KEY|\$\{MARROW_(?:API_KEY|BASE_URL|FLEET_AGENT_ID)\}/);
+  assert.doesNotMatch(`${mcpRaw}\n${runtimeRaw}`, new RegExp(installKey));
+  assert.doesNotMatch(`${mcpRaw}\n${runtimeRaw}`, /fixture-old-credential/);
+
+  const previous = {
+    MARROW_API_KEY: process.env.MARROW_API_KEY,
+    MARROW_BASE_URL: process.env.MARROW_BASE_URL,
+    MARROW_FLEET_AGENT_ID: process.env.MARROW_FLEET_AGENT_ID,
+    MARROW_AGENT_ID: process.env.MARROW_AGENT_ID,
+  };
+  try {
+    process.env.MARROW_API_KEY = 'fixture-runtime-credential';
+    process.env.MARROW_BASE_URL = 'https://wrong-runtime.example.test';
+    process.env.MARROW_FLEET_AGENT_ID = 'wrong-runtime-agent';
+    delete process.env.MARROW_AGENT_ID;
+    delete globalThis.__MARROW_PASSIVE_RUNTIME__;
+    delete globalThis.__MARROW_INSTALL_IDENTITY_CAPTURE__;
+
+    await import(`${pathToFileURL(runtimePath).href}?case=installed-identity-${Date.now()}`);
+
+    assert.equal(globalThis.__MARROW_INSTALL_IDENTITY_CAPTURE__.options.agentId, generatedAgentId);
+    assert.equal(globalThis.__MARROW_INSTALL_IDENTITY_CAPTURE__.options.baseUrl, 'https://api.identity.example.test');
+    assert.equal(mcp.mcpServers.marrow.env.MARROW_FLEET_AGENT_ID, globalThis.__MARROW_INSTALL_IDENTITY_CAPTURE__.options.agentId);
+  } finally {
+    delete globalThis.__MARROW_PASSIVE_RUNTIME__;
+    delete globalThis.__MARROW_INSTALL_IDENTITY_CAPTURE__;
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test('explicit installer identity wins and repair remains byte-idempotent', async () => {
+  const dir = tempDir();
+  fs.writeFileSync(path.join(dir, 'package.json'), '{}');
+  fs.writeFileSync(path.join(dir, 'AGENTS.md'), '# Agents\n');
+  const explicitAgentId = 'customer-approved-agent';
+  const options = () => ({
+    cwd: dir,
+    mode: 'both',
+    yes: true,
+    repair: true,
+    dryRun: false,
+    selfTest: false,
+    controller: false,
+    apiKey: 'fixture-explicit-credential',
+    baseUrl: 'https://api.explicit.example.test',
+    agentId: explicitAgentId,
+    processCommands: [],
+    mcpConfigPaths: [],
+  });
+
+  const first = await install(options());
+  const mcpPath = path.join(dir, '.mcp.json');
+  const runtimePath = path.join(dir, '.marrow', 'passive-runtime.mjs');
+  const firstMcp = fs.readFileSync(mcpPath, 'utf8');
+  const firstRuntime = fs.readFileSync(runtimePath, 'utf8');
+  const second = await install(options());
+
+  assert.equal(first.activation.agent_id, explicitAgentId);
+  assert.equal(second.activation.agent_id, explicitAgentId);
+  assert.equal(JSON.parse(firstMcp).mcpServers.marrow.env.MARROW_FLEET_AGENT_ID, explicitAgentId);
+  assert.match(firstRuntime, /const installedAgentId = "customer-approved-agent";/);
+  assert.equal(fs.readFileSync(mcpPath, 'utf8'), firstMcp);
+  assert.equal(fs.readFileSync(runtimePath, 'utf8'), firstRuntime);
+  assert.equal(second.changes.some((change) => change.applied), false);
+  assert.equal(second.changes.every((change) => change.already_present), true);
+  assert.doesNotMatch(`${firstMcp}\n${firstRuntime}`, /fixture-explicit-credential/);
+  assert.doesNotMatch(firstMcp, /MARROW_API_KEY|\$\{MARROW_API_KEY\}/);
+});
+
 
 
 test('generated passive runtime warning redacts SDK initialization errors', async () => {
