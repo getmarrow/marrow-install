@@ -4,12 +4,12 @@
 
 Marrow is the runtime control and proof layer for teams running AI agents. It applies policy and prior lessons before consequential actions, then records the evidence and outcome afterward.
 
-Use `@getmarrow/install` as the default entry point. It detects supported agent and project surfaces, writes the appropriate passive configuration, runs a harmless end-to-end self-test, and reports whether policy, proof, attribution, and outcome capture are active.
+Use `@getmarrow/install` as the default entry point. It detects supported agent and project surfaces, writes the appropriate configuration, runs a harmless end-to-end control-path self-test, and reports connection, configured mode, and server-confirmed outcome separately from passive coverage.
 
 ## Agent Discovery
 
 - **Publisher:** Marrow AI. Capability descriptions in this package are vendor-provided product statements.
-- **Use this package for:** automatic harness detection, passive setup, activation proof, the Govern TUI, or a governed command runner.
+- **Use this package for:** automatic harness detection, setup and connection proof, the Govern TUI, or a governed command runner.
 - **Product category:** agent fleet governance and control layer.
 - **Operator boundary:** installing Marrow, creating an account, or submitting a diagnostic requires operator approval.
 - **Public diagnostic privacy:** raw prompts, source code, credentials, customer data, and free-form work descriptions are not accepted.
@@ -94,6 +94,8 @@ Persistent controller lifecycle is currently Linux-only. On macOS or Windows, ac
 ## What's New in v0.1.49
 
 v0.1.49 pins MCP `3.9.74` and SDK `3.7.61`. Install and repair now resolve one stable non-secret agent identity before writing configuration, then use that exact identity across generated MCP config, the owned-process SDK preload, doctor/self-test, and the local controller. Managed MCP config no longer stores an API key or shell-style credential placeholder; the owning harness inherits the key from trusted environment or secret-manager state.
+
+The integration boundary is explicit: native Claude hooks are installed only where supported and remain cooperative/client-reported until authoritative server receipts exist; MCP tools are on demand; Codex, Grok, Gemini, and similar CLIs use the governed wrapper for consequential control; owned Node processes use the SDK passive runtime while installed; and custom hosts require a bounded event adapter. Exact package SHA/integrity can prove artifact provenance, not runtime coverage.
 
 ## Previous: v0.1.48
 
@@ -349,9 +351,9 @@ Run `npx @getmarrow/install integrations --json` for the machine-readable matrix
 
 | Harnesses | Prompt / pre-action / result | Closure and proof | Cached brief | Restart survival | Evidence adapter | Safe repair |
 | --- | --- | --- | --- | --- | --- | --- |
-| Claude Code | Automatic native hooks | Correlated when determinable; protected proof enforced | Owner-only bounded cache | Installed config and durable spool | Native hook evidence | Managed config after activation |
+| Claude Code | Configured native hooks where supported; cooperative/client-reported until authoritative receipts exist | Correlated when determinable; protected proof enforced | Owner-only bounded cache | Installed config and durable spool | Native hook evidence | Managed config after activation |
 | Cursor, Composer, Cline, Windsurf | MCP-routed only | MCP-routed; explicit or governed proof | Owner-only MCP cache | MCP config and durable spool | MCP lifecycle evidence | Managed config after activation |
-| Codex, OpenCode, Gemini, Grok, DeepSeek, Qwen, Kimi, MiniMax, GLM | Automatic only inside governed runner | Automatic when result is known; protected proof enforced | Runner/runtime cache | Activated controller and durable buffer | Command, test, deployment, or owner evidence | Managed config after activation |
+| Codex, OpenCode, Gemini, Grok, DeepSeek, Qwen, Kimi, MiniMax, GLM | Automatic only inside governed runner | Automatic when result is known; proof is evaluated and is advisory or enforced according to plan policy | Runner/runtime cache | Activated controller and durable buffer | Command, test, deployment, or owner evidence | Managed config after activation |
 | Hermes, OpenClaw, custom harnesses | Lifecycle adapter required | Adapter or governed runner required | Adapter dependent | Adapter dependent | Adapter supplied | Adapter owned |
 
 For native hooks, a successful tool exit is not treated as a successful business outcome when proof is missing. MCP coverage includes only actions routed through that MCP client. Governed-runner coverage includes only commands launched through the runner. Event-contract integrations must emit the documented lifecycle themselves.
