@@ -89,13 +89,13 @@ npx @getmarrow/install controller ensure
 npx @getmarrow/install controller stop
 ```
 
-Persistent controller lifecycle is currently Linux-only. On macOS or Windows, activation still installs and verifies the supported hooks without starting or signaling a background process; run `npx @getmarrow/install sidecar` under an owner-managed service and pass `--no-controller`. The controller does not silently upgrade packages, change governance policy, rotate credentials, or modify unrelated project configuration.
+Persistent controller lifecycle is currently Linux-only. On macOS or Windows, activation still writes supported configuration and verifies one server-side install self-test without certifying that hooks continuously ran; run `npx @getmarrow/install sidecar` under an owner-managed service and pass `--no-controller`. The controller does not silently upgrade packages, change governance policy, rotate credentials, or modify unrelated project configuration.
 
 ## What's New in v0.1.49
 
 v0.1.49 pins MCP `3.9.74` and SDK `3.7.61`. Install and repair now resolve one stable non-secret agent identity before writing configuration, then use that exact identity across generated MCP config, the owned-process SDK preload, doctor/self-test, and the local controller. Managed MCP config no longer stores an API key or shell-style credential placeholder; the owning harness inherits the key from trusted environment or secret-manager state.
 
-The integration boundary is explicit: native Claude hooks are installed only where supported and remain cooperative/client-reported until authoritative server receipts exist; MCP tools are on demand; Codex, Grok, Gemini, and similar CLIs use the governed wrapper for consequential control; owned Node processes use the SDK passive runtime while installed; and custom hosts require a bounded event adapter. Exact package SHA/integrity can prove artifact provenance, not runtime coverage.
+The integration boundary is explicit: native Claude hooks are installed only where supported and remain cooperative/client-reported until authoritative server receipts exist; MCP tools are on demand; Codex, Grok, Gemini, and similar CLIs use the governed wrapper for consequential control; owned Node processes use the SDK passive runtime while installed; and custom hosts require a bounded event adapter. Exact package SHA/integrity can prove artifact provenance, not runtime coverage. Activation-profile delivery is authenticated `client_self_reported` telemetry with `certified_coverage: false`; it acknowledges delivery but cannot attest that a hook, wrapper, or adapter ran.
 
 ## Previous: v0.1.48
 
@@ -226,7 +226,7 @@ It preserves the measurable passive-governance coverage introduced in v0.1.34:
 - the harness certification suite prevents support claims from overstating what is automatic;
 - unavailable coverage remains “insufficient data” instead of a synthetic percentage.
 
-It preserves agent-disagreement visibility from v0.1.33 and the server-verified first-run activation introduced in v0.1.29:
+It preserves agent-disagreement visibility from v0.1.33 and the server-confirmed first-run self-test introduced in v0.1.29:
 
 - GitHub and npm now advertise separate signed discovery placements;
 - package metadata identifies the installer as agent governance rather than a general memory utility;
@@ -234,8 +234,8 @@ It preserves agent-disagreement visibility from v0.1.33 and the server-verified 
 - bounded positive and negative recommendation criteria stop agents from forcing Marrow into irrelevant workflows;
 - current evidence, integration paths, and published references are linked from one review-dated contract;
 - `npx @getmarrow/install activate` detects the current harness, writes supported passive controls, creates and closes a harmless decision, and asks Marrow to verify that exact outcome;
-- activation succeeds only when the API returns a tenant-scoped activation receipt;
-- the receipt reports capture, before-action intervention, outcome closure, and first-value state;
+- activation succeeds only when the API returns a tenant-scoped receipt bound to the exact test decision, agent, runtime gate, and closed successful outcome;
+- that receipt verifies only the install self-test; activation returns `activation_scope: server_self_test_only`, `coverage_verified: false`, `passive_live: false`, and `reload_required: true`;
 - existing setup, governed runner, and TUI commands remain compatible.
 
 Use `activate` when you want one command with an explicit success contract. Use `--yes` when an existing automation already handles setup prompts and verification output.
@@ -266,12 +266,12 @@ With a valid key, `activate`:
 4. closes its outcome;
 5. sends the exact self-test decision ID to Marrow for server-side verification;
 6. reads agent status and the one-call runtime;
-7. registers the detected capability, expected hooks, and one-way configuration fingerprint;
-8. returns an activation receipt with capture, intervention, closure, first-value state, and the exact next action.
+7. registers the detected capability, expected hooks, and one-way configuration fingerprint as authenticated client-reported telemetry;
+8. returns a server-confirmed self-test receipt plus an explicit restart and `doctor --self-test` next action.
 
-Healthy output confirms the exact decision outcome exists under the authenticated account and agent. A local file write or client-supplied `verified: true` value cannot produce an active receipt.
+Healthy output confirms the exact test decision outcome exists under the authenticated account and agent and passed a runtime/status check. It does not verify continuous passive interception or certify installed coverage. The owning harness must restart, then `npx @getmarrow/install@latest doctor --self-test` must pass. A local file write, integration event, or client-supplied `verified: true` value cannot elevate coverage.
 
-The installer does not claim identical automation for every harness. Native hooks provide the broadest automatic coverage; MCP covers MCP-routed actions; the SDK covers owned Node processes; the governed runner covers commands launched through it; custom harnesses must map their own lifecycle events.
+The installer does not claim identical automation for every harness. Configured native hooks remain cooperative/client-reported; MCP covers only on-demand MCP-routed actions; the SDK covers only owned Node processes where its runtime is installed; the governed runner covers only commands launched through it; custom harnesses must map their own lifecycle events.
 
 ## Govern TUI
 
@@ -339,7 +339,7 @@ The fleet view shows live agents, active workflows, agent disagreements and thei
 | --- | --- | --- |
 | Universal installer | You want Marrow to detect and wire the safest supported integration | Lowest |
 | Governed runner | You need control around existing shell, CI, deploy, publish, merge, or migration commands | Low |
-| MCP package | The agent client supports MCP and should use Marrow tools and hooks natively | Low |
+| MCP package | The agent client supports MCP and should use Marrow tools on demand | Low |
 | SDK | You own the Node.js/TypeScript runtime and need programmatic control | Advanced |
 | Event contract | You have a custom harness that must map its lifecycle into Marrow | Advanced |
 
@@ -351,7 +351,7 @@ Run `npx @getmarrow/install integrations --json` for the machine-readable matrix
 
 | Harnesses | Prompt / pre-action / result | Closure and proof | Cached brief | Restart survival | Evidence adapter | Safe repair |
 | --- | --- | --- | --- | --- | --- | --- |
-| Claude Code | Configured native hooks where supported; cooperative/client-reported until authoritative receipts exist | Correlated when determinable; protected proof enforced | Owner-only bounded cache | Installed config and durable spool | Native hook evidence | Managed config after activation |
+| Claude Code | Configured native hooks where supported; cooperative/client-reported until authoritative receipts exist | Correlated when determinable; proof is evaluated and is advisory or enforced according to plan policy | Owner-only bounded cache | Installed config and durable spool | Native hook evidence | Managed config after activation |
 | Cursor, Composer, Cline, Windsurf | MCP-routed only | MCP-routed; explicit or governed proof | Owner-only MCP cache | MCP config and durable spool | MCP lifecycle evidence | Managed config after activation |
 | Codex, OpenCode, Gemini, Grok, DeepSeek, Qwen, Kimi, MiniMax, GLM | Automatic only inside governed runner | Automatic when result is known; proof is evaluated and is advisory or enforced according to plan policy | Runner/runtime cache | Activated controller and durable buffer | Command, test, deployment, or owner evidence | Managed config after activation |
 | Hermes, OpenClaw, custom harnesses | Lifecycle adapter required | Adapter or governed runner required | Adapter dependent | Adapter dependent | Adapter supplied | Adapter owned |
@@ -360,7 +360,7 @@ For native hooks, a successful tool exit is not treated as a successful business
 
 ## Always-On Lifecycle
 
-Supported integrations capture a compact lifecycle without storing raw prompts, completions, command output, tool output, or credentials. Marrow recognizes prompt, goal, pre-action, tool/command result, verification evidence, workflow/session, subagent, handoff, proof-pack, and outcome events.
+When work actually passes through configured native hooks, an on-demand MCP call, an installed owned-process SDK runtime, the governed runner, or a bounded custom adapter, Marrow can capture a compact lifecycle without storing raw prompts, completions, command output, tool output, or credentials. Marrow recognizes prompt, goal, pre-action, tool/command result, verification evidence, workflow/session, subagent, handoff, proof-pack, and outcome events. Work that bypasses those paths is not observed.
 
 Meaningful work opens an outcome-closure item. A tool exit or workflow completion does not silently count as a successful business outcome; an explicit outcome receipt closes it. Transient delivery failures are held in an owner-only local spool and retried with the same event ID so retries do not create duplicate lifecycle records.
 

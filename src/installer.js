@@ -1428,60 +1428,51 @@ async function runSelfTest(options) {
     if (!receiptValid) {
       throw new Error('activation receipt did not verify the exact self-test decision, agent, runtime gate, and closed successful outcome');
     }
-    activationProfileReceipt = await requestJson(`${baseUrl}/v1/agent/integrations/events`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        event_id: `activation-${activationConfigFingerprint.slice(0, 32)}`,
-        event_type: 'activation_profile_registered',
-        harness: options.activation.harness,
-        agent_id: options.agentId,
-        session_id: headers['x-marrow-session-id'],
-        adapter_version: activationAdapterVersion,
-        capability_level: activationCapabilityLevel,
-        config_fingerprint: activationConfigFingerprint,
-        expected_hooks: activationExpectedHooks,
-        action: 'passive integration activation profile registered',
-        occurred_at: new Date().toISOString(),
-      }),
-    });
-    const profileCoverage = activationProfileReceipt?.activation_coverage;
-    const profileReceipt = profileCoverage?.profile_receipt;
-    const accountBindingId = profileCoverage?.account_binding_id;
-    const expectedConfigurationBindingId = typeof accountBindingId === 'string'
-      ? crypto.createHash('sha256')
-        .update(`agent-config-receipt:v2:${accountBindingId}:${activationConfigFingerprint}`)
-        .digest('hex')
-      : null;
-    const expectedHooksMatch = Array.isArray(profileCoverage?.capture_coverage?.expected_hooks)
-      && [...profileCoverage.capture_coverage.expected_hooks].sort().join(',') === [...activationExpectedHooks].sort().join(',');
-    const profileBound = Boolean(
-      activationProfileReceipt?.accepted === true
-      && profileCoverage?.agent_id === options.agentId
-      && profileCoverage?.harness === options.activation.harness
-      && profileCoverage?.activation?.adapter_version === activationAdapterVersion
-      && profileCoverage?.activation?.capability_level === activationCapabilityLevel
-      && profileReceipt?.agent_id === options.agentId
-      && profileReceipt?.harness === options.activation.harness
-      && profileReceipt?.adapter_version === activationAdapterVersion
-      && profileReceipt?.capability_level === activationCapabilityLevel
-      && typeof accountBindingId === 'string'
-      && accountBindingId.length === 64
-      && profileReceipt?.account_binding_id === accountBindingId
-      && profileReceipt?.config_fingerprint_verified === true
-      && profileReceipt?.configuration_binding_id === expectedConfigurationBindingId
-      && profileReceipt?.expected_hooks_verified === true
-      && expectedHooksMatch
+    let activationTelemetry;
+    try {
+      activationTelemetry = await requestJson(`${baseUrl}/v1/agent/integrations/events`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          event_id: `activation-${activationConfigFingerprint.slice(0, 32)}`,
+          event_type: 'activation_profile_registered',
+          harness: options.activation.harness,
+          agent_id: options.agentId,
+          session_id: headers['x-marrow-session-id'],
+          adapter_version: activationAdapterVersion,
+          capability_level: activationCapabilityLevel,
+          config_fingerprint: activationConfigFingerprint,
+          expected_hooks: activationExpectedHooks,
+          action: 'integration activation profile registered as client self-reported telemetry',
+          occurred_at: new Date().toISOString(),
+        }),
+      });
+    } catch {
+      throw new Error('activation telemetry delivery failed; retry activate after the integration-events endpoint accepts authenticated client_self_reported telemetry');
+    }
+    const telemetryAccepted = Boolean(
+      activationTelemetry?.accepted === true
+      && activationTelemetry?.evidence_authority === 'client_self_reported'
     );
+    if (!telemetryAccepted) {
+      throw new Error('activation telemetry was not acknowledged as authenticated client_self_reported delivery; update the backend/client compatibility pair, then retry activate');
+    }
+    // Never project response-supplied coverage or profile receipts into the install
+    // result. This endpoint acknowledges bounded, authenticated client telemetry;
+    // it does not certify that hooks, wrappers, or adapters continuously ran.
+    activationProfileReceipt = {
+      accepted: true,
+      evidence_authority: 'client_self_reported',
+      certified_coverage: false,
+    };
     activationVerified = Boolean(
       firstValue.active
       && runtimeGateVerified(runtime)
       && (status.enabled ?? status.ok)
-      && options.activation.complete === true
-      && profileBound,
+      && telemetryAccepted,
     );
     if (!activationVerified) {
-      throw new Error('activation prerequisites were not all verified by the server');
+      throw new Error('activation self-test prerequisites were not all verified by the server');
     }
   }
   return {
@@ -1497,9 +1488,16 @@ async function runSelfTest(options) {
     runtime_exact_next_action: runtime.exact_next_action || null,
     runtime_before_you_act: runtime.before_you_act || null,
     activation_verified: activationVerified,
+    activation_scope: options.activation ? 'server_self_test_only' : null,
+    coverage_verified: false,
+    passive_live: false,
+    reload_required: Boolean(options.activation),
+    activation_next_action: options.activation
+      ? 'Restart the owning harness, then run npx @getmarrow/install@latest doctor --self-test.'
+      : null,
     activation_receipt: activationReceipt,
     activation_profile_receipt: activationProfileReceipt,
-    activation_coverage: status.activation_coverage || firstValue.activation_coverage || null,
+    activation_coverage: null,
     first_value: firstValue && firstValue.ok !== false ? firstValue : null,
     first_value_signal: firstValueSignal,
     install_value_moment: installValueMoment,
@@ -1652,7 +1650,13 @@ function printReport(report) {
   if (report.activation?.requested) {
     process.stdout.write('Activation:\n');
     process.stdout.write(`- agent: ${report.activation.agent_id}\n`);
-    process.stdout.write(`- server confirmed: ${report.activation.server_confirmed ? 'yes' : 'no'}\n\n`);
+    process.stdout.write(`- self-test server confirmed: ${report.activation.server_confirmed ? 'yes' : 'no'}\n`);
+    process.stdout.write(`- scope: ${report.activation.activation_scope}\n`);
+    process.stdout.write(`- coverage verified: ${report.activation.coverage_verified ? 'yes' : 'no'}\n`);
+    process.stdout.write(`- passive live in this process: ${report.activation.passive_live ? 'yes' : 'no'}\n`);
+    process.stdout.write(`- reload required: ${report.activation.reload_required ? 'yes' : 'no'}\n`);
+    if (report.activation.next_action) process.stdout.write(`- next action: ${report.activation.next_action}\n`);
+    process.stdout.write('\n');
   }
 
   process.stdout.write('Detected:\n');
@@ -1951,6 +1955,11 @@ async function install(options) {
       requested: options.activate,
       agent_id: options.agentId,
       server_confirmed: Boolean(selfTest.activation_verified),
+      activation_scope: selfTest.activation_scope || null,
+      coverage_verified: false,
+      passive_live: false,
+      reload_required: Boolean(options.activate),
+      next_action: selfTest.activation_next_action || null,
       receipt: selfTest.activation_receipt || null,
       profile,
     },
