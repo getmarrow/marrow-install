@@ -32,8 +32,8 @@ test('release-candidate adapter provenance matches the exact MCP source and cert
     },
     sdk: {
       package: '@getmarrow/sdk',
-      version: '3.7.61',
-      integrity: 'sha512-1dXf/Px4mMN4lOehrRkBOF/dC6N9kjQ5R4eb8ohAACx5CvLTS32zSTelfMNjnRcdOknSKMjLnbh7aGFhulVo/Q==',
+      version: '3.7.62',
+      integrity: 'sha512-n1i6Be09TpAQ9BPNRKY7aCvA2iSUPpJfw8djw2MELwpNbBCtKiZ29Jji77BK/6EFLUpSIcTW/Gmdf/ccf0JRYQ==',
     },
   });
 });
@@ -184,15 +184,15 @@ test('doctor resolves direct node_modules bin MCP process versions', () => {
   }
 });
 
-function writeSdkLock(root, declaredSpec = '^3.7.61') {
+function writeSdkLock(root, declaredSpec = '^3.7.62') {
   fs.writeFileSync(path.join(root, 'package-lock.json'), JSON.stringify({
     name: 'fixture',
     lockfileVersion: 3,
     packages: {
       '': { dependencies: { '@getmarrow/sdk': declaredSpec } },
       'node_modules/@getmarrow/sdk': {
-        version: '3.7.61',
-        resolved: 'https://registry.npmjs.org/@getmarrow/sdk/-/sdk-3.7.61.tgz',
+        version: '3.7.62',
+        resolved: 'https://registry.npmjs.org/@getmarrow/sdk/-/sdk-3.7.62.tgz',
         integrity: ADAPTER_PROVENANCE.sdk.integrity,
       },
     },
@@ -226,13 +226,13 @@ test('parseArgs defaults to dry-run unless --yes is passed', () => {
   assert.equal(noController.controller, false);
 });
 
-test('SDK detection accepts the exact public 3.7.61 package and rejects the superseded integrity', () => {
+test('SDK detection accepts the exact 3.7.62 release candidate and rejects the superseded integrity', () => {
   const dir = tempDir();
   const moduleDir = path.join(dir, 'node_modules', '@getmarrow', 'sdk');
-  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ dependencies: { '@getmarrow/sdk': '3.7.61' } }));
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ dependencies: { '@getmarrow/sdk': '3.7.62' } }));
   fs.mkdirSync(moduleDir, { recursive: true });
-  fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({ name: '@getmarrow/sdk', version: '3.7.61' }));
-  writeSdkLock(dir, '3.7.61');
+  fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({ name: '@getmarrow/sdk', version: '3.7.62' }));
+  writeSdkLock(dir, '3.7.62');
 
   let report = inspectSdkDependency(detectEnvironment(dir, {}));
   assert.equal(report.present, true);
@@ -246,7 +246,7 @@ test('SDK detection accepts the exact public 3.7.61 package and rejects the supe
   report = inspectSdkDependency(detectEnvironment(dir, {}));
   assert.equal(report.present, false);
   assert.equal(report.lock_verified, false);
-  assert.equal(report.install_command, 'npm install @getmarrow/sdk@3.7.61');
+  assert.equal(report.install_command, 'npm install @getmarrow/sdk@3.7.62');
 });
 
 test('activate is the one-command write and server verification path', () => {
@@ -662,7 +662,7 @@ test('install reports missing SDK dependency for passive runtime projects', asyn
 
   assert.equal(report.sdkDependency.required, true);
   assert.equal(report.sdkDependency.present, false);
-  assert.equal(report.sdkDependency.install_command, 'npm install @getmarrow/sdk@3.7.61');
+  assert.equal(report.sdkDependency.install_command, 'npm install @getmarrow/sdk@3.7.62');
   assert.deepEqual(report.adapterProvenance, ADAPTER_PROVENANCE);
 
   fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ dependencies: { '@getmarrow/sdk': '^3.7.27' } }));
@@ -673,13 +673,13 @@ test('install reports missing SDK dependency for passive runtime projects', asyn
   let sdk = inspectSdkDependency(detected);
   assert.equal(sdk.present, false);
   assert.equal(sdk.installed_version, '0.0.1');
-  fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({ name: '@getmarrow/sdk', version: '3.7.61' }));
+  fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({ name: '@getmarrow/sdk', version: '3.7.62' }));
   writeSdkLock(dir, '^3.7.27');
   detected = detectEnvironment(dir, {});
   sdk = inspectSdkDependency(detected);
   assert.equal(sdk.present, true);
   assert.equal(sdk.lock_verified, true);
-  assert.equal(sdk.installed_version, '3.7.61');
+  assert.equal(sdk.installed_version, '3.7.62');
   assert.equal(sdk.install_command, null);
 });
 
@@ -1048,7 +1048,7 @@ test('self-test returns first five-minute value signal and proof', async () => {
     assert.equal(requestHeaders['x-marrow-package'], '@getmarrow/install');
     assert.equal(requestHeaders['x-marrow-package-version'], '0.1.49');
     assert.equal(requestHeaders['x-marrow-install-version'], '0.1.49');
-    assert.equal(requestHeaders['x-marrow-sdk-version'], '3.7.61');
+    assert.equal(requestHeaders['x-marrow-sdk-version'], '3.7.62');
     assert.equal(requestHeaders['x-marrow-mcp-version'], '3.9.74');
     assert.equal(result.first_value_signal.active, true);
     assert.match(result.first_value_signal.headline, /Marrow active/);

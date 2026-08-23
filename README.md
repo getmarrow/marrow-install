@@ -93,7 +93,7 @@ Persistent controller lifecycle is currently Linux-only. On macOS or Windows, ac
 
 ## What's New in v0.1.49
 
-v0.1.49 pins MCP `3.9.74` and SDK `3.7.61`. Install and repair now resolve one stable non-secret agent identity before writing configuration, then use that exact identity across generated MCP config, the owned-process SDK preload, doctor/self-test, and the local controller. Managed MCP config no longer stores an API key or shell-style credential placeholder; the owning harness inherits the key from trusted environment or secret-manager state.
+v0.1.49 pins MCP `3.9.74` and SDK `3.7.62`. Install and repair now resolve one stable non-secret agent identity before writing configuration, then use that exact identity across generated MCP config, the owned-process SDK preload, doctor/self-test, and the local controller. Managed MCP config no longer stores an API key or shell-style credential placeholder; the owning harness inherits the key from trusted environment or secret-manager state.
 
 The integration boundary is explicit: native Claude hooks are installed only where supported and remain cooperative/client-reported until authoritative server receipts exist; MCP tools are on demand; Codex, Grok, Gemini, and similar CLIs use the governed wrapper for consequential control; owned Node processes use the SDK passive runtime while installed; and custom hosts require a bounded event adapter. Exact package SHA/integrity can prove artifact provenance, not runtime coverage. Activation-profile delivery is authenticated `client_self_reported` telemetry with `certified_coverage: false`; it acknowledges delivery but cannot attest that a hook, wrapper, or adapter ran.
 

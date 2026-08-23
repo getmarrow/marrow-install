@@ -20,17 +20,17 @@ const {
 
 const NATIVE_HOOK_MATCHER = 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*';
 const MCP_ACTION_RESULT_HOOK_COMMAND = 'npx -y --package=@getmarrow/mcp@3.9.74 marrow-mcp hook';
-const SDK_INTEGRITY = 'sha512-1dXf/Px4mMN4lOehrRkBOF/dC6N9kjQ5R4eb8ohAACx5CvLTS32zSTelfMNjnRcdOknSKMjLnbh7aGFhulVo/Q==';
+const SDK_INTEGRITY = 'sha512-n1i6Be09TpAQ9BPNRKY7aCvA2iSUPpJfw8djw2MELwpNbBCtKiZ29Jji77BK/6EFLUpSIcTW/Gmdf/ccf0JRYQ==';
 
-function writeSdkLock(root, declaredSpec = '^3.7.61') {
+function writeSdkLock(root, declaredSpec = '^3.7.62') {
   fs.writeFileSync(path.join(root, 'package-lock.json'), JSON.stringify({
     name: 'fixture',
     lockfileVersion: 3,
     packages: {
       '': { dependencies: { '@getmarrow/sdk': declaredSpec } },
       'node_modules/@getmarrow/sdk': {
-        version: '3.7.61',
-        resolved: 'https://registry.npmjs.org/@getmarrow/sdk/-/sdk-3.7.61.tgz',
+        version: '3.7.62',
+        resolved: 'https://registry.npmjs.org/@getmarrow/sdk/-/sdk-3.7.62.tgz',
         integrity: SDK_INTEGRITY,
       },
     },
@@ -365,10 +365,10 @@ test('custom SDK activation requires both dependency and exact generated runtime
     assert.equal(profile.complete, false);
     assert.match(profile.exact_fix, /npm install @getmarrow\/sdk/);
 
-    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ dependencies: { '@getmarrow/sdk': '^3.7.61' } }));
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ dependencies: { '@getmarrow/sdk': '^3.7.62' } }));
     const moduleDir = path.join(root, 'node_modules', '@getmarrow', 'sdk');
     fs.mkdirSync(moduleDir, { recursive: true });
-    fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({ name: '@getmarrow/sdk', version: '3.7.61' }));
+    fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({ name: '@getmarrow/sdk', version: '3.7.62' }));
     writeSdkLock(root);
     detection = detectEnvironment(root, { ...process.env, HOME: root });
     plan = buildPlan(detection, { mode: 'sdk' });
@@ -385,13 +385,13 @@ test('custom SDK activation rejects npm aliases even when version and installed 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-sdk-alias-'));
   try {
     fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({
-      dependencies: { '@getmarrow/sdk': 'npm:untrusted-sdk@3.7.61' },
+      dependencies: { '@getmarrow/sdk': 'npm:untrusted-sdk@3.7.62' },
     }));
     const moduleDir = path.join(root, 'node_modules', '@getmarrow', 'sdk');
     fs.mkdirSync(moduleDir, { recursive: true });
     fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({
       name: '@getmarrow/sdk',
-      version: '3.7.61',
+      version: '3.7.62',
     }));
 
     const detection = detectEnvironment(root, { ...process.env, HOME: root });
@@ -414,15 +414,15 @@ test('custom SDK activation rejects override impersonation despite forged instal
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-sdk-override-'));
   try {
     fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({
-      dependencies: { '@getmarrow/sdk': '^3.7.61' },
-      overrides: { '@getmarrow/sdk': 'npm:untrusted-sdk@3.7.61' },
+      dependencies: { '@getmarrow/sdk': '^3.7.62' },
+      overrides: { '@getmarrow/sdk': 'npm:untrusted-sdk@3.7.62' },
     }));
     writeSdkLock(root);
     const moduleDir = path.join(root, 'node_modules', '@getmarrow', 'sdk');
     fs.mkdirSync(moduleDir, { recursive: true });
     fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({
       name: '@getmarrow/sdk',
-      version: '3.7.61',
+      version: '3.7.62',
     }));
 
     const detection = detectEnvironment(root, { ...process.env, HOME: root });
