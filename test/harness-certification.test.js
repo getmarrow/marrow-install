@@ -120,6 +120,7 @@ test('default harness matrix lists every advertised client without claiming nati
     assert.ok(matrix.length >= 16);
     assert.ok(matrix.every((entry) => entry.default_install.mcp === true));
     assert.ok(matrix.every((entry) => entry.default_install.sdk_passive_runtime === true));
+    assert.ok(matrix.every((entry) => entry.verified_passive === false));
     const claude = matrix.find((entry) => entry.client === 'claude-code');
     const hermes = matrix.find((entry) => entry.client === 'hermes');
     assert.equal(claude.default_install.native_hooks, false);
@@ -129,7 +130,7 @@ test('default harness matrix lists every advertised client without claiming nati
   }
 });
 
-test('capability registry certifies every advertised harness without overstating automatic coverage', () => {
+test('capability registry describes every advertised harness without overstating automatic coverage', () => {
   const clients = new Set(HARNESS_CAPABILITY_REGISTRY.map((entry) => entry.client));
   for (const client of ['claude-code', 'cursor', 'composer', 'cline', 'codex', 'opencode', 'hermes', 'openclaw', 'gemini', 'grok', 'deepseek', 'qwen', 'kimi', 'minimax', 'glm', 'custom']) {
     assert.ok(clients.has(client), `missing capability contract for ${client}`);
@@ -145,7 +146,7 @@ test('capability registry certifies every advertised harness without overstating
   }
 });
 
-test('Claude native-hook activation certifies pre-action, result, and session-end coverage', () => {
+test('Claude native-hook configuration records local completeness without proving runtime coverage', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-cert-'));
   try {
     fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
@@ -158,6 +159,9 @@ test('Claude native-hook activation certifies pre-action, result, and session-en
     assert.equal(profile.adapter_version, '3.9.74');
     assert.deepEqual(profile.expected_hooks, ['prompt', 'pre_action', 'action_result', 'session_end']);
     assert.deepEqual(profile.observed_hooks.sort(), ['action_result', 'pre_action', 'prompt', 'session_end'].sort());
+    assert.equal(profile.evidence_authority, 'client_self_reported');
+    assert.equal(profile.coverage_verified, false);
+    assert.equal(profile.configuration_complete, true);
     assert.equal(profile.complete, true);
     assert.match(profile.config_fingerprint, /^[a-f0-9]{64}$/);
     const settings = fs.readFileSync(path.join(root, '.claude', 'settings.json'), 'utf8');

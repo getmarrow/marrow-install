@@ -340,7 +340,7 @@ Options:
   --dry-run          Print planned changes without writing
   --doctor           Check install health without writing
   --repair           Write missing hooks/config, then run self-test and status check
-  update             Same as --repair: refresh certified MCP/SDK/install pins after owner approval
+  update             Same as --repair: refresh exact MCP/SDK/install package pins after owner approval
   --yes, -y          Write detected config files
   --mode <mode>      auto, mcp, sdk, both, or md
   --key <key>        Marrow API key for self-test. Prefer MARROW_API_KEY because CLI args can appear in process listings.
@@ -948,6 +948,9 @@ function activationProfile(detection, plan, changes, client) {
     config_fingerprint: configFingerprint,
     expected_hooks: expectedHooks,
     observed_hooks: observedHooks,
+    evidence_authority: 'client_self_reported',
+    coverage_verified: false,
+    configuration_complete: complete,
     complete,
     exact_fix: exactFix,
   };
@@ -1085,7 +1088,8 @@ function defaultHarnessInstallMatrix(detection = detectEnvironment(process.cwd()
         native_hooks: entry.capability_level === 'native_hooks' && Boolean(detection.claudeCode),
         governed_wrapper: entry.capability_level === 'governed_wrapper',
       },
-      verified_passive: detected && entry.automatic.length > 0,
+      configured_locally: detected && entry.automatic.length > 0,
+      verified_passive: false,
       unsupported_claim: entry.capability_level === 'event_contract'
         ? 'Needs a bounded event adapter. MCP tools remain on demand.'
         : null,
@@ -1842,7 +1846,10 @@ async function install(options) {
       .filter((change) => change.changed && change.applied && /hook|runtime|rule|instruction|config/i.test(change.label))
       .map((change) => change.label)
       .slice(0, 20),
-    capture_verified: changes.every((change) => change.applied || change.already_present),
+    capture_verified: false,
+    configuration_complete: changes.every((change) => change.applied || change.already_present),
+    evidence_authority: 'client_self_reported',
+    coverage_verified: false,
     adapter_version: profile.adapter_version,
     capability_level: profile.capability_level,
     config_fingerprint: profile.config_fingerprint,
