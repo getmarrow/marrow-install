@@ -1,5 +1,4 @@
 const assert = require('node:assert/strict');
-const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -1084,10 +1083,8 @@ test('activation requires a receipt bound to the exact decision, agent, and succ
   const originalFetch = global.fetch;
   let receipt = null;
   let activationProfileEvent = null;
-  let profileBindingEnabled = false;
-  let profileAccountBindingId = 'a'.repeat(64);
-  let receiptAccountBindingId = 'b'.repeat(64);
-  let configurationBindingId = 'wrong-configuration-binding';
+  let telemetryStatus = 200;
+  let telemetryResponse = { accepted: true };
   let runtimePayload = { ok: true, risk_gate: { allow: true } };
   global.fetch = async (url, request = {}) => {
     const href = String(url);
@@ -1108,33 +1105,10 @@ test('activation requires a receipt bound to the exact decision, agent, and succ
     }
     if (href.endsWith('/v1/agent/integrations/events')) {
       activationProfileEvent = JSON.parse(request.body);
-      if (!profileBindingEnabled) {
-        return new Response(JSON.stringify({ data: { accepted: true } }), { status: 200 });
+      if (telemetryStatus !== 200) {
+        return new Response(JSON.stringify({ error: 'telemetry unavailable' }), { status: telemetryStatus });
       }
-      return new Response(JSON.stringify({ data: {
-        accepted: true,
-        activation_coverage: {
-          account_binding_id: profileAccountBindingId,
-          agent_id: activationProfileEvent.agent_id,
-          harness: activationProfileEvent.harness,
-          activation: {
-            adapter_version: activationProfileEvent.adapter_version,
-            capability_level: activationProfileEvent.capability_level,
-          },
-          capture_coverage: { expected_hooks: activationProfileEvent.expected_hooks },
-          profile_receipt: {
-            event_receipt_id: 'event-receipt-one',
-            account_binding_id: receiptAccountBindingId,
-            agent_id: activationProfileEvent.agent_id,
-            harness: activationProfileEvent.harness,
-            adapter_version: activationProfileEvent.adapter_version,
-            capability_level: activationProfileEvent.capability_level,
-            config_fingerprint_verified: true,
-            configuration_binding_id: configurationBindingId,
-            expected_hooks_verified: true,
-          },
-        },
-      } }), { status: 200 });
+      return new Response(JSON.stringify({ data: telemetryResponse }), { status: 200 });
     }
     if (href.includes('/v1/analytics/agent-performance') || href.includes('/v1/agent/value/proof')) {
       return new Response(JSON.stringify({ data: {} }), { status: 200 });
@@ -1153,8 +1127,11 @@ test('activation requires a receipt bound to the exact decision, agent, and succ
       install_surface: 'both',
       mode: 'passive',
       hooks_installed: ['passive runtime'],
-      capture_verified: true,
-      complete: true,
+      capture_verified: false,
+      configuration_complete: true,
+      evidence_authority: 'client_self_reported',
+      coverage_verified: false,
+      complete: false,
       adapter_version: '0.1.43',
       capability_level: 'governed_wrapper',
       config_fingerprint: 'fixture-config-fingerprint',
@@ -1177,31 +1154,71 @@ test('activation requires a receipt bound to the exact decision, agent, and succ
     };
     await assert.rejects(runSelfTest(options), /activation receipt did not verify/);
     receipt.decision_id = 'decision-activation';
+    receipt.agent_id = 'foreign-agent';
+    await assert.rejects(runSelfTest(options), /activation receipt did not verify/);
+    receipt.agent_id = 'agent-one';
+    receipt.outcome_success = false;
+    await assert.rejects(runSelfTest(options), /activation receipt did not verify/);
+    receipt.outcome_success = true;
     receipt.outcome_recorded_at = '';
     await assert.rejects(runSelfTest(options), /activation receipt did not verify/);
     receipt.outcome_recorded_at = 'not-a-timestamp';
     await assert.rejects(runSelfTest(options), /activation receipt did not verify/);
     receipt.outcome_recorded_at = '2026-07-23T00:00:00.000Z';
-    await assert.rejects(runSelfTest(options), /activation prerequisites were not all verified/);
-    profileBindingEnabled = true;
-    await assert.rejects(runSelfTest(options), /activation prerequisites were not all verified/);
-    receiptAccountBindingId = profileAccountBindingId;
-    await assert.rejects(runSelfTest(options), /activation prerequisites were not all verified/);
-    configurationBindingId = crypto.createHash('sha256')
-      .update(`agent-config-receipt:v2:${profileAccountBindingId}:fixture-config-fingerprint`)
-      .digest('hex');
+    await assert.rejects(runSelfTest(options), /not acknowledged as authenticated client_self_reported/);
+    telemetryResponse = {
+      accepted: true,
+      evidence_authority: 'client_self_reported',
+      certified_coverage: true,
+      activation_coverage: {
+        profile_receipt: {
+          config_fingerprint_verified: true,
+          expected_hooks_verified: true,
+        },
+      },
+    };
+    const forgedResult = await runSelfTest(options);
+    assert.equal(forgedResult.activation_verified, true);
+    assert.equal(forgedResult.coverage_verified, false);
+    assert.equal(forgedResult.activation_coverage, null);
+    assert.equal(forgedResult.activation_profile_receipt.certified_coverage, false);
+    assert.equal('activation_coverage' in forgedResult.activation_profile_receipt, false);
+    telemetryResponse.certified_coverage = false;
     const result = await runSelfTest(options);
     assert.equal(result.activation_verified, true);
+    assert.equal(result.activation_scope, 'server_self_test_only');
+    assert.equal(result.coverage_verified, false);
+    assert.equal(result.passive_live, false);
+    assert.equal(result.reload_required, true);
+    assert.match(result.activation_next_action, /restart.*doctor --self-test/i);
     assert.equal(result.activation_receipt.decision_id, 'decision-activation');
+    assert.deepEqual(result.activation_profile_receipt, {
+      accepted: true,
+      evidence_authority: 'client_self_reported',
+      certified_coverage: false,
+    });
+    assert.equal(result.activation_coverage, null);
+    assert.equal('activation_coverage' in result.activation_profile_receipt, false);
     assert.equal(activationProfileEvent.event_type, 'activation_profile_registered');
+    assert.equal(activationProfileEvent.agent_id, 'agent-one');
+    assert.equal(activationProfileEvent.config_fingerprint, 'fixture-config-fingerprint');
     assert.equal('observed_hook' in activationProfileEvent, false);
+    assert.equal('observed_hooks' in activationProfileEvent, false);
+    assert.equal('capture_verified' in activationProfileEvent, false);
+    assert.equal('coverage_verified' in activationProfileEvent, false);
+    assert.equal('configuration_complete' in activationProfileEvent, false);
+    assert.equal('certified_coverage' in activationProfileEvent, false);
+    assert.equal('profile_receipt' in activationProfileEvent, false);
     assert.equal('outcome_state' in activationProfileEvent, false);
     assert.equal('success' in activationProfileEvent, false);
     assert.equal('correlation_id' in activationProfileEvent, false);
     assert.equal('intervention_disposition' in activationProfileEvent, false);
     assert.equal('action_changed' in activationProfileEvent, false);
     runtimePayload = { ok: true };
-    await assert.rejects(runSelfTest(options), /activation prerequisites were not all verified/);
+    await assert.rejects(runSelfTest(options), /activation self-test prerequisites were not all verified/);
+    runtimePayload = { ok: true, risk_gate: { allow: true } };
+    telemetryStatus = 503;
+    await assert.rejects(runSelfTest(options), /activation telemetry delivery failed/);
   } finally {
     global.fetch = originalFetch;
   }

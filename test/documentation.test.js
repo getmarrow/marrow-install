@@ -43,6 +43,12 @@ test('npm entry point matches the product positioning contract', () => {
   assert.notEqual(firstRunHeading, -1, 'README must contain the first-run activation section');
   assert.notEqual(trustHeading, -1, 'README must contain the trust and data-boundaries section');
   assert.ok(firstRunHeading < trustHeading, 'first-run activation must precede trust boundaries');
+  assert.match(readme, /activation_scope: server_self_test_only/);
+  assert.match(readme, /coverage_verified: false/);
+  assert.match(readme, /passive_live: false/);
+  assert.match(readme, /authenticated `client_self_reported` telemetry with `certified_coverage: false`/);
+  assert.match(readme, /Work that bypasses those paths is not observed/);
+  assert.doesNotMatch(readme, /protected proof enforced/);
 });
 
 test('fresh-install smoke verifies the current structured self-test contract', () => {
