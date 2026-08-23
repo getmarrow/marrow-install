@@ -91,9 +91,13 @@ npx @getmarrow/install controller stop
 
 Persistent controller lifecycle is currently Linux-only. On macOS or Windows, activation still installs and verifies the supported hooks without starting or signaling a background process; run `npx @getmarrow/install sidecar` under an owner-managed service and pass `--no-controller`. The controller does not silently upgrade packages, change governance policy, rotate credentials, or modify unrelated project configuration.
 
-## What's New in v0.1.48
+## What's New in v0.1.49
 
-v0.1.48 pins MCP `3.9.72` and SDK `3.7.61`. The SDK keeps passive capture enabled without intercepting its own Marrow control-plane requests, while every generated MCP setup and repair command now uses the supported MCP release.
+v0.1.49 pins MCP `3.9.74` and SDK `3.7.61`. Install and repair now resolve one stable non-secret agent identity before writing configuration, then use that exact identity across generated MCP config, the owned-process SDK preload, doctor/self-test, and the local controller. Managed MCP config no longer stores an API key or shell-style credential placeholder; the owning harness inherits the key from trusted environment or secret-manager state.
+
+## Previous: v0.1.48
+
+v0.1.48 pinned MCP `3.9.72` and SDK `3.7.61`. The SDK kept passive capture enabled without intercepting its own Marrow control-plane requests, while every generated MCP setup and repair command used the supported MCP release.
 
 ## Previous: v0.1.47
 
