@@ -384,6 +384,8 @@ See the [Trust Center](https://getmarrow.ai/trust/) for implemented controls, cu
 | `MARROW_BASE_URL` | No | API base override |
 | `MARROW_FLEET_AGENT_ID` | No | Default agent identity |
 
+Install and repair resolve one stable, non-secret agent identity before writing configuration. The managed MCP entry and owned-process SDK preload use that same identity and API base as doctor/self-test. The installer never copies `MARROW_API_KEY` into MCP configuration or generated runtime source; the owning harness must inherit the key from trusted environment or secret-manager configuration. Pass `--agent-id <id>` when an operator-approved identity must override the stable generated value.
+
 Use the host's secret manager first. The shared resolver can also check documented Marrow and project env files for owned development environments. Run `doctor` when a key or hook cannot be found.
 
 ## Documentation
