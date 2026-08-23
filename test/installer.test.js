@@ -26,7 +26,7 @@ test('release-candidate adapter provenance matches the exact MCP source and cert
     mcp: {
       package: '@getmarrow/mcp',
       version: '3.9.74',
-      source_sha: '24a78df7fcc4cd33a79a25f571cd41782d082516',
+      source_sha: 'a34a87ee1d6ea16d8ebcc26aa0e66bf7dcb5e23f',
       integrity: null,
       integrity_state: 'registry_unavailable_until_publish',
     },
@@ -36,6 +36,7 @@ test('release-candidate adapter provenance matches the exact MCP source and cert
       integrity: 'sha512-n1i6Be09TpAQ9BPNRKY7aCvA2iSUPpJfw8djw2MELwpNbBCtKiZ29Jji77BK/6EFLUpSIcTW/Gmdf/ccf0JRYQ==',
     },
   });
+  assert.notEqual(ADAPTER_PROVENANCE.mcp.source_sha, '24a78df7fcc4cd33a79a25f571cd41782d082516');
 });
 
 test('doctor identifies stale and mixed MCP processes without exposing command lines', () => {
