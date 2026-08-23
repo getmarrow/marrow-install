@@ -1356,6 +1356,7 @@ async function runSelfTest(options) {
       action: 'Marrow passive install self-test: verify one-call agent runtime and outcome closure',
       type: 'process',
       role: 'general',
+      response_mode: 'expanded',
       surfaces: ['workspace'],
       proof: {
         checks: ['installer self-test'],
@@ -1465,14 +1466,19 @@ async function runSelfTest(options) {
       evidence_authority: 'client_self_reported',
       certified_coverage: false,
     };
-    activationVerified = Boolean(
-      firstValue.active
-      && runtimeGateVerified(runtime)
-      && (status.enabled ?? status.ok)
-      && telemetryAccepted,
-    );
+    const activationPrerequisites = {
+      first_value_active: firstValue?.active === true,
+      runtime_gate_verified: runtimeGateVerified(runtime),
+      status_enabled: (status.enabled ?? status.ok) === true,
+      telemetry_accepted: telemetryAccepted,
+    };
+    activationVerified = Object.values(activationPrerequisites).every(Boolean);
     if (!activationVerified) {
-      throw new Error('activation self-test prerequisites were not all verified by the server');
+      const missing = Object.entries(activationPrerequisites)
+        .filter(([, verified]) => !verified)
+        .map(([name]) => name)
+        .join(',');
+      throw new Error(`activation self-test prerequisites were not all verified by the server (${missing})`);
     }
   }
   return {
