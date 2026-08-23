@@ -9,9 +9,8 @@ const { firstCapturePath, harnessReloadPlan } = require('./first-hour');
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MARROW_BLOCK_START = '<!-- marrow:passive-start -->';
 const MARROW_BLOCK_END = '<!-- marrow:passive-end -->';
-const MCP_ADAPTER_VERSION = '3.9.72';
-const MCP_ADAPTER_SOURCE_SHA = '5203f96388849dfda12cb05d476b36b542639e16';
-const MCP_ADAPTER_INTEGRITY = 'sha512-FTs9ORn4WVwDIeJEjovriDK4X8WZVSGbbe8iz6GGYFy62jBRJOXOZ4aW8B4Ll+10i71o8RcEBJ0Px38Pc6v/qw==';
+const MCP_ADAPTER_VERSION = '3.9.74';
+const MCP_ADAPTER_SOURCE_SHA = '24a78df7fcc4cd33a79a25f571cd41782d082516';
 const SDK_ADAPTER_VERSION = '3.7.61';
 const SDK_ADAPTER_INTEGRITY = 'sha512-1dXf/Px4mMN4lOehrRkBOF/dC6N9kjQ5R4eb8ohAACx5CvLTS32zSTelfMNjnRcdOknSKMjLnbh7aGFhulVo/Q==';
 const SDK_ADAPTER_TARBALL = `https://registry.npmjs.org/@getmarrow/sdk/-/sdk-${SDK_ADAPTER_VERSION}.tgz`;
@@ -21,7 +20,8 @@ const ADAPTER_PROVENANCE = Object.freeze({
     package: '@getmarrow/mcp',
     version: MCP_ADAPTER_VERSION,
     source_sha: MCP_ADAPTER_SOURCE_SHA,
-    integrity: MCP_ADAPTER_INTEGRITY,
+    integrity: null,
+    integrity_state: 'registry_unavailable_until_publish',
   }),
   sdk: Object.freeze({
     package: '@getmarrow/sdk',
