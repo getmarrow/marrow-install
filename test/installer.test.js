@@ -1087,6 +1087,7 @@ test('activation requires a receipt bound to the exact decision, agent, and succ
   let telemetryStatus = 200;
   let telemetryResponse = { accepted: true };
   let runtimePayload = { ok: true, risk_gate: { allow: true } };
+  let runtimeRequestBody = null;
   global.fetch = async (url, request = {}) => {
     const href = String(url);
     if (href.endsWith('/v1/agent/think')) {
@@ -1099,6 +1100,7 @@ test('activation requires a receipt bound to the exact decision, agent, and succ
       return new Response(JSON.stringify({ data: { ok: true, enabled: true, health: 'healthy' } }), { status: 200 });
     }
     if (href.endsWith('/v1/agent/runtime')) {
+      runtimeRequestBody = JSON.parse(request.body);
       return new Response(JSON.stringify({ data: runtimePayload }), { status: 200 });
     }
     if (href.endsWith('/v1/agent/first-value')) {
@@ -1179,6 +1181,7 @@ test('activation requires a receipt bound to the exact decision, agent, and succ
       },
     };
     const forgedResult = await runSelfTest(options);
+    assert.equal(runtimeRequestBody.response_mode, 'expanded');
     assert.equal(forgedResult.activation_verified, true);
     assert.equal(forgedResult.coverage_verified, false);
     assert.equal(forgedResult.activation_coverage, null);
@@ -1216,7 +1219,7 @@ test('activation requires a receipt bound to the exact decision, agent, and succ
     assert.equal('intervention_disposition' in activationProfileEvent, false);
     assert.equal('action_changed' in activationProfileEvent, false);
     runtimePayload = { ok: true };
-    await assert.rejects(runSelfTest(options), /activation self-test prerequisites were not all verified/);
+    await assert.rejects(runSelfTest(options), /runtime_gate_verified/);
     runtimePayload = { ok: true, risk_gate: { allow: true } };
     telemetryStatus = 503;
     await assert.rejects(runSelfTest(options), /activation telemetry delivery failed/);
