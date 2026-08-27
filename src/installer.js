@@ -653,7 +653,7 @@ if (apiKey && !globalThis.__MARROW_PASSIVE_RUNTIME__) {
     const { MarrowClient } = await import('@getmarrow/sdk');
     const marrow = new MarrowClient(apiKey, {
       baseUrl: installedBaseUrl,
-      agentId: installedAgentId || process.env.MARROW_FLEET_AGENT_ID || process.env.MARROW_AGENT_ID,
+      agentId: process.env.MARROW_FLEET_AGENT_ID || process.env.MARROW_AGENT_ID || installedAgentId,
       sessionId: process.env.MARROW_SESSION_ID,
       mode: process.env.MARROW_ENFORCEMENT_MODE || 'auto',
     });
