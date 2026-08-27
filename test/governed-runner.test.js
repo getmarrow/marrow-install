@@ -651,8 +651,8 @@ test('governed runner attaches stable client attribution from env and CLI', () =
     assert.equal(sourceClient(envParsed.options.client), 'qwen');
     assert.equal(headers(envParsed.options)['X-Marrow-Client'], 'qwen');
     assert.equal(headers(envParsed.options)['X-Marrow-Package'], '@getmarrow/install');
-    assert.equal(headers(envParsed.options)['X-Marrow-Package-Version'], '0.1.50');
-    assert.equal(headers(envParsed.options)['X-Marrow-Install-Version'], '0.1.50');
+    assert.equal(headers(envParsed.options)['X-Marrow-Package-Version'], '0.1.51');
+    assert.equal(headers(envParsed.options)['X-Marrow-Install-Version'], '0.1.51');
     assert.equal(headers(envParsed.options)['X-Marrow-SDK-Version'], '3.7.62');
     assert.equal(headers(envParsed.options)['X-Marrow-MCP-Version'], '3.9.74');
 
