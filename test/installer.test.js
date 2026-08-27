@@ -443,7 +443,7 @@ test('install --yes writes passive runtime and instructions idempotently', async
   assert.ok(settings.hooks.UserPromptSubmit);
 });
 
-test('installed MCP and SDK runtime use one stable identity without persisting the API key', async () => {
+test('generated passive runtime prefers current process identity and falls back to installed identity', async () => {
   const dir = tempDir();
   const sdkDir = path.join(dir, 'node_modules', '@getmarrow', 'sdk');
   fs.writeFileSync(path.join(dir, 'package.json'), '{}');
@@ -539,16 +539,26 @@ test('installed MCP and SDK runtime use one stable identity without persisting t
   try {
     process.env.MARROW_API_KEY = 'fixture-runtime-credential';
     process.env.MARROW_BASE_URL = 'https://wrong-runtime.example.test';
-    process.env.MARROW_FLEET_AGENT_ID = 'wrong-runtime-agent';
+    const runRuntime = async (caseName) => {
+      delete globalThis.__MARROW_PASSIVE_RUNTIME__;
+      delete globalThis.__MARROW_INSTALL_IDENTITY_CAPTURE__;
+      await import(`${pathToFileURL(runtimePath).href}?case=${caseName}-${Date.now()}`);
+      return globalThis.__MARROW_INSTALL_IDENTITY_CAPTURE__.options;
+    };
+
+    process.env.MARROW_FLEET_AGENT_ID = 'codex-bob-current';
+    process.env.MARROW_AGENT_ID = 'codex-bob-agent-current';
+    const fleetIdentity = await runRuntime('fleet-identity');
+    assert.equal(fleetIdentity.agentId, 'codex-bob-current');
+    assert.equal(fleetIdentity.baseUrl, 'https://api.identity.example.test');
+
+    delete process.env.MARROW_FLEET_AGENT_ID;
+    const agentIdentity = await runRuntime('agent-identity');
+    assert.equal(agentIdentity.agentId, 'codex-bob-agent-current');
+
     delete process.env.MARROW_AGENT_ID;
-    delete globalThis.__MARROW_PASSIVE_RUNTIME__;
-    delete globalThis.__MARROW_INSTALL_IDENTITY_CAPTURE__;
-
-    await import(`${pathToFileURL(runtimePath).href}?case=installed-identity-${Date.now()}`);
-
-    assert.equal(globalThis.__MARROW_INSTALL_IDENTITY_CAPTURE__.options.agentId, generatedAgentId);
-    assert.equal(globalThis.__MARROW_INSTALL_IDENTITY_CAPTURE__.options.baseUrl, 'https://api.identity.example.test');
-    assert.equal(mcp.mcpServers.marrow.env.MARROW_FLEET_AGENT_ID, globalThis.__MARROW_INSTALL_IDENTITY_CAPTURE__.options.agentId);
+    const installedIdentity = await runRuntime('installed-identity');
+    assert.equal(installedIdentity.agentId, generatedAgentId);
   } finally {
     delete globalThis.__MARROW_PASSIVE_RUNTIME__;
     delete globalThis.__MARROW_INSTALL_IDENTITY_CAPTURE__;
