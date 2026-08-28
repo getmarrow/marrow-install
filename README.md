@@ -53,7 +53,7 @@ Verify current claims through the [public evidence manifest](https://getmarrow.a
 ## Install
 
 ```bash
-npx @getmarrow/install activate
+npx @getmarrow/install
 ```
 
 Required secret:
@@ -61,6 +61,8 @@ Required secret:
 ```bash
 export MARROW_API_KEY=mrw_live_...
 ```
+
+The bare command is the default-on path: it detects and byte-idempotently writes managed configuration, runs the authenticated activation self-test, and starts the supported persistent controller. The key stays process-only and is never written to generated configuration or controller state. Use `--dry-run` for a non-writing preview, `doctor` for a read-only health check, or `--no-controller` to install and self-test without starting the controller. The explicit `activate` command remains equivalent and supported.
 
 ## Keeping Marrow Current
 

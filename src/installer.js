@@ -269,41 +269,69 @@ function parseArgs(argv) {
     activate: false,
     controller: true,
   };
+  let explicitOperation = false;
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === 'activate' || arg === '--activate') {
+      explicitOperation = true;
       options.activate = true;
       options.yes = true;
       options.selfTest = true;
     }
-    else if (arg === '--yes' || arg === '-y') options.yes = true;
+    else if (arg === '--yes' || arg === '-y') {
+      explicitOperation = true;
+      options.yes = true;
+    }
     else if (arg === '--repair' || arg === 'repair' || arg === 'update' || arg === '--update') {
+      explicitOperation = true;
       options.repair = true;
       options.yes = true;
       options.update = true;
     }
-    else if (arg === '--dry-run') options.dryRun = true;
-    else if (arg === '--doctor' || arg === 'doctor' || arg === 'check') options.doctor = true;
+    else if (arg === '--dry-run') {
+      explicitOperation = true;
+      options.dryRun = true;
+    }
+    else if (arg === '--doctor' || arg === 'doctor' || arg === 'check') {
+      explicitOperation = true;
+      options.doctor = true;
+    }
     else if (arg === '--json') options.json = true;
     else if (arg === '--no-self-test') {
+      explicitOperation = true;
       options.selfTest = false;
       options.selfTestExplicitlyDisabled = true;
     }
     else if (arg === '--no-controller') options.controller = false;
     else if (arg === '--self-test') options.selfTest = true;
     else if (arg === '--cwd') options.cwd = path.resolve(argv[++i] || options.cwd);
-    else if (arg === '--mode') options.mode = argv[++i] || options.mode;
+    else if (arg === '--mode') {
+      explicitOperation = true;
+      options.mode = argv[++i] || options.mode;
+    }
     else if (arg === '--key') {
       options.apiKey = argv[++i] || options.apiKey;
       options.keyFromArg = true;
     }
     else if (arg === '--base-url') options.baseUrl = argv[++i] || options.baseUrl;
     else if (arg === '--agent-id') options.agentId = argv[++i] || options.agentId;
-    else if (arg === '--mcp') options.mode = 'mcp';
-    else if (arg === '--sdk') options.mode = 'sdk';
-    else if (arg === '--md' || arg === '--instructions') options.mode = 'md';
-    else if (arg === '--both') options.mode = 'both';
+    else if (arg === '--mcp') {
+      explicitOperation = true;
+      options.mode = 'mcp';
+    }
+    else if (arg === '--sdk') {
+      explicitOperation = true;
+      options.mode = 'sdk';
+    }
+    else if (arg === '--md' || arg === '--instructions') {
+      explicitOperation = true;
+      options.mode = 'md';
+    }
+    else if (arg === '--both') {
+      explicitOperation = true;
+      options.mode = 'both';
+    }
     else if (arg === '--help' || arg === '-h') {
       options.help = true;
     } else {
@@ -314,6 +342,12 @@ function parseArgs(argv) {
   if (!['auto', 'mcp', 'sdk', 'both', 'md'].includes(options.mode)) {
     throw new Error('--mode must be one of auto, mcp, sdk, both, md');
   }
+  if (!explicitOperation) {
+    options.activate = true;
+    options.yes = true;
+    options.selfTest = true;
+  }
+  if (options.dryRun) options.selfTest = false;
   if (options.activate && options.selfTestExplicitlyDisabled) {
     throw new Error('activate cannot be combined with --no-self-test because server verification is required');
   }
@@ -326,6 +360,7 @@ function parseArgs(argv) {
 
 function usage() {
   return `Usage:
+  npx @getmarrow/install
   npx @getmarrow/install --dry-run
   npx @getmarrow/install activate
   npx @getmarrow/install --yes
@@ -336,6 +371,7 @@ function usage() {
   npx @getmarrow/install --sdk --yes
 
 Options:
+  (no command)       Detect, install, self-test, and start the supported persistent controller
   activate           Detect, install, self-test, and return a server-confirmed activation receipt
   --dry-run          Print planned changes without writing
   --doctor           Check install health without writing
@@ -1835,6 +1871,9 @@ async function install(options) {
   }
   if (options.activate && options.selfTest === false) {
     throw new Error('activate requires the server self-test');
+  }
+  if (options.activate && !String(options.apiKey || '').trim()) {
+    throw new Error('activation requires MARROW_API_KEY from the process environment or trusted secret storage');
   }
   if (options.repair && options.yes !== true && !options.dryRun && !options.doctor) {
     throw new Error('repair requires explicit write authorization (--yes)');
