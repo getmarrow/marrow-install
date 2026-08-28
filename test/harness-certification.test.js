@@ -15,6 +15,7 @@ const {
   codexNativeHookFingerprint,
   cursorNativeHookFingerprint,
   clineNativeHookFingerprint,
+  windsurfNativeHookFingerprint,
   defaultHarnessInstallMatrix,
   detectEnvironment,
   firstCapturePath,
@@ -26,6 +27,11 @@ const NATIVE_HOOK_MATCHER = 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*';
 const CODEX_NATIVE_HOOK_MATCHER = 'Bash|apply_patch|Edit|Write|MultiEdit|mcp__(?!marrow__marrow_).*|functions\\.(?!marrow_).*';
 const CURSOR_NATIVE_HOOK_MATCHER = 'Shell|Write|Delete|Task|MCP:(?!marrow(?:_.*|:marrow_.*)$).*';
 const MCP_ACTION_RESULT_HOOK_COMMAND = 'npx -y --package=@getmarrow/mcp@3.9.75 marrow-mcp hook';
+const WINDSURF_EVENTS = [
+  'pre_write_code', 'pre_run_command', 'pre_mcp_tool_use',
+  'post_write_code', 'post_run_command', 'post_mcp_tool_use',
+  'post_cascade_response',
+];
 const SDK_INTEGRITY = 'sha512-n1i6Be09TpAQ9BPNRKY7aCvA2iSUPpJfw8djw2MELwpNbBCtKiZ29Jji77BK/6EFLUpSIcTW/Gmdf/ccf0JRYQ==';
 
 function writeSdkLock(root, declaredSpec = '^3.7.62') {
@@ -380,6 +386,143 @@ test('Cline hook installation rejects symlinked and out-of-root targets before a
   }
 });
 
+test('Windsurf reconciles exact native hooks, preserves unrelated config, fails closed only before actions, and is byte-idempotent', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-windsurf-'));
+  try {
+    fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
+    fs.mkdirSync(path.join(root, '.windsurf'), { recursive: true });
+    const hooksPath = path.join(root, '.windsurf', 'hooks.json');
+    fs.writeFileSync(hooksPath, JSON.stringify({
+      owner_setting: { retained: true },
+      hooks: {
+        pre_run_command: [
+          { command: 'printf owner-pre', show_output: true, owner: true },
+          { command: 'npx -y --package=@getmarrow/mcp@3.9.74 marrow-mcp windsurf-pre-action-hook', show_output: true },
+        ],
+        post_cascade_response: [{ command: 'printf owner-closeout', owner: true }],
+        owner_event: [{ command: 'printf owner-event' }],
+      },
+    }, null, 2) + '\n');
+    const detection = detectEnvironment(root, { ...process.env, HOME: root });
+    assert.equal(detection.windsurf, true);
+    const plan = buildPlan(detection, { mode: 'mcp' });
+    assert.equal(plan.writes.filter((write) => write.label === 'Windsurf native hooks').length, 1);
+    const changes = applyPlan(plan, { yes: true, dryRun: false, doctor: false });
+    const settings = JSON.parse(fs.readFileSync(hooksPath, 'utf8'));
+    assert.deepEqual(settings.owner_setting, { retained: true });
+    assert.deepEqual(settings.hooks.owner_event, [{ command: 'printf owner-event' }]);
+    assert.equal(settings.hooks.pre_run_command.some((entry) => entry.command === 'printf owner-pre' && entry.owner === true), true);
+    assert.equal(settings.hooks.post_cascade_response.some((entry) => entry.command === 'printf owner-closeout' && entry.owner === true), true);
+    assert.equal(JSON.stringify(settings).includes('@getmarrow/mcp@3.9.74'), false);
+    assert.equal(settings.hooks.post_cascade_response_with_transcript, undefined);
+    assert.equal(settings.hooks.post_run_command_failure, undefined);
+    for (const eventName of WINDSURF_EVENTS) {
+      const marrow = settings.hooks[eventName].filter((entry) => /marrow-mcp windsurf-/.test(entry.command));
+      assert.equal(marrow.length, 1, eventName);
+      assert.equal(marrow[0].show_output, false, eventName);
+      assert.match(marrow[0].command, /@getmarrow\/mcp@3\.9\.75/);
+    }
+
+    const preCommand = settings.hooks.pre_run_command.find((entry) => /windsurf-pre-action-hook/.test(entry.command)).command;
+    const postCommand = settings.hooks.post_run_command.find((entry) => /windsurf-hook/.test(entry.command)).command;
+    const closeoutCommand = settings.hooks.post_cascade_response.find((entry) => /windsurf-session-hook/.test(entry.command)).command;
+    assert.doesNotMatch(JSON.stringify(settings), /MARROW_API_KEY|mrw_/);
+
+    const fakeBin = path.join(root, 'fake-bin');
+    fs.mkdirSync(fakeBin);
+    fs.writeFileSync(path.join(fakeBin, 'npx'), '#!/bin/sh\ncase "${FAKE_NPX_STATUS:-0}" in 0) exit 0 ;; 2) printf "%s\\n" "Marrow blocked this action because required governance approval or proof is unavailable." >&2; exit 2 ;; *) printf "%s\\n" "synthetic-private-launch-error" >&2; exit "$FAKE_NPX_STATUS" ;; esac\n');
+    fs.chmodSync(path.join(fakeBin, 'npx'), 0o755);
+    const commandEnv = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}` };
+    const allowed = spawnSync(preCommand, { shell: true, env: { ...commandEnv, FAKE_NPX_STATUS: '0' }, input: '{}', encoding: 'utf8' });
+    assert.equal(allowed.status, 0, allowed.stderr);
+    assert.equal(allowed.stdout, '');
+    assert.equal(allowed.stderr, '');
+    const denied = spawnSync(preCommand, { shell: true, env: { ...commandEnv, FAKE_NPX_STATUS: '2' }, input: '{}', encoding: 'utf8' });
+    assert.equal(denied.status, 2);
+    assert.equal(denied.stdout, '');
+    assert.equal(denied.stderr, 'Marrow blocked this action because required governance approval or proof is unavailable.\n');
+    const launchFailure = spawnSync(preCommand, { shell: true, env: { ...commandEnv, FAKE_NPX_STATUS: '7' }, input: '{}', encoding: 'utf8' });
+    assert.equal(launchFailure.status, 2);
+    assert.equal(launchFailure.stdout, '');
+    assert.equal(launchFailure.stderr, 'Marrow governance adapter was unavailable; this action is blocked.\n');
+    assert.doesNotMatch(launchFailure.stderr, /synthetic-private-launch-error/);
+    for (const telemetryCommand of [postCommand, closeoutCommand]) {
+      const result = spawnSync(telemetryCommand, { shell: true, env: { ...commandEnv, FAKE_NPX_STATUS: '7' }, input: '{}', encoding: 'utf8' });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout, '');
+      assert.equal(result.stderr, '');
+    }
+
+    const profile = activationProfile(detection, plan, changes, 'windsurf');
+    assert.equal(profile.capability_level, 'native_hooks');
+    assert.deepEqual(profile.expected_hooks, ['pre_action', 'action_result', 'response_closeout']);
+    assert.deepEqual(profile.observed_hooks, ['pre_action', 'action_result', 'response_closeout']);
+    assert.equal(profile.configuration_complete, true);
+    assert.equal(profile.coverage_verified, false);
+    assert.equal(profile.passive_live, false);
+    assert.equal(profile.restricted_mode_disables_hooks, true);
+    assert.equal(profile.restart_required, true);
+    assert.equal(profile.workspace_trust_required, true);
+    assert.equal(profile.mcp_tools, 'on_demand');
+    assert.match(profile.exact_fix, /Restart Windsurf.*Restricted Mode.*MCP tools remain on demand/);
+    assert.equal(profile.config_fingerprint, windsurfNativeHookFingerprint(settings));
+    const matrix = defaultHarnessInstallMatrix(detection).find((entry) => entry.client === 'windsurf');
+    assert.equal(matrix.capability_level, 'native_hooks');
+    assert.equal(matrix.default_install.native_hooks, true);
+    assert.equal(matrix.configured_locally, true);
+    assert.equal(matrix.verified_passive, false);
+    assert.match(matrix.unsupported_claim, /Restricted Mode.*never verifies passive coverage/);
+    const reload = harnessReloadPlan(detection, changes);
+    assert.equal(reload.clients.some((entry) => entry.client === 'windsurf'), true);
+    assert.match(reload.instruction, /Restart Windsurf.*trust.*Restricted Mode/);
+    const capture = firstCapturePath(detection, 'windsurf-agent');
+    assert.equal(capture.client, 'windsurf');
+    assert.equal(capture.capability_level, 'native_hooks');
+    assert.equal(capture.command, null);
+    assert.match(capture.instruction, /pre-action.*success-result.*response-closeout.*MCP tools remain on demand/);
+
+    const first = fs.readFileSync(hooksPath);
+    const secondPlan = buildPlan(detectEnvironment(root, { ...process.env, HOME: root }), { mode: 'mcp' });
+    const secondChanges = applyPlan(secondPlan, { yes: true, dryRun: false, doctor: false });
+    assert.deepEqual(fs.readFileSync(hooksPath), first);
+    assert.equal(secondChanges.find((change) => change.label === 'Windsurf native hooks').already_present, true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Windsurf hook installation rejects invalid JSON, symlink, and out-of-root targets before writes', () => {
+  for (const unsafeKind of ['invalid-json', 'symlink', 'outside']) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-windsurf-unsafe-'));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-windsurf-outside-'));
+    try {
+      fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
+      fs.mkdirSync(path.join(root, '.windsurf'), { recursive: true });
+      const hooksPath = path.join(root, '.windsurf', 'hooks.json');
+      if (unsafeKind === 'invalid-json') fs.writeFileSync(hooksPath, '{broken');
+      if (unsafeKind === 'symlink') {
+        fs.writeFileSync(path.join(outside, 'hooks.json'), '{"owner":true}\n');
+        fs.symlinkSync(path.join(outside, 'hooks.json'), hooksPath);
+      }
+      let detection = detectEnvironment(root, { ...process.env, HOME: root });
+      if (unsafeKind === 'outside') detection.paths.windsurfHooks = path.join(outside, 'hooks.json');
+      const plan = buildPlan(detection, { mode: 'mcp' });
+      assert.throws(
+        () => applyPlan(plan, { yes: true, dryRun: false, doctor: false }),
+        /Unexpected token|Expected property|unsafe managed target|outside project root/,
+      );
+      assert.equal(fs.existsSync(path.join(root, '.mcp.json')), false);
+      assert.equal(fs.existsSync(path.join(root, 'AGENTS.md')), false);
+      if (unsafeKind === 'invalid-json') assert.equal(fs.readFileSync(hooksPath, 'utf8'), '{broken');
+      if (unsafeKind === 'symlink') assert.equal(fs.readFileSync(path.join(outside, 'hooks.json'), 'utf8'), '{"owner":true}\n');
+      if (unsafeKind === 'outside') assert.equal(fs.existsSync(path.join(outside, 'hooks.json')), false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  }
+});
+
 test('default harness matrix lists every advertised client without claiming native hooks everywhere', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-default-matrix-'));
   try {
@@ -401,7 +544,7 @@ test('default harness matrix lists every advertised client without claiming nati
 
 test('capability registry describes every advertised harness without overstating automatic coverage', () => {
   const clients = new Set(HARNESS_CAPABILITY_REGISTRY.map((entry) => entry.client));
-  for (const client of ['claude-code', 'cursor', 'composer', 'cline', 'codex', 'opencode', 'hermes', 'openclaw', 'gemini', 'grok', 'deepseek', 'qwen', 'kimi', 'minimax', 'glm', 'custom']) {
+  for (const client of ['claude-code', 'cursor', 'composer', 'cline', 'windsurf', 'codex', 'opencode', 'hermes', 'openclaw', 'gemini', 'grok', 'deepseek', 'qwen', 'kimi', 'minimax', 'glm', 'custom']) {
     assert.ok(clients.has(client), `missing capability contract for ${client}`);
   }
   for (const entry of HARNESS_CAPABILITY_REGISTRY) {

@@ -25,6 +25,12 @@ function harnessReloadPlan(detection = {}, changes = []) {
       restart: 'Enable Hooks in Cline, trust the project hook executables and workspace, then restart Cline. TaskComplete remains unverified.',
     });
   }
+  if (detection.windsurf) {
+    clients.push({
+      client: 'windsurf',
+      restart: 'Restart Windsurf, trust the workspace hook configuration, and leave Restricted Mode so native hooks can run.',
+    });
+  }
   if (detection.codex) {
     clients.push({
       client: 'codex',
@@ -71,6 +77,14 @@ function firstCapturePath(detection = {}, agentId) {
       capability_level: 'native_hooks',
       command: null,
       instruction: 'After Enable Hooks, executable/workspace trust, and restart, Cline uses native PreToolUse, PostToolUse, and TaskCancel hooks. MCP remains on demand. TaskComplete is documented as coming soon and is not verified coverage; configuration does not prove passive runtime coverage.',
+    };
+  }
+  if (detection.windsurf) {
+    return {
+      client: 'windsurf',
+      capability_level: 'native_hooks',
+      command: null,
+      instruction: 'After restart, workspace trust review, and leaving Restricted Mode, Windsurf uses native pre-action, success-result, and response-closeout hooks. MCP tools remain on demand. Configuration does not verify runtime coverage.',
     };
   }
   if (detection.codex) {

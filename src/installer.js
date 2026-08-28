@@ -10,7 +10,7 @@ const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MARROW_BLOCK_START = '<!-- marrow:passive-start -->';
 const MARROW_BLOCK_END = '<!-- marrow:passive-end -->';
 const MCP_ADAPTER_VERSION = '3.9.75';
-const MCP_ADAPTER_SOURCE_SHA = 'ed454700a0a02e65c4b98782bf15e885e69fc1ff';
+const MCP_ADAPTER_SOURCE_SHA = '3b5843abc2ab801221804f3ad8139328d8cd0ad7';
 const SDK_ADAPTER_VERSION = '3.7.62';
 const SDK_ADAPTER_INTEGRITY = 'sha512-n1i6Be09TpAQ9BPNRKY7aCvA2iSUPpJfw8djw2MELwpNbBCtKiZ29Jji77BK/6EFLUpSIcTW/Gmdf/ccf0JRYQ==';
 const SDK_ADAPTER_TARBALL = `https://registry.npmjs.org/@getmarrow/sdk/-/sdk-${SDK_ADAPTER_VERSION}.tgz`;
@@ -43,6 +43,13 @@ const CURSOR_SESSION_END_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} ma
 const CLINE_PRE_ACTION_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp cline-pre-action-hook`;
 const CLINE_ACTION_RESULT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp cline-hook`;
 const CLINE_SESSION_END_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp cline-session-hook`;
+const WINDSURF_PRE_ACTION_ENTRYPOINT = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp windsurf-pre-action-hook`;
+const WINDSURF_ACTION_RESULT_ENTRYPOINT = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp windsurf-hook`;
+const WINDSURF_SESSION_END_ENTRYPOINT = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp windsurf-session-hook`;
+const WINDSURF_LAUNCH_FAILURE = 'Marrow governance adapter was unavailable; this action is blocked.';
+const WINDSURF_PRE_ACTION_HOOK_COMMAND = `sh -c 'stderr="$(${WINDSURF_PRE_ACTION_ENTRYPOINT} 2>&1 >/dev/null)"; status=$?; if [ "$status" -eq 0 ]; then exit 0; fi; if [ "$status" -eq 2 ]; then printf "%s\\n" "$stderr" >&2; exit 2; fi; printf "%s\\n" "${WINDSURF_LAUNCH_FAILURE}" >&2; exit 2'`;
+const WINDSURF_ACTION_RESULT_HOOK_COMMAND = `sh -c '${WINDSURF_ACTION_RESULT_ENTRYPOINT} >/dev/null 2>&1 || :; exit 0'`;
+const WINDSURF_SESSION_END_HOOK_COMMAND = `sh -c '${WINDSURF_SESSION_END_ENTRYPOINT} >/dev/null 2>&1 || :; exit 0'`;
 const NATIVE_HOOK_MATCHER = 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*';
 const CODEX_NATIVE_HOOK_MATCHER = 'Bash|apply_patch|Edit|Write|MultiEdit|mcp__(?!marrow__marrow_).*|functions\\.(?!marrow_).*';
 const CURSOR_NATIVE_HOOK_MATCHER = 'Shell|Write|Delete|Task|MCP:(?!marrow(?:_.*|:marrow_.*)$).*';
@@ -55,7 +62,7 @@ const HARNESS_CAPABILITY_REGISTRY = Object.freeze([
   { client: 'cursor', capability_level: 'native_hooks', automatic: ['pre_action', 'action_result', 'outcome_closure'], install_surface: 'mcp' },
   { client: 'composer', capability_level: 'native_hooks', automatic: ['pre_action', 'action_result', 'outcome_closure'], install_surface: 'mcp' },
   { client: 'cline', capability_level: 'native_hooks', automatic: ['pre_action', 'action_result', 'cancel_closeout'], install_surface: 'mcp' },
-  { client: 'windsurf', capability_level: 'mcp', automatic: ['mcp_tool_calls'], install_surface: 'mcp' },
+  { client: 'windsurf', capability_level: 'native_hooks', automatic: ['pre_action', 'action_result', 'response_closeout'], install_surface: 'mcp' },
   { client: 'codex', capability_level: 'native_hooks', automatic: ['prompt', 'pre_action', 'action_result', 'session_end'], install_surface: 'mcp' },
   { client: 'opencode', capability_level: 'governed_wrapper', automatic: ['pre_action', 'action_result', 'outcome_closure'], install_surface: 'runner' },
   { client: 'hermes', capability_level: 'event_contract', automatic: [], install_surface: 'addon' },
@@ -412,6 +419,7 @@ function detectedClient(detection) {
   if (detection.claudeCode) return 'claude-code';
   if (detection.cursor) return 'cursor';
   if (detection.cline) return 'cline';
+  if (detection.windsurf) return 'windsurf';
   if (detection.codex) return 'codex';
   return 'custom';
 }
@@ -455,6 +463,7 @@ function detectEnvironment(cwd = process.cwd(), env = process.env) {
     claudeSettings: path.join(root, '.claude', 'settings.json'),
     codexHooks: path.join(root, '.codex', 'hooks.json'),
     cursorHooks: path.join(root, '.cursor', 'hooks.json'),
+    windsurfHooks: path.join(root, '.windsurf', 'hooks.json'),
     clinePreToolUseHook: path.join(root, '.clinerules', 'hooks', 'PreToolUse'),
     clinePostToolUseHook: path.join(root, '.clinerules', 'hooks', 'PostToolUse'),
     clineTaskCancelHook: path.join(root, '.clinerules', 'hooks', 'TaskCancel'),
@@ -477,6 +486,7 @@ function detectEnvironment(cwd = process.cwd(), env = process.env) {
     claudeCode: exists(paths.claudeSettings) || exists(paths.claudeMd),
     cursor: exists(path.join(root, '.cursor')),
     cline: exists(path.join(root, '.clinerules')),
+    windsurf: exists(path.join(root, '.windsurf')),
     codex: exists(paths.agentsMd) || exists(path.join(root, '.codex')),
     mcpConfig: exists(paths.mcpJson) || exists(paths.cursorMcp) || exists(paths.claudeSettings),
     openclaw: exists(paths.openclawJson) || Boolean(env.OPENCLAW_HOME || env.OPENCLAW_AGENT_ID),
@@ -679,12 +689,12 @@ Marrow should run passively after install:
 
 - Use MCP plus these instructions in every workspace: \`npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp setup\`.
 - Use SDK passive runtime in owned Node processes: \`createPassiveRuntime().install()\`.
-- Native Claude hooks install only when \`.claude\` is present. Codex native hooks install into \`.codex/hooks.json\`; Cursor and Composer use \`.cursor/hooks.json\`; Cline uses non-overwriting executable files under \`.clinerules/hooks/\`. Restart the host, enable/review hooks, and trust the workspace before claiming runtime coverage. Windsurf gets MCP tools on demand. Grok, Gemini, and similar CLI harnesses use the governed wrapper. Hermes, OpenClaw, and custom hosts need a bounded event adapter.
+- Native Claude hooks install only when \`.claude\` is present. Codex native hooks install into \`.codex/hooks.json\`; Cursor and Composer use \`.cursor/hooks.json\`; Cline uses non-overwriting executable files under \`.clinerules/hooks/\`; Windsurf uses \`.windsurf/hooks.json\`. Restart the host, enable/review hooks, disable Windsurf Restricted Mode where native hooks are required, and trust the workspace before claiming runtime coverage. Grok, Gemini, and similar CLI harnesses use the governed wrapper. Hermes, OpenClaw, and custom hosts need a bounded event adapter.
 - Keep passive token/model usage proof enabled. Empty savings stay zero until observed model usage lands. Do not invent token, cost, or time savings.
 - Before risky work, use Marrow's decision brief or passive prompt hook.
 - After activate writes MCP or hooks, restart this harness, then run \`npx @getmarrow/install@latest doctor --self-test\`. Do not claim Marrow is live in a process that has not reloaded.
 - First turn: tell the owner the gate is live and empty savings are honest. The next deploy, merge, or publish must go through Marrow.
-- Cursor and Composer use configured native hooks after restart and \`/hooks\` trust review. Cline uses its configured PreToolUse, PostToolUse, and TaskCancel hooks only after Enable Hooks, restart, executable trust, and workspace trust; TaskComplete is not claimed as current coverage. MCP tools remain on demand. Windsurf calls \`marrow_agent_runtime\` before consequential actions. Codex uses configured native hooks after restart and \`/hooks\` trust review. Grok, Gemini, and similar CLIs: wrap them with \`npx @getmarrow/install run --agent <agent-id> -- -- <command>\`.
+- Cursor and Composer use configured native hooks after restart and \`/hooks\` trust review. Cline uses its configured PreToolUse, PostToolUse, and TaskCancel hooks only after Enable Hooks, restart, executable trust, and workspace trust; TaskComplete is not claimed as current coverage. Windsurf uses configured native pre-action, success-result, and response-closeout hooks only after restart, trust review, and leaving Restricted Mode; MCP tools remain on demand. Codex uses configured native hooks after restart and \`/hooks\` trust review. Grok, Gemini, and similar CLIs: wrap them with \`npx @getmarrow/install run --agent <agent-id> -- -- <command>\`.
 - Before the session ends, close open work with session-end auto-commit or \`marrow_commit\`. Record model usage only when the host response includes counts.
 - After meaningful work, record the outcome so future agents learn from it.
 - After Marrow blocks, warns, or requires review, use the decision trace receipt to tell the operator what changed and which recorded workflow or proof is required. Stay quiet for routine low-risk work.
@@ -1090,6 +1100,70 @@ function upsertCursorHooks(hooksPath) {
   return JSON.stringify(settings, null, 2) + '\n';
 }
 
+const WINDSURF_PRE_EVENTS = ['pre_write_code', 'pre_run_command', 'pre_mcp_tool_use'];
+const WINDSURF_POST_EVENTS = ['post_write_code', 'post_run_command', 'post_mcp_tool_use'];
+
+function windsurfMarrowHookEntrypoint(command) {
+  if (typeof command !== 'string') return null;
+  const match = command.match(/@getmarrow\/mcp(?:@[^\s]+)?\s+marrow-mcp\s+windsurf-(pre-action-hook|hook|session-hook)(?:\s|['"]|$)/);
+  return match?.[1] || null;
+}
+
+function reconcileWindsurfHook(settings, eventName, command) {
+  const original = Array.isArray(settings?.hooks?.[eventName]) ? settings.hooks[eventName] : [];
+  const retained = original.filter((entry) => !(
+    entry && typeof entry === 'object' && !Array.isArray(entry)
+    && windsurfMarrowHookEntrypoint(entry.command)
+  ));
+  return [...retained, { command, show_output: false }];
+}
+
+function exactWindsurfHookConfigured(settings, eventName, command) {
+  const entries = settings?.hooks?.[eventName];
+  return Array.isArray(entries) && entries.some((entry) => (
+    entry && typeof entry === 'object' && !Array.isArray(entry)
+    && entry.command === command
+    && entry.show_output === false
+  ));
+}
+
+function windsurfNativeHookFingerprint(settings) {
+  const configured = Object.fromEntries([
+    ...WINDSURF_PRE_EVENTS.map((event) => [event, exactWindsurfHookConfigured(settings, event, WINDSURF_PRE_ACTION_HOOK_COMMAND)]),
+    ...WINDSURF_POST_EVENTS.map((event) => [event, exactWindsurfHookConfigured(settings, event, WINDSURF_ACTION_RESULT_HOOK_COMMAND)]),
+    ['post_cascade_response', exactWindsurfHookConfigured(settings, 'post_cascade_response', WINDSURF_SESSION_END_HOOK_COMMAND)],
+  ]);
+  return crypto.createHash('sha256').update(JSON.stringify({
+    schema: 'marrow-windsurf-native-hooks.v1',
+    adapter_version: MCP_ADAPTER_VERSION,
+    expected_hooks: ['pre_action', 'action_result', 'response_closeout'],
+    restricted_mode_disables_hooks: true,
+    configured,
+  })).digest('hex');
+}
+
+function upsertWindsurfHooks(hooksPath) {
+  const settings = parseJsonObject(hooksPath);
+  const hooks = settings.hooks && typeof settings.hooks === 'object' && !Array.isArray(settings.hooks)
+    ? settings.hooks
+    : {};
+  settings.hooks = { ...hooks };
+  for (const eventName of WINDSURF_PRE_EVENTS) {
+    settings.hooks[eventName] = reconcileWindsurfHook(
+      settings, eventName, WINDSURF_PRE_ACTION_HOOK_COMMAND,
+    );
+  }
+  for (const eventName of WINDSURF_POST_EVENTS) {
+    settings.hooks[eventName] = reconcileWindsurfHook(
+      settings, eventName, WINDSURF_ACTION_RESULT_HOOK_COMMAND,
+    );
+  }
+  settings.hooks.post_cascade_response = reconcileWindsurfHook(
+    settings, 'post_cascade_response', WINDSURF_SESSION_END_HOOK_COMMAND,
+  );
+  return JSON.stringify(settings, null, 2) + '\n';
+}
+
 function clinePreToolUseHookSource() {
   return `#!/bin/sh
 output="$(npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp cline-pre-action-hook 2>/dev/null)" || output=""
@@ -1179,6 +1253,7 @@ function activationProfile(detection, plan, changes, client) {
   const claudeSettings = safeJsonObject(detection.paths.claudeSettings);
   const codexSettings = safeJsonObject(detection.paths.codexHooks);
   const cursorSettings = safeJsonObject(detection.paths.cursorHooks);
+  const windsurfSettings = safeJsonObject(detection.paths.windsurfHooks);
   if (client === 'codex') {
     if (exactHookConfigured(codexSettings, 'UserPromptSubmit', CODEX_CONTEXT_HOOK_COMMAND)) observedHooks.push('prompt');
     if (exactHookConfigured(codexSettings, 'PreToolUse', CODEX_PRE_ACTION_HOOK_COMMAND, CODEX_NATIVE_HOOK_MATCHER)) observedHooks.push('pre_action');
@@ -1200,6 +1275,16 @@ function activationProfile(detection, plan, changes, client) {
     for (const hook of clineHookContract(detection)) {
       if (exactExecutableFile(hook.path, hook.content)) observedHooks.push(hook.stage);
     }
+  } else if (client === 'windsurf') {
+    if (WINDSURF_PRE_EVENTS.every((event) => exactWindsurfHookConfigured(
+      windsurfSettings, event, WINDSURF_PRE_ACTION_HOOK_COMMAND,
+    ))) observedHooks.push('pre_action');
+    if (WINDSURF_POST_EVENTS.every((event) => exactWindsurfHookConfigured(
+      windsurfSettings, event, WINDSURF_ACTION_RESULT_HOOK_COMMAND,
+    ))) observedHooks.push('action_result');
+    if (exactWindsurfHookConfigured(
+      windsurfSettings, 'post_cascade_response', WINDSURF_SESSION_END_HOOK_COMMAND,
+    )) observedHooks.push('response_closeout');
   } else {
     if (capabilityLevel === 'native_hooks'
       && exactHookConfigured(claudeSettings, 'UserPromptSubmit', MCP_CONTEXT_HOOK_COMMAND)) observedHooks.push('prompt');
@@ -1236,6 +1321,7 @@ function activationProfile(detection, plan, changes, client) {
     ? client === 'codex' ? codexNativeHookFingerprint(codexSettings)
       : client === 'cursor' || client === 'composer' ? cursorNativeHookFingerprint(cursorSettings)
       : client === 'cline' ? clineNativeHookFingerprint(detection)
+      : client === 'windsurf' ? windsurfNativeHookFingerprint(windsurfSettings)
       : claudeNativeHookFingerprint(claudeSettings)
     : crypto.createHash('sha256')
       .update(`${client}:${capabilityLevel}:${expectedHooks.join(',')}:${fingerprintMaterial}`)
@@ -1247,6 +1333,8 @@ function activationProfile(detection, plan, changes, client) {
   const exactFix = complete
     ? client === 'cline'
       ? 'Enable Hooks in Cline, trust the project hook executables and workspace, then restart Cline. TaskComplete remains unverified and is not configured.'
+      : client === 'windsurf'
+      ? 'Restart Windsurf, trust the workspace hook configuration, and leave Restricted Mode before expecting hooks to run. MCP tools remain on demand.'
       : null
     : capabilityLevel === 'sdk_passive_runtime' && !sdkDependency.present
     ? `${sdkDependency.install_command} && npx @getmarrow/install --repair`
@@ -1273,6 +1361,12 @@ function activationProfile(detection, plan, changes, client) {
       task_completion_closure_verified: false,
       enable_hooks_required: true,
       executable_trust_required: true,
+    } : {}),
+    ...(client === 'windsurf' ? {
+      restricted_mode_disables_hooks: true,
+      restart_required: true,
+      workspace_trust_required: true,
+      mcp_tools: 'on_demand',
     } : {}),
   };
 }
@@ -1397,6 +1491,7 @@ function defaultHarnessInstallMatrix(detection = detectEnvironment(process.cwd()
       || (entry.client === 'claude-code' && detection.claudeCode)
       || (entry.client === 'cursor' && detection.cursor)
       || (entry.client === 'cline' && detection.cline)
+      || (entry.client === 'windsurf' && detection.windsurf)
       || (entry.client === 'codex' && detection.codex);
     const codexSettings = entry.client === 'codex' ? safeJsonObject(detection.paths.codexHooks) : null;
     const codexConfigured = Boolean(codexSettings
@@ -1420,6 +1515,17 @@ function defaultHarnessInstallMatrix(detection = detectEnvironment(process.cwd()
       }));
     const clineConfigured = entry.client === 'cline'
       && clineHookContract(detection).every((hook) => exactExecutableFile(hook.path, hook.content));
+    const windsurfSettings = entry.client === 'windsurf' ? safeJsonObject(detection.paths.windsurfHooks) : null;
+    const windsurfConfigured = Boolean(windsurfSettings
+      && WINDSURF_PRE_EVENTS.every((event) => exactWindsurfHookConfigured(
+        windsurfSettings, event, WINDSURF_PRE_ACTION_HOOK_COMMAND,
+      ))
+      && WINDSURF_POST_EVENTS.every((event) => exactWindsurfHookConfigured(
+        windsurfSettings, event, WINDSURF_ACTION_RESULT_HOOK_COMMAND,
+      ))
+      && exactWindsurfHookConfigured(
+        windsurfSettings, 'post_cascade_response', WINDSURF_SESSION_END_HOOK_COMMAND,
+      ));
     return {
       client: entry.client,
       capability_level: entry.capability_level,
@@ -1433,17 +1539,21 @@ function defaultHarnessInstallMatrix(detection = detectEnvironment(process.cwd()
           entry.client === 'claude-code' ? detection.claudeCode
             : entry.client === 'codex' ? detection.codex
             : ['cursor', 'composer'].includes(entry.client) ? detection.cursor
-            : entry.client === 'cline' && detection.cline,
+            : entry.client === 'cline' ? detection.cline
+            : entry.client === 'windsurf' && detection.windsurf,
         ),
         governed_wrapper: entry.capability_level === 'governed_wrapper',
       },
       configured_locally: entry.client === 'codex' ? codexConfigured
         : ['cursor', 'composer'].includes(entry.client) ? cursorConfigured
         : entry.client === 'cline' ? clineConfigured
+        : entry.client === 'windsurf' ? windsurfConfigured
         : detected && entry.automatic.length > 0,
       verified_passive: false,
       unsupported_claim: entry.client === 'cline'
         ? 'TaskComplete is documented as coming soon and is not configured or counted as observed coverage.'
+        : entry.client === 'windsurf'
+        ? 'Restricted Mode disables hooks; configuration requires restart and trust review and never verifies passive coverage.'
         : entry.capability_level === 'event_contract'
         ? 'Needs a bounded event adapter. MCP tools remain on demand.'
         : null,
@@ -1504,6 +1614,14 @@ function buildPlan(detection, options) {
           conflict_fix: 'Move or remove the existing owner-managed Cline hook after owner review, then run npx @getmarrow/install --repair.',
         });
       }
+    }
+    if (detection.windsurf) {
+      writes.push({
+        type: 'json-transform',
+        path: detection.paths.windsurfHooks,
+        label: 'Windsurf native hooks',
+        transform: upsertWindsurfHooks,
+      });
     }
     writes.push({
       type: 'json-transform',
@@ -2443,6 +2561,7 @@ module.exports = {
   codexNativeHookFingerprint,
   cursorNativeHookFingerprint,
   clineNativeHookFingerprint,
+  windsurfNativeHookFingerprint,
   printReport,
   ADAPTER_PROVENANCE,
   HARNESS_CAPABILITY_REGISTRY,
