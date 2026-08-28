@@ -5,12 +5,13 @@ const crypto = require('node:crypto');
 const { version: INSTALLER_ADAPTER_VERSION } = require('../package.json');
 const { controllerStatus, controllerSupportedPlatform, ensureGovernanceController } = require('./controller-manager');
 const { firstCapturePath, harnessReloadPlan } = require('./first-hour');
+const { evidence: localControlEvidence } = require('./control-state');
 
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MARROW_BLOCK_START = '<!-- marrow:passive-start -->';
 const MARROW_BLOCK_END = '<!-- marrow:passive-end -->';
 const MCP_ADAPTER_VERSION = '3.9.75';
-const MCP_ADAPTER_SOURCE_SHA = '5a93bee42a52854866f553e056b2c7a95a8b084e';
+const MCP_ADAPTER_SOURCE_SHA = '7548a7ae2d7e95bb16c62470da41af06cb62c5c1';
 const SDK_ADAPTER_VERSION = '3.7.62';
 const SDK_ADAPTER_INTEGRITY = 'sha512-n1i6Be09TpAQ9BPNRKY7aCvA2iSUPpJfw8djw2MELwpNbBCtKiZ29Jji77BK/6EFLUpSIcTW/Gmdf/ccf0JRYQ==';
 const SDK_ADAPTER_TARBALL = `https://registry.npmjs.org/@getmarrow/sdk/-/sdk-${SDK_ADAPTER_VERSION}.tgz`;
@@ -2703,12 +2704,14 @@ async function install(options) {
   const changedConfig = changes.some((change) => change.applied) || configRepairs.some((repair) => repair.changed);
   const selfTestPassed = Boolean(!selfTest.skipped && selfTest.active && !selfTest.error);
   const controllerPlatform = options.controllerPlatform || process.platform;
+  const localControl = localControlEvidence({ apiKey: options.apiKey, home: options.controlHome });
   let controller = await controllerStatus({
     root: detection.root,
     agentId: options.agentId,
     platform: controllerPlatform,
   });
   const shouldEnsureController = options.controller !== false
+    && localControl.enabled
     && controllerSupportedPlatform(controllerPlatform)
     && Boolean(options.apiKey)
     && selfTestPassed
@@ -2803,6 +2806,7 @@ async function install(options) {
     configRepairs,
     sdkDependency,
     controller,
+    local_control: localControl,
     selfTest,
     warnings: [
       ...(options.keyFromArg

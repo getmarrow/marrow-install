@@ -28,6 +28,7 @@ const {
   detectEnvironment,
 } = require('./installer');
 const { createHostUsageCapture } = require('./usage-telemetry');
+const { readLocalControlState, recordGovernedBypass } = require('./control-state');
 
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MCP_SETUP_COMMAND = `npx -y --package=${ADAPTER_PROVENANCE.mcp.package}@${ADAPTER_PROVENANCE.mcp.version} marrow-mcp setup`;
@@ -786,6 +787,18 @@ async function runGoverned(parsed, execution = {}) {
   let protectedAction = risky;
   const surfaces = inferSurfaces(commandText || action);
 
+  let localControl;
+  try { localControl = readLocalControlState(execution.controlStateOptions || {}); }
+  catch (error) {
+    if (protectedAction) return { ok: false, blocked: true, exitCode: 13, action, type, risky, message: error.message };
+    localControl = { enabled: true, state: 'error' };
+  }
+  if (!localControl.enabled) {
+    const bypass = protectedAction ? await recordGovernedBypass({ harness: options.client, agentId: options.agentId, surfaces, risk: risky ? 'high' : 'medium' }, { ...options, ...(execution.controlStateOptions || {}) }) : { bypass_recorded: false, remote_delivered: false };
+    const child = await runChild(childCommand, scopedExecutionEnv(null), execution.stdout || process.stdout);
+    return { ok: child.exitCode === 0, blocked: false, exitCode: child.exitCode, action, type, risky, local_control: 'owner_disabled', bypass_recorded: bypass.bypass_recorded, bypass_remote_delivered: bypass.remote_delivered, decision: null, decision_id: '', permit_id: null, permit_verified: false, permit_closed: false };
+  }
+
   try {
     runtime = await preflightRuntime(options, action, type, commandText);
     decision = gateDecision(runtime);
@@ -1022,6 +1035,16 @@ async function gateOnly(parsed) {
   const { options } = parsed;
   const action = redact(options.action);
   const type = options.type || inferType(action);
+  const protectedAction = isRisky(action, type);
+  let localControl;
+  try { localControl = readLocalControlState(); } catch (error) {
+    if (protectedAction) return { ok: false, allowed: false, blocked: true, exitCode: 13, action, type, decision: null, message: error.message };
+    localControl = { enabled: true };
+  }
+  if (!localControl.enabled) {
+    const bypass = protectedAction ? await recordGovernedBypass({ harness: options.client, agentId: options.agentId, surfaces: inferSurfaces(action), risk: 'high' }, options) : { bypass_recorded: false, remote_delivered: false };
+    return { ok: true, allowed: true, state: 'owner_disabled', action, type, bypass_recorded: bypass.bypass_recorded, bypass_remote_delivered: bypass.remote_delivered, decision: null, permit: null };
+  }
   const runtime = await preflightRuntime(options, action, type, action);
   const decision = gateDecision(runtime);
   printGate(decision, runtime);
