@@ -31,6 +31,12 @@ function harnessReloadPlan(detection = {}, changes = []) {
       restart: 'Restart Windsurf, trust the workspace hook configuration, and leave Restricted Mode so native hooks can run.',
     });
   }
+  if (detection.gemini) {
+    clients.push({
+      client: 'gemini',
+      restart: 'Restart Gemini CLI, open /hooks panel, and review and approve the project hook fingerprints before treating native hooks as live.',
+    });
+  }
   if (detection.codex) {
     clients.push({
       client: 'codex',
@@ -85,6 +91,14 @@ function firstCapturePath(detection = {}, agentId) {
       capability_level: 'native_hooks',
       command: null,
       instruction: 'After restart, workspace trust review, and leaving Restricted Mode, Windsurf uses native pre-action, success-result, and response-closeout hooks. MCP tools remain on demand. Configuration does not verify runtime coverage.',
+    };
+  }
+  if (detection.gemini) {
+    return {
+      client: 'gemini',
+      capability_level: 'native_hooks',
+      command: null,
+      instruction: 'After restart and project fingerprint review and approval in /hooks panel, Gemini CLI uses native BeforeTool, AfterTool, and AfterAgent hooks. MCP tools remain on demand. Explicit hook disablement is preserved, and configuration does not verify runtime coverage.',
     };
   }
   if (detection.codex) {
