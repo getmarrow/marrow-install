@@ -3,7 +3,6 @@ const { StringDecoder } = require('node:string_decoder');
 
 const MAX_TOKEN_COUNT = 1_000_000_000;
 const MAX_USAGE_EVENT_BYTES = 4_096;
-const MAX_TYPE_PREFIX_BYTES = 256;
 const CODEX_USAGE_KEYS = new Set([
   'cached_input_tokens',
   'input_tokens',
@@ -50,9 +49,12 @@ function normalizeCodexTurnUsage(event) {
 function isCodexJsonExecution(command) {
   if (!Array.isArray(command) || command.length < 3) return false;
   const executable = path.basename(String(command[0] || '')).toLowerCase().replace(/\.exe$/, '');
+  const execArgs = command.slice(2);
+  const terminatorIndex = execArgs.indexOf('--');
+  const optionArgs = terminatorIndex === -1 ? execArgs : execArgs.slice(0, terminatorIndex);
   return executable === 'codex'
     && command[1] === 'exec'
-    && command.slice(2).includes('--json');
+    && optionArgs.includes('--json');
 }
 
 function createCodexJsonlUsageCollector() {
@@ -68,36 +70,25 @@ function createCodexJsonlUsageCollector() {
     discardLine = false;
   };
 
-  const inspectPrefix = () => {
-    const type = line.match(/^\s*\{\s*"type"\s*:\s*"([^"]*)"/);
-    if (type && type[1] !== 'turn.completed') {
-      discardLine = true;
-      line = '';
-    } else if (!type && line.length >= MAX_TYPE_PREFIX_BYTES) {
-      discardLine = true;
-      line = '';
-    }
-  };
-
   const finishLine = () => {
     if (discardLine || !line.trim()) {
       resetLine();
       return;
     }
-    if (!/^\s*\{\s*"type"\s*:\s*"turn\.completed"/.test(line)) {
+    let parsed = null;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      if (/"type"\s*:\s*"turn\.completed"/.test(line)) invalidUsageEvent = true;
+      resetLine();
+      return;
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || parsed.type !== 'turn.completed') {
       resetLine();
       return;
     }
 
     usageEventCount += 1;
-    let parsed = null;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      invalidUsageEvent = true;
-      resetLine();
-      return;
-    }
     const normalized = normalizeCodexTurnUsage(parsed);
     if (!normalized || usageEventCount !== 1) invalidUsageEvent = true;
     else acceptedUsage = normalized;
@@ -112,7 +103,7 @@ function createCodexJsonlUsageCollector() {
       }
       if (discardLine) continue;
       if (line.length >= MAX_USAGE_EVENT_BYTES) {
-        if (/^\s*\{\s*"type"\s*:\s*"turn\.completed"/.test(line)) {
+        if (/"type"\s*:\s*"turn\.completed"/.test(line)) {
           invalidUsageEvent = true;
           usageEventCount += 1;
         }
@@ -121,7 +112,6 @@ function createCodexJsonlUsageCollector() {
         continue;
       }
       line += character;
-      inspectPrefix();
     }
   };
 

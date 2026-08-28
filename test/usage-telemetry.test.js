@@ -55,6 +55,23 @@ test('Codex JSONL collector handles chunk boundaries and rejects duplicate usage
   assert.equal(duplicate.finish(), null);
 });
 
+test('Codex JSONL collector accepts reordered root keys and rejects reordered duplicates', () => {
+  const reorderedEvent = {
+    usage: validEvent().usage,
+    type: 'turn.completed',
+  };
+  const reorderedLine = `${JSON.stringify(reorderedEvent)}\n`;
+
+  const single = createCodexJsonlUsageCollector();
+  single.write(reorderedLine);
+  assert.equal(single.finish().total_tokens, 150);
+
+  const duplicate = createCodexJsonlUsageCollector();
+  duplicate.write(`${JSON.stringify(validEvent())}\n`);
+  duplicate.write(reorderedLine);
+  assert.equal(duplicate.finish(), null);
+});
+
 test('Codex JSONL collector discards non-usage event text without retaining it', () => {
   const collector = createCodexJsonlUsageCollector();
   collector.write(`${JSON.stringify({
@@ -71,7 +88,10 @@ test('Codex JSONL collector discards non-usage event text without retaining it',
 test('usage capture activates only for direct structured Codex exec', () => {
   assert.equal(isCodexJsonExecution(['codex', 'exec', '--json', 'inspect']), true);
   assert.equal(isCodexJsonExecution(['/usr/local/bin/codex', 'exec', 'inspect', '--json']), true);
+  assert.equal(isCodexJsonExecution(['codex', 'exec', 'inspect', '--json', '--', '--json']), true);
   assert.equal(isCodexJsonExecution(['codex', 'exec', 'inspect']), false);
+  assert.equal(isCodexJsonExecution(['codex', 'exec', '--', '--json']), false);
+  assert.equal(isCodexJsonExecution(['codex', 'exec', 'inspect', '--', '--json']), false);
   assert.equal(isCodexJsonExecution(['codex', '--json', 'inspect']), false);
   assert.equal(isCodexJsonExecution(['node', 'codex', 'exec', '--json']), false);
 });
