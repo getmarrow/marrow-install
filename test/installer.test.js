@@ -1057,8 +1057,8 @@ test('self-test returns first five-minute value signal and proof', async () => {
       agentId: 'installer-test',
     });
     assert.equal(requestHeaders['x-marrow-package'], '@getmarrow/install');
-    assert.equal(requestHeaders['x-marrow-package-version'], '0.1.51');
-    assert.equal(requestHeaders['x-marrow-install-version'], '0.1.51');
+    assert.equal(requestHeaders['x-marrow-package-version'], '0.1.52');
+    assert.equal(requestHeaders['x-marrow-install-version'], '0.1.52');
     assert.equal(requestHeaders['x-marrow-sdk-version'], '3.7.62');
     assert.equal(requestHeaders['x-marrow-mcp-version'], '3.9.74');
     assert.equal(result.first_value_signal.active, true);

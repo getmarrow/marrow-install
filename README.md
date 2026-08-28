@@ -91,9 +91,9 @@ npx @getmarrow/install controller stop
 
 Persistent controller lifecycle is currently Linux-only. On macOS or Windows, activation still writes supported configuration and verifies one server-side install self-test without certifying that hooks continuously ran; run `npx @getmarrow/install sidecar` under an owner-managed service and pass `--no-controller`. The controller does not silently upgrade packages, change governance policy, rotate credentials, or modify unrelated project configuration.
 
-## What's New in v0.1.51
+## What's New in v0.1.52
 
-v0.1.51 keeps MCP `3.9.74` and SDK `3.7.62`, and makes generated passive runtime identity follow the current process: `MARROW_FLEET_AGENT_ID` first, then `MARROW_AGENT_ID`, with the installer-captured identity retained only as a fallback. This prevents a stale installed harness identity from overriding the current Codex, Bob, or other canonical process identity. Managed MCP config does not store an API key or shell-style credential placeholder; the owning harness inherits the key from trusted environment or secret-manager state.
+v0.1.52 keeps MCP `3.9.74` and SDK `3.7.62`, and makes generated passive runtime identity follow the current process: `MARROW_FLEET_AGENT_ID` first, then `MARROW_AGENT_ID`, with the installer-captured identity retained only as a fallback. This prevents a stale installed harness identity from overriding the current Codex, Bob, or other canonical process identity. Managed MCP config does not store an API key or shell-style credential placeholder; the owning harness inherits the key from trusted environment or secret-manager state.
 
 The integration boundary is explicit: native Claude hooks are installed only where supported and remain cooperative/client-reported until authoritative server receipts exist; MCP tools are on demand; Codex, Grok, Gemini, and similar CLIs use the governed wrapper for consequential control; owned Node processes use the SDK passive runtime while installed; and custom hosts require a bounded event adapter. Exact package SHA/integrity can prove artifact provenance, not runtime coverage. Activation-profile delivery is authenticated `client_self_reported` telemetry with `certified_coverage: false`; it acknowledges delivery but cannot attest that a hook, wrapper, or adapter ran.
 
