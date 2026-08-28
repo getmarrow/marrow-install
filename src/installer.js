@@ -10,7 +10,7 @@ const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MARROW_BLOCK_START = '<!-- marrow:passive-start -->';
 const MARROW_BLOCK_END = '<!-- marrow:passive-end -->';
 const MCP_ADAPTER_VERSION = '3.9.75';
-const MCP_ADAPTER_SOURCE_SHA = '3b5843abc2ab801221804f3ad8139328d8cd0ad7';
+const MCP_ADAPTER_SOURCE_SHA = '34e77d909537af3bf3e4edda6e314baad3d3dcef';
 const SDK_ADAPTER_VERSION = '3.7.62';
 const SDK_ADAPTER_INTEGRITY = 'sha512-n1i6Be09TpAQ9BPNRKY7aCvA2iSUPpJfw8djw2MELwpNbBCtKiZ29Jji77BK/6EFLUpSIcTW/Gmdf/ccf0JRYQ==';
 const SDK_ADAPTER_TARBALL = `https://registry.npmjs.org/@getmarrow/sdk/-/sdk-${SDK_ADAPTER_VERSION}.tgz`;
@@ -50,11 +50,22 @@ const WINDSURF_LAUNCH_FAILURE = 'Marrow governance adapter was unavailable; this
 const WINDSURF_PRE_ACTION_HOOK_COMMAND = `sh -c 'stderr="$(${WINDSURF_PRE_ACTION_ENTRYPOINT} 2>&1 >/dev/null)"; status=$?; if [ "$status" -eq 0 ]; then exit 0; fi; if [ "$status" -eq 2 ]; then printf "%s\\n" "$stderr" >&2; exit 2; fi; printf "%s\\n" "${WINDSURF_LAUNCH_FAILURE}" >&2; exit 2'`;
 const WINDSURF_ACTION_RESULT_HOOK_COMMAND = `sh -c '${WINDSURF_ACTION_RESULT_ENTRYPOINT} >/dev/null 2>&1 || :; exit 0'`;
 const WINDSURF_SESSION_END_HOOK_COMMAND = `sh -c '${WINDSURF_SESSION_END_ENTRYPOINT} >/dev/null 2>&1 || :; exit 0'`;
+const GEMINI_PRE_ACTION_ENTRYPOINT = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp gemini-pre-action-hook`;
+const GEMINI_ACTION_RESULT_ENTRYPOINT = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp gemini-hook`;
+const GEMINI_SESSION_END_ENTRYPOINT = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp gemini-session-hook`;
+const GEMINI_FIXED_DENIAL = 'Marrow blocked this action because required governance approval or proof is unavailable.';
+const GEMINI_LAUNCH_FAILURE = 'Marrow governance adapter was unavailable; this action is blocked.';
+const GEMINI_PRE_ACTION_HOOK_COMMAND = `sh -c 'output="$(${GEMINI_PRE_ACTION_ENTRYPOINT} 2>/dev/null)" && { case "$output" in "{\\"decision\\":\\"allow\\"}"|"{\\"decision\\":\\"deny\\",\\"reason\\":\\"${GEMINI_FIXED_DENIAL}\\"}") printf "%s\\n" "$output"; exit 0 ;; esac; }; printf "%s\\n" "${GEMINI_LAUNCH_FAILURE}" >&2; exit 2'`;
+const GEMINI_ACTION_RESULT_HOOK_COMMAND = `sh -c '${GEMINI_ACTION_RESULT_ENTRYPOINT} >/dev/null 2>&1 || :; printf "%s\\n" "{}"; exit 0'`;
+const GEMINI_SESSION_END_HOOK_COMMAND = `sh -c '${GEMINI_SESSION_END_ENTRYPOINT} >/dev/null 2>&1 || :; printf "%s\\n" "{}"; exit 0'`;
 const NATIVE_HOOK_MATCHER = 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*';
 const CODEX_NATIVE_HOOK_MATCHER = 'Bash|apply_patch|Edit|Write|MultiEdit|mcp__(?!marrow__marrow_).*|functions\\.(?!marrow_).*';
 const CURSOR_NATIVE_HOOK_MATCHER = 'Shell|Write|Delete|Task|MCP:(?!marrow(?:_.*|:marrow_.*)$).*';
+const GEMINI_NATIVE_HOOK_MATCHER = '^(?:run_shell_command|write_file|replace|edit_file|delete_file|mcp_(?!marrow_marrow_)[A-Za-z0-9_]{1,192})$';
 const CODEX_HOOK_TIMEOUT_SECONDS = 5;
 const CODEX_SESSION_TIMEOUT_SECONDS = 3;
+const GEMINI_HOOK_TIMEOUT_MS = 5000;
+const GEMINI_CLOSEOUT_TIMEOUT_MS = 3000;
 const NATIVE_EXPECTED_HOOKS = ['prompt', 'pre_action', 'action_result', 'session_end'];
 const SOURCE_CLIENTS = new Set(['claude-code', 'cursor', 'composer', 'windsurf', 'openclaw', 'codex', 'gemini', 'grok', 'deepseek', 'qwen', 'kimi', 'minimax', 'cline', 'opencode', 'hermes', 'glm', 'mcp', 'ci', 'custom', 'unknown']);
 const HARNESS_CAPABILITY_REGISTRY = Object.freeze([
@@ -67,7 +78,7 @@ const HARNESS_CAPABILITY_REGISTRY = Object.freeze([
   { client: 'opencode', capability_level: 'governed_wrapper', automatic: ['pre_action', 'action_result', 'outcome_closure'], install_surface: 'runner' },
   { client: 'hermes', capability_level: 'event_contract', automatic: [], install_surface: 'addon' },
   { client: 'openclaw', capability_level: 'event_contract', automatic: [], install_surface: 'addon' },
-  { client: 'gemini', capability_level: 'governed_wrapper', automatic: ['pre_action', 'action_result', 'outcome_closure'], install_surface: 'runner' },
+  { client: 'gemini', capability_level: 'native_hooks', automatic: ['pre_action', 'action_result', 'turn_closeout'], install_surface: 'mcp' },
   { client: 'grok', capability_level: 'governed_wrapper', automatic: ['pre_action', 'action_result', 'outcome_closure'], install_surface: 'runner' },
   { client: 'deepseek', capability_level: 'governed_wrapper', automatic: ['pre_action', 'action_result', 'outcome_closure'], install_surface: 'runner' },
   { client: 'qwen', capability_level: 'governed_wrapper', automatic: ['pre_action', 'action_result', 'outcome_closure'], install_surface: 'runner' },
@@ -420,6 +431,7 @@ function detectedClient(detection) {
   if (detection.cursor) return 'cursor';
   if (detection.cline) return 'cline';
   if (detection.windsurf) return 'windsurf';
+  if (detection.gemini) return 'gemini';
   if (detection.codex) return 'codex';
   return 'custom';
 }
@@ -464,6 +476,7 @@ function detectEnvironment(cwd = process.cwd(), env = process.env) {
     codexHooks: path.join(root, '.codex', 'hooks.json'),
     cursorHooks: path.join(root, '.cursor', 'hooks.json'),
     windsurfHooks: path.join(root, '.windsurf', 'hooks.json'),
+    geminiSettings: path.join(root, '.gemini', 'settings.json'),
     clinePreToolUseHook: path.join(root, '.clinerules', 'hooks', 'PreToolUse'),
     clinePostToolUseHook: path.join(root, '.clinerules', 'hooks', 'PostToolUse'),
     clineTaskCancelHook: path.join(root, '.clinerules', 'hooks', 'TaskCancel'),
@@ -487,6 +500,7 @@ function detectEnvironment(cwd = process.cwd(), env = process.env) {
     cursor: exists(path.join(root, '.cursor')),
     cline: exists(path.join(root, '.clinerules')),
     windsurf: exists(path.join(root, '.windsurf')),
+    gemini: exists(path.join(root, '.gemini')),
     codex: exists(paths.agentsMd) || exists(path.join(root, '.codex')),
     mcpConfig: exists(paths.mcpJson) || exists(paths.cursorMcp) || exists(paths.claudeSettings),
     openclaw: exists(paths.openclawJson) || Boolean(env.OPENCLAW_HOME || env.OPENCLAW_AGENT_ID),
@@ -689,12 +703,12 @@ Marrow should run passively after install:
 
 - Use MCP plus these instructions in every workspace: \`npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp setup\`.
 - Use SDK passive runtime in owned Node processes: \`createPassiveRuntime().install()\`.
-- Native Claude hooks install only when \`.claude\` is present. Codex native hooks install into \`.codex/hooks.json\`; Cursor and Composer use \`.cursor/hooks.json\`; Cline uses non-overwriting executable files under \`.clinerules/hooks/\`; Windsurf uses \`.windsurf/hooks.json\`. Restart the host, enable/review hooks, disable Windsurf Restricted Mode where native hooks are required, and trust the workspace before claiming runtime coverage. Grok, Gemini, and similar CLI harnesses use the governed wrapper. Hermes, OpenClaw, and custom hosts need a bounded event adapter.
+- Native Claude hooks install only when \`.claude\` is present. Codex native hooks install into \`.codex/hooks.json\`; Cursor and Composer use \`.cursor/hooks.json\`; Cline uses non-overwriting executable files under \`.clinerules/hooks/\`; Windsurf uses \`.windsurf/hooks.json\`; Gemini CLI uses \`.gemini/settings.json\`. Restart the host, enable/review hooks, disable Windsurf Restricted Mode where native hooks are required, and trust the workspace before claiming runtime coverage. Grok and similar CLI harnesses without native gates use the governed wrapper. Hermes, OpenClaw, and custom hosts need a bounded event adapter.
 - Keep passive token/model usage proof enabled. Empty savings stay zero until observed model usage lands. Do not invent token, cost, or time savings.
 - Before risky work, use Marrow's decision brief or passive prompt hook.
 - After activate writes MCP or hooks, restart this harness, then run \`npx @getmarrow/install@latest doctor --self-test\`. Do not claim Marrow is live in a process that has not reloaded.
 - First turn: tell the owner the gate is live and empty savings are honest. The next deploy, merge, or publish must go through Marrow.
-- Cursor and Composer use configured native hooks after restart and \`/hooks\` trust review. Cline uses its configured PreToolUse, PostToolUse, and TaskCancel hooks only after Enable Hooks, restart, executable trust, and workspace trust; TaskComplete is not claimed as current coverage. Windsurf uses configured native pre-action, success-result, and response-closeout hooks only after restart, trust review, and leaving Restricted Mode; MCP tools remain on demand. Codex uses configured native hooks after restart and \`/hooks\` trust review. Grok, Gemini, and similar CLIs: wrap them with \`npx @getmarrow/install run --agent <agent-id> -- -- <command>\`.
+- Cursor and Composer use configured native hooks after restart and \`/hooks\` trust review. Cline uses its configured PreToolUse, PostToolUse, and TaskCancel hooks only after Enable Hooks, restart, executable trust, and workspace trust; TaskComplete is not claimed as current coverage. Windsurf uses configured native pre-action, success-result, and response-closeout hooks only after restart, trust review, and leaving Restricted Mode. Gemini CLI uses configured BeforeTool, AfterTool, and AfterAgent hooks only after restart and project fingerprint review and approval in \`/hooks panel\`; explicit user disablement is preserved. MCP tools remain on demand. Codex uses configured native hooks after restart and \`/hooks\` trust review. Grok and similar CLIs without native gates: wrap them with \`npx @getmarrow/install run --agent <agent-id> -- -- <command>\`.
 - Before the session ends, close open work with session-end auto-commit or \`marrow_commit\`. Record model usage only when the host response includes counts.
 - After meaningful work, record the outcome so future agents learn from it.
 - After Marrow blocks, warns, or requires review, use the decision trace receipt to tell the operator what changed and which recorded workflow or proof is required. Stay quiet for routine low-risk work.
@@ -1164,6 +1178,112 @@ function upsertWindsurfHooks(hooksPath) {
   return JSON.stringify(settings, null, 2) + '\n';
 }
 
+function geminiMarrowHookEntrypoint(command) {
+  if (typeof command !== 'string') return null;
+  const match = command.match(/@getmarrow\/mcp(?:@[^\s]+)?\s+marrow-mcp\s+gemini-(pre-action-hook|hook|session-hook)(?:\s|['"]|$)/);
+  return match?.[1] || null;
+}
+
+function reconcileGeminiHook(settings, eventName, canonical) {
+  const original = Array.isArray(settings?.hooks?.[eventName]) ? settings.hooks[eventName] : [];
+  const retained = [];
+  for (const group of original) {
+    if (!group || typeof group !== 'object' || Array.isArray(group) || !Array.isArray(group.hooks)) {
+      retained.push(group);
+      continue;
+    }
+    const hooks = group.hooks.filter((handler) => !(
+      handler && typeof handler === 'object' && !Array.isArray(handler)
+      && (String(handler.name || '').startsWith('marrow-') || geminiMarrowHookEntrypoint(handler.command))
+    ));
+    if (hooks.length > 0) retained.push({ ...group, hooks });
+  }
+  return [...retained, canonical];
+}
+
+function exactGeminiHookConfigured(settings, eventName, name, command, matcher, timeout) {
+  const groups = settings?.hooks?.[eventName];
+  if (!Array.isArray(groups)) return false;
+  return groups.some((group) => (
+    group && typeof group === 'object' && !Array.isArray(group)
+    && (matcher === undefined ? group.matcher === undefined : group.matcher === matcher)
+    && Array.isArray(group.hooks)
+    && group.hooks.some((handler) => (
+      handler && typeof handler === 'object' && !Array.isArray(handler)
+      && handler.name === name
+      && handler.type === 'command'
+      && handler.command === command
+      && handler.timeout === timeout
+    ))
+  ));
+}
+
+function geminiHooksExplicitlyDisabled(settings) {
+  return settings?.hooksConfig?.enabled === false;
+}
+
+function geminiNativeHookFingerprint(settings) {
+  return crypto.createHash('sha256').update(JSON.stringify({
+    schema: 'marrow-gemini-native-hooks.v1',
+    adapter_version: MCP_ADAPTER_VERSION,
+    expected_hooks: ['pre_action', 'action_result', 'turn_closeout'],
+    explicitly_enabled: settings?.hooksConfig?.enabled === true,
+    explicitly_disabled: geminiHooksExplicitlyDisabled(settings),
+    configured: {
+      pre_action: exactGeminiHookConfigured(
+        settings, 'BeforeTool', 'marrow-before-tool', GEMINI_PRE_ACTION_HOOK_COMMAND,
+        GEMINI_NATIVE_HOOK_MATCHER, GEMINI_HOOK_TIMEOUT_MS,
+      ),
+      action_result: exactGeminiHookConfigured(
+        settings, 'AfterTool', 'marrow-after-tool', GEMINI_ACTION_RESULT_HOOK_COMMAND,
+        GEMINI_NATIVE_HOOK_MATCHER, GEMINI_HOOK_TIMEOUT_MS,
+      ),
+      turn_closeout: exactGeminiHookConfigured(
+        settings, 'AfterAgent', 'marrow-after-agent', GEMINI_SESSION_END_HOOK_COMMAND,
+        undefined, GEMINI_CLOSEOUT_TIMEOUT_MS,
+      ),
+    },
+    session_end_claimed: false,
+  })).digest('hex');
+}
+
+function upsertGeminiHooks(settingsPath) {
+  const settings = parseJsonObject(settingsPath);
+  const hooks = settings.hooks && typeof settings.hooks === 'object' && !Array.isArray(settings.hooks)
+    ? settings.hooks
+    : {};
+  settings.hooks = {
+    ...hooks,
+    BeforeTool: reconcileGeminiHook(settings, 'BeforeTool', {
+      matcher: GEMINI_NATIVE_HOOK_MATCHER,
+      hooks: [{
+        name: 'marrow-before-tool',
+        type: 'command',
+        command: GEMINI_PRE_ACTION_HOOK_COMMAND,
+        timeout: GEMINI_HOOK_TIMEOUT_MS,
+      }],
+    }),
+    AfterTool: reconcileGeminiHook(settings, 'AfterTool', {
+      matcher: GEMINI_NATIVE_HOOK_MATCHER,
+      hooks: [{
+        name: 'marrow-after-tool',
+        type: 'command',
+        command: GEMINI_ACTION_RESULT_HOOK_COMMAND,
+        timeout: GEMINI_HOOK_TIMEOUT_MS,
+      }],
+    }),
+    AfterAgent: reconcileGeminiHook(settings, 'AfterAgent', {
+      hooks: [{
+        name: 'marrow-after-agent',
+        type: 'command',
+        command: GEMINI_SESSION_END_HOOK_COMMAND,
+        timeout: GEMINI_CLOSEOUT_TIMEOUT_MS,
+      }],
+    }),
+  };
+  return JSON.stringify(settings, null, 2) + '\n';
+}
+
 function clinePreToolUseHookSource() {
   return `#!/bin/sh
 output="$(npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp cline-pre-action-hook 2>/dev/null)" || output=""
@@ -1254,6 +1374,7 @@ function activationProfile(detection, plan, changes, client) {
   const codexSettings = safeJsonObject(detection.paths.codexHooks);
   const cursorSettings = safeJsonObject(detection.paths.cursorHooks);
   const windsurfSettings = safeJsonObject(detection.paths.windsurfHooks);
+  const geminiSettings = safeJsonObject(detection.paths.geminiSettings);
   if (client === 'codex') {
     if (exactHookConfigured(codexSettings, 'UserPromptSubmit', CODEX_CONTEXT_HOOK_COMMAND)) observedHooks.push('prompt');
     if (exactHookConfigured(codexSettings, 'PreToolUse', CODEX_PRE_ACTION_HOOK_COMMAND, CODEX_NATIVE_HOOK_MATCHER)) observedHooks.push('pre_action');
@@ -1285,6 +1406,19 @@ function activationProfile(detection, plan, changes, client) {
     if (exactWindsurfHookConfigured(
       windsurfSettings, 'post_cascade_response', WINDSURF_SESSION_END_HOOK_COMMAND,
     )) observedHooks.push('response_closeout');
+  } else if (client === 'gemini' && !geminiHooksExplicitlyDisabled(geminiSettings)) {
+    if (exactGeminiHookConfigured(
+      geminiSettings, 'BeforeTool', 'marrow-before-tool', GEMINI_PRE_ACTION_HOOK_COMMAND,
+      GEMINI_NATIVE_HOOK_MATCHER, GEMINI_HOOK_TIMEOUT_MS,
+    )) observedHooks.push('pre_action');
+    if (exactGeminiHookConfigured(
+      geminiSettings, 'AfterTool', 'marrow-after-tool', GEMINI_ACTION_RESULT_HOOK_COMMAND,
+      GEMINI_NATIVE_HOOK_MATCHER, GEMINI_HOOK_TIMEOUT_MS,
+    )) observedHooks.push('action_result');
+    if (exactGeminiHookConfigured(
+      geminiSettings, 'AfterAgent', 'marrow-after-agent', GEMINI_SESSION_END_HOOK_COMMAND,
+      undefined, GEMINI_CLOSEOUT_TIMEOUT_MS,
+    )) observedHooks.push('turn_closeout');
   } else {
     if (capabilityLevel === 'native_hooks'
       && exactHookConfigured(claudeSettings, 'UserPromptSubmit', MCP_CONTEXT_HOOK_COMMAND)) observedHooks.push('prompt');
@@ -1322,6 +1456,7 @@ function activationProfile(detection, plan, changes, client) {
       : client === 'cursor' || client === 'composer' ? cursorNativeHookFingerprint(cursorSettings)
       : client === 'cline' ? clineNativeHookFingerprint(detection)
       : client === 'windsurf' ? windsurfNativeHookFingerprint(windsurfSettings)
+      : client === 'gemini' ? geminiNativeHookFingerprint(geminiSettings)
       : claudeNativeHookFingerprint(claudeSettings)
     : crypto.createHash('sha256')
       .update(`${client}:${capabilityLevel}:${expectedHooks.join(',')}:${fingerprintMaterial}`)
@@ -1335,6 +1470,8 @@ function activationProfile(detection, plan, changes, client) {
       ? 'Enable Hooks in Cline, trust the project hook executables and workspace, then restart Cline. TaskComplete remains unverified and is not configured.'
       : client === 'windsurf'
       ? 'Restart Windsurf, trust the workspace hook configuration, and leave Restricted Mode before expecting hooks to run. MCP tools remain on demand.'
+      : client === 'gemini'
+      ? 'Restart Gemini CLI, open /hooks panel, and review and approve the project hook fingerprints. MCP tools remain on demand.'
       : null
     : capabilityLevel === 'sdk_passive_runtime' && !sdkDependency.present
     ? `${sdkDependency.install_command} && npx @getmarrow/install --repair`
@@ -1342,6 +1479,8 @@ function activationProfile(detection, plan, changes, client) {
     ? `npx @getmarrow/install run --agent <agent-id> -- ${client}`
     : client === 'cline' && clineConflicts.length > 0
     ? 'Move or remove the conflicting owner-managed Cline hook file after owner review, then run npx @getmarrow/install --repair. Marrow will never overwrite or compose it.'
+    : client === 'gemini' && geminiHooksExplicitlyDisabled(geminiSettings)
+    ? 'Hooks are explicitly disabled. After owner review, run /hooks enable-all, open /hooks panel, review and approve the project hook fingerprints, then restart Gemini CLI.'
     : 'npx @getmarrow/install --repair';
   return {
     adapter_version: adapterVersion,
@@ -1367,6 +1506,15 @@ function activationProfile(detection, plan, changes, client) {
       restart_required: true,
       workspace_trust_required: true,
       mcp_tools: 'on_demand',
+    } : {}),
+    ...(client === 'gemini' ? {
+      hooks_enabled: !geminiHooksExplicitlyDisabled(geminiSettings),
+      explicit_disable_preserved: geminiHooksExplicitlyDisabled(geminiSettings),
+      trust_review_required: true,
+      restart_required: true,
+      mcp_tools: 'on_demand',
+      session_end_delivery_claimed: false,
+      deterministic_closeout: 'AfterAgent',
     } : {}),
   };
 }
@@ -1492,6 +1640,7 @@ function defaultHarnessInstallMatrix(detection = detectEnvironment(process.cwd()
       || (entry.client === 'cursor' && detection.cursor)
       || (entry.client === 'cline' && detection.cline)
       || (entry.client === 'windsurf' && detection.windsurf)
+      || (entry.client === 'gemini' && detection.gemini)
       || (entry.client === 'codex' && detection.codex);
     const codexSettings = entry.client === 'codex' ? safeJsonObject(detection.paths.codexHooks) : null;
     const codexConfigured = Boolean(codexSettings
@@ -1526,6 +1675,21 @@ function defaultHarnessInstallMatrix(detection = detectEnvironment(process.cwd()
       && exactWindsurfHookConfigured(
         windsurfSettings, 'post_cascade_response', WINDSURF_SESSION_END_HOOK_COMMAND,
       ));
+    const geminiSettings = entry.client === 'gemini' ? safeJsonObject(detection.paths.geminiSettings) : null;
+    const geminiConfigured = Boolean(geminiSettings
+      && !geminiHooksExplicitlyDisabled(geminiSettings)
+      && exactGeminiHookConfigured(
+        geminiSettings, 'BeforeTool', 'marrow-before-tool', GEMINI_PRE_ACTION_HOOK_COMMAND,
+        GEMINI_NATIVE_HOOK_MATCHER, GEMINI_HOOK_TIMEOUT_MS,
+      )
+      && exactGeminiHookConfigured(
+        geminiSettings, 'AfterTool', 'marrow-after-tool', GEMINI_ACTION_RESULT_HOOK_COMMAND,
+        GEMINI_NATIVE_HOOK_MATCHER, GEMINI_HOOK_TIMEOUT_MS,
+      )
+      && exactGeminiHookConfigured(
+        geminiSettings, 'AfterAgent', 'marrow-after-agent', GEMINI_SESSION_END_HOOK_COMMAND,
+        undefined, GEMINI_CLOSEOUT_TIMEOUT_MS,
+      ));
     return {
       client: entry.client,
       capability_level: entry.capability_level,
@@ -1540,7 +1704,8 @@ function defaultHarnessInstallMatrix(detection = detectEnvironment(process.cwd()
             : entry.client === 'codex' ? detection.codex
             : ['cursor', 'composer'].includes(entry.client) ? detection.cursor
             : entry.client === 'cline' ? detection.cline
-            : entry.client === 'windsurf' && detection.windsurf,
+            : entry.client === 'windsurf' ? detection.windsurf
+            : entry.client === 'gemini' && detection.gemini,
         ),
         governed_wrapper: entry.capability_level === 'governed_wrapper',
       },
@@ -1548,12 +1713,15 @@ function defaultHarnessInstallMatrix(detection = detectEnvironment(process.cwd()
         : ['cursor', 'composer'].includes(entry.client) ? cursorConfigured
         : entry.client === 'cline' ? clineConfigured
         : entry.client === 'windsurf' ? windsurfConfigured
+        : entry.client === 'gemini' ? geminiConfigured
         : detected && entry.automatic.length > 0,
       verified_passive: false,
       unsupported_claim: entry.client === 'cline'
         ? 'TaskComplete is documented as coming soon and is not configured or counted as observed coverage.'
         : entry.client === 'windsurf'
         ? 'Restricted Mode disables hooks; configuration requires restart and trust review and never verifies passive coverage.'
+        : entry.client === 'gemini'
+        ? 'Project hooks require restart and project fingerprint review and approval in /hooks panel; explicit hooksConfig.enabled=false is preserved and SessionEnd delivery is not claimed.'
         : entry.capability_level === 'event_contract'
         ? 'Needs a bounded event adapter. MCP tools remain on demand.'
         : null,
@@ -1621,6 +1789,14 @@ function buildPlan(detection, options) {
         path: detection.paths.windsurfHooks,
         label: 'Windsurf native hooks',
         transform: upsertWindsurfHooks,
+      });
+    }
+    if (detection.gemini) {
+      writes.push({
+        type: 'json-transform',
+        path: detection.paths.geminiSettings,
+        label: 'Gemini CLI native hooks',
+        transform: upsertGeminiHooks,
       });
     }
     writes.push({
@@ -2562,6 +2738,7 @@ module.exports = {
   cursorNativeHookFingerprint,
   clineNativeHookFingerprint,
   windsurfNativeHookFingerprint,
+  geminiNativeHookFingerprint,
   printReport,
   ADAPTER_PROVENANCE,
   HARNESS_CAPABILITY_REGISTRY,

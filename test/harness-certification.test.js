@@ -16,6 +16,7 @@ const {
   cursorNativeHookFingerprint,
   clineNativeHookFingerprint,
   windsurfNativeHookFingerprint,
+  geminiNativeHookFingerprint,
   defaultHarnessInstallMatrix,
   detectEnvironment,
   firstCapturePath,
@@ -32,6 +33,7 @@ const WINDSURF_EVENTS = [
   'post_write_code', 'post_run_command', 'post_mcp_tool_use',
   'post_cascade_response',
 ];
+const GEMINI_MATCHER = '^(?:run_shell_command|write_file|replace|edit_file|delete_file|mcp_(?!marrow_marrow_)[A-Za-z0-9_]{1,192})$';
 const SDK_INTEGRITY = 'sha512-n1i6Be09TpAQ9BPNRKY7aCvA2iSUPpJfw8djw2MELwpNbBCtKiZ29Jji77BK/6EFLUpSIcTW/Gmdf/ccf0JRYQ==';
 
 function writeSdkLock(root, declaredSpec = '^3.7.62') {
@@ -516,6 +518,182 @@ test('Windsurf hook installation rejects invalid JSON, symlink, and out-of-root 
       if (unsafeKind === 'invalid-json') assert.equal(fs.readFileSync(hooksPath, 'utf8'), '{broken');
       if (unsafeKind === 'symlink') assert.equal(fs.readFileSync(path.join(outside, 'hooks.json'), 'utf8'), '{"owner":true}\n');
       if (unsafeKind === 'outside') assert.equal(fs.existsSync(path.join(outside, 'hooks.json')), false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  }
+});
+
+test('Gemini CLI reconciles exact native groups, validates decisions, keeps neutral closeout, and is byte-idempotent', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-gemini-'));
+  try {
+    fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
+    fs.mkdirSync(path.join(root, '.gemini'), { recursive: true });
+    const settingsPath = path.join(root, '.gemini', 'settings.json');
+    fs.writeFileSync(settingsPath, JSON.stringify({
+      owner_setting: { retained: true },
+      hooksConfig: { owner_option: 'retained' },
+      hooks: {
+        BeforeTool: [
+          { matcher: 'owner-tool', hooks: [{ name: 'owner-before', type: 'command', command: 'printf owner-before', timeout: 99 }] },
+          { matcher: 'old', hooks: [{ name: 'marrow-before-tool', type: 'command', command: 'npx -y --package=@getmarrow/mcp@3.9.74 marrow-mcp gemini-pre-action-hook', timeout: 1 }] },
+        ],
+        AfterAgent: [{ hooks: [{ name: 'owner-after-agent', type: 'command', command: 'printf owner-closeout' }] }],
+        SessionEnd: [{ hooks: [{ name: 'owner-session-end', type: 'command', command: 'printf owner-session' }] }],
+        OwnerEvent: [{ hooks: [{ name: 'owner-event', type: 'command', command: 'printf owner-event' }] }],
+      },
+    }, null, 2) + '\n');
+    const detection = detectEnvironment(root, { ...process.env, HOME: root });
+    assert.equal(detection.gemini, true);
+    const plan = buildPlan(detection, { mode: 'mcp' });
+    assert.equal(plan.writes.filter((write) => write.label === 'Gemini CLI native hooks').length, 1);
+    const changes = applyPlan(plan, { yes: true, dryRun: false, doctor: false });
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    assert.deepEqual(settings.owner_setting, { retained: true });
+    assert.deepEqual(settings.hooksConfig, { owner_option: 'retained' });
+    assert.equal(settings.hooks.BeforeTool.some((group) => group.matcher === 'owner-tool'), true);
+    assert.equal(settings.hooks.AfterAgent.some((group) => group.hooks?.some((hook) => hook.name === 'owner-after-agent')), true);
+    assert.deepEqual(settings.hooks.SessionEnd, [{ hooks: [{ name: 'owner-session-end', type: 'command', command: 'printf owner-session' }] }]);
+    assert.deepEqual(settings.hooks.OwnerEvent, [{ hooks: [{ name: 'owner-event', type: 'command', command: 'printf owner-event' }] }]);
+    assert.equal(JSON.stringify(settings).includes('@getmarrow/mcp@3.9.74'), false);
+    assert.equal(JSON.stringify(settings.hooks.SessionEnd).includes('marrow-'), false);
+
+    const expected = [
+      ['BeforeTool', 'marrow-before-tool', 'gemini-pre-action-hook', 5000, GEMINI_MATCHER],
+      ['AfterTool', 'marrow-after-tool', 'gemini-hook', 5000, GEMINI_MATCHER],
+      ['AfterAgent', 'marrow-after-agent', 'gemini-session-hook', 3000, undefined],
+    ];
+    const commands = {};
+    for (const [eventName, name, entrypoint, timeout, matcher] of expected) {
+      const groups = settings.hooks[eventName];
+      const marrowHandlers = groups.flatMap((group) => group.hooks || []).filter((handler) => handler.name === name);
+      assert.equal(marrowHandlers.length, 1, eventName);
+      const group = groups.find((candidate) => candidate.hooks?.includes(marrowHandlers[0]));
+      assert.equal(group.matcher, matcher, eventName);
+      assert.equal(marrowHandlers[0].type, 'command');
+      assert.equal(marrowHandlers[0].timeout, timeout);
+      assert.match(marrowHandlers[0].command, new RegExp(`@getmarrow/mcp@3\\.9\\.75 marrow-mcp ${entrypoint}`));
+      commands[eventName] = marrowHandlers[0].command;
+    }
+    assert.doesNotMatch(JSON.stringify(settings), /MARROW_API_KEY|mrw_/);
+
+    const fakeBin = path.join(root, 'fake-bin');
+    fs.mkdirSync(fakeBin);
+    fs.writeFileSync(path.join(fakeBin, 'npx'), '#!/bin/sh\ncase "${FAKE_NPX_MODE:-allow}" in allow) printf "%s" \'{"decision":"allow"}\' ;; deny) printf "%s" \'{"decision":"deny","reason":"Marrow blocked this action because required governance approval or proof is unavailable."}\' ;; invalid) printf "%s" \'polluted {"decision":"allow"}\' ;; *) printf "%s\\n" "synthetic-private-launch-error" >&2; exit 7 ;; esac\n');
+    fs.chmodSync(path.join(fakeBin, 'npx'), 0o755);
+    const commandEnv = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}` };
+    const allow = spawnSync(commands.BeforeTool, { shell: true, env: { ...commandEnv, FAKE_NPX_MODE: 'allow' }, input: '{}', encoding: 'utf8' });
+    assert.equal(allow.status, 0, allow.stderr);
+    assert.equal(allow.stdout, '{"decision":"allow"}\n');
+    assert.equal(allow.stderr, '');
+    const deny = spawnSync(commands.BeforeTool, { shell: true, env: { ...commandEnv, FAKE_NPX_MODE: 'deny' }, input: '{}', encoding: 'utf8' });
+    assert.equal(deny.status, 0, deny.stderr);
+    assert.equal(deny.stdout, '{"decision":"deny","reason":"Marrow blocked this action because required governance approval or proof is unavailable."}\n');
+    assert.equal(deny.stderr, '');
+    for (const mode of ['invalid', 'fail']) {
+      const blocked = spawnSync(commands.BeforeTool, { shell: true, env: { ...commandEnv, FAKE_NPX_MODE: mode }, input: '{}', encoding: 'utf8' });
+      assert.equal(blocked.status, 2, mode);
+      assert.equal(blocked.stdout, '');
+      assert.equal(blocked.stderr, 'Marrow governance adapter was unavailable; this action is blocked.\n');
+      assert.doesNotMatch(blocked.stderr, /synthetic-private-launch-error/);
+    }
+    for (const eventName of ['AfterTool', 'AfterAgent']) {
+      const neutral = spawnSync(commands[eventName], { shell: true, env: { ...commandEnv, FAKE_NPX_MODE: 'fail' }, input: '{}', encoding: 'utf8' });
+      assert.equal(neutral.status, 0, neutral.stderr);
+      assert.equal(neutral.stdout, '{}\n');
+      assert.equal(neutral.stderr, '');
+    }
+
+    const profile = activationProfile(detection, plan, changes, 'gemini');
+    assert.equal(profile.capability_level, 'native_hooks');
+    assert.deepEqual(profile.expected_hooks, ['pre_action', 'action_result', 'turn_closeout']);
+    assert.deepEqual(profile.observed_hooks, ['pre_action', 'action_result', 'turn_closeout']);
+    assert.equal(profile.configuration_complete, true);
+    assert.equal(profile.coverage_verified, false);
+    assert.equal(profile.passive_live, false);
+    assert.equal(profile.hooks_enabled, true);
+    assert.equal(profile.explicit_disable_preserved, false);
+    assert.equal(profile.session_end_delivery_claimed, false);
+    assert.equal(profile.deterministic_closeout, 'AfterAgent');
+    assert.match(profile.exact_fix, /Restart Gemini CLI.*\/hooks panel.*review and approve/);
+    assert.doesNotMatch(profile.exact_fix, /\/hooks trust/);
+    assert.equal(profile.config_fingerprint, geminiNativeHookFingerprint(settings));
+    const matrix = defaultHarnessInstallMatrix(detection).find((entry) => entry.client === 'gemini');
+    assert.equal(matrix.capability_level, 'native_hooks');
+    assert.equal(matrix.default_install.native_hooks, true);
+    assert.equal(matrix.configured_locally, true);
+    assert.equal(matrix.verified_passive, false);
+    assert.match(matrix.unsupported_claim, /\/hooks panel.*SessionEnd delivery is not claimed/);
+    const reload = harnessReloadPlan(detection, changes);
+    assert.equal(reload.clients.some((entry) => entry.client === 'gemini'), true);
+    assert.match(reload.instruction, /Restart Gemini CLI.*\/hooks panel.*review and approve/);
+    const capture = firstCapturePath(detection, 'gemini-agent');
+    assert.equal(capture.client, 'gemini');
+    assert.equal(capture.capability_level, 'native_hooks');
+    assert.equal(capture.command, null);
+    assert.match(capture.instruction, /BeforeTool.*AfterTool.*AfterAgent.*MCP tools remain on demand/);
+
+    const first = fs.readFileSync(settingsPath);
+    const secondPlan = buildPlan(detectEnvironment(root, { ...process.env, HOME: root }), { mode: 'mcp' });
+    const secondChanges = applyPlan(secondPlan, { yes: true, dryRun: false, doctor: false });
+    assert.deepEqual(fs.readFileSync(settingsPath), first);
+    assert.equal(secondChanges.find((change) => change.label === 'Gemini CLI native hooks').already_present, true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Gemini explicit hook disablement remains owner-controlled and reports enable-all without invented trust commands', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-gemini-disabled-'));
+  try {
+    fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
+    fs.mkdirSync(path.join(root, '.gemini'), { recursive: true });
+    const settingsPath = path.join(root, '.gemini', 'settings.json');
+    fs.writeFileSync(settingsPath, JSON.stringify({ hooksConfig: { enabled: false, owner: 'retained' }, hooks: {} }, null, 2) + '\n');
+    const detection = detectEnvironment(root, { ...process.env, HOME: root });
+    const plan = buildPlan(detection, { mode: 'mcp' });
+    const changes = applyPlan(plan, { yes: true, dryRun: false, doctor: false });
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    assert.deepEqual(settings.hooksConfig, { enabled: false, owner: 'retained' });
+    const profile = activationProfile(detection, plan, changes, 'gemini');
+    assert.equal(profile.configuration_complete, false);
+    assert.deepEqual(profile.observed_hooks, []);
+    assert.equal(profile.hooks_enabled, false);
+    assert.equal(profile.explicit_disable_preserved, true);
+    assert.match(profile.exact_fix, /\/hooks enable-all.*\/hooks panel.*review and approve.*restart Gemini CLI/);
+    assert.doesNotMatch(profile.exact_fix, /\/hooks trust/);
+    assert.equal(defaultHarnessInstallMatrix(detection).find((entry) => entry.client === 'gemini').configured_locally, false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Gemini hook installation rejects invalid JSON, symlink, and out-of-root targets before writes', () => {
+  for (const unsafeKind of ['invalid-json', 'symlink', 'outside']) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-gemini-unsafe-'));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-gemini-outside-'));
+    try {
+      fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
+      fs.mkdirSync(path.join(root, '.gemini'), { recursive: true });
+      const settingsPath = path.join(root, '.gemini', 'settings.json');
+      if (unsafeKind === 'invalid-json') fs.writeFileSync(settingsPath, '{broken');
+      if (unsafeKind === 'symlink') {
+        fs.writeFileSync(path.join(outside, 'settings.json'), '{"owner":true}\n');
+        fs.symlinkSync(path.join(outside, 'settings.json'), settingsPath);
+      }
+      const detection = detectEnvironment(root, { ...process.env, HOME: root });
+      if (unsafeKind === 'outside') detection.paths.geminiSettings = path.join(outside, 'settings.json');
+      const plan = buildPlan(detection, { mode: 'mcp' });
+      assert.throws(
+        () => applyPlan(plan, { yes: true, dryRun: false, doctor: false }),
+        /Unexpected token|Expected property|unsafe managed target|outside project root/,
+      );
+      assert.equal(fs.existsSync(path.join(root, '.mcp.json')), false);
+      assert.equal(fs.existsSync(path.join(root, 'AGENTS.md')), false);
+      if (unsafeKind === 'invalid-json') assert.equal(fs.readFileSync(settingsPath, 'utf8'), '{broken');
+      if (unsafeKind === 'symlink') assert.equal(fs.readFileSync(path.join(outside, 'settings.json'), 'utf8'), '{"owner":true}\n');
+      if (unsafeKind === 'outside') assert.equal(fs.existsSync(path.join(outside, 'settings.json')), false);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
       fs.rmSync(outside, { recursive: true, force: true });
