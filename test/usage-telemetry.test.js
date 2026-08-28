@@ -3,6 +3,7 @@ const test = require('node:test');
 
 const {
   MAX_TOKEN_COUNT,
+  MAX_USAGE_EVENT_BYTES,
   createCodexJsonlUsageCollector,
   isCodexJsonExecution,
   normalizeCodexTurnUsage,
@@ -70,6 +71,18 @@ test('Codex JSONL collector accepts reordered root keys and rejects reordered du
   duplicate.write(`${JSON.stringify(validEvent())}\n`);
   duplicate.write(reorderedLine);
   assert.equal(duplicate.finish(), null);
+});
+
+test('Codex JSONL collector rejects a completed duplicate hidden after the size boundary', () => {
+  const oversizedReorderedEvent = {
+    usage: validEvent().usage,
+    padding: 'x'.repeat(MAX_USAGE_EVENT_BYTES),
+    type: 'turn.completed',
+  };
+  const collector = createCodexJsonlUsageCollector();
+  collector.write(`${JSON.stringify(validEvent())}\n`);
+  collector.write(`${JSON.stringify(oversizedReorderedEvent)}\n`);
+  assert.equal(collector.finish(), null);
 });
 
 test('Codex JSONL collector discards non-usage event text without retaining it', () => {
