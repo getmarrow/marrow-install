@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
+const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -13,6 +14,7 @@ const {
   claudeNativeHookFingerprint,
   codexNativeHookFingerprint,
   cursorNativeHookFingerprint,
+  clineNativeHookFingerprint,
   defaultHarnessInstallMatrix,
   detectEnvironment,
   firstCapturePath,
@@ -76,6 +78,17 @@ test('Cursor and Composer first capture uses native hooks only after restart and
   assert.match(capture.instruction, /Cursor and Composer/);
   assert.match(capture.instruction, /\/hooks review/);
   assert.match(capture.instruction, /does not verify runtime coverage/);
+});
+
+test('Cline first capture requires Enable Hooks, executable trust, restart, and keeps TaskComplete unverified', () => {
+  const capture = firstCapturePath({ cline: true, claudeCode: false, cursor: false, codex: false }, 'cline');
+  assert.equal(capture.client, 'cline');
+  assert.equal(capture.capability_level, 'native_hooks');
+  assert.equal(capture.command, null);
+  assert.match(capture.instruction, /Enable Hooks/);
+  assert.match(capture.instruction, /executable\/workspace trust/);
+  assert.match(capture.instruction, /TaskComplete.*coming soon.*not verified/);
+  assert.match(capture.instruction, /does not prove passive runtime coverage/);
 });
 
 test('Codex first capture requires native-hook restart and trust review without claiming coverage', () => {
@@ -216,6 +229,150 @@ test('Cursor hook installation rejects symlinked and out-of-root targets before 
       );
       assert.equal(fs.existsSync(path.join(outside, 'hooks.json')), false);
       assert.equal(fs.existsSync(path.join(root, '.mcp.json')), false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  }
+});
+
+test('Cline hooks install exact executable non-blocking scripts and remain byte-idempotent', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-cline-'));
+  try {
+    fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
+    fs.mkdirSync(path.join(root, '.clinerules'), { recursive: true });
+    const detection = detectEnvironment(root, { ...process.env, HOME: root });
+    assert.equal(detection.cline, true);
+    const plan = buildPlan(detection, { mode: 'both' });
+    assert.deepEqual(plan.writes.filter((write) => /Cline .* native hook/.test(write.label)).map((write) => path.basename(write.path)), [
+      'PreToolUse', 'PostToolUse', 'TaskCancel',
+    ]);
+    const changes = applyPlan(plan, { yes: true, dryRun: false, doctor: false });
+    const hookDir = path.join(root, '.clinerules', 'hooks');
+    const hookPaths = ['PreToolUse', 'PostToolUse', 'TaskCancel'].map((name) => path.join(hookDir, name));
+    for (const hookPath of hookPaths) {
+      assert.equal(fs.statSync(hookPath).mode & 0o777, 0o755);
+      assert.match(fs.readFileSync(hookPath, 'utf8'), /^#!\/bin\/sh\n/);
+    }
+    const pre = fs.readFileSync(hookPaths[0], 'utf8');
+    const post = fs.readFileSync(hookPaths[1], 'utf8');
+    const cancel = fs.readFileSync(hookPaths[2], 'utf8');
+    assert.match(pre, /@getmarrow\/mcp@3\.9\.75 marrow-mcp cline-pre-action-hook/);
+    assert.match(pre, /"cancel":true/);
+    assert.match(pre, /JSON\.parse/);
+    assert.match(post, /@getmarrow\/mcp@3\.9\.75 marrow-mcp cline-hook/);
+    assert.match(post, /\|\| :/);
+    assert.match(cancel, /@getmarrow\/mcp@3\.9\.75 marrow-mcp cline-session-hook/);
+    assert.match(cancel, /\|\| :/);
+    assert.equal(fs.existsSync(path.join(hookDir, 'TaskComplete')), false);
+
+    const fakeBin = path.join(root, 'fake-bin');
+    fs.mkdirSync(fakeBin);
+    const fakeNpx = path.join(fakeBin, 'npx');
+    fs.writeFileSync(fakeNpx, '#!/bin/sh\nif [ "${FAKE_NPX_FAIL:-}" = "1" ]; then exit 7; fi\nprintf "%s\\n" \'{"cancel":false}\'\n');
+    fs.chmodSync(fakeNpx, 0o755);
+    const hookEnv = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}` };
+    const allowed = spawnSync(hookPaths[0], [], { env: hookEnv, input: '{}', encoding: 'utf8' });
+    assert.equal(allowed.status, 0, allowed.stderr);
+    assert.deepEqual(JSON.parse(allowed.stdout), { cancel: false });
+    const failed = spawnSync(hookPaths[0], [], { env: { ...hookEnv, FAKE_NPX_FAIL: '1' }, input: '{}', encoding: 'utf8' });
+    assert.equal(failed.status, 0, failed.stderr);
+    assert.equal(JSON.parse(failed.stdout).cancel, true);
+    for (const hookPath of hookPaths.slice(1)) {
+      const telemetryFailure = spawnSync(hookPath, [], { env: { ...hookEnv, FAKE_NPX_FAIL: '1' }, input: '{}', encoding: 'utf8' });
+      assert.equal(telemetryFailure.status, 0, telemetryFailure.stderr);
+      assert.equal(telemetryFailure.stdout, '');
+    }
+
+    const profile = activationProfile(detection, plan, changes, 'cline');
+    assert.equal(profile.capability_level, 'native_hooks');
+    assert.deepEqual(profile.expected_hooks, ['pre_action', 'action_result', 'cancel_closeout']);
+    assert.deepEqual(profile.observed_hooks, ['pre_action', 'action_result', 'cancel_closeout']);
+    assert.equal(profile.evidence_authority, 'client_self_reported');
+    assert.equal(profile.coverage_verified, false);
+    assert.equal(profile.passive_live, false);
+    assert.equal(profile.configuration_complete, true);
+    assert.equal(profile.task_complete_support, 'coming_soon_not_configured');
+    assert.equal(profile.task_completion_closure_verified, false);
+    assert.equal(profile.enable_hooks_required, true);
+    assert.match(profile.exact_fix, /Enable Hooks.*trust.*restart/);
+    assert.equal(profile.config_fingerprint, clineNativeHookFingerprint(detection));
+    const matrix = defaultHarnessInstallMatrix(detection).find((entry) => entry.client === 'cline');
+    assert.equal(matrix.capability_level, 'native_hooks');
+    assert.deepEqual(matrix.automatic, ['pre_action', 'action_result', 'cancel_closeout']);
+    assert.equal(matrix.default_install.native_hooks, true);
+    assert.equal(matrix.configured_locally, true);
+    assert.equal(matrix.verified_passive, false);
+    assert.match(matrix.unsupported_claim, /TaskComplete.*coming soon.*not configured/);
+
+    const firstBytes = hookPaths.map((hookPath) => fs.readFileSync(hookPath));
+    const secondDetection = detectEnvironment(root, { ...process.env, HOME: root });
+    const secondPlan = buildPlan(secondDetection, { mode: 'both' });
+    const secondChanges = applyPlan(secondPlan, { yes: true, dryRun: false, doctor: false });
+    hookPaths.forEach((hookPath, index) => {
+      assert.deepEqual(fs.readFileSync(hookPath), firstBytes[index]);
+      assert.equal(fs.statSync(hookPath).mode & 0o777, 0o755);
+    });
+    assert.ok(secondChanges.filter((change) => /Cline .* native hook/.test(change.label)).every((change) => change.already_present));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Cline preserves unrelated hook conflicts and reports exact owner resolution', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-cline-conflict-'));
+  try {
+    fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
+    const hooksDir = path.join(root, '.clinerules', 'hooks');
+    fs.mkdirSync(hooksDir, { recursive: true });
+    const prePath = path.join(hooksDir, 'PreToolUse');
+    const ownerHook = '#!/bin/sh\nprintf owner-hook\n';
+    fs.writeFileSync(prePath, ownerHook);
+    fs.chmodSync(prePath, 0o755);
+    const detection = detectEnvironment(root, { ...process.env, HOME: root });
+    const plan = buildPlan(detection, { mode: 'mcp' });
+    const changes = applyPlan(plan, { yes: true, dryRun: false, doctor: false });
+    assert.equal(fs.readFileSync(prePath, 'utf8'), ownerHook);
+    assert.equal(fs.statSync(prePath).mode & 0o777, 0o755);
+    const conflict = changes.find((change) => change.label === 'Cline PreToolUse native hook');
+    assert.equal(conflict.hook_conflict, true);
+    assert.equal(conflict.applied, false);
+    assert.equal(conflict.changed, false);
+    assert.match(conflict.exact_fix, /Move or remove.*owner review.*--repair/);
+    const profile = activationProfile(detection, plan, changes, 'cline');
+    assert.equal(profile.configuration_complete, false);
+    assert.deepEqual(profile.observed_hooks, ['action_result', 'cancel_closeout']);
+    assert.deepEqual(profile.hook_conflicts, ['Cline PreToolUse native hook']);
+    assert.match(profile.exact_fix, /Move or remove.*owner-managed.*never overwrite or compose/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Cline hook installation rejects symlinked and out-of-root targets before any write or chmod', () => {
+  for (const unsafeKind of ['symlink', 'outside']) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-cline-unsafe-'));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-cline-outside-'));
+    try {
+      fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
+      const hooksDir = path.join(root, '.clinerules', 'hooks');
+      fs.mkdirSync(hooksDir, { recursive: true });
+      let detection = detectEnvironment(root, { ...process.env, HOME: root });
+      if (unsafeKind === 'symlink') {
+        const outsideHook = path.join(outside, 'owner-hook');
+        fs.writeFileSync(outsideHook, 'owner\n');
+        fs.symlinkSync(outsideHook, path.join(hooksDir, 'PreToolUse'));
+      } else {
+        detection.paths.clinePreToolUseHook = path.join(outside, 'PreToolUse');
+      }
+      const plan = buildPlan(detection, { mode: 'mcp' });
+      assert.throws(
+        () => applyPlan(plan, { yes: true, dryRun: false, doctor: false }),
+        /unsafe managed target|outside project root/,
+      );
+      assert.equal(fs.existsSync(path.join(root, '.mcp.json')), false);
+      assert.equal(fs.existsSync(path.join(hooksDir, 'PostToolUse')), false);
+      if (unsafeKind === 'outside') assert.equal(fs.existsSync(path.join(outside, 'PreToolUse')), false);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
       fs.rmSync(outside, { recursive: true, force: true });

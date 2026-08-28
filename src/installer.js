@@ -10,7 +10,7 @@ const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MARROW_BLOCK_START = '<!-- marrow:passive-start -->';
 const MARROW_BLOCK_END = '<!-- marrow:passive-end -->';
 const MCP_ADAPTER_VERSION = '3.9.75';
-const MCP_ADAPTER_SOURCE_SHA = '7c955af5d1894c349cc73a23bbe650e96e0fc954';
+const MCP_ADAPTER_SOURCE_SHA = 'ed454700a0a02e65c4b98782bf15e885e69fc1ff';
 const SDK_ADAPTER_VERSION = '3.7.62';
 const SDK_ADAPTER_INTEGRITY = 'sha512-n1i6Be09TpAQ9BPNRKY7aCvA2iSUPpJfw8djw2MELwpNbBCtKiZ29Jji77BK/6EFLUpSIcTW/Gmdf/ccf0JRYQ==';
 const SDK_ADAPTER_TARBALL = `https://registry.npmjs.org/@getmarrow/sdk/-/sdk-${SDK_ADAPTER_VERSION}.tgz`;
@@ -40,6 +40,9 @@ const CODEX_SESSION_END_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} mar
 const CURSOR_PRE_ACTION_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp cursor-pre-action-hook`;
 const CURSOR_ACTION_RESULT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp cursor-hook`;
 const CURSOR_SESSION_END_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp cursor-session-hook`;
+const CLINE_PRE_ACTION_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp cline-pre-action-hook`;
+const CLINE_ACTION_RESULT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp cline-hook`;
+const CLINE_SESSION_END_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp cline-session-hook`;
 const NATIVE_HOOK_MATCHER = 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*';
 const CODEX_NATIVE_HOOK_MATCHER = 'Bash|apply_patch|Edit|Write|MultiEdit|mcp__(?!marrow__marrow_).*|functions\\.(?!marrow_).*';
 const CURSOR_NATIVE_HOOK_MATCHER = 'Shell|Write|Delete|Task|MCP:(?!marrow(?:_.*|:marrow_.*)$).*';
@@ -51,7 +54,7 @@ const HARNESS_CAPABILITY_REGISTRY = Object.freeze([
   { client: 'claude-code', capability_level: 'native_hooks', automatic: ['prompt', 'pre_action', 'action_result', 'session_end'], install_surface: 'mcp' },
   { client: 'cursor', capability_level: 'native_hooks', automatic: ['pre_action', 'action_result', 'outcome_closure'], install_surface: 'mcp' },
   { client: 'composer', capability_level: 'native_hooks', automatic: ['pre_action', 'action_result', 'outcome_closure'], install_surface: 'mcp' },
-  { client: 'cline', capability_level: 'mcp', automatic: ['mcp_tool_calls'], install_surface: 'mcp' },
+  { client: 'cline', capability_level: 'native_hooks', automatic: ['pre_action', 'action_result', 'cancel_closeout'], install_surface: 'mcp' },
   { client: 'windsurf', capability_level: 'mcp', automatic: ['mcp_tool_calls'], install_surface: 'mcp' },
   { client: 'codex', capability_level: 'native_hooks', automatic: ['prompt', 'pre_action', 'action_result', 'session_end'], install_surface: 'mcp' },
   { client: 'opencode', capability_level: 'governed_wrapper', automatic: ['pre_action', 'action_result', 'outcome_closure'], install_surface: 'runner' },
@@ -408,6 +411,7 @@ function detectedClient(detection) {
   if (detection.openclaw) return 'openclaw';
   if (detection.claudeCode) return 'claude-code';
   if (detection.cursor) return 'cursor';
+  if (detection.cline) return 'cline';
   if (detection.codex) return 'codex';
   return 'custom';
 }
@@ -451,6 +455,9 @@ function detectEnvironment(cwd = process.cwd(), env = process.env) {
     claudeSettings: path.join(root, '.claude', 'settings.json'),
     codexHooks: path.join(root, '.codex', 'hooks.json'),
     cursorHooks: path.join(root, '.cursor', 'hooks.json'),
+    clinePreToolUseHook: path.join(root, '.clinerules', 'hooks', 'PreToolUse'),
+    clinePostToolUseHook: path.join(root, '.clinerules', 'hooks', 'PostToolUse'),
+    clineTaskCancelHook: path.join(root, '.clinerules', 'hooks', 'TaskCancel'),
     claudeMd: path.join(root, 'CLAUDE.md'),
     agentsMd: path.join(root, 'AGENTS.md'),
     cursorRules: path.join(root, '.cursor', 'rules', 'marrow.mdc'),
@@ -469,6 +476,7 @@ function detectEnvironment(cwd = process.cwd(), env = process.env) {
     python: exists(paths.pyproject) || exists(paths.requirements) || exists(paths.setupPy),
     claudeCode: exists(paths.claudeSettings) || exists(paths.claudeMd),
     cursor: exists(path.join(root, '.cursor')),
+    cline: exists(path.join(root, '.clinerules')),
     codex: exists(paths.agentsMd) || exists(path.join(root, '.codex')),
     mcpConfig: exists(paths.mcpJson) || exists(paths.cursorMcp) || exists(paths.claudeSettings),
     openclaw: exists(paths.openclawJson) || Boolean(env.OPENCLAW_HOME || env.OPENCLAW_AGENT_ID),
@@ -671,12 +679,12 @@ Marrow should run passively after install:
 
 - Use MCP plus these instructions in every workspace: \`npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp setup\`.
 - Use SDK passive runtime in owned Node processes: \`createPassiveRuntime().install()\`.
-- Native Claude hooks install only when \`.claude\` is present. Codex native hooks install into \`.codex/hooks.json\`; Cursor and Composer use the same native lifecycle configuration in \`.cursor/hooks.json\`. Restart the host and review configured hooks with \`/hooks\` before claiming runtime coverage. Cline and Windsurf get MCP tools on demand. Grok, Gemini, and similar CLI harnesses use the governed wrapper. Hermes, OpenClaw, and custom hosts need a bounded event adapter.
+- Native Claude hooks install only when \`.claude\` is present. Codex native hooks install into \`.codex/hooks.json\`; Cursor and Composer use \`.cursor/hooks.json\`; Cline uses non-overwriting executable files under \`.clinerules/hooks/\`. Restart the host, enable/review hooks, and trust the workspace before claiming runtime coverage. Windsurf gets MCP tools on demand. Grok, Gemini, and similar CLI harnesses use the governed wrapper. Hermes, OpenClaw, and custom hosts need a bounded event adapter.
 - Keep passive token/model usage proof enabled. Empty savings stay zero until observed model usage lands. Do not invent token, cost, or time savings.
 - Before risky work, use Marrow's decision brief or passive prompt hook.
 - After activate writes MCP or hooks, restart this harness, then run \`npx @getmarrow/install@latest doctor --self-test\`. Do not claim Marrow is live in a process that has not reloaded.
 - First turn: tell the owner the gate is live and empty savings are honest. The next deploy, merge, or publish must go through Marrow.
-- Cursor and Composer use configured native hooks after restart and \`/hooks\` trust review; MCP tools remain on demand. Cline and Windsurf call \`marrow_agent_runtime\` before consequential actions. Codex uses its configured native hooks after restart and \`/hooks\` trust review. Grok, Gemini, and similar CLIs: wrap them with \`npx @getmarrow/install run --agent <agent-id> -- -- <command>\`.
+- Cursor and Composer use configured native hooks after restart and \`/hooks\` trust review. Cline uses its configured PreToolUse, PostToolUse, and TaskCancel hooks only after Enable Hooks, restart, executable trust, and workspace trust; TaskComplete is not claimed as current coverage. MCP tools remain on demand. Windsurf calls \`marrow_agent_runtime\` before consequential actions. Codex uses configured native hooks after restart and \`/hooks\` trust review. Grok, Gemini, and similar CLIs: wrap them with \`npx @getmarrow/install run --agent <agent-id> -- -- <command>\`.
 - Before the session ends, close open work with session-end auto-commit or \`marrow_commit\`. Record model usage only when the host response includes counts.
 - After meaningful work, record the outcome so future agents learn from it.
 - After Marrow blocks, warns, or requires review, use the decision trace receipt to tell the operator what changed and which recorded workflow or proof is required. Stay quiet for routine low-risk work.
@@ -1082,6 +1090,76 @@ function upsertCursorHooks(hooksPath) {
   return JSON.stringify(settings, null, 2) + '\n';
 }
 
+function clinePreToolUseHookSource() {
+  return `#!/bin/sh
+output="$(npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp cline-pre-action-hook 2>/dev/null)" || output=""
+if [ -n "$output" ]; then
+  validated="$(printf '%s' "$output" | NODE_OPTIONS= node -e 'let s="";process.stdin.setEncoding("utf8");process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>{try{const v=JSON.parse(s);const keys=Object.keys(v).sort();const allow=v.cancel===false&&keys.length===1&&keys[0]==="cancel";const deny=v.cancel===true&&typeof v.errorMessage==="string"&&v.errorMessage.length>0&&v.errorMessage.length<=500&&keys.length===2&&keys[0]==="cancel"&&keys[1]==="errorMessage";if(!allow&&!deny)process.exit(1);process.stdout.write(JSON.stringify(v));}catch{process.exit(1);}});' 2>/dev/null)" || validated=""
+  if [ -n "$validated" ]; then
+    printf '%s\n' "$validated"
+    exit 0
+  fi
+fi
+printf '%s\n' '{"cancel":true,"errorMessage":"Marrow governance did not return a valid decision. Restore trusted configuration and retry."}'
+exit 0
+`;
+}
+
+function clineTelemetryHookSource(entrypoint) {
+  return `#!/bin/sh
+npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp ${entrypoint} >/dev/null 2>&1 || :
+exit 0
+`;
+}
+
+function clineHookContract(detection) {
+  return [
+    {
+      stage: 'pre_action',
+      path: detection.paths.clinePreToolUseHook,
+      label: 'Cline PreToolUse native hook',
+      content: clinePreToolUseHookSource(),
+    },
+    {
+      stage: 'action_result',
+      path: detection.paths.clinePostToolUseHook,
+      label: 'Cline PostToolUse native hook',
+      content: clineTelemetryHookSource('cline-hook'),
+    },
+    {
+      stage: 'cancel_closeout',
+      path: detection.paths.clineTaskCancelHook,
+      label: 'Cline TaskCancel native hook',
+      content: clineTelemetryHookSource('cline-session-hook'),
+    },
+  ];
+}
+
+function exactExecutableFile(filePath, content) {
+  try {
+    const stat = fs.lstatSync(filePath);
+    return stat.isFile() && !stat.isSymbolicLink() && (stat.mode & 0o111) !== 0 && safeRead(filePath) === content;
+  } catch {
+    return false;
+  }
+}
+
+function clineNativeHookFingerprint(detection) {
+  const hooks = clineHookContract(detection).map((hook) => ({
+    stage: hook.stage,
+    configured: exactExecutableFile(hook.path, hook.content),
+    content_sha256: exactExecutableFile(hook.path, hook.content)
+      ? crypto.createHash('sha256').update(hook.content).digest('hex')
+      : null,
+  }));
+  return crypto.createHash('sha256').update(JSON.stringify({
+    schema: 'marrow-cline-native-hooks.v1',
+    adapter_version: MCP_ADAPTER_VERSION,
+    task_complete_support: 'coming_soon_not_configured',
+    hooks,
+  })).digest('hex');
+}
+
 function activationProfile(detection, plan, changes, client) {
   const registry = HARNESS_CAPABILITY_REGISTRY.find((entry) => entry.client === client)
     || HARNESS_CAPABILITY_REGISTRY.find((entry) => entry.client === 'custom');
@@ -1118,6 +1196,10 @@ function activationProfile(detection, plan, changes, client) {
     if (exactCursorHookConfigured(cursorSettings, 'stop', CURSOR_SESSION_END_HOOK_COMMAND, undefined, {
       timeout: CODEX_SESSION_TIMEOUT_SECONDS,
     })) observedHooks.push('outcome_closure');
+  } else if (client === 'cline') {
+    for (const hook of clineHookContract(detection)) {
+      if (exactExecutableFile(hook.path, hook.content)) observedHooks.push(hook.stage);
+    }
   } else {
     if (capabilityLevel === 'native_hooks'
       && exactHookConfigured(claudeSettings, 'UserPromptSubmit', MCP_CONTEXT_HOOK_COMMAND)) observedHooks.push('prompt');
@@ -1153,17 +1235,25 @@ function activationProfile(detection, plan, changes, client) {
   const configFingerprint = capabilityLevel === 'native_hooks'
     ? client === 'codex' ? codexNativeHookFingerprint(codexSettings)
       : client === 'cursor' || client === 'composer' ? cursorNativeHookFingerprint(cursorSettings)
+      : client === 'cline' ? clineNativeHookFingerprint(detection)
       : claudeNativeHookFingerprint(claudeSettings)
     : crypto.createHash('sha256')
       .update(`${client}:${capabilityLevel}:${expectedHooks.join(',')}:${fingerprintMaterial}`)
       .digest('hex');
   const complete = expectedHooks.length > 0 && expectedHooks.every((hook) => observedHooks.includes(hook));
+  const clineConflicts = changes
+    .filter((change) => change.hook_conflict)
+    .map((change) => change.label);
   const exactFix = complete
-    ? null
+    ? client === 'cline'
+      ? 'Enable Hooks in Cline, trust the project hook executables and workspace, then restart Cline. TaskComplete remains unverified and is not configured.'
+      : null
     : capabilityLevel === 'sdk_passive_runtime' && !sdkDependency.present
     ? `${sdkDependency.install_command} && npx @getmarrow/install --repair`
     : capabilityLevel === 'governed_wrapper'
     ? `npx @getmarrow/install run --agent <agent-id> -- ${client}`
+    : client === 'cline' && clineConflicts.length > 0
+    ? 'Move or remove the conflicting owner-managed Cline hook file after owner review, then run npx @getmarrow/install --repair. Marrow will never overwrite or compose it.'
     : 'npx @getmarrow/install --repair';
   return {
     adapter_version: adapterVersion,
@@ -1177,6 +1267,13 @@ function activationProfile(detection, plan, changes, client) {
     configuration_complete: complete,
     complete,
     exact_fix: exactFix,
+    ...(client === 'cline' ? {
+      hook_conflicts: clineConflicts,
+      task_complete_support: 'coming_soon_not_configured',
+      task_completion_closure_verified: false,
+      enable_hooks_required: true,
+      executable_trust_required: true,
+    } : {}),
   };
 }
 
@@ -1299,6 +1396,7 @@ function defaultHarnessInstallMatrix(detection = detectEnvironment(process.cwd()
     const detected = detectedClient(detection) === entry.client
       || (entry.client === 'claude-code' && detection.claudeCode)
       || (entry.client === 'cursor' && detection.cursor)
+      || (entry.client === 'cline' && detection.cline)
       || (entry.client === 'codex' && detection.codex);
     const codexSettings = entry.client === 'codex' ? safeJsonObject(detection.paths.codexHooks) : null;
     const codexConfigured = Boolean(codexSettings
@@ -1320,6 +1418,8 @@ function defaultHarnessInstallMatrix(detection = detectEnvironment(process.cwd()
       && exactCursorHookConfigured(cursorSettings, 'stop', CURSOR_SESSION_END_HOOK_COMMAND, undefined, {
         timeout: CODEX_SESSION_TIMEOUT_SECONDS,
       }));
+    const clineConfigured = entry.client === 'cline'
+      && clineHookContract(detection).every((hook) => exactExecutableFile(hook.path, hook.content));
     return {
       client: entry.client,
       capability_level: entry.capability_level,
@@ -1332,15 +1432,19 @@ function defaultHarnessInstallMatrix(detection = detectEnvironment(process.cwd()
         native_hooks: entry.capability_level === 'native_hooks' && Boolean(
           entry.client === 'claude-code' ? detection.claudeCode
             : entry.client === 'codex' ? detection.codex
-            : ['cursor', 'composer'].includes(entry.client) && detection.cursor,
+            : ['cursor', 'composer'].includes(entry.client) ? detection.cursor
+            : entry.client === 'cline' && detection.cline,
         ),
         governed_wrapper: entry.capability_level === 'governed_wrapper',
       },
       configured_locally: entry.client === 'codex' ? codexConfigured
         : ['cursor', 'composer'].includes(entry.client) ? cursorConfigured
+        : entry.client === 'cline' ? clineConfigured
         : detected && entry.automatic.length > 0,
       verified_passive: false,
-      unsupported_claim: entry.capability_level === 'event_contract'
+      unsupported_claim: entry.client === 'cline'
+        ? 'TaskComplete is documented as coming soon and is not configured or counted as observed coverage.'
+        : entry.capability_level === 'event_contract'
         ? 'Needs a bounded event adapter. MCP tools remain on demand.'
         : null,
     };
@@ -1388,6 +1492,18 @@ function buildPlan(detection, options) {
         label: 'Codex native hooks',
         transform: upsertCodexHooks,
       });
+    }
+    if (detection.cline) {
+      for (const hook of clineHookContract(detection)) {
+        writes.push({
+          type: 'owned-executable',
+          path: hook.path,
+          label: hook.label,
+          content: hook.content,
+          mode: 0o755,
+          conflict_fix: 'Move or remove the existing owner-managed Cline hook after owner review, then run npx @getmarrow/install --repair.',
+        });
+      }
     }
     writes.push({
       type: 'json-transform',
@@ -1493,8 +1609,10 @@ function applyPlan(plan, options) {
   const root = path.resolve(plan.root || path.dirname(plan.writes[0].path));
   for (const write of plan.writes) assertContainedManagedTarget(root, write.path);
   const prepared = plan.writes.map((write) => {
+    const fileExists = exists(write.path);
     const before = safeRead(write.path);
     let after;
+    let hookConflict = false;
     if (write.type === 'file') {
       if (write.overwrite === false && before) {
         after = before;
@@ -1505,26 +1623,42 @@ function applyPlan(plan, options) {
       after = upsertBlock(before, write.block);
     } else if (write.type === 'json-transform') {
       after = write.transform(write.path);
+    } else if (write.type === 'owned-executable') {
+      if (fileExists && before !== write.content) {
+        after = before;
+        hookConflict = true;
+      } else {
+        after = write.content;
+      }
     } else {
       throw new Error(`Unknown write type: ${write.type}`);
     }
 
-    return { write, before, after };
+    const beforeMode = fileExists ? fs.lstatSync(write.path).mode & 0o777 : null;
+    const modeChanged = !hookConflict && typeof write.mode === 'number' && beforeMode !== write.mode;
+    return { write, before, after, hookConflict, modeChanged };
   });
 
   const changes = [];
-  for (const { write, before, after } of prepared) {
-    const changed = before !== after;
-    const writeApplied = Boolean(options.yes && !options.dryRun && !options.doctor);
+  for (const { write, before, after, hookConflict, modeChanged } of prepared) {
+    const contentChanged = before !== after;
+    const changed = !hookConflict && (contentChanged || modeChanged);
+    const writeApplied = Boolean(options.yes && !options.dryRun && !options.doctor && !hookConflict);
     changes.push({
       path: write.path,
       label: write.label,
       changed,
       applied: changed && writeApplied,
-      already_present: !changed,
+      already_present: !changed && !hookConflict,
+      hook_conflict: hookConflict,
+      ...(hookConflict ? { exact_fix: write.conflict_fix } : {}),
     });
-    if (changed && writeApplied) {
+    if (contentChanged && writeApplied) {
       atomicWriteManagedFile(root, write.path, after);
+    }
+    if (modeChanged && writeApplied) {
+      assertContainedManagedTarget(root, write.path);
+      fs.chmodSync(write.path, write.mode);
     }
   }
   return changes;
@@ -2308,6 +2442,7 @@ module.exports = {
   claudeNativeHookFingerprint,
   codexNativeHookFingerprint,
   cursorNativeHookFingerprint,
+  clineNativeHookFingerprint,
   printReport,
   ADAPTER_PROVENANCE,
   HARNESS_CAPABILITY_REGISTRY,

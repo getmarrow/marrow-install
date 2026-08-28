@@ -19,6 +19,12 @@ function harnessReloadPlan(detection = {}, changes = []) {
       restart: 'Restart Cursor or Composer, then review the trusted workspace hooks with /hooks so native lifecycle hooks and project MCP load.',
     });
   }
+  if (detection.cline) {
+    clients.push({
+      client: 'cline',
+      restart: 'Enable Hooks in Cline, trust the project hook executables and workspace, then restart Cline. TaskComplete remains unverified.',
+    });
+  }
   if (detection.codex) {
     clients.push({
       client: 'codex',
@@ -57,6 +63,14 @@ function firstCapturePath(detection = {}, agentId) {
       capability_level: 'native_hooks',
       command: null,
       instruction: 'After restart and trusted-workspace /hooks review, Cursor and Composer use the same native pre-action, action-result, and outcome-closeout hooks. MCP tools remain on demand. Configuration does not verify runtime coverage.',
+    };
+  }
+  if (detection.cline) {
+    return {
+      client: 'cline',
+      capability_level: 'native_hooks',
+      command: null,
+      instruction: 'After Enable Hooks, executable/workspace trust, and restart, Cline uses native PreToolUse, PostToolUse, and TaskCancel hooks. MCP remains on demand. TaskComplete is documented as coming soon and is not verified coverage; configuration does not prove passive runtime coverage.',
     };
   }
   if (detection.codex) {
