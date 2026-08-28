@@ -200,7 +200,13 @@ function writeSdkLock(root, declaredSpec = '^3.7.62') {
   }));
 }
 
-test('parseArgs defaults to dry-run unless --yes is passed', () => {
+test('parseArgs makes only the bare install path default-on while preserving explicit controls', () => {
+  const defaults = parseArgs([]);
+  assert.equal(defaults.yes, true);
+  assert.equal(defaults.activate, true);
+  assert.equal(defaults.selfTest, true);
+  assert.equal(defaults.controller, true);
+
   const dry = parseArgs(['--mcp']);
   assert.equal(dry.mode, 'mcp');
   assert.equal(dry.yes, false);
@@ -212,6 +218,14 @@ test('parseArgs defaults to dry-run unless --yes is passed', () => {
 
   const doctor = parseArgs(['doctor']);
   assert.equal(doctor.doctor, true);
+  assert.equal(doctor.yes, false);
+  assert.equal(doctor.activate, false);
+
+  const preview = parseArgs(['--dry-run']);
+  assert.equal(preview.dryRun, true);
+  assert.equal(preview.yes, false);
+  assert.equal(preview.activate, false);
+  assert.equal(preview.selfTest, false);
 
   const repair = parseArgs(['--repair']);
   assert.equal(repair.repair, true);
@@ -225,6 +239,12 @@ test('parseArgs defaults to dry-run unless --yes is passed', () => {
 
   const noController = parseArgs(['--repair', '--no-controller']);
   assert.equal(noController.controller, false);
+
+  const defaultWithoutController = parseArgs(['--no-controller']);
+  assert.equal(defaultWithoutController.yes, true);
+  assert.equal(defaultWithoutController.activate, true);
+  assert.equal(defaultWithoutController.selfTest, true);
+  assert.equal(defaultWithoutController.controller, false);
 });
 
 test('SDK detection accepts the exact 3.7.62 release candidate and rejects the superseded integrity', () => {
@@ -346,6 +366,15 @@ test('programmatic activation cannot attest to a dry-run or skipped self-test', 
   await assert.rejects(install({ ...base, yes: undefined, dryRun: false, selfTest: true }), /requires write mode/);
   await assert.rejects(install({ ...base, doctor: true, dryRun: false, selfTest: true }), /requires write mode/);
   await assert.rejects(install({ ...base, dryRun: false, selfTest: false }), /requires the server self-test/);
+});
+
+test('default activation fails before writing when MARROW_API_KEY is unavailable', async () => {
+  const dir = tempDir();
+  fs.writeFileSync(path.join(dir, 'package.json'), '{}');
+  const options = { ...parseArgs([]), cwd: dir, apiKey: '' };
+
+  await assert.rejects(install(options), /activation requires MARROW_API_KEY/);
+  assert.equal(fs.existsSync(path.join(dir, '.marrow')), false);
 });
 
 test('applyPlan distinguishes files written now from configuration already present', () => {
