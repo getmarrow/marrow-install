@@ -11,6 +11,7 @@ const {
   applyPlan,
   buildPlan,
   claudeNativeHookFingerprint,
+  codexNativeHookFingerprint,
   defaultHarnessInstallMatrix,
   detectEnvironment,
   firstCapturePath,
@@ -19,7 +20,8 @@ const {
 } = require('../src/installer');
 
 const NATIVE_HOOK_MATCHER = 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*';
-const MCP_ACTION_RESULT_HOOK_COMMAND = 'npx -y --package=@getmarrow/mcp@3.9.74 marrow-mcp hook';
+const CODEX_NATIVE_HOOK_MATCHER = 'Bash|apply_patch|Edit|Write|MultiEdit|mcp__(?!marrow__marrow_).*|functions\\.(?!marrow_).*';
+const MCP_ACTION_RESULT_HOOK_COMMAND = 'npx -y --package=@getmarrow/mcp@3.9.75 marrow-mcp hook';
 const SDK_INTEGRITY = 'sha512-n1i6Be09TpAQ9BPNRKY7aCvA2iSUPpJfw8djw2MELwpNbBCtKiZ29Jji77BK/6EFLUpSIcTW/Gmdf/ccf0JRYQ==';
 
 function writeSdkLock(root, declaredSpec = '^3.7.62') {
@@ -60,7 +62,7 @@ test('activate writes require a harness reload and do not claim this process is 
   ]);
   assert.equal(plan.required, true);
   assert.equal(plan.live_in_this_process, false);
-  assert.match(plan.instruction, /Codex or Grok/);
+  assert.match(plan.instruction, /review the repository hooks with \/hooks/);
   assert.match(plan.prove_command, /doctor --self-test/);
 });
 
@@ -73,11 +75,12 @@ test('Cursor first capture is on-demand MCP runtime, not native hooks', () => {
   assert.match(capture.instruction, /marrow_session_end/);
 });
 
-test('Codex first capture is the governed runner', () => {
+test('Codex first capture requires native-hook restart and trust review without claiming coverage', () => {
   const capture = firstCapturePath({ cursor: false, claudeCode: false, codex: true }, 'codex');
-  assert.equal(capture.capability_level, 'governed_wrapper');
-  assert.match(capture.command, /@getmarrow\/install run --agent codex/);
-  assert.match(capture.instruction, /marrow_session_end|marrow_commit/);
+  assert.equal(capture.capability_level, 'native_hooks');
+  assert.equal(capture.command, null);
+  assert.match(capture.instruction, /\/hooks trust review/);
+  assert.match(capture.instruction, /does not verify runtime coverage/);
 });
 
 test('Claude first capture uses native hooks even when Cursor is also present', () => {
@@ -156,7 +159,7 @@ test('Claude native-hook configuration records local completeness without provin
     const changes = applyPlan(plan, { yes: true, dryRun: false, doctor: false });
     const profile = activationProfile(detection, plan, changes, 'claude-code');
     assert.equal(profile.capability_level, 'native_hooks');
-    assert.equal(profile.adapter_version, '3.9.74');
+    assert.equal(profile.adapter_version, '3.9.75');
     assert.deepEqual(profile.expected_hooks, ['prompt', 'pre_action', 'action_result', 'session_end']);
     assert.deepEqual(profile.observed_hooks.sort(), ['action_result', 'pre_action', 'prompt', 'session_end'].sort());
     assert.equal(profile.evidence_authority, 'client_self_reported');
@@ -168,7 +171,7 @@ test('Claude native-hook configuration records local completeness without provin
     const parsedSettings = JSON.parse(settings);
     const canonicalFingerprint = crypto.createHash('sha256').update(JSON.stringify({
       schema: 'marrow-claude-native-hooks.v3',
-      adapter_version: '3.9.74',
+      adapter_version: '3.9.75',
       expected_hooks: ['prompt', 'pre_action', 'action_result', 'session_end'],
       configured: {
         prompt: true,
@@ -178,18 +181,18 @@ test('Claude native-hook configuration records local completeness without provin
         session_end: true,
       },
       descriptors: {
-        prompt: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.74 marrow-mcp context-hook', timeout: null }],
-        pre_action: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.74 marrow-mcp pre-action-hook', timeout: null }],
-        action_result_success: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.74 marrow-mcp hook', timeout: null }],
-        action_result_failure: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.74 marrow-mcp hook', timeout: null }],
-        session_end: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.74 marrow-mcp session-hook', timeout: null }],
+        prompt: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.75 marrow-mcp context-hook', timeout: null }],
+        pre_action: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.75 marrow-mcp pre-action-hook', timeout: null }],
+        action_result_success: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.75 marrow-mcp hook', timeout: null }],
+        action_result_failure: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.75 marrow-mcp hook', timeout: null }],
+        session_end: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.75 marrow-mcp session-hook', timeout: null }],
       },
       active_marrow_handlers: {
-        prompt: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.74 marrow-mcp context-hook', timeout: null }],
-        pre_action: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.74 marrow-mcp pre-action-hook', timeout: null }],
-        action_result_success: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.74 marrow-mcp hook', timeout: null }],
-        action_result_failure: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.74 marrow-mcp hook', timeout: null }],
-        session_end: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.74 marrow-mcp session-hook', timeout: null }],
+        prompt: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.75 marrow-mcp context-hook', timeout: null }],
+        pre_action: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.75 marrow-mcp pre-action-hook', timeout: null }],
+        action_result_success: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.75 marrow-mcp hook', timeout: null }],
+        action_result_failure: [{ matcher: 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.75 marrow-mcp hook', timeout: null }],
+        session_end: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.75 marrow-mcp session-hook', timeout: null }],
       },
     })).digest('hex');
     assert.equal(profile.config_fingerprint, canonicalFingerprint);
@@ -198,7 +201,7 @@ test('Claude native-hook configuration records local completeness without provin
     assert.match(settings, /pre-action-hook/);
     assert.match(settings, /PostToolUseFailure/);
     assert.match(settings, /session-hook/);
-    assert.match(settings, /getmarrow\/mcp@3\.9\.74.*marrow-mcp hook/);
+    assert.match(settings, /getmarrow\/mcp@3\.9\.75.*marrow-mcp hook/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -239,7 +242,7 @@ test('Claude setup replaces old Marrow hooks without duplicate execution', () =>
       .flatMap((entry) => entry.hooks || [])
       .filter((hook) => /^npx\s+(?:-y\s+)?(?:--package=)?@getmarrow\/mcp(?:@[^\s]+)?\s+(?:marrow-mcp\s+)?/.test(hook.command || ''));
     assert.equal(commandCounts.length, 5);
-    assert.ok(commandCounts.every((hook) => hook.command.includes('@getmarrow/mcp@3.9.74')));
+    assert.ok(commandCounts.every((hook) => hook.command.includes('@getmarrow/mcp@3.9.75')));
     assert.deepEqual(settings.permissions, { allow: ['Read'] });
     assert.match(first, /printf unrelated/);
     assert.equal(settings.hooks.PostToolUseFailure.at(-1).hooks[0].timeout, 14);
@@ -305,23 +308,90 @@ test('Claude fingerprint includes unexpected legacy and duplicate active handler
   }
 });
 
-test('Codex activation does not claim SDK capture when SDK is absent', () => {
+test('Codex hooks reconcile exact native events, preserve unrelated entries, and stay byte-idempotent', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-codex-'));
   try {
     fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
     fs.writeFileSync(path.join(root, 'AGENTS.md'), '# Agents\n');
+    fs.mkdirSync(path.join(root, '.codex'), { recursive: true });
+    fs.writeFileSync(path.join(root, '.codex', 'hooks.json'), JSON.stringify({
+      owner_setting: { preserved: true },
+      hooks: {
+        PreToolUse: [{ matcher: 'owner-tool', hooks: [{ type: 'command', command: 'owner-check', timeout: 9 }] }],
+        CustomEvent: [{ hooks: [{ type: 'command', command: 'owner-custom' }] }],
+      },
+    }, null, 2) + '\n');
     const detection = detectEnvironment(root, { ...process.env, HOME: root });
     const plan = buildPlan(detection, { mode: 'both' });
     const changes = applyPlan(plan, { yes: true, dryRun: false, doctor: false });
     const profile = activationProfile(detection, plan, changes, 'codex');
+    const hooksPath = path.join(root, '.codex', 'hooks.json');
+    const first = fs.readFileSync(hooksPath, 'utf8');
+    const settings = JSON.parse(first);
 
-    assert.equal(profile.capability_level, 'governed_wrapper');
-    assert.deepEqual(profile.expected_hooks, ['pre_action', 'action_result', 'outcome_closure']);
-    assert.deepEqual(profile.observed_hooks, []);
-    assert.equal(profile.complete, false);
-    assert.match(profile.exact_fix, /install run --agent/);
+    assert.deepEqual(settings.owner_setting, { preserved: true });
+    assert.deepEqual(settings.hooks.CustomEvent, [{ hooks: [{ type: 'command', command: 'owner-custom' }] }]);
+    assert.ok(settings.hooks.PreToolUse.some((entry) => entry.matcher === 'owner-tool'));
+    const exact = (event, suffix, matcher, timeout) => {
+      const entry = settings.hooks[event].find((candidate) => matcher == null || candidate.matcher === matcher);
+      const hook = entry.hooks.find((candidate) => candidate.command?.endsWith(`marrow-mcp ${suffix}`));
+      assert.ok(hook, `missing ${event} ${suffix}`);
+      assert.equal(hook.timeout, timeout);
+      assert.match(hook.command, /@getmarrow\/mcp@3\.9\.75/);
+      return hook;
+    };
+    exact('UserPromptSubmit', 'codex-context-hook', null, 5);
+    const preAction = exact('PreToolUse', 'codex-pre-action-hook', CODEX_NATIVE_HOOK_MATCHER, 5);
+    assert.equal(preAction.async, false);
+    exact('PostToolUse', 'codex-hook', CODEX_NATIVE_HOOK_MATCHER, 5);
+    exact('SessionEnd', 'codex-session-hook', null, 3);
+    assert.equal(settings.hooks.PostToolUseFailure, undefined);
+    assert.equal(profile.capability_level, 'native_hooks');
+    assert.equal(profile.adapter_version, '3.9.75');
+    assert.deepEqual(profile.expected_hooks, ['prompt', 'pre_action', 'action_result', 'session_end']);
+    assert.deepEqual(profile.observed_hooks.sort(), ['prompt', 'pre_action', 'action_result', 'session_end'].sort());
+    assert.equal(profile.evidence_authority, 'client_self_reported');
+    assert.equal(profile.coverage_verified, false);
+    assert.equal(profile.passive_live, false);
+    assert.equal(profile.configuration_complete, true);
+    assert.equal(profile.complete, true);
+    assert.equal(profile.exact_fix, null);
+    assert.equal(profile.config_fingerprint, codexNativeHookFingerprint(settings));
+
+    const secondDetection = detectEnvironment(root, { ...process.env, HOME: root });
+    const secondPlan = buildPlan(secondDetection, { mode: 'both' });
+    applyPlan(secondPlan, { yes: true, dryRun: false, doctor: false });
+    assert.equal(fs.readFileSync(hooksPath, 'utf8'), first);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Codex hook installation rejects symlinked and out-of-root targets before any write', () => {
+  for (const unsafeKind of ['symlink', 'outside']) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-codex-unsafe-'));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-codex-outside-'));
+    try {
+      fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
+      fs.writeFileSync(path.join(root, 'AGENTS.md'), '# Agents\n');
+      let detection = detectEnvironment(root, { ...process.env, HOME: root });
+      if (unsafeKind === 'symlink') {
+        fs.symlinkSync(outside, path.join(root, '.codex'));
+        detection = detectEnvironment(root, { ...process.env, HOME: root });
+      } else {
+        detection.paths.codexHooks = path.join(outside, 'hooks.json');
+      }
+      const plan = buildPlan(detection, { mode: 'mcp' });
+      assert.throws(
+        () => applyPlan(plan, { yes: true, dryRun: false, doctor: false }),
+        /unsafe path component|outside project root/,
+      );
+      assert.equal(fs.existsSync(path.join(outside, 'hooks.json')), false);
+      assert.equal(fs.existsSync(path.join(root, '.mcp.json')), false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
   }
 });
 

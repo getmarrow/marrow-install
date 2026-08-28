@@ -22,7 +22,7 @@ function harnessReloadPlan(detection = {}, changes = []) {
   if (detection.codex) {
     clients.push({
       client: 'codex',
-      restart: 'Start a new Codex or Grok session so AGENTS.md and MCP config load.',
+      restart: 'Start a new Codex session, then review the repository hooks with /hooks before treating them as trusted or live.',
     });
   }
   if (clients.length === 0) {
@@ -59,11 +59,19 @@ function firstCapturePath(detection = {}, agentId) {
       instruction: 'After restart, call marrow_agent_runtime before the next deploy, merge, or publish. Before the session ends, call marrow_session_end. Cursor MCP tools are on demand.',
     };
   }
+  if (detection.codex) {
+    return {
+      client: 'codex',
+      capability_level: 'native_hooks',
+      command: null,
+      instruction: 'After restart and owner /hooks trust review, Codex native hooks capture prompt, pre-action, action-result, and session-end events. Configuration alone does not verify runtime coverage.',
+    };
+  }
   return {
-    client: detection.codex ? 'codex' : 'governed_wrapper',
+    client: 'governed_wrapper',
     capability_level: 'governed_wrapper',
     command: `npx @getmarrow/install run --agent ${id} -- -- <command>`,
-    instruction: 'Wrap the next deploy, merge, or publish with the governed runner. Codex and Grok do not intercept tools natively. Before the session ends, call marrow_session_end or marrow_commit. Do not invent token counts.',
+    instruction: 'Wrap the next deploy, merge, or publish with the governed runner. Grok and similar unsupported hosts do not intercept tools natively. Before the session ends, call marrow_session_end or marrow_commit. Do not invent token counts.',
   };
 }
 
