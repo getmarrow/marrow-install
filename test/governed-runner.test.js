@@ -255,6 +255,131 @@ test('server-classified low-risk actions remain non-blocking without an action p
   }
 });
 
+test('governed runner tees Codex JSONL unchanged and attaches valid usage once', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-runner-usage-'));
+  const executable = path.join(directory, 'codex');
+  const outputLines = [
+    JSON.stringify({ type: 'thread.started', thread_id: 'thread-test' }),
+    JSON.stringify({ type: 'turn.completed', usage: {
+      input_tokens: 120,
+      cached_input_tokens: 40,
+      output_tokens: 30,
+    } }),
+  ];
+  const expectedOutput = `${outputLines.join('\n')}\n`;
+  fs.writeFileSync(
+    executable,
+    `#!/bin/sh\nprintf '%s' '${expectedOutput}'\n`,
+    { mode: 0o700 },
+  );
+
+  const originalFetch = globalThis.fetch;
+  const commits = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const pathname = new URL(String(url)).pathname;
+    const body = init.body ? JSON.parse(String(init.body)) : {};
+    if (pathname === '/v1/agent/runtime') {
+      return Response.json({ data: {
+        risk_gate: { allow: true, decision: 'allow', risk_level: 'low' },
+        gate_receipt: { required: false },
+      } });
+    }
+    if (pathname === '/v1/agent/think') {
+      return Response.json({ data: { decision_id: 'decision-usage' } });
+    }
+    if (pathname === '/v1/agent/commit') {
+      commits.push({ body, headers: new Headers(init.headers) });
+      return Response.json({ data: { committed: true } });
+    }
+    return Response.json({ data: {} });
+  };
+
+  try {
+    const parsed = parseArgs([
+      'run', '--key', 'test-key', '--agent', 'usage-agent', '--session', 'usage-session',
+      '--type', 'general', '--action', 'inspect repository', '--',
+      executable, 'exec', '--json', 'inspect',
+    ]);
+    let rendered = '';
+    const stdout = new Writable({
+      write(chunk, encoding, callback) {
+        rendered += chunk.toString();
+        callback();
+      },
+    });
+
+    const first = await runGoverned(parsed, { stdout });
+    const second = await runGoverned(parsed, { stdout });
+    assert.equal(first.ok, true);
+    assert.deepEqual(first.usage_capture, {
+      supported: true,
+      observed: true,
+      source: 'codex_exec_jsonl',
+      evidence: 'accepted_host_reported_usage',
+    });
+    assert.equal(rendered, expectedOutput.repeat(2));
+    assert.equal(commits.length, 2);
+    assert.deepEqual(commits[0].body.model_usage, {
+      provider: 'openai',
+      input_tokens: 120,
+      output_tokens: 30,
+      cached_tokens: 40,
+      total_tokens: 150,
+      source: 'codex_exec_jsonl',
+      marrow_intervention: 'governed_runner_usage_capture',
+    });
+    assert.equal(commits[0].body.proof.model_usage, undefined);
+    assert.equal(
+      commits[0].headers.get('idempotency-key'),
+      commits[1].headers.get('idempotency-key'),
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('governed runner omits model usage when Codex JSONL is malformed', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-runner-usage-invalid-'));
+  const executable = path.join(directory, 'codex');
+  fs.writeFileSync(
+    executable,
+    '#!/bin/sh\nprintf \'%s\\n\' \'{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":3}}\'\n',
+    { mode: 0o700 },
+  );
+  const originalFetch = globalThis.fetch;
+  let commitBody = null;
+  globalThis.fetch = async (url, init = {}) => {
+    const pathname = new URL(String(url)).pathname;
+    if (pathname === '/v1/agent/runtime') {
+      return Response.json({ data: { risk_gate: { allow: true, risk_level: 'low' } } });
+    }
+    if (pathname === '/v1/agent/think') {
+      return Response.json({ data: { decision_id: 'decision-no-usage' } });
+    }
+    if (pathname === '/v1/agent/commit') {
+      commitBody = JSON.parse(String(init.body));
+      return Response.json({ data: { committed: true } });
+    }
+    return Response.json({ data: {} });
+  };
+  try {
+    const parsed = parseArgs([
+      'run', '--key', 'test-key', '--agent', 'usage-agent', '--type', 'general',
+      '--action', 'inspect repository', '--', executable, 'exec', '--json', 'inspect',
+    ]);
+    const stdout = new Writable({ write(chunk, encoding, callback) { callback(); } });
+    const result = await runGoverned(parsed, { stdout });
+    assert.equal(result.usage_capture.supported, true);
+    assert.equal(result.usage_capture.observed, false);
+    assert.equal(result.usage_capture.evidence, 'no_valid_host_reported_usage');
+    assert.equal(commitBody.model_usage, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('governed runner never starts a protected child when permit verification is not exactly true', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-runner-verify-'));
   const marker = path.join(directory, 'executed');
