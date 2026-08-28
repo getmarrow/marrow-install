@@ -9,8 +9,8 @@ const { firstCapturePath, harnessReloadPlan } = require('./first-hour');
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MARROW_BLOCK_START = '<!-- marrow:passive-start -->';
 const MARROW_BLOCK_END = '<!-- marrow:passive-end -->';
-const MCP_ADAPTER_VERSION = '3.9.74';
-const MCP_ADAPTER_SOURCE_SHA = 'a34a87ee1d6ea16d8ebcc26aa0e66bf7dcb5e23f';
+const MCP_ADAPTER_VERSION = '3.9.75';
+const MCP_ADAPTER_SOURCE_SHA = '735eb7f7a74019ac0c3c60c375f10b0eae2e02a4';
 const SDK_ADAPTER_VERSION = '3.7.62';
 const SDK_ADAPTER_INTEGRITY = 'sha512-n1i6Be09TpAQ9BPNRKY7aCvA2iSUPpJfw8djw2MELwpNbBCtKiZ29Jji77BK/6EFLUpSIcTW/Gmdf/ccf0JRYQ==';
 const SDK_ADAPTER_TARBALL = `https://registry.npmjs.org/@getmarrow/sdk/-/sdk-${SDK_ADAPTER_VERSION}.tgz`;
@@ -33,7 +33,14 @@ const MCP_CONTEXT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mc
 const MCP_PRE_ACTION_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp pre-action-hook`;
 const MCP_ACTION_RESULT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp hook`;
 const MCP_SESSION_END_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp session-hook`;
+const CODEX_CONTEXT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp codex-context-hook`;
+const CODEX_PRE_ACTION_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp codex-pre-action-hook`;
+const CODEX_ACTION_RESULT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp codex-hook`;
+const CODEX_SESSION_END_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp codex-session-hook`;
 const NATIVE_HOOK_MATCHER = 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*';
+const CODEX_NATIVE_HOOK_MATCHER = 'Bash|apply_patch|Edit|Write|MultiEdit|mcp__(?!marrow__marrow_).*|functions\\.(?!marrow_).*';
+const CODEX_HOOK_TIMEOUT_SECONDS = 5;
+const CODEX_SESSION_TIMEOUT_SECONDS = 3;
 const NATIVE_EXPECTED_HOOKS = ['prompt', 'pre_action', 'action_result', 'session_end'];
 const SOURCE_CLIENTS = new Set(['claude-code', 'cursor', 'composer', 'windsurf', 'openclaw', 'codex', 'gemini', 'grok', 'deepseek', 'qwen', 'kimi', 'minimax', 'cline', 'opencode', 'hermes', 'glm', 'mcp', 'ci', 'custom', 'unknown']);
 const HARNESS_CAPABILITY_REGISTRY = Object.freeze([
@@ -42,7 +49,7 @@ const HARNESS_CAPABILITY_REGISTRY = Object.freeze([
   { client: 'composer', capability_level: 'mcp', automatic: ['mcp_tool_calls'], install_surface: 'mcp' },
   { client: 'cline', capability_level: 'mcp', automatic: ['mcp_tool_calls'], install_surface: 'mcp' },
   { client: 'windsurf', capability_level: 'mcp', automatic: ['mcp_tool_calls'], install_surface: 'mcp' },
-  { client: 'codex', capability_level: 'governed_wrapper', automatic: ['pre_action', 'action_result', 'outcome_closure'], install_surface: 'runner' },
+  { client: 'codex', capability_level: 'native_hooks', automatic: ['prompt', 'pre_action', 'action_result', 'session_end'], install_surface: 'mcp' },
   { client: 'opencode', capability_level: 'governed_wrapper', automatic: ['pre_action', 'action_result', 'outcome_closure'], install_surface: 'runner' },
   { client: 'hermes', capability_level: 'event_contract', automatic: [], install_surface: 'addon' },
   { client: 'openclaw', capability_level: 'event_contract', automatic: [], install_surface: 'addon' },
@@ -438,6 +445,7 @@ function detectEnvironment(cwd = process.cwd(), env = process.env) {
     requirements: path.join(root, 'requirements.txt'),
     setupPy: path.join(root, 'setup.py'),
     claudeSettings: path.join(root, '.claude', 'settings.json'),
+    codexHooks: path.join(root, '.codex', 'hooks.json'),
     claudeMd: path.join(root, 'CLAUDE.md'),
     agentsMd: path.join(root, 'AGENTS.md'),
     cursorRules: path.join(root, '.cursor', 'rules', 'marrow.mdc'),
@@ -658,12 +666,12 @@ Marrow should run passively after install:
 
 - Use MCP plus these instructions in every workspace: \`npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp setup\`.
 - Use SDK passive runtime in owned Node processes: \`createPassiveRuntime().install()\`.
-- Native Claude hooks install only when \`.claude\` is present. Cursor, Composer, Cline, and Windsurf get MCP tools on demand. Codex, Grok, Gemini, and similar CLI harnesses use the governed wrapper. Hermes, OpenClaw, and custom hosts need a bounded event adapter.
+- Native Claude hooks install only when \`.claude\` is present. Codex native hooks install into the repository \`.codex/hooks.json\`; restart Codex and review them with \`/hooks\` before claiming runtime coverage. Cursor, Composer, Cline, and Windsurf get MCP tools on demand. Grok, Gemini, and similar CLI harnesses use the governed wrapper. Hermes, OpenClaw, and custom hosts need a bounded event adapter.
 - Keep passive token/model usage proof enabled. Empty savings stay zero until observed model usage lands. Do not invent token, cost, or time savings.
 - Before risky work, use Marrow's decision brief or passive prompt hook.
 - After activate writes MCP or hooks, restart this harness, then run \`npx @getmarrow/install@latest doctor --self-test\`. Do not claim Marrow is live in a process that has not reloaded.
 - First turn: tell the owner the gate is live and empty savings are honest. The next deploy, merge, or publish must go through Marrow.
-- Cursor, Composer, Cline, and Windsurf: call \`marrow_agent_runtime\` before those actions. Codex, Grok, Gemini, and similar CLIs: wrap them with \`npx @getmarrow/install run --agent <agent-id> -- -- <command>\`.
+- Cursor, Composer, Cline, and Windsurf: call \`marrow_agent_runtime\` before those actions. Codex uses its configured native hooks after restart and \`/hooks\` trust review. Grok, Gemini, and similar CLIs: wrap them with \`npx @getmarrow/install run --agent <agent-id> -- -- <command>\`.
 - Before the session ends, close open work with session-end auto-commit or \`marrow_commit\`. Record model usage only when the host response includes counts.
 - After meaningful work, record the outcome so future agents learn from it.
 - After Marrow blocks, warns, or requires review, use the decision trace receipt to tell the operator what changed and which recorded workflow or proof is required. Stay quiet for routine low-risk work.
@@ -793,12 +801,12 @@ function exactHookDescriptors(settings, eventName, command, matcher) {
 function marrowHookSubcommand(command) {
   if (typeof command !== 'string') return null;
   const match = command.trim().match(
-    /^npx\s+(?:-y\s+)?(?:--package=@getmarrow\/mcp(?:@[^\s]+)?\s+marrow-mcp|@getmarrow\/mcp(?:@[^\s]+)?)\s+(context-hook|pre-action-hook|hook|session-hook)$/,
+    /^npx\s+(?:-y\s+)?(?:--package=@getmarrow\/mcp(?:@[^\s]+)?\s+marrow-mcp|@getmarrow\/mcp(?:@[^\s]+)?)\s+(?:(?:claude|codex|grok)-)?(context-hook|pre-action-hook|hook|session-hook)$/,
   );
   return match?.[1] || null;
 }
 
-function reconcileMarrowCommandHook(settings, eventName, subcommand, command, matcher) {
+function reconcileMarrowCommandHook(settings, eventName, subcommand, command, matcher, handlerOptions = {}) {
   const original = Array.isArray(settings?.hooks?.[eventName]) ? settings.hooks[eventName] : [];
   let preferredHandler = null;
   const retained = [];
@@ -822,7 +830,7 @@ function reconcileMarrowCommandHook(settings, eventName, subcommand, command, ma
     }
     if (remaining.length > 0) retained.push({ ...entry, hooks: remaining });
   }
-  const canonical = { hooks: [{ ...(preferredHandler || {}), type: 'command', command }] };
+  const canonical = { hooks: [{ ...(preferredHandler || {}), ...handlerOptions, type: 'command', command }] };
   if (matcher != null) canonical.matcher = matcher;
   retained.push(canonical);
   return retained;
@@ -918,6 +926,60 @@ function upsertClaudeHooks(settingsPath) {
   return JSON.stringify(settings, null, 2) + '\n';
 }
 
+function codexNativeHookFingerprint(settings) {
+  const contract = {
+    schema: 'marrow-codex-native-hooks.v1',
+    adapter_version: MCP_ADAPTER_VERSION,
+    expected_hooks: NATIVE_EXPECTED_HOOKS,
+    configured: {
+      prompt: exactHookConfigured(settings, 'UserPromptSubmit', CODEX_CONTEXT_HOOK_COMMAND),
+      pre_action: exactHookConfigured(settings, 'PreToolUse', CODEX_PRE_ACTION_HOOK_COMMAND, CODEX_NATIVE_HOOK_MATCHER),
+      action_result: exactHookConfigured(settings, 'PostToolUse', CODEX_ACTION_RESULT_HOOK_COMMAND, CODEX_NATIVE_HOOK_MATCHER),
+      session_end: exactHookConfigured(settings, 'SessionEnd', CODEX_SESSION_END_HOOK_COMMAND),
+    },
+    descriptors: {
+      prompt: exactHookDescriptors(settings, 'UserPromptSubmit', CODEX_CONTEXT_HOOK_COMMAND),
+      pre_action: exactHookDescriptors(settings, 'PreToolUse', CODEX_PRE_ACTION_HOOK_COMMAND, CODEX_NATIVE_HOOK_MATCHER),
+      action_result: exactHookDescriptors(settings, 'PostToolUse', CODEX_ACTION_RESULT_HOOK_COMMAND, CODEX_NATIVE_HOOK_MATCHER),
+      session_end: exactHookDescriptors(settings, 'SessionEnd', CODEX_SESSION_END_HOOK_COMMAND),
+    },
+    active_marrow_handlers: {
+      prompt: marrowHookDescriptors(settings, 'UserPromptSubmit'),
+      pre_action: marrowHookDescriptors(settings, 'PreToolUse'),
+      action_result: marrowHookDescriptors(settings, 'PostToolUse'),
+      session_end: marrowHookDescriptors(settings, 'SessionEnd'),
+    },
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(contract)).digest('hex');
+}
+
+function upsertCodexHooks(hooksPath) {
+  const settings = parseJsonObject(hooksPath);
+  const hooks = settings.hooks && typeof settings.hooks === 'object' && !Array.isArray(settings.hooks)
+    ? settings.hooks
+    : {};
+  settings.hooks = {
+    ...hooks,
+    UserPromptSubmit: reconcileMarrowCommandHook(
+      settings, 'UserPromptSubmit', 'context-hook', CODEX_CONTEXT_HOOK_COMMAND, undefined,
+      { timeout: CODEX_HOOK_TIMEOUT_SECONDS },
+    ),
+    PreToolUse: reconcileMarrowCommandHook(
+      settings, 'PreToolUse', 'pre-action-hook', CODEX_PRE_ACTION_HOOK_COMMAND, CODEX_NATIVE_HOOK_MATCHER,
+      { timeout: CODEX_HOOK_TIMEOUT_SECONDS, async: false },
+    ),
+    PostToolUse: reconcileMarrowCommandHook(
+      settings, 'PostToolUse', 'hook', CODEX_ACTION_RESULT_HOOK_COMMAND, CODEX_NATIVE_HOOK_MATCHER,
+      { timeout: CODEX_HOOK_TIMEOUT_SECONDS },
+    ),
+    SessionEnd: reconcileMarrowCommandHook(
+      settings, 'SessionEnd', 'session-hook', CODEX_SESSION_END_HOOK_COMMAND, undefined,
+      { timeout: CODEX_SESSION_TIMEOUT_SECONDS },
+    ),
+  };
+  return JSON.stringify(settings, null, 2) + '\n';
+}
+
 function activationProfile(detection, plan, changes, client) {
   const registry = HARNESS_CAPABILITY_REGISTRY.find((entry) => entry.client === client)
     || HARNESS_CAPABILITY_REGISTRY.find((entry) => entry.client === 'custom');
@@ -935,15 +997,23 @@ function activationProfile(detection, plan, changes, client) {
     : INSTALLER_ADAPTER_VERSION;
   const observedHooks = [];
   const claudeSettings = safeJsonObject(detection.paths.claudeSettings);
-  if (capabilityLevel === 'native_hooks'
-    && exactHookConfigured(claudeSettings, 'UserPromptSubmit', MCP_CONTEXT_HOOK_COMMAND)) observedHooks.push('prompt');
-  if (capabilityLevel === 'native_hooks'
-    && exactHookConfigured(claudeSettings, 'PreToolUse', MCP_PRE_ACTION_HOOK_COMMAND, NATIVE_HOOK_MATCHER)) observedHooks.push('pre_action');
-  if (capabilityLevel === 'native_hooks'
-    && exactHookConfigured(claudeSettings, 'PostToolUse', MCP_ACTION_RESULT_HOOK_COMMAND, NATIVE_HOOK_MATCHER)
-    && exactHookConfigured(claudeSettings, 'PostToolUseFailure', MCP_ACTION_RESULT_HOOK_COMMAND, NATIVE_HOOK_MATCHER)) observedHooks.push('action_result');
-  if (capabilityLevel === 'native_hooks'
-    && exactHookConfigured(claudeSettings, 'Stop', MCP_SESSION_END_HOOK_COMMAND)) observedHooks.push('session_end');
+  const codexSettings = safeJsonObject(detection.paths.codexHooks);
+  if (client === 'codex') {
+    if (exactHookConfigured(codexSettings, 'UserPromptSubmit', CODEX_CONTEXT_HOOK_COMMAND)) observedHooks.push('prompt');
+    if (exactHookConfigured(codexSettings, 'PreToolUse', CODEX_PRE_ACTION_HOOK_COMMAND, CODEX_NATIVE_HOOK_MATCHER)) observedHooks.push('pre_action');
+    if (exactHookConfigured(codexSettings, 'PostToolUse', CODEX_ACTION_RESULT_HOOK_COMMAND, CODEX_NATIVE_HOOK_MATCHER)) observedHooks.push('action_result');
+    if (exactHookConfigured(codexSettings, 'SessionEnd', CODEX_SESSION_END_HOOK_COMMAND)) observedHooks.push('session_end');
+  } else {
+    if (capabilityLevel === 'native_hooks'
+      && exactHookConfigured(claudeSettings, 'UserPromptSubmit', MCP_CONTEXT_HOOK_COMMAND)) observedHooks.push('prompt');
+    if (capabilityLevel === 'native_hooks'
+      && exactHookConfigured(claudeSettings, 'PreToolUse', MCP_PRE_ACTION_HOOK_COMMAND, NATIVE_HOOK_MATCHER)) observedHooks.push('pre_action');
+    if (capabilityLevel === 'native_hooks'
+      && exactHookConfigured(claudeSettings, 'PostToolUse', MCP_ACTION_RESULT_HOOK_COMMAND, NATIVE_HOOK_MATCHER)
+      && exactHookConfigured(claudeSettings, 'PostToolUseFailure', MCP_ACTION_RESULT_HOOK_COMMAND, NATIVE_HOOK_MATCHER)) observedHooks.push('action_result');
+    if (capabilityLevel === 'native_hooks'
+      && exactHookConfigured(claudeSettings, 'Stop', MCP_SESSION_END_HOOK_COMMAND)) observedHooks.push('session_end');
+  }
   const passiveRuntime = safeRead(detection.paths.passiveRuntime);
   if (capabilityLevel === 'sdk_passive_runtime'
     && sdkDependency.present
@@ -966,7 +1036,7 @@ function activationProfile(detection, plan, changes, client) {
     .sort()
     .join('|');
   const configFingerprint = capabilityLevel === 'native_hooks'
-    ? claudeNativeHookFingerprint(claudeSettings)
+    ? client === 'codex' ? codexNativeHookFingerprint(codexSettings) : claudeNativeHookFingerprint(claudeSettings)
     : crypto.createHash('sha256')
       .update(`${client}:${capabilityLevel}:${expectedHooks.join(',')}:${fingerprintMaterial}`)
       .digest('hex');
@@ -986,6 +1056,7 @@ function activationProfile(detection, plan, changes, client) {
     observed_hooks: observedHooks,
     evidence_authority: 'client_self_reported',
     coverage_verified: false,
+    passive_live: false,
     configuration_complete: complete,
     complete,
     exact_fix: exactFix,
@@ -1112,6 +1183,12 @@ function defaultHarnessInstallMatrix(detection = detectEnvironment(process.cwd()
       || (entry.client === 'claude-code' && detection.claudeCode)
       || (entry.client === 'cursor' && detection.cursor)
       || (entry.client === 'codex' && detection.codex);
+    const codexSettings = entry.client === 'codex' ? safeJsonObject(detection.paths.codexHooks) : null;
+    const codexConfigured = Boolean(codexSettings
+      && exactHookConfigured(codexSettings, 'UserPromptSubmit', CODEX_CONTEXT_HOOK_COMMAND)
+      && exactHookConfigured(codexSettings, 'PreToolUse', CODEX_PRE_ACTION_HOOK_COMMAND, CODEX_NATIVE_HOOK_MATCHER)
+      && exactHookConfigured(codexSettings, 'PostToolUse', CODEX_ACTION_RESULT_HOOK_COMMAND, CODEX_NATIVE_HOOK_MATCHER)
+      && exactHookConfigured(codexSettings, 'SessionEnd', CODEX_SESSION_END_HOOK_COMMAND));
     return {
       client: entry.client,
       capability_level: entry.capability_level,
@@ -1121,10 +1198,12 @@ function defaultHarnessInstallMatrix(detection = detectEnvironment(process.cwd()
         mcp: true,
         instructions: true,
         sdk_passive_runtime: node,
-        native_hooks: entry.capability_level === 'native_hooks' && Boolean(detection.claudeCode),
+        native_hooks: entry.capability_level === 'native_hooks' && Boolean(
+          entry.client === 'claude-code' ? detection.claudeCode : entry.client === 'codex' && detection.codex,
+        ),
         governed_wrapper: entry.capability_level === 'governed_wrapper',
       },
-      configured_locally: detected && entry.automatic.length > 0,
+      configured_locally: entry.client === 'codex' ? codexConfigured : detected && entry.automatic.length > 0,
       verified_passive: false,
       unsupported_claim: entry.capability_level === 'event_contract'
         ? 'Needs a bounded event adapter. MCP tools remain on demand.'
@@ -1165,6 +1244,14 @@ function buildPlan(detection, options) {
         path: detection.paths.claudeSettings,
         label: 'Claude Code MCP passive hooks',
         transform: upsertClaudeHooks,
+      });
+    }
+    if (detection.codex) {
+      writes.push({
+        type: 'json-transform',
+        path: detection.paths.codexHooks,
+        label: 'Codex native hooks',
+        transform: upsertCodexHooks,
       });
     }
     writes.push({
@@ -1899,6 +1986,7 @@ async function install(options) {
     configuration_complete: changes.every((change) => change.applied || change.already_present),
     evidence_authority: 'client_self_reported',
     coverage_verified: false,
+    passive_live: false,
     adapter_version: profile.adapter_version,
     capability_level: profile.capability_level,
     config_fingerprint: profile.config_fingerprint,
@@ -2077,6 +2165,7 @@ module.exports = {
   stableAgentId,
   activationProfile,
   claudeNativeHookFingerprint,
+  codexNativeHookFingerprint,
   printReport,
   ADAPTER_PROVENANCE,
   HARNESS_CAPABILITY_REGISTRY,
