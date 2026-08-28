@@ -57,6 +57,85 @@ function isCodexJsonExecution(command) {
     && optionArgs.includes('--json');
 }
 
+function createCompletedTypeScanner() {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let role = 'other';
+  let token = '';
+  let tokenInvalid = false;
+  let lastSignificant = '';
+  let expectTypeColon = false;
+  let expectTypeValue = false;
+  let completed = false;
+
+  return {
+    write(character) {
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+          tokenInvalid = role !== 'other';
+        } else if (character === '\\') {
+          escaped = true;
+        } else if (character === '"') {
+          inString = false;
+          if (role === 'root_key') {
+            expectTypeColon = !tokenInvalid && token === 'type';
+          } else if (role === 'type_value') {
+            if (!tokenInvalid && token === 'turn.completed') completed = true;
+            expectTypeValue = false;
+          }
+          role = 'other';
+          token = '';
+          tokenInvalid = false;
+          lastSignificant = '"';
+        } else if (role !== 'other') {
+          if (token.length < 32) token += character;
+          else tokenInvalid = true;
+        }
+        return;
+      }
+
+      if (/\s/.test(character)) return;
+      if (character === '"') {
+        role = depth === 1 && (lastSignificant === '{' || lastSignificant === ',')
+          ? 'root_key'
+          : depth === 1 && expectTypeValue
+          ? 'type_value'
+          : 'other';
+        token = '';
+        tokenInvalid = false;
+        inString = true;
+        return;
+      }
+      if (character === '{' || character === '[') {
+        depth += 1;
+        lastSignificant = character;
+        return;
+      }
+      if (character === '}' || character === ']') {
+        depth = Math.max(0, depth - 1);
+        lastSignificant = character;
+        return;
+      }
+      if (depth === 1 && expectTypeColon) {
+        expectTypeColon = false;
+        expectTypeValue = character === ':';
+      } else if (depth === 1 && expectTypeValue) {
+        expectTypeValue = false;
+      }
+      if (depth === 1 && character === ',') {
+        expectTypeColon = false;
+        expectTypeValue = false;
+      }
+      lastSignificant = character;
+    },
+    completed() {
+      return completed;
+    },
+  };
+}
+
 function createCodexJsonlUsageCollector() {
   const decoder = new StringDecoder('utf8');
   let line = '';
@@ -64,14 +143,17 @@ function createCodexJsonlUsageCollector() {
   let acceptedUsage = null;
   let usageEventCount = 0;
   let invalidUsageEvent = false;
+  let typeScanner = createCompletedTypeScanner();
 
   const resetLine = () => {
     line = '';
     discardLine = false;
+    typeScanner = createCompletedTypeScanner();
   };
 
   const finishLine = () => {
     if (discardLine || !line.trim()) {
+      if (discardLine && typeScanner.completed()) invalidUsageEvent = true;
       resetLine();
       return;
     }
@@ -79,7 +161,7 @@ function createCodexJsonlUsageCollector() {
     try {
       parsed = JSON.parse(line);
     } catch {
-      if (/"type"\s*:\s*"turn\.completed"/.test(line)) invalidUsageEvent = true;
+      if (typeScanner.completed()) invalidUsageEvent = true;
       resetLine();
       return;
     }
@@ -101,12 +183,9 @@ function createCodexJsonlUsageCollector() {
         finishLine();
         continue;
       }
+      typeScanner.write(character);
       if (discardLine) continue;
       if (line.length >= MAX_USAGE_EVENT_BYTES) {
-        if (/"type"\s*:\s*"turn\.completed"/.test(line)) {
-          invalidUsageEvent = true;
-          usageEventCount += 1;
-        }
         discardLine = true;
         line = '';
         continue;
@@ -148,6 +227,7 @@ function createHostUsageCapture(command) {
 
 module.exports = {
   MAX_TOKEN_COUNT,
+  MAX_USAGE_EVENT_BYTES,
   createCodexJsonlUsageCollector,
   createHostUsageCapture,
   isCodexJsonExecution,
