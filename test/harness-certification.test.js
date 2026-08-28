@@ -17,6 +17,12 @@ const {
   clineNativeHookFingerprint,
   windsurfNativeHookFingerprint,
   geminiNativeHookFingerprint,
+  grokNativeHookFingerprint,
+  GROK_CONTEXT_HOOK_COMMAND,
+  GROK_PRE_ACTION_HOOK_COMMAND,
+  GROK_ACTION_RESULT_HOOK_COMMAND,
+  GROK_SESSION_END_HOOK_COMMAND,
+  GROK_NATIVE_HOOK_MATCHER,
   defaultHarnessInstallMatrix,
   detectEnvironment,
   firstCapturePath,
@@ -639,6 +645,76 @@ test('Gemini CLI reconciles exact native groups, validates decisions, keeps neut
     const secondChanges = applyPlan(secondPlan, { yes: true, dryRun: false, doctor: false });
     assert.deepEqual(fs.readFileSync(settingsPath), first);
     assert.equal(secondChanges.find((change) => change.label === 'Gemini CLI native hooks').already_present, true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Grok capability recognizes only the exact global native gate and never treats configuration as observed coverage', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-grok-'));
+  try {
+    fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
+    const hookDir = path.join(root, '.grok', 'hooks');
+    const hookPath = path.join(hookDir, 'marrow.json');
+    fs.mkdirSync(hookDir, { recursive: true });
+    const settings = {
+      owner: { retained: true },
+      hooks: {
+        UserPromptSubmit: [{ hooks: [{ type: 'command', command: GROK_CONTEXT_HOOK_COMMAND, timeout: 5 }] }],
+        PreToolUse: [{ matcher: GROK_NATIVE_HOOK_MATCHER, hooks: [{ type: 'command', command: GROK_PRE_ACTION_HOOK_COMMAND, timeout: 7 }] }],
+        PostToolUse: [{ matcher: GROK_NATIVE_HOOK_MATCHER, hooks: [{ type: 'command', command: GROK_ACTION_RESULT_HOOK_COMMAND, timeout: 5 }] }],
+        PostToolUseFailure: [{ matcher: GROK_NATIVE_HOOK_MATCHER, hooks: [{ type: 'command', command: GROK_ACTION_RESULT_HOOK_COMMAND, timeout: 5 }] }],
+        Stop: [{ hooks: [{ type: 'command', command: GROK_SESSION_END_HOOK_COMMAND, timeout: 3 }] }],
+        OwnerEvent: [{ hooks: [{ type: 'command', command: 'printf owner-event' }] }],
+      },
+    };
+    fs.writeFileSync(hookPath, JSON.stringify(settings, null, 2) + '\n');
+    const detection = detectEnvironment(root, { ...process.env, HOME: root });
+    assert.equal(detection.grok, true);
+    assert.equal(detection.paths.grokHooks, hookPath);
+    const plan = buildPlan(detection, { mode: 'mcp' });
+    const profile = activationProfile(detection, plan, [], 'grok');
+    assert.equal(profile.capability_level, 'native_hooks');
+    assert.deepEqual(profile.expected_hooks, ['pre_action', 'action_result', 'turn_closeout']);
+    assert.deepEqual(profile.observed_hooks, ['pre_action', 'action_result', 'turn_closeout']);
+    assert.equal(profile.configuration_complete, true);
+    assert.equal(profile.coverage_verified, false);
+    assert.equal(profile.passive_live, false);
+    assert.equal(profile.hooks_user_toggleable, true);
+    assert.equal(profile.duplicate_session_end_configured, false);
+    assert.equal(profile.deterministic_closeout, 'Stop');
+    assert.equal(profile.governed_wrapper_fallback, 'explicit_bounded_only');
+    assert.match(GROK_PRE_ACTION_HOOK_COMMAND, /^node -e /);
+    assert.match(GROK_PRE_ACTION_HOOK_COMMAND, /setTimeout\(fail,5000\)/);
+    assert.doesNotMatch(GROK_PRE_ACTION_HOOK_COMMAND, /\btimeout\b/);
+    assert.match(profile.exact_fix, /Restart Grok.*\/hooks.*enabled.*does not verify observed coverage/);
+    assert.equal(profile.config_fingerprint, grokNativeHookFingerprint(settings));
+
+    const matrix = defaultHarnessInstallMatrix(detection).find((entry) => entry.client === 'grok');
+    assert.equal(matrix.capability_level, 'native_hooks');
+    assert.deepEqual(matrix.automatic, ['pre_action', 'action_result', 'turn_closeout']);
+    assert.equal(matrix.install_surface, 'mcp');
+    assert.equal(matrix.default_install.native_hooks, true);
+    assert.equal(matrix.default_install.governed_wrapper, false);
+    assert.equal(matrix.configured_locally, true);
+    assert.equal(matrix.verified_passive, false);
+    assert.match(matrix.unsupported_claim, /user-toggleable.*\/hooks inspection.*client-self-reported.*SessionEnd/);
+    const reload = harnessReloadPlan(detection, [{ label: 'MCP hooks', applied: true, changed: true }]);
+    assert.equal(reload.clients.some((entry) => entry.client === 'grok'), true);
+    assert.match(reload.instruction, /Restart Grok.*\/hooks.*enabled/);
+    const capture = firstCapturePath(detection, 'grok-agent');
+    assert.equal(capture.client, 'grok');
+    assert.equal(capture.capability_level, 'native_hooks');
+    assert.equal(capture.command, null);
+    assert.match(capture.instruction, /global native pre-action.*nonblocking Stop.*user-toggleable.*governed runner remains an explicit bounded fallback/);
+
+    settings.hooks.SessionEnd = [{ hooks: [{ type: 'command', command: GROK_SESSION_END_HOOK_COMMAND, timeout: 3 }] }];
+    fs.writeFileSync(hookPath, JSON.stringify(settings, null, 2) + '\n');
+    const duplicate = activationProfile(detection, plan, [], 'grok');
+    assert.equal(duplicate.configuration_complete, false);
+    assert.equal(duplicate.observed_hooks.includes('turn_closeout'), false);
+    assert.equal(duplicate.duplicate_session_end_configured, true);
+    assert.equal(defaultHarnessInstallMatrix(detection).find((entry) => entry.client === 'grok').configured_locally, false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

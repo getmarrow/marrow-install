@@ -37,6 +37,12 @@ function harnessReloadPlan(detection = {}, changes = []) {
       restart: 'Restart Gemini CLI, open /hooks panel, and review and approve the project hook fingerprints before treating native hooks as live.',
     });
   }
+  if (detection.grok) {
+    clients.push({
+      client: 'grok',
+      restart: 'Restart Grok, inspect /hooks, and confirm the trusted global Marrow hooks are enabled before treating them as live.',
+    });
+  }
   if (detection.codex) {
     clients.push({
       client: 'codex',
@@ -109,11 +115,19 @@ function firstCapturePath(detection = {}, agentId) {
       instruction: 'After restart and owner /hooks trust review, Codex native hooks capture prompt, pre-action, action-result, and session-end events. Configuration alone does not verify runtime coverage.',
     };
   }
+  if (detection.grok) {
+    return {
+      client: 'grok',
+      capability_level: 'native_hooks',
+      command: null,
+      instruction: 'After restart and /hooks inspection, Grok uses global native pre-action, result, failure-result, and one nonblocking Stop closeout hook. Hooks remain user-toggleable, MCP tools stay on demand, and configuration does not verify observed runtime coverage. The governed runner remains an explicit bounded fallback.',
+    };
+  }
   return {
     client: 'governed_wrapper',
     capability_level: 'governed_wrapper',
     command: `npx @getmarrow/install run --agent ${id} -- -- <command>`,
-    instruction: 'Wrap the next deploy, merge, or publish with the governed runner. Grok and similar unsupported hosts do not intercept tools natively. Before the session ends, call marrow_session_end or marrow_commit. Do not invent token counts.',
+    instruction: 'Wrap the next deploy, merge, or publish with the governed runner for hosts without a native gate. Before the session ends, call marrow_session_end or marrow_commit. Do not invent token counts.',
   };
 }
 
