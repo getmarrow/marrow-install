@@ -16,7 +16,7 @@ function harnessReloadPlan(detection = {}, changes = []) {
   if (detection.cursor) {
     clients.push({
       client: 'cursor',
-      restart: 'Restart Cursor so project MCP loads.',
+      restart: 'Restart Cursor or Composer, then review the trusted workspace hooks with /hooks so native lifecycle hooks and project MCP load.',
     });
   }
   if (detection.codex) {
@@ -54,9 +54,9 @@ function firstCapturePath(detection = {}, agentId) {
   if (detection.cursor) {
     return {
       client: 'cursor',
-      capability_level: 'mcp',
-      command: 'marrow_agent_runtime',
-      instruction: 'After restart, call marrow_agent_runtime before the next deploy, merge, or publish. Before the session ends, call marrow_session_end. Cursor MCP tools are on demand.',
+      capability_level: 'native_hooks',
+      command: null,
+      instruction: 'After restart and trusted-workspace /hooks review, Cursor and Composer use the same native pre-action, action-result, and outcome-closeout hooks. MCP tools remain on demand. Configuration does not verify runtime coverage.',
     };
   }
   if (detection.codex) {

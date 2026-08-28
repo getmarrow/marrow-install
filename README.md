@@ -95,7 +95,7 @@ Persistent controller lifecycle is currently Linux-only. On macOS or Windows, ac
 
 ## What's New in v0.1.53
 
-v0.1.53 pins the Codex native-gate MCP candidate `3.9.75` and reconciles only Marrow-owned entries into repository-scoped `.codex/hooks.json`. It configures prompt, synchronous pre-action, action-result, and bounded session-end callbacks without persisting the API key or claiming that configuration proves runtime coverage.
+v0.1.53 pins the native-gate MCP candidate `3.9.75` and reconciles only Marrow-owned entries into repository-scoped `.codex/hooks.json` and `.cursor/hooks.json`. Codex receives prompt, synchronous pre-action, action-result, and bounded session-end callbacks. Cursor and Composer share synchronous fail-closed pre-action plus result, failure, and stop closeout callbacks. Configuration never persists the API key or proves runtime coverage before restart and trusted-workspace `/hooks` review.
 
 The integration boundary is explicit: native Claude hooks are installed only where supported and remain cooperative/client-reported until authoritative server receipts exist; MCP tools are on demand; Codex receives repository-scoped native hooks and requires restart plus owner `/hooks` trust review before runtime claims; Grok, Gemini, and similar CLIs use the governed wrapper for consequential control; owned Node processes use the SDK passive runtime while installed; and custom hosts require a bounded event adapter. Exact package SHA/integrity can prove artifact provenance, not runtime coverage. Activation-profile delivery is authenticated `client_self_reported` telemetry with `certified_coverage: false`; it acknowledges delivery but cannot attest that a hook, wrapper, or adapter ran.
 
@@ -124,7 +124,7 @@ v0.1.47 makes activate honest about reload and the first capture path:
 v0.1.46 makes default install cover every workspace honestly:
 
 - auto mode now writes MCP plus agent instructions in every project, and the SDK passive runtime whenever Node is present;
-- Claude native hooks still install only when `.claude` is present; detected Cursor workspaces also get `.cursor/mcp.json`;
+- Claude native hooks still install only when `.claude` is present; detected Cursor workspaces get `.cursor/hooks.json` plus `.cursor/mcp.json`, and Composer uses that same Cursor-native lifecycle path;
 - Hermes, OpenClaw, and custom hosts stay event-contract only and are not claimed as native interception;
 - generated MCP setup, launch, and certified hook commands pin current MCP `3.9.64` from source `ed8293165247e89161045c7fbf68aeee4d51c6da`;
 - SDK detection and operator-approved upgrade rules pin exact public `3.7.59`;

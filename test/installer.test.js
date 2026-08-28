@@ -26,7 +26,7 @@ test('release-candidate adapter provenance matches the exact MCP source and cert
     mcp: {
       package: '@getmarrow/mcp',
       version: '3.9.75',
-      source_sha: '735eb7f7a74019ac0c3c60c375f10b0eae2e02a4',
+      source_sha: '7c955af5d1894c349cc73a23bbe650e96e0fc954',
       integrity: null,
       integrity_state: 'registry_unavailable_until_publish',
     },

@@ -12,6 +12,7 @@ const {
   buildPlan,
   claudeNativeHookFingerprint,
   codexNativeHookFingerprint,
+  cursorNativeHookFingerprint,
   defaultHarnessInstallMatrix,
   detectEnvironment,
   firstCapturePath,
@@ -21,6 +22,7 @@ const {
 
 const NATIVE_HOOK_MATCHER = 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*';
 const CODEX_NATIVE_HOOK_MATCHER = 'Bash|apply_patch|Edit|Write|MultiEdit|mcp__(?!marrow__marrow_).*|functions\\.(?!marrow_).*';
+const CURSOR_NATIVE_HOOK_MATCHER = 'Shell|Write|Delete|Task|MCP:(?!marrow(?:_.*|:marrow_.*)$).*';
 const MCP_ACTION_RESULT_HOOK_COMMAND = 'npx -y --package=@getmarrow/mcp@3.9.75 marrow-mcp hook';
 const SDK_INTEGRITY = 'sha512-n1i6Be09TpAQ9BPNRKY7aCvA2iSUPpJfw8djw2MELwpNbBCtKiZ29Jji77BK/6EFLUpSIcTW/Gmdf/ccf0JRYQ==';
 
@@ -66,13 +68,14 @@ test('activate writes require a harness reload and do not claim this process is 
   assert.match(plan.prove_command, /doctor --self-test/);
 });
 
-test('Cursor first capture is on-demand MCP runtime, not native hooks', () => {
+test('Cursor and Composer first capture uses native hooks only after restart and trust review', () => {
   const capture = firstCapturePath({ cursor: true, claudeCode: false, codex: false }, 'fleet-1');
   assert.equal(capture.client, 'cursor');
-  assert.equal(capture.capability_level, 'mcp');
-  assert.equal(capture.command, 'marrow_agent_runtime');
-  assert.match(capture.instruction, /on demand/);
-  assert.match(capture.instruction, /marrow_session_end/);
+  assert.equal(capture.capability_level, 'native_hooks');
+  assert.equal(capture.command, null);
+  assert.match(capture.instruction, /Cursor and Composer/);
+  assert.match(capture.instruction, /\/hooks review/);
+  assert.match(capture.instruction, /does not verify runtime coverage/);
 });
 
 test('Codex first capture requires native-hook restart and trust review without claiming coverage', () => {
@@ -99,18 +102,124 @@ test('unchanged config does not claim a reload or that this process is live', ()
   assert.equal(plan.live_in_this_process, true);
 });
 
-test('detected Cursor workspaces also receive Cursor MCP config', () => {
+test('detected Cursor workspaces receive Cursor hooks and MCP config', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-cursor-mcp-'));
   try {
     fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
     fs.mkdirSync(path.join(root, '.cursor'), { recursive: true });
     const detection = detectEnvironment(root, { ...process.env, HOME: root });
     const plan = buildPlan(detection, { mode: 'auto' });
+    assert.ok(plan.writes.some((item) => item.label === 'Cursor native hooks'));
     assert.ok(plan.writes.some((item) => item.label === 'Cursor MCP server config'));
     assert.ok(plan.writes.some((item) => item.label === 'Project MCP server config'));
     assert.ok(plan.writes.some((item) => item.label === 'SDK passive runtime preload'));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Cursor hooks reconcile exact native events, preserve unrelated entries, and stay byte-idempotent', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-cursor-'));
+  try {
+    fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
+    fs.mkdirSync(path.join(root, '.cursor'), { recursive: true });
+    const hooksPath = path.join(root, '.cursor', 'hooks.json');
+    fs.writeFileSync(hooksPath, JSON.stringify({
+      version: 9,
+      owner_setting: { preserved: true },
+      hooks: {
+        preToolUse: [
+          { command: 'owner-check', matcher: 'owner-tool', timeout: 9 },
+          { command: 'npx -y --package=@getmarrow/mcp@3.9.74 marrow-mcp cursor-pre-action-hook', matcher: 'old' },
+        ],
+        customEvent: [{ command: 'owner-custom' }],
+      },
+    }, null, 2) + '\n');
+    const detection = detectEnvironment(root, { ...process.env, HOME: root });
+    const plan = buildPlan(detection, { mode: 'both' });
+    const changes = applyPlan(plan, { yes: true, dryRun: false, doctor: false });
+    const first = fs.readFileSync(hooksPath, 'utf8');
+    const settings = JSON.parse(first);
+    assert.equal(settings.version, 1);
+    assert.deepEqual(settings.owner_setting, { preserved: true });
+    assert.deepEqual(settings.hooks.customEvent, [{ command: 'owner-custom' }]);
+    assert.ok(settings.hooks.preToolUse.some((entry) => entry.command === 'owner-check'));
+    assert.equal(settings.hooks.UserPromptSubmit, undefined);
+    assert.equal(settings.hooks.prompt, undefined);
+
+    const exact = (event, suffix, matcher, timeout) => {
+      const entries = settings.hooks[event].filter((entry) => entry.command?.endsWith(`marrow-mcp ${suffix}`));
+      assert.equal(entries.length, 1, `expected one ${event} ${suffix}`);
+      const entry = entries[0];
+      assert.equal(entry.matcher, matcher);
+      assert.equal(entry.timeout, timeout);
+      assert.match(entry.command, /@getmarrow\/mcp@3\.9\.75/);
+      return entry;
+    };
+    const preAction = exact('preToolUse', 'cursor-pre-action-hook', CURSOR_NATIVE_HOOK_MATCHER, 5);
+    assert.equal(preAction.failClosed, true);
+    assert.equal(preAction.async, false);
+    exact('postToolUse', 'cursor-hook', CURSOR_NATIVE_HOOK_MATCHER, 5);
+    exact('postToolUseFailure', 'cursor-hook', CURSOR_NATIVE_HOOK_MATCHER, 5);
+    exact('stop', 'cursor-session-hook', undefined, 3);
+    assert.doesNotMatch(JSON.stringify(settings), /cursor-context-hook|UserPromptSubmit/);
+
+    for (const client of ['cursor', 'composer']) {
+      const profile = activationProfile(detection, plan, changes, client);
+      assert.equal(profile.capability_level, 'native_hooks');
+      assert.deepEqual(profile.expected_hooks, ['pre_action', 'action_result', 'outcome_closure']);
+      assert.deepEqual(profile.observed_hooks, ['pre_action', 'action_result', 'outcome_closure']);
+      assert.equal(profile.evidence_authority, 'client_self_reported');
+      assert.equal(profile.coverage_verified, false);
+      assert.equal(profile.passive_live, false);
+      assert.equal(profile.configuration_complete, true);
+      assert.equal(profile.config_fingerprint, cursorNativeHookFingerprint(settings));
+    }
+    const matrix = defaultHarnessInstallMatrix(detection);
+    for (const client of ['cursor', 'composer']) {
+      const entry = matrix.find((candidate) => candidate.client === client);
+      assert.equal(entry.capability_level, 'native_hooks');
+      assert.deepEqual(entry.automatic, ['pre_action', 'action_result', 'outcome_closure']);
+      assert.equal(entry.default_install.native_hooks, true);
+      assert.equal(entry.configured_locally, true);
+      assert.equal(entry.verified_passive, false);
+    }
+
+    const secondDetection = detectEnvironment(root, { ...process.env, HOME: root });
+    const secondPlan = buildPlan(secondDetection, { mode: 'both' });
+    applyPlan(secondPlan, { yes: true, dryRun: false, doctor: false });
+    assert.equal(fs.readFileSync(hooksPath, 'utf8'), first);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Cursor hook installation rejects symlinked and out-of-root targets before any write', () => {
+  for (const unsafeKind of ['symlink', 'outside']) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-cursor-unsafe-'));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-harness-cursor-outside-'));
+    try {
+      fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
+      let detection;
+      if (unsafeKind === 'symlink') {
+        fs.symlinkSync(outside, path.join(root, '.cursor'));
+        detection = detectEnvironment(root, { ...process.env, HOME: root });
+      } else {
+        fs.mkdirSync(path.join(root, '.cursor'));
+        detection = detectEnvironment(root, { ...process.env, HOME: root });
+        detection.paths.cursorHooks = path.join(outside, 'hooks.json');
+      }
+      const plan = buildPlan(detection, { mode: 'mcp' });
+      assert.throws(
+        () => applyPlan(plan, { yes: true, dryRun: false, doctor: false }),
+        /unsafe path component|outside project root/,
+      );
+      assert.equal(fs.existsSync(path.join(outside, 'hooks.json')), false);
+      assert.equal(fs.existsSync(path.join(root, '.mcp.json')), false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
   }
 });
 
