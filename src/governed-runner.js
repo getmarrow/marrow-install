@@ -27,6 +27,7 @@ const {
   buildPlan,
   detectEnvironment,
 } = require('./installer');
+const { createHostUsageCapture } = require('./usage-telemetry');
 
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MCP_SETUP_COMMAND = `npx -y --package=${ADAPTER_PROVENANCE.mcp.package}@${ADAPTER_PROVENANCE.mcp.version} marrow-mcp setup`;
@@ -512,11 +513,11 @@ function dataOf(json) {
   return json && typeof json === 'object' && json.data && typeof json.data === 'object' ? json.data : json;
 }
 
-async function requestJson(options, method, route, body) {
+async function requestJson(options, method, route, body, extraHeaders = {}) {
   if (!options.apiKey) throw new Error('MARROW_API_KEY is required. Use --fail-open only for non-production local commands.');
   const response = await fetch(new URL(route, options.baseUrl.replace(/\/$/, '/')), {
     method,
-    headers: headers(options),
+    headers: { ...headers(options), ...extraHeaders },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await response.text();
@@ -674,15 +675,48 @@ function printGate(decision, runtime, stream = process.stdout) {
   if (runtime?.value_proof?.owner_summary) stream.write(`Value: ${runtime.value_proof.owner_summary}\n`);
 }
 
-function runChild(command, env = process.env) {
+function runChild(command, env = process.env, stdout = process.stdout) {
   return new Promise((resolve) => {
+    const usageCapture = createHostUsageCapture(command);
     const child = spawn(command[0], command.slice(1), {
-      stdio: 'inherit',
+      stdio: usageCapture.supported ? ['inherit', 'pipe', 'inherit'] : 'inherit',
       shell: false,
       env,
     });
-    child.on('error', (error) => resolve({ exitCode: 127, error }));
-    child.on('close', (code, signal) => resolve({ exitCode: code ?? 1, signal: signal || null }));
+    let closed = null;
+    let pendingWrites = 0;
+    let settled = false;
+    const settle = () => {
+      if (settled || !closed || pendingWrites > 0) return;
+      settled = true;
+      resolve({
+        ...closed,
+        usageCaptureSupported: usageCapture.supported,
+        modelUsage: usageCapture.finish(),
+      });
+    };
+    if (usageCapture.supported && child.stdout) {
+      child.stdout.on('data', (chunk) => {
+        usageCapture.write(chunk);
+        pendingWrites += 1;
+        const ready = stdout.write(chunk, () => {
+          pendingWrites -= 1;
+          settle();
+        });
+        if (!ready) {
+          child.stdout.pause();
+          stdout.once('drain', () => child.stdout?.resume());
+        }
+      });
+    }
+    child.on('error', (error) => {
+      closed = { exitCode: 127, error };
+      settle();
+    });
+    child.on('close', (code, signal) => {
+      closed = { exitCode: code ?? 1, signal: signal || null };
+      settle();
+    });
   });
 }
 
@@ -718,7 +752,7 @@ async function createDecision(options, action, type, target, surfaces) {
   });
 }
 
-async function commitOutcome(options, decisionId, success, outcome, proof, gateReceiptId) {
+async function commitOutcome(options, decisionId, success, outcome, proof, gateReceiptId, modelUsage = null) {
   const body = {
     decision_id: decisionId,
     success,
@@ -727,10 +761,16 @@ async function commitOutcome(options, decisionId, success, outcome, proof, gateR
     source_meta: sourceMeta(options, 'commit', { action: outcome }),
   };
   if (gateReceiptId) body.gate_receipt_id = gateReceiptId;
-  return requestJson(options, 'POST', '/v1/agent/commit', body);
+  if (modelUsage) body.model_usage = modelUsage;
+  const commitHeaders = modelUsage
+    ? { 'Idempotency-Key': `marrow-run-${crypto.createHash('sha256')
+      .update(`${options.agentId}\u0000${options.sessionId}\u0000${decisionId}`)
+      .digest('hex')}` }
+    : {};
+  return requestJson(options, 'POST', '/v1/agent/commit', body, commitHeaders);
 }
 
-async function runGoverned(parsed) {
+async function runGoverned(parsed, execution = {}) {
   const { options, childCommand } = parsed;
   const commandText = redactedCommand(childCommand);
   const action = options.action ? redact(options.action) : commandText;
@@ -816,7 +856,7 @@ async function runGoverned(parsed) {
   }
 
   const childEnv = scopedExecutionEnv(permitVerified ? actionPermit : null);
-  const child = await runChild(childCommand, childEnv);
+  const child = await runChild(childCommand, childEnv, execution.stdout || process.stdout);
   const success = child.exitCode === 0;
   const proof = defaultProof({ options, action, childCommand, exitCode: child.exitCode, success });
   const outcome = success
@@ -826,7 +866,15 @@ async function runGoverned(parsed) {
   let commit = null;
   if (decisionId) {
     try {
-      commit = await commitOutcome(options, decisionId, success, outcome, proof, decision?.receiptId || '');
+      commit = await commitOutcome(
+        options,
+        decisionId,
+        success,
+        outcome,
+        proof,
+        decision?.receiptId || '',
+        child.modelUsage,
+      );
     } catch (error) {
       process.stderr.write(`Marrow outcome commit failed: ${error.message}\n`);
     }
@@ -861,6 +909,16 @@ async function runGoverned(parsed) {
     permit_id: actionPermit?.permit_id || null,
     permit_verified: permitVerified,
     permit_closed: Boolean(permitClosed),
+    usage_capture: {
+      supported: child.usageCaptureSupported === true,
+      observed: Boolean(child.modelUsage),
+      source: child.modelUsage?.source || null,
+      evidence: child.modelUsage
+        ? 'accepted_host_reported_usage'
+        : child.usageCaptureSupported
+        ? 'no_valid_host_reported_usage'
+        : 'unsupported_child_command',
+    },
   };
 }
 
