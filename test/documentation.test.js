@@ -48,6 +48,11 @@ test('npm entry point matches the product positioning contract', () => {
   assert.match(readme, /passive_live: false/);
   assert.match(readme, /authenticated `client_self_reported` telemetry with `certified_coverage: false`/);
   assert.match(readme, /Work that bypasses those paths is not observed/);
+  assert.match(readme, /leaves `MARROW_TOOL_PROFILE` unset.*17-tool `primary` surface/s);
+  assert.match(readme, /MARROW_TOOL_PROFILE=core/);
+  assert.match(readme, /MARROW_TOOL_PROFILE=full/);
+  assert.match(readme, /Tool visibility is not authorization/);
+  assert.match(readme, /does not invoke paid write tools/);
   assert.doesNotMatch(readme, /protected proof enforced/);
 });
 
