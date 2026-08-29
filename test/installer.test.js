@@ -261,6 +261,16 @@ test('tool profile parsing preserves explicit profiles and rejects invalid value
     effective_profile: 'primary',
     expected_visible_count: 17,
   });
+  assert.deepEqual(parseArgs([], {}).toolProfile, {
+    configured_profile: 'unset',
+    effective_profile: 'primary',
+    expected_visible_count: 17,
+  });
+  assert.deepEqual(resolveToolProfile({ configured_profile: 'unset' }), {
+    configured_profile: 'unset',
+    effective_profile: 'primary',
+    expected_visible_count: 17,
+  });
   assert.deepEqual(resolveToolProfile('primary'), {
     configured_profile: 'primary',
     effective_profile: 'primary',
@@ -286,6 +296,16 @@ test('tool profile parsing preserves explicit profiles and rejects invalid value
     () => parseArgs([], { MARROW_TOOL_PROFILE: 'unset' }),
     /Invalid MARROW_TOOL_PROFILE/,
   );
+  for (const invalidProfile of ['', '   ', '\t', ' core ', 'primary ', ' full']) {
+    assert.throws(
+      () => resolveToolProfile(invalidProfile),
+      /Invalid MARROW_TOOL_PROFILE.*Unset MARROW_TOOL_PROFILE to use primary.*core.*full/i,
+    );
+    assert.throws(
+      () => parseArgs([], { MARROW_TOOL_PROFILE: invalidProfile }),
+      /Invalid MARROW_TOOL_PROFILE.*Unset MARROW_TOOL_PROFILE to use primary.*core.*full/i,
+    );
+  }
 });
 
 function primaryAvailability(evidenceState = 'available') {
@@ -423,24 +443,26 @@ test('ordinary MCP setup leaves profile unset while explicit core/full profiles 
 });
 
 test('invalid stored MCP profile fails closed before configuration can broaden', () => {
-  const dir = tempDir();
-  fs.writeFileSync(path.join(dir, 'package.json'), '{}');
-  fs.writeFileSync(path.join(dir, '.mcp.json'), JSON.stringify({
-    mcpServers: { marrow: { env: { MARROW_TOOL_PROFILE: 'everything' } } },
-  }));
-  const plan = buildPlan(detectEnvironment(dir, {}), {
-    mode: 'mcp',
-    agentId: 'agent-profile-test',
-    baseUrl: 'https://api.example.test',
-    toolProfile: resolveToolProfile(undefined),
-  });
+  for (const invalidProfile of ['everything', '', '   ', ' core ']) {
+    const dir = tempDir();
+    fs.writeFileSync(path.join(dir, 'package.json'), '{}');
+    fs.writeFileSync(path.join(dir, '.mcp.json'), JSON.stringify({
+      mcpServers: { marrow: { env: { MARROW_TOOL_PROFILE: invalidProfile } } },
+    }));
+    const plan = buildPlan(detectEnvironment(dir, {}), {
+      mode: 'mcp',
+      agentId: 'agent-profile-test',
+      baseUrl: 'https://api.example.test',
+      toolProfile: resolveToolProfile(undefined),
+    });
 
-  assert.throws(
-    () => applyPlan(plan, { yes: true, dryRun: false, doctor: false }),
-    /Invalid MARROW_TOOL_PROFILE.*Unset MARROW_TOOL_PROFILE to use primary.*core.*full/i,
-  );
-  const config = JSON.parse(fs.readFileSync(path.join(dir, '.mcp.json'), 'utf8'));
-  assert.equal(config.mcpServers.marrow.env.MARROW_TOOL_PROFILE, 'everything');
+    assert.throws(
+      () => applyPlan(plan, { yes: true, dryRun: false, doctor: false }),
+      /Invalid MARROW_TOOL_PROFILE.*Unset MARROW_TOOL_PROFILE to use primary.*core.*full/i,
+    );
+    const config = JSON.parse(fs.readFileSync(path.join(dir, '.mcp.json'), 'utf8'));
+    assert.equal(config.mcpServers.marrow.env.MARROW_TOOL_PROFILE, invalidProfile);
+  }
 });
 
 test('SDK detection accepts the exact 3.7.62 release candidate and rejects the superseded integrity', () => {

@@ -142,15 +142,15 @@ function explicitMcpVersion(command) {
 }
 
 function resolveToolProfile(value) {
-  const structured = value && typeof value === 'object' && !Array.isArray(value);
+  const structured = value !== null && typeof value === 'object' && !Array.isArray(value);
   const candidate = structured
     ? value.configured_profile
     : value;
-  const absent = candidate == null || String(candidate).trim() === '';
+  const absent = !structured && candidate === undefined;
   const structuredUnset = structured && candidate === 'unset';
   const configuredProfile = absent || structuredUnset
     ? 'unset'
-    : String(candidate).trim();
+    : candidate;
   if (!absent && !structuredUnset && !TOOL_PROFILES.has(configuredProfile)) {
     throw new Error(`Invalid MARROW_TOOL_PROFILE. ${TOOL_PROFILE_EXACT_FIX}`);
   }
