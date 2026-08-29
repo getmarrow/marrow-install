@@ -64,6 +64,12 @@ export MARROW_API_KEY=mrw_live_...
 
 The bare command is the default-on path: it detects and byte-idempotently writes managed configuration, runs the authenticated activation self-test, and starts the supported persistent controller. The key stays process-only and is never written to generated configuration or controller state. Use `--dry-run` for a non-writing preview, `doctor` for a read-only health check, or `--no-controller` to install and self-test without starting the controller. The explicit `activate` command remains equivalent and supported.
 
+### MCP tool profiles
+
+Ordinary setup leaves `MARROW_TOOL_PROFILE` unset, which selects the documented 17-tool `primary` surface. Set `MARROW_TOOL_PROFILE=core` only for the legacy seven-tool minimal surface, or `MARROW_TOOL_PROFILE=full` for the complete advanced/legacy catalog. Explicit `primary`, `core`, and `full` values are accepted; any other value fails with an exact bounded repair and never falls back to a broader profile.
+
+Tool visibility is not authorization. Every visible call still reaches Marrow's backend authentication, tenant, key-permission, plan, proof, and policy enforcement. `doctor --self-test` reports the configured and effective profile, the expected visible count, reloaded MCP visible names/count, and non-authorizing backend entitlement/upgrade projection. Until the owning harness restarts and matching MCP status is observed, actual visibility stays unavailable and the profile remains not-live. The self-test reads backend availability status; it does not invoke paid write tools to discover access.
+
 ## Keeping Marrow Current
 
 Marrow's hosted API, website, and dashboard update automatically; local SDK dependencies, generated runtime files, MCP hooks/configuration, and pinned package versions do not silently rewrite themselves. Keeping them current delivers new client-side features, compatibility improvements, and any published security fixes. Supported clients report their package version during authenticated status/runtime activity, and Marrow returns a `client_update` notice with the exact action when the version is behind or unknown.
@@ -93,7 +99,11 @@ npx @getmarrow/install controller stop
 
 Persistent controller lifecycle is currently Linux-only. On macOS or Windows, activation still writes supported configuration and verifies one server-side install self-test without certifying that hooks continuously ran; run `npx @getmarrow/install sidecar` under an owner-managed service and pass `--no-controller`. The controller does not silently upgrade packages, change governance policy, rotate credentials, or modify unrelated project configuration.
 
-## What's New in v0.1.53
+## What's New in v0.1.54
+
+v0.1.54 pins sealed MCP candidate `3.9.77` from source `1e782d8ba6bbb54bfaa322f0300565c7176f1969` and makes ordinary setup use the primary tool surface without writing a profile variable. Explicit `core` and `full` selections remain preserved, invalid values fail closed with a bounded repair, and human/JSON self-test output distinguishes configured/effective profile, expected visibility, actual post-reload visibility, and backend-projected entitlement state. Backend projections are status evidence only and always report `authorizes_calls: false`.
+
+## Previous: v0.1.53
 
 v0.1.53 pins the native-gate MCP candidate `3.9.75` and reconciles only Marrow-owned native hook surfaces. Codex uses `.codex/hooks.json`; Cursor and Composer use `.cursor/hooks.json`; Cline uses bounded executables under `.clinerules/hooks/`; Windsurf uses `.windsurf/hooks.json`; Gemini CLI receives named BeforeTool, AfterTool, and AfterAgent groups in `.gemini/settings.json`; Grok receives trusted global hooks in `~/.grok/hooks/marrow.json`. Grok PreToolUse validates strict private allow/deny JSON and fails closed with exit `2` when the child cannot provide an exact decision; PostToolUse/PostToolUseFailure emit compact results; one nonblocking Stop hook closes the turn with no duplicate SessionEnd hook. Grok hooks remain user-toggleable, so restart plus `/hooks` inspection is required and configuration never proves observed coverage.
 

@@ -7,6 +7,8 @@ const { pathToFileURL } = require('node:url');
 
 const {
   ADAPTER_PROVENANCE,
+  PRIMARY_TOOL_NAMES,
+  buildMcpToolProfileReport,
   buildPlan,
   applyPlan,
   detectEnvironment,
@@ -18,6 +20,7 @@ const {
   parseArgs,
   passiveRuntimeSource,
   printReport,
+  resolveToolProfile,
   runSelfTest,
 } = require('../src/installer');
 
@@ -25,10 +28,10 @@ test('release-candidate adapter provenance matches the exact MCP source and cert
   assert.deepEqual(ADAPTER_PROVENANCE, {
     mcp: {
       package: '@getmarrow/mcp',
-      version: '3.9.75',
-      source_sha: '7548a7ae2d7e95bb16c62470da41af06cb62c5c1',
-      integrity: null,
-      integrity_state: 'registry_unavailable_until_publish',
+      version: '3.9.77',
+      source_sha: '1e782d8ba6bbb54bfaa322f0300565c7176f1969',
+      integrity: 'sha512-4SVvnyTaDh/mhVUry1LaGCYKXSB/mt5NCHijIOLP336jILSqe7ezjZ5/EwEOMTQ2JvLm6w0QE/jmGbcksqe86w==',
+      integrity_state: 'sealed_local_candidate',
     },
     sdk: {
       package: '@getmarrow/sdk',
@@ -42,15 +45,15 @@ test('release-candidate adapter provenance matches the exact MCP source and cert
 test('doctor identifies stale and mixed MCP processes without exposing command lines', () => {
   const report = inspectMcpProcesses({ commands: [
     'npx -y @getmarrow/mcp@2.8.0',
-    'npx -y --package=@getmarrow/mcp@3.9.75 marrow-mcp',
+    'npx -y --package=@getmarrow/mcp@3.9.77 marrow-mcp',
     'node unrelated.js --token=must-not-appear',
   ] });
   assert.equal(report.healthy, false);
   assert.equal(report.mixed_versions, true);
   assert.deepEqual(report.stale_versions, ['2.8.0']);
-  assert.deepEqual(report.active_versions, ['2.8.0', '3.9.75']);
+  assert.deepEqual(report.active_versions, ['2.8.0', '3.9.77']);
   assert.doesNotMatch(JSON.stringify(report), /must-not-appear|unrelated\.js/);
-  assert.equal(report.exact_fix, 'npx -y --package=@getmarrow/mcp@3.9.75 marrow-mcp setup');
+  assert.equal(report.exact_fix, 'npx -y --package=@getmarrow/mcp@3.9.77 marrow-mcp setup');
   assert.equal(report.restart_required, true);
   assert.match(report.restart_instruction, /restart every owning harness/i);
   assert.equal(report.verification_command, 'npx -y @getmarrow/install@latest doctor --self-test');
@@ -68,7 +71,7 @@ test('doctor treats version-unknown MCP processes as unhealthy with executable r
   assert.equal(report.active_processes, 2);
   assert.equal(report.unknown_version_processes, 2);
   assert.equal(report.healthy, false);
-  assert.equal(report.exact_fix, 'npx -y --package=@getmarrow/mcp@3.9.75 marrow-mcp setup');
+  assert.equal(report.exact_fix, 'npx -y --package=@getmarrow/mcp@3.9.77 marrow-mcp setup');
   assert.doesNotMatch(report.exact_fix, /stop|restart|then/i);
   assert.doesNotMatch(JSON.stringify(report), /must-not-appear/);
   assert.equal(report.restart_required, true);
@@ -77,7 +80,7 @@ test('doctor treats version-unknown MCP processes as unhealthy with executable r
 
 test('doctor ignores parent shells and sandbox wrappers that only mention MCP commands', () => {
   const report = inspectMcpProcesses({ commands: [
-    '/usr/bin/bwrap --ro-bind / / /bin/bash -lc npx -y --package=@getmarrow/mcp@3.9.75 marrow-mcp setup',
+    '/usr/bin/bwrap --ro-bind / / /bin/bash -lc npx -y --package=@getmarrow/mcp@3.9.77 marrow-mcp setup',
     '/bin/bash -lc npx -y @getmarrow/mcp@2.8.0',
     'rg @getmarrow/mcp package.json',
     'rg /tmp/node_modules/@getmarrow/mcp package-lock.json',
@@ -93,14 +96,14 @@ test('doctor flags stale and mixed MCP owner configurations without exposing pat
   const stale = path.join(root, 'claude.json');
   const current = path.join(root, 'cursor.json');
   fs.writeFileSync(stale, JSON.stringify({ mcp: { command: 'npx', args: ['-y', '@getmarrow/mcp@2.8.0'], secret: 'must-not-appear' } }));
-  fs.writeFileSync(current, JSON.stringify({ mcp: { command: 'npx', args: ['-y', '--package=@getmarrow/mcp@3.9.75', 'marrow-mcp'] } }));
+  fs.writeFileSync(current, JSON.stringify({ mcp: { command: 'npx', args: ['-y', '--package=@getmarrow/mcp@3.9.77', 'marrow-mcp'] } }));
   try {
     const report = inspectMcpConfigurations({}, { paths: [stale, current] });
     assert.equal(report.healthy, false);
     assert.equal(report.mixed_versions, true);
-    assert.deepEqual(report.configured_versions, ['2.8.0', '3.9.75']);
+    assert.deepEqual(report.configured_versions, ['2.8.0', '3.9.77']);
     assert.deepEqual(report.stale_versions, ['2.8.0']);
-    assert.match(report.exact_fix, /--package=@getmarrow\/mcp@3\.9\.75 marrow-mcp setup/);
+    assert.match(report.exact_fix, /--package=@getmarrow\/mcp@3\.9\.77 marrow-mcp setup/);
     assert.equal(report.verification_command, 'npx -y @getmarrow/install@latest doctor --self-test');
     assert.doesNotMatch(JSON.stringify(report), /must-not-appear|claude\.json|cursor\.json/);
   } finally {
@@ -111,12 +114,12 @@ test('doctor flags stale and mixed MCP owner configurations without exposing pat
 test('doctor accepts a current-only MCP owner configuration', () => {
   const root = tempDir();
   const current = path.join(root, '.mcp.json');
-  fs.writeFileSync(current, JSON.stringify({ mcpServers: { marrow: { command: 'npx', args: ['-y', '--package=@getmarrow/mcp@3.9.75', 'marrow-mcp'] } } }));
+  fs.writeFileSync(current, JSON.stringify({ mcpServers: { marrow: { command: 'npx', args: ['-y', '--package=@getmarrow/mcp@3.9.77', 'marrow-mcp'] } } }));
   try {
     const report = inspectMcpConfigurations({}, { paths: [current] });
     assert.equal(report.healthy, true);
     assert.equal(report.mixed_versions, false);
-    assert.deepEqual(report.configured_versions, ['3.9.75']);
+    assert.deepEqual(report.configured_versions, ['3.9.77']);
     assert.equal(report.exact_fix, null);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -127,11 +130,11 @@ test('doctor treats the previously pinned MCP 3.9.59 as stale', () => {
   const report = inspectMcpProcesses({ commands: [
     'npx -y --package=@getmarrow/mcp@3.9.59 marrow-mcp',
   ] });
-  assert.equal(report.expected_version, '3.9.75');
+  assert.equal(report.expected_version, '3.9.77');
   assert.deepEqual(report.active_versions, ['3.9.59']);
   assert.deepEqual(report.stale_versions, ['3.9.59']);
   assert.equal(report.healthy, false);
-  assert.equal(report.exact_fix, 'npx -y --package=@getmarrow/mcp@3.9.75 marrow-mcp setup');
+  assert.equal(report.exact_fix, 'npx -y --package=@getmarrow/mcp@3.9.77 marrow-mcp setup');
 });
 
 test('doctor treats both immediately superseded MCP releases as stale', () => {
@@ -139,11 +142,11 @@ test('doctor treats both immediately superseded MCP releases as stale', () => {
     const report = inspectMcpProcesses({ commands: [
       `npx -y --package=@getmarrow/mcp@${version} marrow-mcp`,
     ] });
-    assert.equal(report.expected_version, '3.9.75');
+    assert.equal(report.expected_version, '3.9.77');
     assert.deepEqual(report.active_versions, [version]);
     assert.deepEqual(report.stale_versions, [version]);
     assert.equal(report.healthy, false);
-    assert.equal(report.exact_fix, 'npx -y --package=@getmarrow/mcp@3.9.75 marrow-mcp setup');
+    assert.equal(report.exact_fix, 'npx -y --package=@getmarrow/mcp@3.9.77 marrow-mcp setup');
   }
 });
 
@@ -156,7 +159,7 @@ test('doctor flags an unpinned MCP owner configuration as version-unknown', () =
     assert.equal(report.healthy, false);
     assert.equal(report.unknown_version_configurations, 1);
     assert.deepEqual(report.configured_versions, []);
-    assert.match(report.exact_fix, /@getmarrow\/mcp@3\.9\.75/);
+    assert.match(report.exact_fix, /@getmarrow\/mcp@3\.9\.77/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -201,11 +204,16 @@ function writeSdkLock(root, declaredSpec = '^3.7.62') {
 }
 
 test('parseArgs makes only the bare install path default-on while preserving explicit controls', () => {
-  const defaults = parseArgs([]);
+  const defaults = parseArgs([], {});
   assert.equal(defaults.yes, true);
   assert.equal(defaults.activate, true);
   assert.equal(defaults.selfTest, true);
   assert.equal(defaults.controller, true);
+  assert.deepEqual(defaults.toolProfile, {
+    configured_profile: 'unset',
+    effective_profile: 'primary',
+    expected_visible_count: 17,
+  });
 
   const dry = parseArgs(['--mcp']);
   assert.equal(dry.mode, 'mcp');
@@ -245,6 +253,194 @@ test('parseArgs makes only the bare install path default-on while preserving exp
   assert.equal(defaultWithoutController.activate, true);
   assert.equal(defaultWithoutController.selfTest, true);
   assert.equal(defaultWithoutController.controller, false);
+});
+
+test('tool profile parsing preserves explicit profiles and rejects invalid values with bounded repair', () => {
+  assert.deepEqual(resolveToolProfile(undefined), {
+    configured_profile: 'unset',
+    effective_profile: 'primary',
+    expected_visible_count: 17,
+  });
+  assert.deepEqual(resolveToolProfile('primary'), {
+    configured_profile: 'primary',
+    effective_profile: 'primary',
+    expected_visible_count: 17,
+  });
+  assert.deepEqual(resolveToolProfile('core'), {
+    configured_profile: 'core',
+    effective_profile: 'core',
+    expected_visible_count: 7,
+  });
+  assert.deepEqual(resolveToolProfile('full'), {
+    configured_profile: 'full',
+    effective_profile: 'full',
+    expected_visible_count: null,
+  });
+  assert.equal(parseArgs([], { MARROW_TOOL_PROFILE: 'core' }).toolProfile.configured_profile, 'core');
+  assert.equal(parseArgs([], { MARROW_TOOL_PROFILE: 'full' }).toolProfile.effective_profile, 'full');
+  assert.throws(
+    () => parseArgs([], { MARROW_TOOL_PROFILE: 'everything' }),
+    /Invalid MARROW_TOOL_PROFILE.*Unset MARROW_TOOL_PROFILE to use primary.*core.*full/i,
+  );
+  assert.throws(
+    () => parseArgs([], { MARROW_TOOL_PROFILE: 'unset' }),
+    /Invalid MARROW_TOOL_PROFILE/,
+  );
+});
+
+function primaryAvailability(evidenceState = 'available') {
+  const tools = PRIMARY_TOOL_NAMES.map((name) => {
+    const gated = name === 'marrow_workflow_gate' || name === 'marrow_fleet_lessons';
+    return {
+      name,
+      state: gated ? 'upgrade_required' : 'entitled',
+      always_available: !gated,
+      plan_feature: gated ? (name === 'marrow_workflow_gate' ? 'pre_action_risk_gates' : 'fleet_learning') : null,
+      minimum_plan: gated ? 'team' : null,
+      owner_management_url: 'https://getmarrow.ai/account/#billing',
+    };
+  });
+  return {
+    profile: 'primary',
+    current_plan: evidenceState === 'available' ? 'free' : null,
+    owner_management_url: 'https://getmarrow.ai/account/#billing',
+    entitlement_evidence: {
+      state: evidenceState,
+      source: evidenceState === 'available' ? 'plan_entitlement_service' : 'entitlement_read_unavailable',
+      authoritative: evidenceState === 'available',
+      authorizing: false,
+    },
+    counts: { total: 17, entitled: 15, upgrade_required: 2 },
+    tools,
+  };
+}
+
+test('self-test profile report trusts only matching reloaded MCP visibility and non-authorizing backend evidence', () => {
+  const report = buildMcpToolProfileReport(
+    resolveToolProfile(undefined),
+    {
+      configured_profile: 'unset',
+      effective_profile: 'primary',
+      visible_tool_count: 17,
+      visible_tool_names: [...PRIMARY_TOOL_NAMES],
+      local_visibility_grants_entitlement: false,
+      backend_entitlement_projection: {
+        evidence_state: 'unavailable',
+        source: 'backend_projection_not_provided',
+        authorizes_calls: false,
+        primary_tool_availability: null,
+      },
+    },
+    primaryAvailability('available'),
+  );
+
+  assert.equal(report.configured_profile, 'unset');
+  assert.equal(report.effective_profile, 'primary');
+  assert.equal(report.expected_visible_count, 17);
+  assert.equal(report.visible_tool_count, 17);
+  assert.deepEqual(report.visible_tool_names, PRIMARY_TOOL_NAMES);
+  assert.equal(report.visibility_live, true);
+  assert.equal(report.reload_required, false);
+  assert.equal(report.local_visibility_grants_entitlement, false);
+  assert.equal(report.backend_entitlement_projection.evidence_state, 'available');
+  assert.equal(report.backend_entitlement_projection.source, 'authenticated_backend');
+  assert.equal(report.backend_entitlement_projection.authorizes_calls, false);
+  assert.deepEqual(report.backend_entitlement_projection.primary_tool_availability.counts, {
+    total: 17,
+    entitled: 15,
+    upgrade_required: 2,
+  });
+});
+
+test('non-reloaded and unavailable profile evidence stays not-live and non-authorizing', () => {
+  const cold = buildMcpToolProfileReport(
+    resolveToolProfile(undefined),
+    {
+      configured_profile: 'core',
+      effective_profile: 'core',
+      visible_tool_count: 7,
+      visible_tool_names: Array.from({ length: 7 }, (_, index) => `core-tool-${index}`),
+      local_visibility_grants_entitlement: false,
+    },
+    primaryAvailability('unavailable'),
+  );
+
+  assert.equal(cold.visible_tool_count, null);
+  assert.deepEqual(cold.visible_tool_names, []);
+  assert.equal(cold.visibility_live, false);
+  assert.equal(cold.reload_required, true);
+  assert.equal(cold.backend_entitlement_projection.evidence_state, 'unavailable');
+  assert.equal(cold.backend_entitlement_projection.authorizes_calls, false);
+
+  const fullNames = Array.from({ length: 58 }, (_, index) => `full-tool-${index}`);
+  const full = buildMcpToolProfileReport(resolveToolProfile('full'), {
+    configured_profile: 'full',
+    effective_profile: 'full',
+    visible_tool_count: fullNames.length,
+    visible_tool_names: fullNames,
+    local_visibility_grants_entitlement: false,
+  });
+  assert.equal(full.expected_visible_count, 58);
+  assert.equal(full.visible_tool_count, 58);
+  assert.equal(full.visibility_live, true);
+});
+
+test('ordinary MCP setup leaves profile unset while explicit core/full profiles are preserved', () => {
+  const createPlan = (root, toolProfile) => {
+    fs.writeFileSync(path.join(root, 'package.json'), '{}');
+    fs.writeFileSync(path.join(root, '.mcp.json'), '{}');
+    return buildPlan(detectEnvironment(root, {}), {
+      mode: 'mcp',
+      agentId: 'agent-profile-test',
+      baseUrl: 'https://api.example.test',
+      toolProfile,
+    });
+  };
+
+  const ordinary = tempDir();
+  applyPlan(createPlan(ordinary, resolveToolProfile(undefined)), { yes: true, dryRun: false, doctor: false });
+  let config = JSON.parse(fs.readFileSync(path.join(ordinary, '.mcp.json'), 'utf8'));
+  assert.equal('MARROW_TOOL_PROFILE' in config.mcpServers.marrow.env, false);
+
+  const core = tempDir();
+  applyPlan(createPlan(core, resolveToolProfile('core')), { yes: true, dryRun: false, doctor: false });
+  config = JSON.parse(fs.readFileSync(path.join(core, '.mcp.json'), 'utf8'));
+  assert.equal(config.mcpServers.marrow.env.MARROW_TOOL_PROFILE, 'core');
+
+  const full = tempDir();
+  fs.writeFileSync(path.join(full, '.mcp.json'), JSON.stringify({
+    mcpServers: { marrow: { env: { MARROW_TOOL_PROFILE: 'full' } } },
+  }));
+  const fullPlan = buildPlan(detectEnvironment(full, {}), {
+    mode: 'mcp',
+    agentId: 'agent-profile-test',
+    baseUrl: 'https://api.example.test',
+    toolProfile: resolveToolProfile(undefined),
+  });
+  applyPlan(fullPlan, { yes: true, dryRun: false, doctor: false });
+  config = JSON.parse(fs.readFileSync(path.join(full, '.mcp.json'), 'utf8'));
+  assert.equal(config.mcpServers.marrow.env.MARROW_TOOL_PROFILE, 'full');
+});
+
+test('invalid stored MCP profile fails closed before configuration can broaden', () => {
+  const dir = tempDir();
+  fs.writeFileSync(path.join(dir, 'package.json'), '{}');
+  fs.writeFileSync(path.join(dir, '.mcp.json'), JSON.stringify({
+    mcpServers: { marrow: { env: { MARROW_TOOL_PROFILE: 'everything' } } },
+  }));
+  const plan = buildPlan(detectEnvironment(dir, {}), {
+    mode: 'mcp',
+    agentId: 'agent-profile-test',
+    baseUrl: 'https://api.example.test',
+    toolProfile: resolveToolProfile(undefined),
+  });
+
+  assert.throws(
+    () => applyPlan(plan, { yes: true, dryRun: false, doctor: false }),
+    /Invalid MARROW_TOOL_PROFILE.*Unset MARROW_TOOL_PROFILE to use primary.*core.*full/i,
+  );
+  const config = JSON.parse(fs.readFileSync(path.join(dir, '.mcp.json'), 'utf8'));
+  assert.equal(config.mcpServers.marrow.env.MARROW_TOOL_PROFILE, 'everything');
 });
 
 test('SDK detection accepts the exact 3.7.62 release candidate and rejects the superseded integrity', () => {
@@ -326,7 +522,7 @@ test('generated passive instructions pin the supported MCP release', () => {
   const plan = buildPlan(detected, { mode: 'mcp' });
   const instructions = plan.writes.find((write) => write.path.endsWith('AGENTS.md'))?.block;
 
-  assert.match(instructions, /npx -y --package=@getmarrow\/mcp@3\.9\.75 marrow-mcp setup/);
+  assert.match(instructions, /npx -y --package=@getmarrow\/mcp@3\.9\.77 marrow-mcp setup/);
   assert.doesNotMatch(instructions, /@getmarrow\/mcp@latest/);
 });
 
@@ -481,7 +677,7 @@ test('generated passive runtime prefers current process identity and falls back 
     mcpServers: {
       marrow: {
         command: 'npx',
-        args: ['-y', '--package=@getmarrow/mcp@3.9.75', 'marrow-mcp'],
+        args: ['-y', '--package=@getmarrow/mcp@3.9.77', 'marrow-mcp'],
         env: {
           MARROW_API_KEY: 'fixture-old-credential',
           MARROW_BASE_URL: '${MARROW_BASE_URL}',
@@ -930,6 +1126,12 @@ test('repair mode writes config and reports self-test remediation state', async 
   }
   assert.match(output, /- wrote: SDK passive runtime preload/);
   assert.doesNotMatch(output, /would write/);
+  assert.match(output, /configured tool profile: unset/);
+  assert.match(output, /effective tool profile: primary/);
+  assert.match(output, /expected visible tools: 17/);
+  assert.match(output, /actual visible tools: unavailable until process reload/);
+  assert.match(output, /visible tool names: unavailable until process reload/);
+  assert.match(output, /backend-projected entitlements: unavailable.*non-authorizing/);
 });
 
 test('doctor reports likely env files when MARROW_API_KEY is not loaded', async () => {
@@ -995,6 +1197,19 @@ test('self-test returns first five-minute value signal and proof', async () => {
         ok: true,
         enabled: true,
         health: 'healthy',
+        mcp_tool_profile: {
+          configured_profile: 'unset',
+          effective_profile: 'primary',
+          visible_tool_count: 17,
+          visible_tool_names: [...PRIMARY_TOOL_NAMES],
+          local_visibility_grants_entitlement: false,
+          backend_entitlement_projection: {
+            evidence_state: 'unavailable',
+            source: 'backend_projection_not_provided',
+            authorizes_calls: false,
+            primary_tool_availability: null,
+          },
+        },
         capture_coverage: { decisions: true, tools: 'detected', commands: 'detected', deploys: 'unknown', publishes: 'unknown' },
         auto_outcome_closure: { state: 'active' },
         client_update: {
@@ -1006,6 +1221,11 @@ test('self-test returns first five-minute value signal and proof', async () => {
           update_command: 'npx @getmarrow/install@latest --repair',
           verification_command: 'npx @getmarrow/install@latest doctor',
         },
+      } }), { status: 200 });
+    }
+    if (href.endsWith('/v1/agent/context')) {
+      return new Response(JSON.stringify({ data: {
+        primary_tool_availability: primaryAvailability('available'),
       } }), { status: 200 });
     }
     if (href.endsWith('/v1/agent/runtime')) {
@@ -1086,10 +1306,19 @@ test('self-test returns first five-minute value signal and proof', async () => {
       agentId: 'installer-test',
     });
     assert.equal(requestHeaders['x-marrow-package'], '@getmarrow/install');
-    assert.equal(requestHeaders['x-marrow-package-version'], '0.1.53');
-    assert.equal(requestHeaders['x-marrow-install-version'], '0.1.53');
+    assert.equal(requestHeaders['x-marrow-package-version'], '0.1.54');
+    assert.equal(requestHeaders['x-marrow-install-version'], '0.1.54');
     assert.equal(requestHeaders['x-marrow-sdk-version'], '3.7.62');
-    assert.equal(requestHeaders['x-marrow-mcp-version'], '3.9.75');
+    assert.equal(requestHeaders['x-marrow-mcp-version'], '3.9.77');
+    assert.equal(result.mcp_tool_profile.configured_profile, 'unset');
+    assert.equal(result.mcp_tool_profile.effective_profile, 'primary');
+    assert.equal(result.mcp_tool_profile.expected_visible_count, 17);
+    assert.equal(result.mcp_tool_profile.visible_tool_count, 17);
+    assert.equal(result.mcp_tool_profile.visibility_live, true);
+    assert.equal(result.mcp_tool_profile.backend_entitlement_projection.evidence_state, 'available');
+    assert.equal(result.mcp_tool_profile.backend_entitlement_projection.authorizes_calls, false);
+    assert.equal(result.mcp_tool_profile.backend_entitlement_projection.primary_tool_availability.counts.entitled, 15);
+    assert.equal(result.mcp_tool_profile.backend_entitlement_projection.primary_tool_availability.counts.upgrade_required, 2);
     assert.equal(result.first_value_signal.active, true);
     assert.match(result.first_value_signal.headline, /Marrow active/);
     assert.ok(result.first_value_signal.captured.includes('decisions'));

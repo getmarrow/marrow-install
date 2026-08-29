@@ -10,8 +10,9 @@ const { evidence: localControlEvidence } = require('./control-state');
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MARROW_BLOCK_START = '<!-- marrow:passive-start -->';
 const MARROW_BLOCK_END = '<!-- marrow:passive-end -->';
-const MCP_ADAPTER_VERSION = '3.9.75';
-const MCP_ADAPTER_SOURCE_SHA = '7548a7ae2d7e95bb16c62470da41af06cb62c5c1';
+const MCP_ADAPTER_VERSION = '3.9.77';
+const MCP_ADAPTER_SOURCE_SHA = '1e782d8ba6bbb54bfaa322f0300565c7176f1969';
+const MCP_ADAPTER_INTEGRITY = 'sha512-4SVvnyTaDh/mhVUry1LaGCYKXSB/mt5NCHijIOLP336jILSqe7ezjZ5/EwEOMTQ2JvLm6w0QE/jmGbcksqe86w==';
 const SDK_ADAPTER_VERSION = '3.7.62';
 const SDK_ADAPTER_INTEGRITY = 'sha512-n1i6Be09TpAQ9BPNRKY7aCvA2iSUPpJfw8djw2MELwpNbBCtKiZ29Jji77BK/6EFLUpSIcTW/Gmdf/ccf0JRYQ==';
 const SDK_ADAPTER_TARBALL = `https://registry.npmjs.org/@getmarrow/sdk/-/sdk-${SDK_ADAPTER_VERSION}.tgz`;
@@ -21,8 +22,8 @@ const ADAPTER_PROVENANCE = Object.freeze({
     package: '@getmarrow/mcp',
     version: MCP_ADAPTER_VERSION,
     source_sha: MCP_ADAPTER_SOURCE_SHA,
-    integrity: null,
-    integrity_state: 'registry_unavailable_until_publish',
+    integrity: MCP_ADAPTER_INTEGRITY,
+    integrity_state: 'sealed_local_candidate',
   }),
   sdk: Object.freeze({
     package: '@getmarrow/sdk',
@@ -91,6 +92,28 @@ const GEMINI_HOOK_TIMEOUT_MS = 5000;
 const GEMINI_CLOSEOUT_TIMEOUT_MS = 3000;
 const NATIVE_EXPECTED_HOOKS = ['prompt', 'pre_action', 'action_result', 'session_end'];
 const SOURCE_CLIENTS = new Set(['claude-code', 'cursor', 'composer', 'windsurf', 'openclaw', 'codex', 'gemini', 'grok', 'deepseek', 'qwen', 'kimi', 'minimax', 'cline', 'opencode', 'hermes', 'glm', 'mcp', 'ci', 'custom', 'unknown']);
+const TOOL_PROFILES = new Set(['primary', 'core', 'full']);
+const TOOL_PROFILE_EXPECTED_COUNTS = Object.freeze({ primary: 17, core: 7, full: null });
+const TOOL_PROFILE_EXACT_FIX = 'Unset MARROW_TOOL_PROFILE to use primary, or set MARROW_TOOL_PROFILE=core or MARROW_TOOL_PROFILE=full, then restart the owning harness and run npx @getmarrow/install@latest doctor --self-test.';
+const PRIMARY_TOOL_NAMES = Object.freeze([
+  'marrow_agent_runtime',
+  'marrow_arbitrate',
+  'marrow_coordinate',
+  'marrow_replay_compare',
+  'marrow_decision_brief',
+  'marrow_think',
+  'marrow_commit',
+  'marrow_workflow_gate',
+  'marrow_completion_contracts',
+  'marrow_evaluate_completion_contract',
+  'marrow_agent_status',
+  'marrow_value_report',
+  'marrow_buyer_proof',
+  'marrow_governance_timeline',
+  'marrow_decision_trace',
+  'marrow_fleet_lessons',
+  'marrow_model_usage',
+]);
 const HARNESS_CAPABILITY_REGISTRY = Object.freeze([
   { client: 'claude-code', capability_level: 'native_hooks', automatic: ['prompt', 'pre_action', 'action_result', 'session_end'], install_surface: 'mcp' },
   { client: 'cursor', capability_level: 'native_hooks', automatic: ['pre_action', 'action_result', 'outcome_closure'], install_surface: 'mcp' },
@@ -116,6 +139,148 @@ const HARNESS_CAPABILITY_REGISTRY = Object.freeze([
 function explicitMcpVersion(command) {
   const match = String(command || '').match(/@getmarrow\/mcp@(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/);
   return match ? match[1] : null;
+}
+
+function resolveToolProfile(value) {
+  const structured = value && typeof value === 'object' && !Array.isArray(value);
+  const candidate = structured
+    ? value.configured_profile
+    : value;
+  const absent = candidate == null || String(candidate).trim() === '';
+  const structuredUnset = structured && candidate === 'unset';
+  const configuredProfile = absent || structuredUnset
+    ? 'unset'
+    : String(candidate).trim();
+  if (!absent && !structuredUnset && !TOOL_PROFILES.has(configuredProfile)) {
+    throw new Error(`Invalid MARROW_TOOL_PROFILE. ${TOOL_PROFILE_EXACT_FIX}`);
+  }
+  const effectiveProfile = configuredProfile === 'unset' ? 'primary' : configuredProfile;
+  return {
+    configured_profile: configuredProfile,
+    effective_profile: effectiveProfile,
+    expected_visible_count: TOOL_PROFILE_EXPECTED_COUNTS[effectiveProfile],
+  };
+}
+
+function normalizePrimaryToolAvailability(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || value.profile !== 'primary') return null;
+  const evidence = value.entitlement_evidence;
+  const counts = value.counts;
+  const tools = Array.isArray(value.tools) ? value.tools : [];
+  if (!evidence || typeof evidence !== 'object' || evidence.authorizing !== false) return null;
+  if (!['available', 'unavailable'].includes(evidence.state)) return null;
+  if (!counts || counts.total !== 17 || !Number.isInteger(counts.entitled) || !Number.isInteger(counts.upgrade_required)) return null;
+  if (counts.entitled + counts.upgrade_required !== counts.total || tools.length !== counts.total) return null;
+  const normalizedTools = [];
+  const seen = new Set();
+  for (const tool of tools) {
+    if (!tool || typeof tool !== 'object' || !PRIMARY_TOOL_NAMES.includes(tool.name) || seen.has(tool.name)) return null;
+    if (!['entitled', 'upgrade_required'].includes(tool.state) || typeof tool.always_available !== 'boolean') return null;
+    seen.add(tool.name);
+    normalizedTools.push({
+      name: tool.name,
+      state: tool.state,
+      always_available: tool.always_available,
+      plan_feature: typeof tool.plan_feature === 'string' ? tool.plan_feature : null,
+      minimum_plan: typeof tool.minimum_plan === 'string' ? tool.minimum_plan : null,
+      owner_management_url: typeof tool.owner_management_url === 'string' ? tool.owner_management_url : '',
+    });
+  }
+  if (PRIMARY_TOOL_NAMES.some((name) => !seen.has(name))) return null;
+  const entitled = normalizedTools.filter((tool) => tool.state === 'entitled').length;
+  const upgradeRequired = normalizedTools.filter((tool) => tool.state === 'upgrade_required').length;
+  if (entitled !== counts.entitled || upgradeRequired !== counts.upgrade_required) return null;
+  return {
+    profile: 'primary',
+    current_plan: typeof value.current_plan === 'string' ? value.current_plan : null,
+    owner_management_url: typeof value.owner_management_url === 'string' ? value.owner_management_url : '',
+    entitlement_evidence: {
+      state: evidence.state,
+      source: typeof evidence.source === 'string' ? evidence.source : 'entitlement_read_unavailable',
+      authoritative: evidence.authoritative === true,
+      authorizing: false,
+    },
+    counts: { total: 17, entitled, upgrade_required: upgradeRequired },
+    tools: normalizedTools,
+  };
+}
+
+function backendEntitlementProjection(statusProfile, contextProjection) {
+  const freshProjection = normalizePrimaryToolAvailability(contextProjection);
+  if (freshProjection) {
+    return {
+      evidence_state: freshProjection.entitlement_evidence.state,
+      source: 'authenticated_backend',
+      authorizes_calls: false,
+      primary_tool_availability: freshProjection,
+    };
+  }
+  const envelope = statusProfile?.backend_entitlement_projection;
+  const projected = normalizePrimaryToolAvailability(envelope?.primary_tool_availability);
+  const source = ['authenticated_backend', 'cached_or_stale_status', 'backend_projection_not_provided'].includes(envelope?.source)
+    ? envelope.source
+    : 'backend_projection_not_provided';
+  const available = envelope?.authorizes_calls === false
+    && envelope?.evidence_state === 'available'
+    && source === 'authenticated_backend'
+    && projected?.entitlement_evidence.state === 'available';
+  return {
+    evidence_state: available ? 'available' : 'unavailable',
+    source,
+    authorizes_calls: false,
+    primary_tool_availability: projected,
+  };
+}
+
+function buildMcpToolProfileReport(value, statusProfile = null, contextProjection = null, forceReload = false) {
+  const expected = resolveToolProfile(value);
+  const reportedNames = Array.isArray(statusProfile?.visible_tool_names)
+    ? statusProfile.visible_tool_names.filter((name) => typeof name === 'string')
+    : [];
+  const reportedCount = statusProfile?.visible_tool_count;
+  const reportedConfigured = statusProfile?.configured_profile;
+  const reportedEffective = statusProfile?.effective_profile;
+  const uniqueNames = new Set(reportedNames);
+  const profileIdentityMatches = reportedConfigured === expected.configured_profile
+    && reportedEffective === expected.effective_profile;
+  const reportedCatalogIsConsistent = Number.isInteger(reportedCount)
+    && reportedCount >= 0
+    && reportedNames.length === reportedCount
+    && uniqueNames.size === reportedCount;
+  const expectedCount = expected.effective_profile === 'full'
+    && profileIdentityMatches
+    && reportedCatalogIsConsistent
+    ? reportedCount
+    : expected.expected_visible_count;
+  const expectedPrimaryNames = expected.effective_profile !== 'primary'
+    || (reportedNames.length === PRIMARY_TOOL_NAMES.length
+      && PRIMARY_TOOL_NAMES.every((name) => uniqueNames.has(name)));
+  const visibilityLive = !forceReload
+    && profileIdentityMatches
+    && statusProfile?.local_visibility_grants_entitlement === false
+    && reportedCatalogIsConsistent
+    && reportedCount === expectedCount
+    && expectedPrimaryNames;
+  return {
+    configured_profile: expected.configured_profile,
+    effective_profile: expected.effective_profile,
+    expected_visible_count: expectedCount,
+    visible_tool_count: visibilityLive ? reportedCount : null,
+    actual_visible_count: visibilityLive ? reportedCount : null,
+    visible_tool_names: visibilityLive ? reportedNames : [],
+    local_visibility_grants_entitlement: false,
+    visibility_live: visibilityLive,
+    reload_required: !visibilityLive,
+    reported_configured_profile: typeof reportedConfigured === 'string' ? reportedConfigured : null,
+    reported_effective_profile: typeof reportedEffective === 'string' ? reportedEffective : null,
+    backend_entitlement_projection: backendEntitlementProjection(statusProfile, contextProjection),
+  };
+}
+
+function initialToolProfileReport(value) {
+  return {
+    ...buildMcpToolProfileReport(value),
+  };
 }
 
 function readMcpPackageVersion(packageRoot) {
@@ -307,7 +472,7 @@ function sourceClient() {
   return aliases[raw] || (SOURCE_CLIENTS.has(raw) ? raw : 'custom');
 }
 
-function parseArgs(argv) {
+function parseArgs(argv, env = process.env) {
   const options = {
     cwd: process.cwd(),
     yes: false,
@@ -315,9 +480,10 @@ function parseArgs(argv) {
     doctor: false,
     repair: false,
     mode: 'auto',
-    apiKey: process.env.MARROW_API_KEY || '',
-    baseUrl: process.env.MARROW_BASE_URL || DEFAULT_BASE_URL,
-    agentId: process.env.MARROW_FLEET_AGENT_ID || process.env.MARROW_AGENT_ID || '',
+    apiKey: env.MARROW_API_KEY || '',
+    baseUrl: env.MARROW_BASE_URL || DEFAULT_BASE_URL,
+    agentId: env.MARROW_FLEET_AGENT_ID || env.MARROW_AGENT_ID || '',
+    toolProfile: resolveToolProfile(env.MARROW_TOOL_PROFILE),
     selfTest: true,
     selfTestExplicitlyDisabled: false,
     json: false,
@@ -439,6 +605,10 @@ Options:
   --agent-id <id>    Agent/fleet id for self-test headers
   --no-controller    Do not start the local background controller during install/repair
   --no-self-test     Skip API smoke/self-test
+
+Environment:
+  MARROW_TOOL_PROFILE  Leave unset for primary (17 tools), or explicitly set primary, core, or full.
+                       Visibility never grants entitlement; backend plans and permissions authorize calls.
 `;
 }
 
@@ -727,6 +897,7 @@ function passiveInstructions() {
 Marrow should run passively after install:
 
 - Use MCP plus these instructions in every workspace: \`npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp setup\`.
+- Leave \`MARROW_TOOL_PROFILE\` unset for the 17-tool primary surface. Set \`MARROW_TOOL_PROFILE=core\` or \`MARROW_TOOL_PROFILE=full\` only as an explicit opt-in; backend plans and permissions still enforce access to every visible tool.
 - Use SDK passive runtime in owned Node processes: \`createPassiveRuntime().install()\`.
 - Native Claude hooks install only when \`.claude\` is present. Codex native hooks install into \`.codex/hooks.json\`; Cursor and Composer use \`.cursor/hooks.json\`; Cline uses non-overwriting executable files under \`.clinerules/hooks/\`; Windsurf uses \`.windsurf/hooks.json\`; Gemini CLI uses \`.gemini/settings.json\`; Grok uses trusted global \`~/.grok/hooks/marrow.json\`. Restart the host, enable/review hooks, disable Windsurf Restricted Mode where native hooks are required, and trust the workspace before claiming runtime coverage. The governed wrapper remains an explicit bounded fallback. Hermes, OpenClaw, and custom hosts need a bounded event adapter.
 - Keep passive token/model usage proof enabled. Empty savings stay zero until observed model usage lands. Do not invent token, cost, or time savings.
@@ -790,6 +961,7 @@ function envExample(options = {}) {
 MARROW_BASE_URL=${JSON.stringify(baseUrl)}
 MARROW_FLEET_AGENT_ID=${JSON.stringify(agentId)}
 MARROW_CLIENT=${JSON.stringify(client)}
+# MARROW_TOOL_PROFILE is intentionally unset: ordinary setup uses primary. Set core or full only as an explicit opt-in.
 MARROW_ENFORCEMENT_MODE=auto
 MARROW_PASSIVE_BRIEF=auto
 MARROW_PASSIVE_VALUE_REPORT=true
@@ -1622,13 +1794,18 @@ function upsertMcpServerConfig(filePath, options = {}) {
   const servers = config.mcpServers && typeof config.mcpServers === 'object' && !Array.isArray(config.mcpServers)
     ? config.mcpServers
     : {};
+  const existingProfile = resolveToolProfile(servers.marrow?.env?.MARROW_TOOL_PROFILE).configured_profile;
+  const requestedProfile = resolveToolProfile(options.toolProfile).configured_profile;
+  const configuredProfile = requestedProfile === 'unset' ? existingProfile : requestedProfile;
+  const env = {
+    MARROW_BASE_URL: baseUrl,
+    MARROW_FLEET_AGENT_ID: agentId,
+  };
+  if (configuredProfile !== 'unset') env.MARROW_TOOL_PROFILE = configuredProfile;
   servers.marrow = {
     command: 'npx',
     args: ['-y', `--package=${MCP_PACKAGE_SPEC}`, 'marrow-mcp'],
-    env: {
-      MARROW_BASE_URL: baseUrl,
-      MARROW_FLEET_AGENT_ID: agentId,
-    },
+    env,
   };
   config.mcpServers = servers;
   return JSON.stringify(config, null, 2) + '\n';
@@ -1919,7 +2096,7 @@ function buildPlan(detection, options) {
       type: 'json-transform',
       path: detection.paths.mcpJson,
       label: 'Project MCP server config',
-      transform: (filePath) => upsertMcpServerConfig(filePath, { agentId, baseUrl }),
+      transform: (filePath) => upsertMcpServerConfig(filePath, { agentId, baseUrl, toolProfile: options.toolProfile }),
     });
     if (detection.cursor) {
       writes.push({
@@ -1932,7 +2109,7 @@ function buildPlan(detection, options) {
         type: 'json-transform',
         path: detection.paths.cursorMcp,
         label: 'Cursor MCP server config',
-        transform: (filePath) => upsertMcpServerConfig(filePath, { agentId, baseUrl }),
+        transform: (filePath) => upsertMcpServerConfig(filePath, { agentId, baseUrl, toolProfile: options.toolProfile }),
       });
     }
   }
@@ -2106,12 +2283,14 @@ function runtimeGateVerified(runtime) {
 }
 
 async function runSelfTest(options) {
-  if (!options.selfTest) return { skipped: true, reason: 'disabled' };
+  const initialProfile = initialToolProfileReport(options.toolProfile);
+  if (!options.selfTest) return { skipped: true, reason: 'disabled', mcp_tool_profile: initialProfile };
   if (!options.apiKey) {
     return {
       skipped: true,
       reason: 'missing MARROW_API_KEY',
       exact_fix: 'export MARROW_API_KEY=mrw_live_... && npx @getmarrow/install --repair',
+      mcp_tool_profile: initialProfile,
     };
   }
 
@@ -2157,6 +2336,14 @@ async function runSelfTest(options) {
   });
 
   const status = await requestJson(`${baseUrl}/v1/agent/status`, { headers });
+  const context = await requestJson(`${baseUrl}/v1/agent/context`, { headers })
+    .catch(() => null);
+  const toolProfile = buildMcpToolProfileReport(
+    options.toolProfile,
+    status.mcp_tool_profile,
+    context?.primary_tool_availability,
+    Boolean(options.activation),
+  );
   const runtime = await requestJson(`${baseUrl}/v1/agent/runtime`, {
     method: 'POST',
     headers,
@@ -2291,6 +2478,7 @@ async function runSelfTest(options) {
   }
   return {
     skipped: false,
+    mcp_tool_profile: toolProfile,
     decision_id: decisionId,
     active: Boolean(status.enabled ?? status.ok),
     health: status.health || null,
@@ -2485,6 +2673,24 @@ function printReport(report) {
   }
 
   process.stdout.write('\nSelf-test:\n');
+  const toolProfile = report.selfTest.mcp_tool_profile || report.toolProfile;
+  if (toolProfile) {
+    process.stdout.write(`- configured tool profile: ${toolProfile.configured_profile}\n`);
+    process.stdout.write(`- effective tool profile: ${toolProfile.effective_profile}\n`);
+    process.stdout.write(`- expected visible tools: ${toolProfile.expected_visible_count == null ? 'complete catalog (awaiting reloaded MCP count)' : toolProfile.expected_visible_count}\n`);
+    process.stdout.write(`- actual visible tools: ${toolProfile.actual_visible_count == null ? 'unavailable until process reload' : toolProfile.actual_visible_count}\n`);
+    process.stdout.write(`- visible tool names: ${toolProfile.visibility_live ? toolProfile.visible_tool_names.join(', ') : 'unavailable until process reload'}\n`);
+    process.stdout.write(`- profile live: ${toolProfile.visibility_live ? 'yes' : 'no'}\n`);
+    const projection = toolProfile.backend_entitlement_projection;
+    const availability = projection?.primary_tool_availability;
+    if (projection?.evidence_state === 'available' && availability?.entitlement_evidence?.state === 'available') {
+      process.stdout.write(`- backend-projected entitled tools: ${availability.counts.entitled}\n`);
+      process.stdout.write(`- backend-projected upgrade-required tools: ${availability.counts.upgrade_required}\n`);
+      process.stdout.write(`- backend projection source: ${projection.source}; authorizes calls: no\n`);
+    } else {
+      process.stdout.write(`- backend-projected entitlements: unavailable (source: ${projection?.source || 'backend_projection_not_provided'}; non-authorizing)\n`);
+    }
+  }
   if (report.selfTest.skipped) {
     process.stdout.write(`- skipped: ${report.selfTest.reason}\n`);
     if (report.selfTest.exact_fix) process.stdout.write(`- exact fix: ${report.selfTest.exact_fix}\n`);
@@ -2650,6 +2856,9 @@ async function install(options) {
   if (options.repair && options.yes !== true && !options.dryRun && !options.doctor) {
     throw new Error('repair requires explicit write authorization (--yes)');
   }
+  options.toolProfile = resolveToolProfile(options.toolProfile === undefined
+    ? process.env.MARROW_TOOL_PROFILE
+    : options.toolProfile);
   const detection = detectEnvironment(options.cwd);
   const client = detectedClient(detection);
   options.client = client;
@@ -2696,10 +2905,26 @@ async function install(options) {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (options.activate) throw new Error(`Marrow activation failed: ${message}`);
-    selfTest = { skipped: false, active: false, error: message };
+    selfTest = {
+      skipped: false,
+      active: false,
+      error: message,
+      mcp_tool_profile: initialToolProfileReport(options.toolProfile),
+    };
   }
   if (options.activate && !selfTest.activation_verified) {
     throw new Error('Marrow activation failed: server confirmation was not returned');
+  }
+  const harnessReload = harnessReloadPlan(detection, changes);
+  if (harnessReload.required && selfTest.mcp_tool_profile) {
+    selfTest.mcp_tool_profile = {
+      ...selfTest.mcp_tool_profile,
+      visible_tool_count: null,
+      actual_visible_count: null,
+      visible_tool_names: [],
+      visibility_live: false,
+      reload_required: true,
+    };
   }
   const changedConfig = changes.some((change) => change.applied) || configRepairs.some((repair) => repair.changed);
   const selfTestPassed = Boolean(!selfTest.skipped && selfTest.active && !selfTest.error);
@@ -2762,6 +2987,7 @@ async function install(options) {
     adapterProvenance: ADAPTER_PROVENANCE,
     mode: plan.mode,
     writeMode,
+    toolProfile: selfTest.mcp_tool_profile || initialToolProfileReport(options.toolProfile),
     detected: {
       node: detection.node,
       python: detection.python,
@@ -2784,7 +3010,7 @@ async function install(options) {
       receipt: selfTest.activation_receipt || null,
       profile,
     },
-    harnessReload: harnessReloadPlan(detection, changes),
+    harnessReload,
     firstCapture: firstCapturePath(detection, options.agentId),
     changes,
     doctor: {
@@ -2866,6 +3092,9 @@ module.exports = {
   GROK_SESSION_END_HOOK_COMMAND,
   GROK_NATIVE_HOOK_MATCHER,
   printReport,
+  buildMcpToolProfileReport,
+  resolveToolProfile,
+  PRIMARY_TOOL_NAMES,
   ADAPTER_PROVENANCE,
   HARNESS_CAPABILITY_REGISTRY,
   defaultHarnessInstallMatrix,
