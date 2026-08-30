@@ -30,8 +30,8 @@ test('release-candidate adapter provenance matches the exact MCP source and cert
     mcp: {
       package: '@getmarrow/mcp',
       version: '3.9.79',
-      source_sha: 'e41ee99ec0ffc84c3c0d861b41768d00ebb94d51',
-      integrity: 'sha512-SV15hvfnvDUR1/QBJAIEY6LaOmCb5xwUtjPs7SjBVt5PB3XUPbWg5GOGBsqTt5mn4CM5f2YaElzPsTonsyWZRg==',
+      source_sha: '45aa1a9042454e93aac0e7386ed90e56d74b3fde',
+      integrity: 'sha512-vLfZpfbCTYaPdOGgy74CrpYxyEXaDqXyR1Fo1pW6nMaDuk2AQWxEEkCO55qDybL5Kg0UESYvMcc8pf3Ya+JZrQ==',
       integrity_state: 'sealed_local_candidate',
     },
     sdk: {
