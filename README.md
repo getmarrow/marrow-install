@@ -101,7 +101,7 @@ Persistent controller lifecycle is currently Linux-only. On macOS or Windows, ac
 
 ## What's New in v0.1.55
 
-v0.1.55 pins sealed MCP candidate `3.9.79` from source `45aa1a9042454e93aac0e7386ed90e56d74b3fde` for ordinary setup, generated launch configuration, and native hooks. Doctor, update, and repair retain exact-version resolution and never recommend a downgrade when verified registry or current compatible configuration proves a newer release; offline operation falls back to the sealed candidate without using an unpinned package target.
+v0.1.55 pins sealed MCP candidate `3.9.79` from source `11f00049043d0aba90704ecbf69f32d2278a4573` for ordinary setup, generated launch configuration, and native hooks. Doctor, update, and repair retain exact-version resolution and never propagate a newer local version unless official registry metadata verifies it; offline operation preserves unverified-ahead owner surfaces and uses the sealed candidate for new managed targets.
 
 ## Previous: v0.1.54
 

@@ -11,8 +11,8 @@ const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MARROW_BLOCK_START = '<!-- marrow:passive-start -->';
 const MARROW_BLOCK_END = '<!-- marrow:passive-end -->';
 const MCP_ADAPTER_VERSION = '3.9.79';
-const MCP_ADAPTER_SOURCE_SHA = '45aa1a9042454e93aac0e7386ed90e56d74b3fde';
-const MCP_ADAPTER_INTEGRITY = 'sha512-vLfZpfbCTYaPdOGgy74CrpYxyEXaDqXyR1Fo1pW6nMaDuk2AQWxEEkCO55qDybL5Kg0UESYvMcc8pf3Ya+JZrQ==';
+const MCP_ADAPTER_SOURCE_SHA = '11f00049043d0aba90704ecbf69f32d2278a4573';
+const MCP_ADAPTER_INTEGRITY = 'sha512-LWfBWGot2PnluRbS5Hm3WA2DJCIkf2qVJfthGcCaZx8AoRXFKeg1pUO3rMVFqrOIWOB4nYZw6UgSL+7hDY1wuA==';
 const SDK_ADAPTER_VERSION = '3.7.62';
 const SDK_ADAPTER_INTEGRITY = 'sha512-n1i6Be09TpAQ9BPNRKY7aCvA2iSUPpJfw8djw2MELwpNbBCtKiZ29Jji77BK/6EFLUpSIcTW/Gmdf/ccf0JRYQ==';
 const SDK_ADAPTER_TARBALL = `https://registry.npmjs.org/@getmarrow/sdk/-/sdk-${SDK_ADAPTER_VERSION}.tgz`;
@@ -32,8 +32,10 @@ const ADAPTER_PROVENANCE = Object.freeze({
   }),
 });
 const MCP_REGISTRY_LATEST_URL = 'https://registry.npmjs.org/%40getmarrow%2Fmcp/latest';
+const MCP_REGISTRY_VERIFICATION_COMMAND = 'npm view @getmarrow/mcp@latest name version dist.integrity dist.tarball --json --registry=https://registry.npmjs.org';
 const MCP_STABLE_VERSION_RE = /^(\d{1,6})\.(\d{1,6})\.(\d{1,9})$/;
 const SHA512_INTEGRITY_RE = /^sha512-[A-Za-z0-9+/]+={0,2}$/;
+const VERIFIED_MCP_EXECUTABLE_TARGET = Symbol('verified_mcp_executable_target');
 
 function validSha512Integrity(value) {
   if (!SHA512_INTEGRITY_RE.test(value)) return false;
@@ -72,6 +74,24 @@ function compatibleMcpTargetVersion(value) {
     && compareMcpVersions(value, MCP_ADAPTER_VERSION) >= 0);
 }
 
+function mcpVersionsInText(value) {
+  return [...String(value || '').matchAll(/@getmarrow\/mcp@(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/g)]
+    .map((match) => match[1]);
+}
+
+function unverifiedAheadMcpVersions(versions, targetVersion = MCP_ADAPTER_VERSION) {
+  if (!compatibleMcpTargetVersion(targetVersion)) return [];
+  return [...new Set((Array.isArray(versions) ? versions : [])
+    .filter((version) => compatibleMcpTargetVersion(version)
+      && compareMcpVersions(version, targetVersion) > 0))].sort((left, right) => compareMcpVersions(left, right));
+}
+
+function mcpRegistryVerificationAction(versions) {
+  const ahead = [...new Set(Array.isArray(versions) ? versions : [])].sort((left, right) => compareMcpVersions(left, right));
+  const targets = ahead.map((version) => `@getmarrow/mcp@${version}`).join(', ');
+  return `Run ${MCP_REGISTRY_VERIFICATION_COMMAND} with official npm registry access, then rerun npx -y @getmarrow/install@latest doctor --self-test. Automatic repair is suppressed${targets ? ` for ${targets}` : ''}; preserve each existing surface until registry metadata verifies it or the owner chooses the sealed or verified version.`;
+}
+
 function verifiedMcpRegistryMetadata(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const version = typeof value.version === 'string' ? value.version : '';
@@ -86,31 +106,38 @@ function verifiedMcpRegistryMetadata(value) {
 }
 
 function resolveMcpTargetVersion(options = {}) {
-  const candidates = new Map([[MCP_ADAPTER_VERSION, {
-    version: MCP_ADAPTER_VERSION,
-    source: 'sealed_installer',
-    integrity: MCP_ADAPTER_INTEGRITY,
-    source_sha: MCP_ADAPTER_SOURCE_SHA,
-  }]]);
-  for (const value of Array.isArray(options.currentVersions) ? options.currentVersions : []) {
-    if (!compatibleMcpTargetVersion(value)) continue;
-    candidates.set(value, {
-      version: value,
-      source: 'current_exact_configuration',
-      integrity: null,
-      source_sha: null,
-    });
-  }
   const registry = verifiedMcpRegistryMetadata(options.registryMetadata);
   if (registry) {
-    candidates.set(registry.version, {
+    const target = {
       version: registry.version,
       source: 'verified_npm_registry',
       integrity: registry.integrity,
       source_sha: null,
-    });
+    };
+    Object.defineProperty(target, VERIFIED_MCP_EXECUTABLE_TARGET, { value: true });
+    return target;
   }
-  return [...candidates.values()].sort((left, right) => compareMcpVersions(right.version, left.version))[0];
+  return {
+    version: MCP_ADAPTER_VERSION,
+    source: 'sealed_installer',
+    integrity: MCP_ADAPTER_INTEGRITY,
+    source_sha: MCP_ADAPTER_SOURCE_SHA,
+  };
+}
+
+function executableMcpTarget(options = {}) {
+  const target = options.mcpTarget;
+  if (target?.[VERIFIED_MCP_EXECUTABLE_TARGET] === true
+    && target.source === 'verified_npm_registry'
+    && compatibleMcpTargetVersion(target.version)
+    && validSha512Integrity(target.integrity)
+    && target.source_sha === null) return target;
+  return resolveMcpTargetVersion();
+}
+
+function expectedMcpInspectionVersion(options = {}) {
+  if (options.expectedVersion === MCP_ADAPTER_VERSION) return MCP_ADAPTER_VERSION;
+  return executableMcpTarget({ mcpTarget: options.expectedTarget }).version;
 }
 
 async function readMcpRegistryMetadata(options = {}) {
@@ -160,24 +187,26 @@ function retargetMcpPackageSpec(value, version) {
 function retargetMcpDowngradeRecommendation(value, targetVersion) {
   if (typeof value !== 'string' || !compatibleMcpTargetVersion(targetVersion)) return value;
   return value.replace(/@getmarrow\/mcp@(\d+\.\d+\.\d+)/g, (match, version) => (
-    parsedStableMcpVersion(version) && compareMcpVersions(version, targetVersion) < 0
+    parsedStableMcpVersion(version) && version !== targetVersion
       ? `@getmarrow/mcp@${targetVersion}`
       : match
   ));
 }
 
-function alignMcpRecommendationVersions(value, targetVersion, key = '') {
+function alignMcpRecommendationVersions(value, targetVersion, key = '', verificationAction = null) {
   if (Array.isArray(value)) {
-    return value.map((entry) => alignMcpRecommendationVersions(entry, targetVersion, key));
+    return value.map((entry) => alignMcpRecommendationVersions(entry, targetVersion, key, verificationAction));
   }
   if (!value || typeof value !== 'object') {
     return /(?:command|fix|instruction|next_action|notice)$/i.test(key)
-      ? retargetMcpDowngradeRecommendation(value, targetVersion)
+      ? verificationAction && typeof value === 'string' && /@getmarrow\/mcp@\d+\.\d+\.\d+/.test(value)
+        ? verificationAction
+        : retargetMcpDowngradeRecommendation(value, targetVersion)
       : value;
   }
   return Object.fromEntries(Object.entries(value).map(([entryKey, entryValue]) => [
     entryKey,
-    alignMcpRecommendationVersions(entryValue, targetVersion, entryKey),
+    alignMcpRecommendationVersions(entryValue, targetVersion, entryKey, verificationAction),
   ]));
 }
 const MCP_CONTEXT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp context-hook`;
@@ -515,14 +544,16 @@ function inspectMcpProcesses(options = {}) {
     .filter(isMcpProcessCommand)
     .map((command) => explicitMcpVersion(command) || packageMcpVersion(command) || 'unknown');
   const versions = [...new Set(active.filter((version) => version !== 'unknown'))].sort();
-  const expectedVersion = compatibleMcpTargetVersion(options.expectedVersion)
-    ? options.expectedVersion
-    : resolveMcpTargetVersion({ currentVersions: versions }).version;
+  const expectedVersion = expectedMcpInspectionVersion(options);
   const unknownVersionProcesses = active.filter((version) => version === 'unknown').length;
-  const staleVersions = versions.filter((version) => version !== expectedVersion);
+  const aheadUnverifiedVersions = unverifiedAheadMcpVersions(versions, expectedVersion);
+  const staleVersions = versions.filter((version) => version !== expectedVersion
+    && !aheadUnverifiedVersions.includes(version));
   const mixedVersions = versions.length > 1 || (versions.length > 0 && unknownVersionProcesses > 0);
   const stale = staleVersions.length > 0;
-  const needsRepair = stale || mixedVersions || unknownVersionProcesses > 0;
+  const aheadUnverified = aheadUnverifiedVersions.length > 0;
+  const needsRepair = stale || mixedVersions || unknownVersionProcesses > 0 || aheadUnverified;
+  const automaticRepairSuppressed = aheadUnverified;
   const repairCommand = `npx -y --package=@getmarrow/mcp@${expectedVersion} marrow-mcp setup`;
   return {
     available: process.platform === 'linux' || Array.isArray(options.commands),
@@ -531,11 +562,19 @@ function inspectMcpProcesses(options = {}) {
     active_versions: versions,
     unknown_version_processes: unknownVersionProcesses,
     stale_versions: staleVersions,
+    ahead_unverified: aheadUnverified,
+    ahead_unverified_versions: aheadUnverifiedVersions,
     mixed_versions: mixedVersions,
     healthy: !needsRepair,
-    exact_fix: needsRepair ? repairCommand : null,
-    restart_required: needsRepair,
-    restart_instruction: needsRepair ? 'Restart every owning harness to replace its active Marrow MCP process.' : null,
+    automatic_repair_suppressed: automaticRepairSuppressed,
+    registry_verification_required: aheadUnverified,
+    exact_fix: automaticRepairSuppressed
+      ? mcpRegistryVerificationAction(aheadUnverifiedVersions)
+      : needsRepair ? repairCommand : null,
+    restart_required: needsRepair && !automaticRepairSuppressed,
+    restart_instruction: needsRepair && !automaticRepairSuppressed
+      ? 'Restart every owning harness to replace its active Marrow MCP process.'
+      : null,
     verification_command: needsRepair ? 'npx -y @getmarrow/install@latest doctor --self-test' : null,
   };
 }
@@ -574,13 +613,15 @@ function inspectMcpConfigurations(detection, options = {}) {
     }
   }
   const configuredVersions = [...new Set(versions)].sort();
-  const expectedVersion = compatibleMcpTargetVersion(options.expectedVersion)
-    ? options.expectedVersion
-    : resolveMcpTargetVersion({ currentVersions: configuredVersions }).version;
-  const staleVersions = configuredVersions.filter((version) => version !== expectedVersion);
+  const expectedVersion = expectedMcpInspectionVersion(options);
+  const aheadUnverifiedVersions = unverifiedAheadMcpVersions(configuredVersions, expectedVersion);
+  const staleVersions = configuredVersions.filter((version) => version !== expectedVersion
+    && !aheadUnverifiedVersions.includes(version));
   const mixedVersions = configuredVersions.length > 1
     || (configuredVersions.length > 0 && unknownVersionConfigurations > 0);
-  const healthy = staleVersions.length === 0 && !mixedVersions && unknownVersionConfigurations === 0;
+  const aheadUnverified = aheadUnverifiedVersions.length > 0;
+  const healthy = staleVersions.length === 0 && !mixedVersions
+    && unknownVersionConfigurations === 0 && !aheadUnverified;
   return {
     expected_version: expectedVersion,
     files_checked: filesChecked,
@@ -588,9 +629,17 @@ function inspectMcpConfigurations(detection, options = {}) {
     configured_versions: configuredVersions,
     unknown_version_configurations: unknownVersionConfigurations,
     stale_versions: staleVersions,
+    ahead_unverified: aheadUnverified,
+    ahead_unverified_versions: aheadUnverifiedVersions,
     mixed_versions: mixedVersions,
     healthy,
-    exact_fix: healthy ? null : `Run npx -y --package=@getmarrow/mcp@${expectedVersion} marrow-mcp setup in each owning workspace, update its MCP launch to npx -y --package=@getmarrow/mcp@${expectedVersion} marrow-mcp, then restart that harness.`,
+    automatic_repair_suppressed: aheadUnverified,
+    registry_verification_required: aheadUnverified,
+    exact_fix: healthy
+      ? null
+      : aheadUnverified
+        ? mcpRegistryVerificationAction(aheadUnverifiedVersions)
+        : `Run npx -y --package=@getmarrow/mcp@${expectedVersion} marrow-mcp setup in each owning workspace, update its MCP launch to npx -y --package=@getmarrow/mcp@${expectedVersion} marrow-mcp, then restart that harness.`,
     verification_command: healthy ? null : 'npx -y @getmarrow/install@latest doctor --self-test',
   };
 }
@@ -2186,9 +2235,7 @@ function buildPlan(detection, options) {
   const client = options.client || detectedClient(detection);
   const agentId = String(options.agentId || '').trim() || stableAgentId(detection.root, client);
   const baseUrl = String(options.baseUrl || DEFAULT_BASE_URL).trim() || DEFAULT_BASE_URL;
-  const mcpTargetVersion = compatibleMcpTargetVersion(options.mcpTargetVersion)
-    ? options.mcpTargetVersion
-    : MCP_ADAPTER_VERSION;
+  const mcpTargetVersion = executableMcpTarget(options).version;
   const retarget = (value) => retargetMcpPackageSpec(value, mcpTargetVersion);
   const mode = options.mode === 'auto'
     ? detection.node ? 'both' : 'mcp'
@@ -2362,9 +2409,16 @@ function applyPlan(plan, options) {
   const prepared = plan.writes.map((write) => {
     const fileExists = exists(write.path);
     const before = safeRead(write.path);
+    const aheadUnverifiedVersions = unverifiedAheadMcpVersions(
+      mcpVersionsInText(before),
+      plan.mcp_target_version,
+    );
+    const automaticRepairSuppressed = aheadUnverifiedVersions.length > 0;
     let after;
     let hookConflict = false;
-    if (write.type === 'file') {
+    if (automaticRepairSuppressed) {
+      after = before;
+    } else if (write.type === 'file') {
       if (write.overwrite === false && before) {
         after = before;
       } else {
@@ -2387,21 +2441,43 @@ function applyPlan(plan, options) {
 
     const beforeMode = fileExists ? fs.lstatSync(write.path).mode & 0o777 : null;
     const modeChanged = !hookConflict && typeof write.mode === 'number' && beforeMode !== write.mode;
-    return { write, before, after, hookConflict, modeChanged };
+    return {
+      write,
+      before,
+      after,
+      hookConflict,
+      modeChanged,
+      automaticRepairSuppressed,
+      aheadUnverifiedVersions,
+    };
   });
 
   const changes = [];
-  for (const { write, before, after, hookConflict, modeChanged } of prepared) {
+  for (const {
+    write,
+    before,
+    after,
+    hookConflict,
+    modeChanged,
+    automaticRepairSuppressed,
+    aheadUnverifiedVersions,
+  } of prepared) {
     const contentChanged = before !== after;
-    const changed = !hookConflict && (contentChanged || modeChanged);
-    const writeApplied = Boolean(options.yes && !options.dryRun && !options.doctor && !hookConflict);
+    const changed = !automaticRepairSuppressed && !hookConflict && (contentChanged || modeChanged);
+    const writeApplied = Boolean(options.yes && !options.dryRun && !options.doctor
+      && !hookConflict && !automaticRepairSuppressed);
     changes.push({
       path: write.path,
       label: write.label,
       changed,
       applied: changed && writeApplied,
-      already_present: !changed && !hookConflict,
+      already_present: !changed && !hookConflict && !automaticRepairSuppressed,
       hook_conflict: hookConflict,
+      automatic_repair_suppressed: automaticRepairSuppressed,
+      ...(automaticRepairSuppressed ? {
+        ahead_unverified_versions: aheadUnverifiedVersions,
+        exact_fix: mcpRegistryVerificationAction(aheadUnverifiedVersions),
+      } : {}),
       ...(hookConflict ? { exact_fix: write.conflict_fix } : {}),
     });
     if (contentChanged && writeApplied) {
@@ -2467,9 +2543,7 @@ async function runSelfTest(options) {
     'x-marrow-package-version': INSTALLER_ADAPTER_VERSION,
     'x-marrow-install-version': INSTALLER_ADAPTER_VERSION,
     'x-marrow-sdk-version': SDK_ADAPTER_VERSION,
-    'x-marrow-mcp-version': compatibleMcpTargetVersion(options.mcpTargetVersion)
-      ? options.mcpTargetVersion
-      : MCP_ADAPTER_VERSION,
+    'x-marrow-mcp-version': executableMcpTarget(options).version,
   };
   if (options.agentId) headers['x-marrow-agent-id'] = options.agentId;
 
@@ -2834,8 +2908,13 @@ function printReport(report) {
 
   process.stdout.write('\nPlanned changes:\n');
   for (const change of report.changes) {
-    const marker = change.applied ? 'wrote' : change.changed ? 'would write' : 'unchanged';
+    const marker = change.automatic_repair_suppressed
+      ? 'preserved unverified-ahead surface; repair suppressed'
+      : change.applied ? 'wrote' : change.changed ? 'would write' : 'unchanged';
     process.stdout.write(`- ${marker}: ${change.label} (${change.path})\n`);
+    if (change.automatic_repair_suppressed && change.exact_fix) {
+      process.stdout.write(`  exact verification: ${change.exact_fix}\n`);
+    }
   }
 
   process.stdout.write('\nSelf-test:\n');
@@ -2985,6 +3064,8 @@ function printReport(report) {
       const processes = report.doctor.mcpProcesses;
       process.stdout.write(`- MCP process versions: ${processes.active_versions.length ? processes.active_versions.join(', ') : processes.active_processes ? 'unknown' : 'none'}\n`);
       process.stdout.write(`- stale/mixed/version-unknown MCP clients: ${processes.healthy ? 'no' : 'yes'}\n`);
+      if (processes.ahead_unverified_versions.length) process.stdout.write(`- unverified-ahead MCP clients: ${processes.ahead_unverified_versions.join(', ')}\n`);
+      if (processes.automatic_repair_suppressed) process.stdout.write('- automatic MCP process repair: suppressed pending official registry verification\n');
       if (processes.restart_instruction) process.stdout.write(`- restart required: ${processes.restart_instruction}\n`);
       if (processes.verification_command) process.stdout.write(`- verify repair: ${processes.verification_command}\n`);
     }
@@ -2992,6 +3073,8 @@ function printReport(report) {
       const configurations = report.doctor.mcpConfigurations;
       process.stdout.write(`- configured MCP versions: ${configurations.configured_versions.length ? configurations.configured_versions.join(', ') : 'none pinned'}\n`);
       process.stdout.write(`- stale/mixed/version-unknown MCP configuration: ${configurations.healthy ? 'no' : 'yes'}\n`);
+      if (configurations.ahead_unverified_versions.length) process.stdout.write(`- unverified-ahead MCP configuration: ${configurations.ahead_unverified_versions.join(', ')}\n`);
+      if (configurations.automatic_repair_suppressed) process.stdout.write('- automatic MCP configuration repair: suppressed pending official registry verification\n');
     }
     if (report.doctor.recommendedFix) process.stdout.write(`- recommended fix: ${report.doctor.recommendedFix}\n`);
     process.stdout.write(`- live health: ${report.doctor.healthCommand}\n`);
@@ -3040,11 +3123,12 @@ async function install(options) {
     ] : [],
     registryMetadata: latestTargetOperation ? registryMetadata : null,
   });
+  options.mcpTarget = mcpTarget;
   options.mcpTargetVersion = mcpTarget.version;
   const plan = buildPlan(detection, options);
   const writeMode = options.doctor ? 'doctor' : options.dryRun ? 'dry-run' : options.repair ? 'repair' : options.yes ? 'write' : 'dry-run';
   const changes = applyPlan(plan, options);
-  const profile = activationProfile(detection, plan, changes, client);
+  let profile = activationProfile(detection, plan, changes, client);
   options.activation = options.activate ? {
     harness: client,
     agent_id: options.agentId,
@@ -3077,12 +3161,31 @@ async function install(options) {
   const envHints = options.apiKey ? [] : findLikelyEnvFiles(detection);
   const mcpProcesses = inspectMcpProcesses({
     commands: options.processCommands,
-    expectedVersion: mcpTarget.version,
+    expectedTarget: mcpTarget,
   });
   const mcpConfigurations = inspectMcpConfigurations(detection, {
     paths: options.mcpConfigPaths,
-    expectedVersion: mcpTarget.version,
+    expectedTarget: mcpTarget,
   });
+  const aheadUnverifiedVersions = [...new Set([
+    ...mcpProcesses.ahead_unverified_versions,
+    ...mcpConfigurations.ahead_unverified_versions,
+    ...changes.flatMap((change) => change.ahead_unverified_versions || []),
+  ])].sort((left, right) => compareMcpVersions(left, right));
+  const automaticMcpRepairSuppressed = aheadUnverifiedVersions.length > 0;
+  const registryVerificationAction = automaticMcpRepairSuppressed
+    ? mcpRegistryVerificationAction(aheadUnverifiedVersions)
+    : null;
+  if (automaticMcpRepairSuppressed) {
+    profile = {
+      ...profile,
+      configuration_complete: false,
+      complete: false,
+      automatic_repair_suppressed: true,
+      ahead_unverified_versions: aheadUnverifiedVersions,
+      exact_fix: registryVerificationAction,
+    };
+  }
   let selfTest;
   try {
     selfTest = await runSelfTest(options);
@@ -3096,7 +3199,12 @@ async function install(options) {
       mcp_tool_profile: initialToolProfileReport(options.toolProfile),
     };
   }
-  selfTest = alignMcpRecommendationVersions(selfTest, mcpTarget.version);
+  selfTest = alignMcpRecommendationVersions(
+    selfTest,
+    mcpTarget.version,
+    '',
+    registryVerificationAction,
+  );
   if (options.activate && !selfTest.activation_verified) {
     throw new Error('Marrow activation failed: server confirmation was not returned');
   }
@@ -3157,7 +3265,10 @@ async function install(options) {
       attempted: true,
       fixedConfig: changedConfig,
       selfTestPassed,
-      message: selfTestPassed
+      automaticMcpRepairSuppressed,
+      message: automaticMcpRepairSuppressed
+        ? registryVerificationAction
+        : selfTestPassed
         ? selfTest.health === 'healthy'
           ? 'I fixed Marrow passive config, one-call runtime is active, and self-test passed.'
           : `I fixed Marrow passive config and self-test passed; status is ${selfTest.health || 'unknown'}${selfTest.next_action ? `. Next action: ${selfTest.next_action}` : ''}.`
@@ -3205,7 +3316,10 @@ async function install(options) {
       missingHooks: changes.filter((change) => change.changed).map((change) => change.label),
       mcpProcesses,
       mcpConfigurations,
-      recommendedFix: mcpProcesses.exact_fix || mcpConfigurations.exact_fix || configDiagnostics.npm_token.recommended_fix || (!options.apiKey
+      ahead_unverified_versions: aheadUnverifiedVersions,
+      automatic_mcp_repair_suppressed: automaticMcpRepairSuppressed,
+      registry_verification_action: registryVerificationAction,
+      recommendedFix: registryVerificationAction || mcpProcesses.exact_fix || mcpConfigurations.exact_fix || configDiagnostics.npm_token.recommended_fix || (!options.apiKey
         ? envHints.length
           ? `MARROW_API_KEY was found in a likely env file at ${envHints[0]}. Load that key from trusted secret storage, export only MARROW_API_KEY, then run npx @getmarrow/install --repair.`
           : 'Set MARROW_API_KEY, then run npx @getmarrow/install --repair.'
@@ -3223,10 +3337,14 @@ async function install(options) {
       ...(options.keyFromArg
         ? ['Avoid --key in shared shells because command-line arguments can be visible in process listings. Prefer MARROW_API_KEY in your environment or secret manager.']
         : []),
-      ...(!mcpProcesses.healthy
+      ...(mcpProcesses.ahead_unverified
+        ? ['Registry-unverified ahead Marrow MCP clients are active. Automatic repair is suppressed; run the exact registry verification action before owner-directed replacement.']
+        : !mcpProcesses.healthy
         ? ['Stale, mixed, or version-unknown Marrow MCP clients are active. Run the exact repair command, then restart every owning harness.']
         : []),
-      ...(!mcpConfigurations.healthy
+      ...(mcpConfigurations.ahead_unverified || changes.some((change) => change.automatic_repair_suppressed)
+        ? ['Registry-unverified ahead Marrow MCP configuration was preserved. It was not copied into other managed targets, and automatic repair is suppressed for that surface.']
+        : !mcpConfigurations.healthy
         ? ['Stale, mixed, or version-unknown Marrow MCP versions remain in owner configuration. Repair each owning workspace and restart its harness.']
         : []),
     ],
