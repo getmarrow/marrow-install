@@ -31,6 +31,155 @@ const ADAPTER_PROVENANCE = Object.freeze({
     integrity: SDK_ADAPTER_INTEGRITY,
   }),
 });
+const MCP_REGISTRY_LATEST_URL = 'https://registry.npmjs.org/%40getmarrow%2Fmcp/latest';
+const MCP_STABLE_VERSION_RE = /^(\d{1,6})\.(\d{1,6})\.(\d{1,9})$/;
+const SHA512_INTEGRITY_RE = /^sha512-[A-Za-z0-9+/]+={0,2}$/;
+
+function validSha512Integrity(value) {
+  if (!SHA512_INTEGRITY_RE.test(value)) return false;
+  const encoded = value.slice('sha512-'.length);
+  try {
+    const digest = Buffer.from(encoded, 'base64');
+    return digest.length === 64 && digest.toString('base64') === encoded;
+  } catch {
+    return false;
+  }
+}
+
+function parsedStableMcpVersion(value) {
+  const match = String(value || '').match(MCP_STABLE_VERSION_RE);
+  if (!match) return null;
+  const parts = match.slice(1).map(Number);
+  return parts.every(Number.isSafeInteger) ? parts : null;
+}
+
+function compareMcpVersions(left, right) {
+  const leftParts = parsedStableMcpVersion(left);
+  const rightParts = parsedStableMcpVersion(right);
+  if (!leftParts || !rightParts) return null;
+  for (let index = 0; index < leftParts.length; index += 1) {
+    if (leftParts[index] !== rightParts[index]) return leftParts[index] - rightParts[index];
+  }
+  return 0;
+}
+
+function compatibleMcpTargetVersion(value) {
+  const candidate = parsedStableMcpVersion(value);
+  const sealed = parsedStableMcpVersion(MCP_ADAPTER_VERSION);
+  return Boolean(candidate && sealed
+    && candidate[0] === sealed[0]
+    && candidate[1] === sealed[1]
+    && compareMcpVersions(value, MCP_ADAPTER_VERSION) >= 0);
+}
+
+function verifiedMcpRegistryMetadata(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const version = typeof value.version === 'string' ? value.version : '';
+  const integrity = typeof value.dist?.integrity === 'string' ? value.dist.integrity : '';
+  const tarball = typeof value.dist?.tarball === 'string' ? value.dist.tarball : '';
+  const expectedTarball = `https://registry.npmjs.org/@getmarrow/mcp/-/mcp-${version}.tgz`;
+  if (value.name !== '@getmarrow/mcp'
+    || !compatibleMcpTargetVersion(version)
+    || !validSha512Integrity(integrity)
+    || tarball !== expectedTarball) return null;
+  return { version, integrity, tarball };
+}
+
+function resolveMcpTargetVersion(options = {}) {
+  const candidates = new Map([[MCP_ADAPTER_VERSION, {
+    version: MCP_ADAPTER_VERSION,
+    source: 'sealed_installer',
+    integrity: MCP_ADAPTER_INTEGRITY,
+    source_sha: MCP_ADAPTER_SOURCE_SHA,
+  }]]);
+  for (const value of Array.isArray(options.currentVersions) ? options.currentVersions : []) {
+    if (!compatibleMcpTargetVersion(value)) continue;
+    candidates.set(value, {
+      version: value,
+      source: 'current_exact_configuration',
+      integrity: null,
+      source_sha: null,
+    });
+  }
+  const registry = verifiedMcpRegistryMetadata(options.registryMetadata);
+  if (registry) {
+    candidates.set(registry.version, {
+      version: registry.version,
+      source: 'verified_npm_registry',
+      integrity: registry.integrity,
+      source_sha: null,
+    });
+  }
+  return [...candidates.values()].sort((left, right) => compareMcpVersions(right.version, left.version))[0];
+}
+
+async function readMcpRegistryMetadata(options = {}) {
+  if (Object.prototype.hasOwnProperty.call(options, 'mcpRegistryMetadata')) {
+    return options.mcpRegistryMetadata;
+  }
+  if (options.resolveMcpRegistry !== true) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2500);
+  try {
+    const fetcher = typeof options.registryFetch === 'function' ? options.registryFetch : fetch;
+    const response = await fetcher(MCP_REGISTRY_LATEST_URL, {
+      headers: { accept: 'application/json' },
+      redirect: 'error',
+      signal: controller.signal,
+    });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function adapterProvenanceForMcpTarget(target) {
+  if (!target || target.version === MCP_ADAPTER_VERSION) return ADAPTER_PROVENANCE;
+  return {
+    mcp: {
+      package: '@getmarrow/mcp',
+      version: target.version,
+      source_sha: target.source_sha,
+      integrity: target.integrity,
+      integrity_state: target.source === 'verified_npm_registry'
+        ? 'verified_npm_registry_metadata'
+        : 'exact_current_configuration',
+    },
+    sdk: ADAPTER_PROVENANCE.sdk,
+  };
+}
+
+function retargetMcpPackageSpec(value, version) {
+  const target = compatibleMcpTargetVersion(version) ? version : MCP_ADAPTER_VERSION;
+  return String(value).split(MCP_PACKAGE_SPEC).join(`@getmarrow/mcp@${target}`);
+}
+
+function retargetMcpDowngradeRecommendation(value, targetVersion) {
+  if (typeof value !== 'string' || !compatibleMcpTargetVersion(targetVersion)) return value;
+  return value.replace(/@getmarrow\/mcp@(\d+\.\d+\.\d+)/g, (match, version) => (
+    parsedStableMcpVersion(version) && compareMcpVersions(version, targetVersion) < 0
+      ? `@getmarrow/mcp@${targetVersion}`
+      : match
+  ));
+}
+
+function alignMcpRecommendationVersions(value, targetVersion, key = '') {
+  if (Array.isArray(value)) {
+    return value.map((entry) => alignMcpRecommendationVersions(entry, targetVersion, key));
+  }
+  if (!value || typeof value !== 'object') {
+    return /(?:command|fix|instruction|next_action|notice)$/i.test(key)
+      ? retargetMcpDowngradeRecommendation(value, targetVersion)
+      : value;
+  }
+  return Object.fromEntries(Object.entries(value).map(([entryKey, entryValue]) => [
+    entryKey,
+    alignMcpRecommendationVersions(entryValue, targetVersion, entryKey),
+  ]));
+}
 const MCP_CONTEXT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp context-hook`;
 const MCP_PRE_ACTION_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp pre-action-hook`;
 const MCP_ACTION_RESULT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp hook`;
@@ -366,15 +515,18 @@ function inspectMcpProcesses(options = {}) {
     .filter(isMcpProcessCommand)
     .map((command) => explicitMcpVersion(command) || packageMcpVersion(command) || 'unknown');
   const versions = [...new Set(active.filter((version) => version !== 'unknown'))].sort();
+  const expectedVersion = compatibleMcpTargetVersion(options.expectedVersion)
+    ? options.expectedVersion
+    : resolveMcpTargetVersion({ currentVersions: versions }).version;
   const unknownVersionProcesses = active.filter((version) => version === 'unknown').length;
-  const staleVersions = versions.filter((version) => version !== MCP_ADAPTER_VERSION);
+  const staleVersions = versions.filter((version) => version !== expectedVersion);
   const mixedVersions = versions.length > 1 || (versions.length > 0 && unknownVersionProcesses > 0);
   const stale = staleVersions.length > 0;
   const needsRepair = stale || mixedVersions || unknownVersionProcesses > 0;
-  const repairCommand = `npx -y --package=@getmarrow/mcp@${MCP_ADAPTER_VERSION} marrow-mcp setup`;
+  const repairCommand = `npx -y --package=@getmarrow/mcp@${expectedVersion} marrow-mcp setup`;
   return {
     available: process.platform === 'linux' || Array.isArray(options.commands),
-    expected_version: MCP_ADAPTER_VERSION,
+    expected_version: expectedVersion,
     active_processes: active.length,
     active_versions: versions,
     unknown_version_processes: unknownVersionProcesses,
@@ -422,12 +574,15 @@ function inspectMcpConfigurations(detection, options = {}) {
     }
   }
   const configuredVersions = [...new Set(versions)].sort();
-  const staleVersions = configuredVersions.filter((version) => version !== MCP_ADAPTER_VERSION);
+  const expectedVersion = compatibleMcpTargetVersion(options.expectedVersion)
+    ? options.expectedVersion
+    : resolveMcpTargetVersion({ currentVersions: configuredVersions }).version;
+  const staleVersions = configuredVersions.filter((version) => version !== expectedVersion);
   const mixedVersions = configuredVersions.length > 1
     || (configuredVersions.length > 0 && unknownVersionConfigurations > 0);
   const healthy = staleVersions.length === 0 && !mixedVersions && unknownVersionConfigurations === 0;
   return {
-    expected_version: MCP_ADAPTER_VERSION,
+    expected_version: expectedVersion,
     files_checked: filesChecked,
     configurations_found: configurationsFound,
     configured_versions: configuredVersions,
@@ -435,7 +590,7 @@ function inspectMcpConfigurations(detection, options = {}) {
     stale_versions: staleVersions,
     mixed_versions: mixedVersions,
     healthy,
-    exact_fix: healthy ? null : `Run npx -y --package=@getmarrow/mcp@${MCP_ADAPTER_VERSION} marrow-mcp setup in each owning workspace, update its MCP launch to npx -y --package=@getmarrow/mcp@${MCP_ADAPTER_VERSION} marrow-mcp, then restart that harness.`,
+    exact_fix: healthy ? null : `Run npx -y --package=@getmarrow/mcp@${expectedVersion} marrow-mcp setup in each owning workspace, update its MCP launch to npx -y --package=@getmarrow/mcp@${expectedVersion} marrow-mcp, then restart that harness.`,
     verification_command: healthy ? null : 'npx -y @getmarrow/install@latest doctor --self-test',
   };
 }
@@ -575,6 +730,7 @@ function parseArgs(argv, env = process.env) {
   if (options.activate && options.dryRun) {
     throw new Error('activate cannot be combined with --dry-run; use --dry-run without activate to preview changes');
   }
+  options.resolveMcpRegistry = Boolean(options.doctor || options.repair || options.update);
 
   return options;
 }
@@ -1603,8 +1759,12 @@ function activationProfile(detection, plan, changes, client) {
   const expectedHooks = capabilityLevel === 'sdk_passive_runtime'
     ? ['pre_action', 'action_result', 'outcome_closure']
     : [...registry.automatic];
+  const mcpTargetVersion = compatibleMcpTargetVersion(plan.mcp_target_version)
+    ? plan.mcp_target_version
+    : MCP_ADAPTER_VERSION;
+  const targetCommand = (command) => retargetMcpPackageSpec(command, mcpTargetVersion);
   const adapterVersion = capabilityLevel === 'native_hooks' || capabilityLevel === 'mcp'
-    ? MCP_ADAPTER_VERSION
+    ? mcpTargetVersion
     : capabilityLevel === 'sdk_passive_runtime'
     ? SDK_ADAPTER_VERSION
     : INSTALLER_ADAPTER_VERSION;
@@ -1616,71 +1776,71 @@ function activationProfile(detection, plan, changes, client) {
   const geminiSettings = safeJsonObject(detection.paths.geminiSettings);
   const grokSettings = safeJsonObject(detection.paths.grokHooks);
   if (client === 'codex') {
-    if (exactHookConfigured(codexSettings, 'UserPromptSubmit', CODEX_CONTEXT_HOOK_COMMAND)) observedHooks.push('prompt');
-    if (exactHookConfigured(codexSettings, 'PreToolUse', CODEX_PRE_ACTION_HOOK_COMMAND, CODEX_NATIVE_HOOK_MATCHER)) observedHooks.push('pre_action');
-    if (exactHookConfigured(codexSettings, 'PostToolUse', CODEX_ACTION_RESULT_HOOK_COMMAND, CODEX_NATIVE_HOOK_MATCHER)) observedHooks.push('action_result');
-    if (exactHookConfigured(codexSettings, 'SessionEnd', CODEX_SESSION_END_HOOK_COMMAND)) observedHooks.push('session_end');
+    if (exactHookConfigured(codexSettings, 'UserPromptSubmit', targetCommand(CODEX_CONTEXT_HOOK_COMMAND))) observedHooks.push('prompt');
+    if (exactHookConfigured(codexSettings, 'PreToolUse', targetCommand(CODEX_PRE_ACTION_HOOK_COMMAND), CODEX_NATIVE_HOOK_MATCHER)) observedHooks.push('pre_action');
+    if (exactHookConfigured(codexSettings, 'PostToolUse', targetCommand(CODEX_ACTION_RESULT_HOOK_COMMAND), CODEX_NATIVE_HOOK_MATCHER)) observedHooks.push('action_result');
+    if (exactHookConfigured(codexSettings, 'SessionEnd', targetCommand(CODEX_SESSION_END_HOOK_COMMAND))) observedHooks.push('session_end');
   } else if (client === 'cursor' || client === 'composer') {
-    if (exactCursorHookConfigured(cursorSettings, 'preToolUse', CURSOR_PRE_ACTION_HOOK_COMMAND, CURSOR_NATIVE_HOOK_MATCHER, {
+    if (exactCursorHookConfigured(cursorSettings, 'preToolUse', targetCommand(CURSOR_PRE_ACTION_HOOK_COMMAND), CURSOR_NATIVE_HOOK_MATCHER, {
       timeout: CODEX_HOOK_TIMEOUT_SECONDS, failClosed: true, async: false,
     })) observedHooks.push('pre_action');
-    if (exactCursorHookConfigured(cursorSettings, 'postToolUse', CURSOR_ACTION_RESULT_HOOK_COMMAND, CURSOR_NATIVE_HOOK_MATCHER, {
+    if (exactCursorHookConfigured(cursorSettings, 'postToolUse', targetCommand(CURSOR_ACTION_RESULT_HOOK_COMMAND), CURSOR_NATIVE_HOOK_MATCHER, {
       timeout: CODEX_HOOK_TIMEOUT_SECONDS,
-    }) && exactCursorHookConfigured(cursorSettings, 'postToolUseFailure', CURSOR_ACTION_RESULT_HOOK_COMMAND, CURSOR_NATIVE_HOOK_MATCHER, {
+    }) && exactCursorHookConfigured(cursorSettings, 'postToolUseFailure', targetCommand(CURSOR_ACTION_RESULT_HOOK_COMMAND), CURSOR_NATIVE_HOOK_MATCHER, {
       timeout: CODEX_HOOK_TIMEOUT_SECONDS,
     })) observedHooks.push('action_result');
-    if (exactCursorHookConfigured(cursorSettings, 'stop', CURSOR_SESSION_END_HOOK_COMMAND, undefined, {
+    if (exactCursorHookConfigured(cursorSettings, 'stop', targetCommand(CURSOR_SESSION_END_HOOK_COMMAND), undefined, {
       timeout: CODEX_SESSION_TIMEOUT_SECONDS,
     })) observedHooks.push('outcome_closure');
   } else if (client === 'cline') {
     for (const hook of clineHookContract(detection)) {
-      if (exactExecutableFile(hook.path, hook.content)) observedHooks.push(hook.stage);
+      if (exactExecutableFile(hook.path, targetCommand(hook.content))) observedHooks.push(hook.stage);
     }
   } else if (client === 'windsurf') {
     if (WINDSURF_PRE_EVENTS.every((event) => exactWindsurfHookConfigured(
-      windsurfSettings, event, WINDSURF_PRE_ACTION_HOOK_COMMAND,
+      windsurfSettings, event, targetCommand(WINDSURF_PRE_ACTION_HOOK_COMMAND),
     ))) observedHooks.push('pre_action');
     if (WINDSURF_POST_EVENTS.every((event) => exactWindsurfHookConfigured(
-      windsurfSettings, event, WINDSURF_ACTION_RESULT_HOOK_COMMAND,
+      windsurfSettings, event, targetCommand(WINDSURF_ACTION_RESULT_HOOK_COMMAND),
     ))) observedHooks.push('action_result');
     if (exactWindsurfHookConfigured(
-      windsurfSettings, 'post_cascade_response', WINDSURF_SESSION_END_HOOK_COMMAND,
+      windsurfSettings, 'post_cascade_response', targetCommand(WINDSURF_SESSION_END_HOOK_COMMAND),
     )) observedHooks.push('response_closeout');
   } else if (client === 'gemini' && !geminiHooksExplicitlyDisabled(geminiSettings)) {
     if (exactGeminiHookConfigured(
-      geminiSettings, 'BeforeTool', 'marrow-before-tool', GEMINI_PRE_ACTION_HOOK_COMMAND,
+      geminiSettings, 'BeforeTool', 'marrow-before-tool', targetCommand(GEMINI_PRE_ACTION_HOOK_COMMAND),
       GEMINI_NATIVE_HOOK_MATCHER, GEMINI_HOOK_TIMEOUT_MS,
     )) observedHooks.push('pre_action');
     if (exactGeminiHookConfigured(
-      geminiSettings, 'AfterTool', 'marrow-after-tool', GEMINI_ACTION_RESULT_HOOK_COMMAND,
+      geminiSettings, 'AfterTool', 'marrow-after-tool', targetCommand(GEMINI_ACTION_RESULT_HOOK_COMMAND),
       GEMINI_NATIVE_HOOK_MATCHER, GEMINI_HOOK_TIMEOUT_MS,
     )) observedHooks.push('action_result');
     if (exactGeminiHookConfigured(
-      geminiSettings, 'AfterAgent', 'marrow-after-agent', GEMINI_SESSION_END_HOOK_COMMAND,
+      geminiSettings, 'AfterAgent', 'marrow-after-agent', targetCommand(GEMINI_SESSION_END_HOOK_COMMAND),
       undefined, GEMINI_CLOSEOUT_TIMEOUT_MS,
     )) observedHooks.push('turn_closeout');
   } else if (client === 'grok') {
     if (exactGrokHookConfigured(
-      grokSettings, 'PreToolUse', GROK_PRE_ACTION_HOOK_COMMAND, GROK_NATIVE_HOOK_MATCHER, 7,
+      grokSettings, 'PreToolUse', targetCommand(GROK_PRE_ACTION_HOOK_COMMAND), GROK_NATIVE_HOOK_MATCHER, 7,
     )) observedHooks.push('pre_action');
     if (exactGrokHookConfigured(
-      grokSettings, 'PostToolUse', GROK_ACTION_RESULT_HOOK_COMMAND, GROK_NATIVE_HOOK_MATCHER, 5,
+      grokSettings, 'PostToolUse', targetCommand(GROK_ACTION_RESULT_HOOK_COMMAND), GROK_NATIVE_HOOK_MATCHER, 5,
     ) && exactGrokHookConfigured(
-      grokSettings, 'PostToolUseFailure', GROK_ACTION_RESULT_HOOK_COMMAND, GROK_NATIVE_HOOK_MATCHER, 5,
+      grokSettings, 'PostToolUseFailure', targetCommand(GROK_ACTION_RESULT_HOOK_COMMAND), GROK_NATIVE_HOOK_MATCHER, 5,
     )) observedHooks.push('action_result');
     if (exactGrokHookConfigured(
-      grokSettings, 'Stop', GROK_SESSION_END_HOOK_COMMAND, undefined, 3,
+      grokSettings, 'Stop', targetCommand(GROK_SESSION_END_HOOK_COMMAND), undefined, 3,
     ) && !grokHasDuplicateSessionEnd(grokSettings)) observedHooks.push('turn_closeout');
   } else {
     if (capabilityLevel === 'native_hooks'
-      && exactHookConfigured(claudeSettings, 'UserPromptSubmit', MCP_CONTEXT_HOOK_COMMAND)) observedHooks.push('prompt');
+      && exactHookConfigured(claudeSettings, 'UserPromptSubmit', targetCommand(MCP_CONTEXT_HOOK_COMMAND))) observedHooks.push('prompt');
     if (capabilityLevel === 'native_hooks'
-      && exactHookConfigured(claudeSettings, 'PreToolUse', MCP_PRE_ACTION_HOOK_COMMAND, NATIVE_HOOK_MATCHER)) observedHooks.push('pre_action');
+      && exactHookConfigured(claudeSettings, 'PreToolUse', targetCommand(MCP_PRE_ACTION_HOOK_COMMAND), NATIVE_HOOK_MATCHER)) observedHooks.push('pre_action');
     if (capabilityLevel === 'native_hooks'
-      && exactHookConfigured(claudeSettings, 'PostToolUse', MCP_ACTION_RESULT_HOOK_COMMAND, NATIVE_HOOK_MATCHER)
-      && exactHookConfigured(claudeSettings, 'PostToolUseFailure', MCP_ACTION_RESULT_HOOK_COMMAND, NATIVE_HOOK_MATCHER)) observedHooks.push('action_result');
+      && exactHookConfigured(claudeSettings, 'PostToolUse', targetCommand(MCP_ACTION_RESULT_HOOK_COMMAND), NATIVE_HOOK_MATCHER)
+      && exactHookConfigured(claudeSettings, 'PostToolUseFailure', targetCommand(MCP_ACTION_RESULT_HOOK_COMMAND), NATIVE_HOOK_MATCHER)) observedHooks.push('action_result');
     if (capabilityLevel === 'native_hooks'
-      && exactHookConfigured(claudeSettings, 'Stop', MCP_SESSION_END_HOOK_COMMAND)) observedHooks.push('session_end');
+      && exactHookConfigured(claudeSettings, 'Stop', targetCommand(MCP_SESSION_END_HOOK_COMMAND))) observedHooks.push('session_end');
   }
   const passiveRuntime = safeRead(detection.paths.passiveRuntime);
   if (capabilityLevel === 'sdk_passive_runtime'
@@ -1696,7 +1856,7 @@ function activationProfile(detection, plan, changes, client) {
   if (capabilityLevel === 'mcp' && mcpConfigs.some((config) => (
     config?.mcpServers?.marrow?.command === 'npx'
     && Array.isArray(config.mcpServers.marrow.args)
-    && config.mcpServers.marrow.args.join(' ') === `-y --package=${MCP_PACKAGE_SPEC} marrow-mcp`
+    && config.mcpServers.marrow.args.join(' ') === `-y --package=@getmarrow/mcp@${mcpTargetVersion} marrow-mcp`
   ))) observedHooks.push('mcp_tool_calls');
   const fingerprintMaterial = changes
     .filter((change) => change.applied || change.already_present)
@@ -1737,7 +1897,7 @@ function activationProfile(detection, plan, changes, client) {
     : client === 'gemini' && geminiHooksExplicitlyDisabled(geminiSettings)
     ? 'Hooks are explicitly disabled. After owner review, run /hooks enable-all, open /hooks panel, review and approve the project hook fingerprints, then restart Gemini CLI.'
     : client === 'grok'
-    ? `Run npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp setup, restart Grok, then inspect /hooks and confirm the global hooks are enabled.`
+    ? `Run npx -y --package=@getmarrow/mcp@${mcpTargetVersion} marrow-mcp setup, restart Grok, then inspect /hooks and confirm the global hooks are enabled.`
     : 'npx @getmarrow/install --repair';
   return {
     adapter_version: adapterVersion,
@@ -2026,6 +2186,10 @@ function buildPlan(detection, options) {
   const client = options.client || detectedClient(detection);
   const agentId = String(options.agentId || '').trim() || stableAgentId(detection.root, client);
   const baseUrl = String(options.baseUrl || DEFAULT_BASE_URL).trim() || DEFAULT_BASE_URL;
+  const mcpTargetVersion = compatibleMcpTargetVersion(options.mcpTargetVersion)
+    ? options.mcpTargetVersion
+    : MCP_ADAPTER_VERSION;
+  const retarget = (value) => retargetMcpPackageSpec(value, mcpTargetVersion);
   const mode = options.mode === 'auto'
     ? detection.node ? 'both' : 'mcp'
     : options.mode;
@@ -2053,7 +2217,7 @@ function buildPlan(detection, options) {
         type: 'json-transform',
         path: detection.paths.claudeSettings,
         label: 'Claude Code MCP passive hooks',
-        transform: upsertClaudeHooks,
+        transform: (filePath) => retarget(upsertClaudeHooks(filePath)),
       });
     }
     if (detection.codex) {
@@ -2061,7 +2225,7 @@ function buildPlan(detection, options) {
         type: 'json-transform',
         path: detection.paths.codexHooks,
         label: 'Codex native hooks',
-        transform: upsertCodexHooks,
+        transform: (filePath) => retarget(upsertCodexHooks(filePath)),
       });
     }
     if (detection.cline) {
@@ -2070,7 +2234,7 @@ function buildPlan(detection, options) {
           type: 'owned-executable',
           path: hook.path,
           label: hook.label,
-          content: hook.content,
+          content: retarget(hook.content),
           mode: 0o755,
           conflict_fix: 'Move or remove the existing owner-managed Cline hook after owner review, then run npx @getmarrow/install --repair.',
         });
@@ -2081,7 +2245,7 @@ function buildPlan(detection, options) {
         type: 'json-transform',
         path: detection.paths.windsurfHooks,
         label: 'Windsurf native hooks',
-        transform: upsertWindsurfHooks,
+        transform: (filePath) => retarget(upsertWindsurfHooks(filePath)),
       });
     }
     if (detection.gemini) {
@@ -2089,27 +2253,27 @@ function buildPlan(detection, options) {
         type: 'json-transform',
         path: detection.paths.geminiSettings,
         label: 'Gemini CLI native hooks',
-        transform: upsertGeminiHooks,
+        transform: (filePath) => retarget(upsertGeminiHooks(filePath)),
       });
     }
     writes.push({
       type: 'json-transform',
       path: detection.paths.mcpJson,
       label: 'Project MCP server config',
-      transform: (filePath) => upsertMcpServerConfig(filePath, { agentId, baseUrl, toolProfile: options.toolProfile }),
+      transform: (filePath) => retarget(upsertMcpServerConfig(filePath, { agentId, baseUrl, toolProfile: options.toolProfile })),
     });
     if (detection.cursor) {
       writes.push({
         type: 'json-transform',
         path: detection.paths.cursorHooks,
         label: 'Cursor native hooks',
-        transform: upsertCursorHooks,
+        transform: (filePath) => retarget(upsertCursorHooks(filePath)),
       });
       writes.push({
         type: 'json-transform',
         path: detection.paths.cursorMcp,
         label: 'Cursor MCP server config',
-        transform: (filePath) => upsertMcpServerConfig(filePath, { agentId, baseUrl, toolProfile: options.toolProfile }),
+        transform: (filePath) => retarget(upsertMcpServerConfig(filePath, { agentId, baseUrl, toolProfile: options.toolProfile })),
       });
     }
   }
@@ -2119,7 +2283,7 @@ function buildPlan(detection, options) {
       type: 'md-block',
       path: detection.paths.agentsMd,
       label: 'Agent instructions',
-      block: passiveInstructions(),
+      block: retarget(passiveInstructions()),
     });
   }
 
@@ -2128,11 +2292,11 @@ function buildPlan(detection, options) {
       type: 'file',
       path: detection.paths.cursorRules,
       label: 'Cursor Marrow rule',
-      content: passiveInstructions().replace(/<!--[^>]+-->/g, '').trim() + '\n',
+      content: retarget(passiveInstructions()).replace(/<!--[^>]+-->/g, '').trim() + '\n',
     });
   }
 
-  return { mode, root: detection.root, writes };
+  return { mode, root: detection.root, writes, mcp_target_version: mcpTargetVersion };
 }
 
 function assertContainedManagedTarget(root, targetPath) {
@@ -2303,7 +2467,9 @@ async function runSelfTest(options) {
     'x-marrow-package-version': INSTALLER_ADAPTER_VERSION,
     'x-marrow-install-version': INSTALLER_ADAPTER_VERSION,
     'x-marrow-sdk-version': SDK_ADAPTER_VERSION,
-    'x-marrow-mcp-version': MCP_ADAPTER_VERSION,
+    'x-marrow-mcp-version': compatibleMcpTargetVersion(options.mcpTargetVersion)
+      ? options.mcpTargetVersion
+      : MCP_ADAPTER_VERSION,
   };
   if (options.agentId) headers['x-marrow-agent-id'] = options.agentId;
 
@@ -2863,6 +3029,18 @@ async function install(options) {
   const client = detectedClient(detection);
   options.client = client;
   options.agentId = String(options.agentId || '').trim() || stableAgentId(detection.root, client);
+  const observedMcpProcesses = inspectMcpProcesses({ commands: options.processCommands });
+  const observedMcpConfigurations = inspectMcpConfigurations(detection, { paths: options.mcpConfigPaths });
+  const registryMetadata = await readMcpRegistryMetadata(options);
+  const latestTargetOperation = Boolean(options.doctor || options.repair || options.update);
+  const mcpTarget = resolveMcpTargetVersion({
+    currentVersions: latestTargetOperation ? [
+      ...observedMcpProcesses.active_versions,
+      ...observedMcpConfigurations.configured_versions,
+    ] : [],
+    registryMetadata: latestTargetOperation ? registryMetadata : null,
+  });
+  options.mcpTargetVersion = mcpTarget.version;
   const plan = buildPlan(detection, options);
   const writeMode = options.doctor ? 'doctor' : options.dryRun ? 'dry-run' : options.repair ? 'repair' : options.yes ? 'write' : 'dry-run';
   const changes = applyPlan(plan, options);
@@ -2897,8 +3075,14 @@ async function install(options) {
     ? repairConfigDiagnostics(configDiagnostics)
     : [];
   const envHints = options.apiKey ? [] : findLikelyEnvFiles(detection);
-  const mcpProcesses = inspectMcpProcesses({ commands: options.processCommands });
-  const mcpConfigurations = inspectMcpConfigurations(detection, { paths: options.mcpConfigPaths });
+  const mcpProcesses = inspectMcpProcesses({
+    commands: options.processCommands,
+    expectedVersion: mcpTarget.version,
+  });
+  const mcpConfigurations = inspectMcpConfigurations(detection, {
+    paths: options.mcpConfigPaths,
+    expectedVersion: mcpTarget.version,
+  });
   let selfTest;
   try {
     selfTest = await runSelfTest(options);
@@ -2912,6 +3096,7 @@ async function install(options) {
       mcp_tool_profile: initialToolProfileReport(options.toolProfile),
     };
   }
+  selfTest = alignMcpRecommendationVersions(selfTest, mcpTarget.version);
   if (options.activate && !selfTest.activation_verified) {
     throw new Error('Marrow activation failed: server confirmation was not returned');
   }
@@ -2984,7 +3169,7 @@ async function install(options) {
 
   return {
     root: detection.root,
-    adapterProvenance: ADAPTER_PROVENANCE,
+    adapterProvenance: adapterProvenanceForMcpTarget(mcpTarget),
     mode: plan.mode,
     writeMode,
     toolProfile: selfTest.mcp_tool_profile || initialToolProfileReport(options.toolProfile),
@@ -3093,6 +3278,7 @@ module.exports = {
   GROK_NATIVE_HOOK_MATCHER,
   printReport,
   buildMcpToolProfileReport,
+  resolveMcpTargetVersion,
   resolveToolProfile,
   PRIMARY_TOOL_NAMES,
   ADAPTER_PROVENANCE,

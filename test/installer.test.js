@@ -20,6 +20,7 @@ const {
   parseArgs,
   passiveRuntimeSource,
   printReport,
+  resolveMcpTargetVersion,
   resolveToolProfile,
   runSelfTest,
 } = require('../src/installer');
@@ -147,6 +148,123 @@ test('doctor treats both immediately superseded MCP releases as stale', () => {
     assert.deepEqual(report.stale_versions, [version]);
     assert.equal(report.healthy, false);
     assert.equal(report.exact_fix, 'npx -y --package=@getmarrow/mcp@3.9.77 marrow-mcp setup');
+  }
+});
+
+test('doctor does not backward-latch its repair target behind a newer compatible active MCP', () => {
+  const report = inspectMcpProcesses({ commands: [
+    'npx -y --package=@getmarrow/mcp@3.9.78 marrow-mcp',
+    'npx -y --package=@getmarrow/mcp@3.9.72 marrow-mcp',
+  ] });
+  assert.equal(report.expected_version, '3.9.78');
+  assert.deepEqual(report.stale_versions, ['3.9.72']);
+  assert.equal(report.exact_fix, 'npx -y --package=@getmarrow/mcp@3.9.78 marrow-mcp setup');
+  assert.doesNotMatch(report.exact_fix, /@getmarrow\/mcp@3\.9\.77(?:\s|$)/);
+});
+
+test('verified registry latest retargets update and repair plans with an exact pin', () => {
+  const registryIntegrity = `sha512-${Buffer.alloc(64, 7).toString('base64')}`;
+  const target = resolveMcpTargetVersion({
+    currentVersions: ['3.9.77'],
+    registryMetadata: {
+      name: '@getmarrow/mcp',
+      version: '3.9.78',
+      dist: {
+        integrity: registryIntegrity,
+        tarball: 'https://registry.npmjs.org/@getmarrow/mcp/-/mcp-3.9.78.tgz',
+      },
+    },
+  });
+  assert.deepEqual(target, {
+    version: '3.9.78',
+    source: 'verified_npm_registry',
+    integrity: registryIntegrity,
+    source_sha: null,
+  });
+
+  const root = tempDir();
+  fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
+  try {
+    const detection = detectEnvironment(root);
+    const plan = buildPlan(detection, {
+      mode: 'mcp',
+      agentId: 'codex-registry-target',
+      baseUrl: 'https://api.getmarrow.ai',
+      toolProfile: resolveToolProfile(undefined),
+      mcpTargetVersion: target.version,
+    });
+    applyPlan(plan, { yes: true, dryRun: false, doctor: false });
+    const generated = [
+      fs.readFileSync(detection.paths.mcpJson, 'utf8'),
+      fs.readFileSync(detection.paths.agentsMd, 'utf8'),
+    ].join('\n');
+    assert.match(generated, /@getmarrow\/mcp@3\.9\.78/);
+    assert.doesNotMatch(generated, /@getmarrow\/mcp@3\.9\.77|@getmarrow\/mcp@latest/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('latest-target resolution stays offline-safe and rejects unverified or incompatible registry claims', () => {
+  assert.equal(resolveMcpTargetVersion({ currentVersions: ['3.9.78'] }).version, '3.9.78');
+  assert.equal(resolveMcpTargetVersion({
+    registryMetadata: {
+      name: '@getmarrow/mcp',
+      version: '3.9.78',
+      dist: {
+        integrity: 'sha512-not-a-complete-digest',
+        tarball: 'https://registry.npmjs.org/@getmarrow/mcp/-/mcp-3.9.78.tgz',
+      },
+    },
+  }).version, '3.9.77');
+  assert.equal(resolveMcpTargetVersion({ currentVersions: ['4.0.0'] }).version, '3.9.77');
+});
+
+test('doctor uses verified registry evidence without emitting a downgrade recommendation', async () => {
+  const root = tempDir();
+  const configPath = path.join(root, '.mcp.json');
+  const registryIntegrity = `sha512-${Buffer.alloc(64, 9).toString('base64')}`;
+  fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
+  fs.writeFileSync(configPath, JSON.stringify({
+    mcpServers: { marrow: { command: 'npx', args: ['-y', '--package=@getmarrow/mcp@3.9.77', 'marrow-mcp'] } },
+  }));
+  try {
+    const report = await install({
+      cwd: root,
+      mode: 'mcp',
+      yes: false,
+      doctor: true,
+      dryRun: false,
+      selfTest: false,
+      apiKey: '',
+      baseUrl: 'https://api.getmarrow.ai',
+      agentId: '',
+      controller: false,
+      processCommands: ['npx -y --package=@getmarrow/mcp@3.9.77 marrow-mcp'],
+      mcpConfigPaths: [configPath],
+      mcpRegistryMetadata: {
+        name: '@getmarrow/mcp',
+        version: '3.9.78',
+        dist: {
+          integrity: registryIntegrity,
+          tarball: 'https://registry.npmjs.org/@getmarrow/mcp/-/mcp-3.9.78.tgz',
+        },
+      },
+    });
+    assert.equal(report.doctor.mcpProcesses.expected_version, '3.9.78');
+    assert.equal(report.doctor.mcpConfigurations.expected_version, '3.9.78');
+    assert.match(report.doctor.recommendedFix, /@getmarrow\/mcp@3\.9\.78/);
+    assert.doesNotMatch(report.doctor.recommendedFix, /@getmarrow\/mcp@3\.9\.77(?:\s|$)/);
+    assert.deepEqual(report.adapterProvenance.mcp, {
+      package: '@getmarrow/mcp',
+      version: '3.9.78',
+      source_sha: null,
+      integrity: registryIntegrity,
+      integrity_state: 'verified_npm_registry_metadata',
+    });
+    assert.equal(fs.readFileSync(configPath, 'utf8').includes('3.9.77'), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
