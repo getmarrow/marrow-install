@@ -99,7 +99,11 @@ npx @getmarrow/install controller stop
 
 Persistent controller lifecycle is currently Linux-only. On macOS or Windows, activation still writes supported configuration and verifies one server-side install self-test without certifying that hooks continuously ran; run `npx @getmarrow/install sidecar` under an owner-managed service and pass `--no-controller`. The controller does not silently upgrade packages, change governance policy, rotate credentials, or modify unrelated project configuration.
 
-## What's New in v0.1.54
+## What's New in v0.1.55
+
+v0.1.55 pins sealed MCP candidate `3.9.79` from source `e41ee99ec0ffc84c3c0d861b41768d00ebb94d51` for ordinary setup, generated launch configuration, and native hooks. Doctor, update, and repair retain exact-version resolution and never recommend a downgrade when verified registry or current compatible configuration proves a newer release; offline operation falls back to the sealed candidate without using an unpinned package target.
+
+## Previous: v0.1.54
 
 v0.1.54 pins sealed MCP candidate `3.9.77` from source `1e782d8ba6bbb54bfaa322f0300565c7176f1969` and makes ordinary setup use the primary tool surface without writing a profile variable. Explicit `core` and `full` selections remain preserved, invalid values fail closed with a bounded repair, and human/JSON self-test output distinguishes configured/effective profile, expected visibility, actual post-reload visibility, and backend-projected entitlement state. Backend projections are status evidence only and always report `authorizes_calls: false`.
 
