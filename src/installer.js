@@ -10,9 +10,9 @@ const { evidence: localControlEvidence } = require('./control-state');
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MARROW_BLOCK_START = '<!-- marrow:passive-start -->';
 const MARROW_BLOCK_END = '<!-- marrow:passive-end -->';
-const MCP_ADAPTER_VERSION = '3.9.79';
-const MCP_ADAPTER_SOURCE_SHA = '11f00049043d0aba90704ecbf69f32d2278a4573';
-const MCP_ADAPTER_INTEGRITY = 'sha512-LWfBWGot2PnluRbS5Hm3WA2DJCIkf2qVJfthGcCaZx8AoRXFKeg1pUO3rMVFqrOIWOB4nYZw6UgSL+7hDY1wuA==';
+const MCP_ADAPTER_VERSION = '3.9.80';
+const MCP_ADAPTER_SOURCE_SHA = 'ee1eda3f201965a6530256accbdf175660dd8ad6';
+const MCP_ADAPTER_INTEGRITY = 'sha512-uou3X18pESV39EMmddDrYN7yd6MrZzosrnQ1eRtvK5j3yuBLAlupj5kQVrrKEWAL6xwuLebXq2isivK2O/2WrA==';
 const SDK_ADAPTER_VERSION = '3.7.62';
 const SDK_ADAPTER_INTEGRITY = 'sha512-n1i6Be09TpAQ9BPNRKY7aCvA2iSUPpJfw8djw2MELwpNbBCtKiZ29Jji77BK/6EFLUpSIcTW/Gmdf/ccf0JRYQ==';
 const SDK_ADAPTER_TARBALL = `https://registry.npmjs.org/@getmarrow/sdk/-/sdk-${SDK_ADAPTER_VERSION}.tgz`;
@@ -33,6 +33,9 @@ const ADAPTER_PROVENANCE = Object.freeze({
 });
 const MCP_REGISTRY_LATEST_URL = 'https://registry.npmjs.org/%40getmarrow%2Fmcp/latest';
 const MCP_REGISTRY_VERIFICATION_COMMAND = 'npm view @getmarrow/mcp@latest name version dist.integrity dist.tarball --json --registry=https://registry.npmjs.org';
+const INSTALLER_UPDATE_COMMAND = 'npx -y @getmarrow/install@latest update';
+const INSTALLER_DOCTOR_COMMAND = 'npx -y @getmarrow/install@latest doctor --self-test';
+const INSTALLER_RESTART_INSTRUCTION = 'After the update completes, restart the detected owning harnesses once. Running Marrow MCP processes remain unchanged until that restart.';
 const MCP_STABLE_VERSION_RE = /^(\d{1,6})\.(\d{1,6})\.(\d{1,9})$/;
 const SHA512_INTEGRITY_RE = /^sha512-[A-Za-z0-9+/]+={0,2}$/;
 const VERIFIED_MCP_EXECUTABLE_TARGET = Symbol('verified_mcp_executable_target');
@@ -554,7 +557,6 @@ function inspectMcpProcesses(options = {}) {
   const aheadUnverified = aheadUnverifiedVersions.length > 0;
   const needsRepair = stale || mixedVersions || unknownVersionProcesses > 0 || aheadUnverified;
   const automaticRepairSuppressed = aheadUnverified;
-  const repairCommand = `npx -y --package=@getmarrow/mcp@${expectedVersion} marrow-mcp setup`;
   return {
     available: process.platform === 'linux' || Array.isArray(options.commands),
     expected_version: expectedVersion,
@@ -570,21 +572,30 @@ function inspectMcpProcesses(options = {}) {
     registry_verification_required: aheadUnverified,
     exact_fix: automaticRepairSuppressed
       ? mcpRegistryVerificationAction(aheadUnverifiedVersions)
-      : needsRepair ? repairCommand : null,
+      : needsRepair ? INSTALLER_UPDATE_COMMAND : null,
     restart_required: needsRepair && !automaticRepairSuppressed,
     restart_instruction: needsRepair && !automaticRepairSuppressed
-      ? 'Restart every owning harness to replace its active Marrow MCP process.'
+      ? INSTALLER_RESTART_INSTRUCTION
       : null,
-    verification_command: needsRepair ? 'npx -y @getmarrow/install@latest doctor --self-test' : null,
+    verification_command: needsRepair && !automaticRepairSuppressed ? INSTALLER_DOCTOR_COMMAND : null,
   };
 }
 
 function inspectMcpConfigurations(detection, options = {}) {
   const home = options.home || process.env.HOME || process.env.USERPROFILE || os.homedir();
   const configuredPaths = Array.isArray(options.paths) ? options.paths : [
-    detection?.paths?.claudeSettings,
-    detection?.paths?.cursorMcp,
+    detection?.paths?.agentsMd,
     detection?.paths?.mcpJson,
+    detection?.paths?.claudeSettings,
+    detection?.paths?.codexHooks,
+    detection?.paths?.cursorHooks,
+    detection?.paths?.cursorMcp,
+    detection?.paths?.clinePreToolUseHook,
+    detection?.paths?.clinePostToolUseHook,
+    detection?.paths?.clineTaskCancelHook,
+    detection?.paths?.windsurfHooks,
+    detection?.paths?.geminiSettings,
+    detection?.paths?.grokHooks,
     path.join(home, '.claude', 'settings.json'),
     path.join(home, '.claude.json'),
     path.join(home, '.cursor', 'mcp.json'),
@@ -639,8 +650,10 @@ function inspectMcpConfigurations(detection, options = {}) {
       ? null
       : aheadUnverified
         ? mcpRegistryVerificationAction(aheadUnverifiedVersions)
-        : `Run npx -y --package=@getmarrow/mcp@${expectedVersion} marrow-mcp setup in each owning workspace, update its MCP launch to npx -y --package=@getmarrow/mcp@${expectedVersion} marrow-mcp, then restart that harness.`,
-    verification_command: healthy ? null : 'npx -y @getmarrow/install@latest doctor --self-test',
+        : INSTALLER_UPDATE_COMMAND,
+    restart_required: !healthy && !aheadUnverified,
+    restart_instruction: !healthy && !aheadUnverified ? INSTALLER_RESTART_INSTRUCTION : null,
+    verification_command: !healthy && !aheadUnverified ? INSTALLER_DOCTOR_COMMAND : null,
   };
 }
 
@@ -1691,6 +1704,75 @@ function grokNativeHookFingerprint(settings) {
   })).digest('hex');
 }
 
+function grokMarrowHookSubcommand(command) {
+  const direct = marrowHookSubcommand(command);
+  if (direct) return direct;
+  if (typeof command !== 'string') return null;
+  const guarded = command.match(
+    /@getmarrow\/mcp@[^\s"',]+["'],["']marrow-mcp["'],["']grok-(pre-action-hook)["']/,
+  );
+  return guarded?.[1] || null;
+}
+
+function reconcileGrokHook(settings, eventName, subcommand, command, matcher, timeout) {
+  const original = Array.isArray(settings?.hooks?.[eventName]) ? settings.hooks[eventName] : [];
+  const retained = [];
+  let preferredHandler = null;
+  for (const entry of original) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || !Array.isArray(entry.hooks)) {
+      retained.push(entry);
+      continue;
+    }
+    const remaining = [];
+    for (const handler of entry.hooks) {
+      const detected = handler && typeof handler === 'object' && !Array.isArray(handler)
+        && handler.type === 'command' ? grokMarrowHookSubcommand(handler.command) : null;
+      if (detected) {
+        if (detected === subcommand && !preferredHandler) preferredHandler = handler;
+        continue;
+      }
+      remaining.push(handler);
+    }
+    if (remaining.length > 0) retained.push({ ...entry, hooks: remaining });
+  }
+  if (!command) return retained;
+  const canonical = {
+    ...(matcher === undefined ? {} : { matcher }),
+    hooks: [{ ...preferredHandler, type: 'command', command, timeout }],
+  };
+  return [...retained, canonical];
+}
+
+function upsertGrokHooks(settingsPath) {
+  const settings = parseJsonObject(settingsPath);
+  const hooks = settings.hooks && typeof settings.hooks === 'object' && !Array.isArray(settings.hooks)
+    ? settings.hooks
+    : {};
+  settings.hooks = {
+    ...hooks,
+    UserPromptSubmit: reconcileGrokHook(settings, 'UserPromptSubmit', 'context-hook', GROK_CONTEXT_HOOK_COMMAND, undefined, 5),
+    PreToolUse: reconcileGrokHook(settings, 'PreToolUse', 'pre-action-hook', GROK_PRE_ACTION_HOOK_COMMAND, GROK_NATIVE_HOOK_MATCHER, 7),
+    PostToolUse: reconcileGrokHook(settings, 'PostToolUse', 'hook', GROK_ACTION_RESULT_HOOK_COMMAND, GROK_NATIVE_HOOK_MATCHER, 5),
+    PostToolUseFailure: reconcileGrokHook(settings, 'PostToolUseFailure', 'hook', GROK_ACTION_RESULT_HOOK_COMMAND, GROK_NATIVE_HOOK_MATCHER, 5),
+    Stop: reconcileGrokHook(settings, 'Stop', 'session-hook', GROK_SESSION_END_HOOK_COMMAND, undefined, 3),
+    SessionEnd: reconcileGrokHook(settings, 'SessionEnd', 'session-hook', null, undefined, 3),
+  };
+  return JSON.stringify(settings, null, 2) + '\n';
+}
+
+function managedGrokHooksFile(filePath) {
+  if (!exists(filePath)) return false;
+  try {
+    const stat = fs.lstatSync(filePath);
+    if (stat.isSymbolicLink() || !stat.isFile()) return true;
+    if (stat.size > 2 * 1024 * 1024) return true;
+    return /@getmarrow\/mcp@[^\s"']+[\s\S]{0,4096}marrow-mcp[\s\S]{0,512}grok-(?:context-hook|pre-action-hook|hook|session-hook)/
+      .test(fs.readFileSync(filePath, 'utf8'));
+  } catch {
+    return true;
+  }
+}
+
 function upsertGeminiHooks(settingsPath) {
   const settings = parseJsonObject(settingsPath);
   const hooks = settings.hooks && typeof settings.hooks === 'object' && !Array.isArray(settings.hooks)
@@ -2303,6 +2385,15 @@ function buildPlan(detection, options) {
         transform: (filePath) => retarget(upsertGeminiHooks(filePath)),
       });
     }
+    if (options.update && detection.grok && managedGrokHooksFile(detection.paths.grokHooks)) {
+      writes.push({
+        type: 'json-transform',
+        path: detection.paths.grokHooks,
+        root: path.resolve(detection.paths.grokHooks, '..', '..', '..'),
+        label: 'Grok native hooks',
+        transform: (filePath) => retarget(upsertGrokHooks(filePath)),
+      });
+    }
     writes.push({
       type: 'json-transform',
       path: detection.paths.mcpJson,
@@ -2405,7 +2496,9 @@ function atomicWriteManagedFile(root, targetPath, contents) {
 function applyPlan(plan, options) {
   if (!Array.isArray(plan?.writes) || plan.writes.length === 0) return [];
   const root = path.resolve(plan.root || path.dirname(plan.writes[0].path));
-  for (const write of plan.writes) assertContainedManagedTarget(root, write.path);
+  for (const write of plan.writes) {
+    assertContainedManagedTarget(path.resolve(write.root || root), write.path);
+  }
   const prepared = plan.writes.map((write) => {
     const fileExists = exists(write.path);
     const before = safeRead(write.path);
@@ -2481,10 +2574,10 @@ function applyPlan(plan, options) {
       ...(hookConflict ? { exact_fix: write.conflict_fix } : {}),
     });
     if (contentChanged && writeApplied) {
-      atomicWriteManagedFile(root, write.path, after);
+      atomicWriteManagedFile(path.resolve(write.root || root), write.path, after);
     }
     if (modeChanged && writeApplied) {
-      assertContainedManagedTarget(root, write.path);
+      assertContainedManagedTarget(path.resolve(write.root || root), write.path);
       fs.chmodSync(write.path, write.mode);
     }
   }
@@ -2997,12 +3090,12 @@ function printReport(report) {
     }
   }
 
-  if (report.harnessReload) {
+  if (report.harnessReload && report.writeMode !== 'doctor') {
     process.stdout.write('\nHarness reload:\n');
     process.stdout.write(`- required: ${report.harnessReload.required ? 'yes' : 'no'}\n`);
     process.stdout.write(`- live in this process: ${report.harnessReload.live_in_this_process ? 'yes' : 'no'}\n`);
-    if (report.harnessReload.instruction) process.stdout.write(`- restart: ${report.harnessReload.instruction}\n`);
-    if (report.harnessReload.prove_command) process.stdout.write(`- prove after restart: ${report.harnessReload.prove_command}\n`);
+    if (report.harnessReload.required && report.harnessReload.instruction) process.stdout.write(`- restart: ${report.harnessReload.instruction}\n`);
+    if (report.harnessReload.required && report.harnessReload.prove_command) process.stdout.write(`- prove after restart: ${report.harnessReload.prove_command}\n`);
   }
   if (report.firstCapture) {
     process.stdout.write('\nFirst capture:\n');
@@ -3049,7 +3142,9 @@ function printReport(report) {
   if (report.controller?.exact_fix) process.stdout.write(`- exact fix: ${report.controller.exact_fix}\n`);
 
   if (report.writeMode === 'doctor') {
-    const liveHere = !report.harnessReload?.required;
+    const liveHere = !report.harnessReload?.required
+      && report.doctor.mcpProcesses?.healthy !== false
+      && report.doctor.mcpConfigurations?.healthy !== false;
     const activeLabel = report.doctor.active && liveHere
       ? 'yes'
       : report.doctor.active
@@ -3066,8 +3161,6 @@ function printReport(report) {
       process.stdout.write(`- stale/mixed/version-unknown MCP clients: ${processes.healthy ? 'no' : 'yes'}\n`);
       if (processes.ahead_unverified_versions.length) process.stdout.write(`- unverified-ahead MCP clients: ${processes.ahead_unverified_versions.join(', ')}\n`);
       if (processes.automatic_repair_suppressed) process.stdout.write('- automatic MCP process repair: suppressed pending official registry verification\n');
-      if (processes.restart_instruction) process.stdout.write(`- restart required: ${processes.restart_instruction}\n`);
-      if (processes.verification_command) process.stdout.write(`- verify repair: ${processes.verification_command}\n`);
     }
     if (report.doctor.mcpConfigurations) {
       const configurations = report.doctor.mcpConfigurations;
@@ -3077,6 +3170,10 @@ function printReport(report) {
       if (configurations.automatic_repair_suppressed) process.stdout.write('- automatic MCP configuration repair: suppressed pending official registry verification\n');
     }
     if (report.doctor.recommendedFix) process.stdout.write(`- recommended fix: ${report.doctor.recommendedFix}\n`);
+    if (report.doctor.mcp_update_required) {
+      process.stdout.write(`- restart once after update: ${report.doctor.restart_instruction}\n`);
+      process.stdout.write(`- verify after restart: ${report.doctor.verification_command}\n`);
+    }
     process.stdout.write(`- live health: ${report.doctor.healthCommand}\n`);
   }
 
@@ -3176,6 +3273,8 @@ async function install(options) {
   const registryVerificationAction = automaticMcpRepairSuppressed
     ? mcpRegistryVerificationAction(aheadUnverifiedVersions)
     : null;
+  const mcpUpdateRequired = !automaticMcpRepairSuppressed
+    && (!mcpConfigurations.healthy || (!options.update && !mcpProcesses.healthy));
   if (automaticMcpRepairSuppressed) {
     profile = {
       ...profile,
@@ -3208,7 +3307,40 @@ async function install(options) {
   if (options.activate && !selfTest.activation_verified) {
     throw new Error('Marrow activation failed: server confirmation was not returned');
   }
-  const harnessReload = harnessReloadPlan(detection, changes);
+  const plannedHarnessReload = harnessReloadPlan(detection, options.doctor ? [] : changes);
+  const updateNeedsRestart = Boolean(options.update
+    && !automaticMcpRepairSuppressed
+    && (plannedHarnessReload.required || (mcpConfigurations.healthy && !mcpProcesses.healthy)));
+  const harnessReload = options.doctor && mcpUpdateRequired
+    ? {
+      ...plannedHarnessReload,
+      required: true,
+      live_in_this_process: false,
+      instruction: INSTALLER_RESTART_INSTRUCTION,
+      prove_command: INSTALLER_DOCTOR_COMMAND,
+    }
+    : updateNeedsRestart
+    ? {
+      ...plannedHarnessReload,
+      required: true,
+      live_in_this_process: false,
+      instruction: INSTALLER_RESTART_INSTRUCTION,
+      prove_command: INSTALLER_DOCTOR_COMMAND,
+    }
+    : plannedHarnessReload;
+  const updateAwaitingRestart = Boolean(options.update
+    && updateNeedsRestart
+    && mcpConfigurations.healthy
+    && !mcpProcesses.healthy
+    && !automaticMcpRepairSuppressed);
+  const reportedMcpProcesses = updateAwaitingRestart
+    ? {
+      ...mcpProcesses,
+      update_completed: true,
+      awaiting_restart: true,
+      exact_fix: null,
+    }
+    : mcpProcesses;
   if (harnessReload.required && selfTest.mcp_tool_profile) {
     selfTest.mcp_tool_profile = {
       ...selfTest.mcp_tool_profile,
@@ -3268,6 +3400,8 @@ async function install(options) {
       automaticMcpRepairSuppressed,
       message: automaticMcpRepairSuppressed
         ? registryVerificationAction
+        : options.update && harnessReload.required
+        ? 'Managed Marrow configuration is synchronized. Running MCP processes are unchanged; complete the Harness reload steps below before treating the update as live.'
         : selfTestPassed
         ? selfTest.health === 'healthy'
           ? 'I fixed Marrow passive config, one-call runtime is active, and self-test passed.'
@@ -3277,7 +3411,6 @@ async function install(options) {
         : `Config repair ran, but self-test failed: ${selfTest.error || 'unknown error'}.`,
     }
     : null;
-
   return {
     root: detection.root,
     adapterProvenance: adapterProvenanceForMcpTarget(mcpTarget),
@@ -3314,12 +3447,18 @@ async function install(options) {
       missingEnv: options.apiKey ? [] : ['MARROW_API_KEY'],
       envHints,
       missingHooks: changes.filter((change) => change.changed).map((change) => change.label),
-      mcpProcesses,
+      mcpProcesses: reportedMcpProcesses,
       mcpConfigurations,
       ahead_unverified_versions: aheadUnverifiedVersions,
       automatic_mcp_repair_suppressed: automaticMcpRepairSuppressed,
       registry_verification_action: registryVerificationAction,
-      recommendedFix: registryVerificationAction || mcpProcesses.exact_fix || mcpConfigurations.exact_fix || configDiagnostics.npm_token.recommended_fix || (!options.apiKey
+      mcp_update_required: mcpUpdateRequired,
+      restart_required: mcpUpdateRequired || updateAwaitingRestart,
+      restart_instruction: mcpUpdateRequired || updateAwaitingRestart ? INSTALLER_RESTART_INSTRUCTION : null,
+      verification_command: mcpUpdateRequired || updateAwaitingRestart ? INSTALLER_DOCTOR_COMMAND : null,
+      recommendedFix: registryVerificationAction
+        || (updateAwaitingRestart ? INSTALLER_RESTART_INSTRUCTION : null)
+        || mcpProcesses.exact_fix || mcpConfigurations.exact_fix || configDiagnostics.npm_token.recommended_fix || (!options.apiKey
         ? envHints.length
           ? `MARROW_API_KEY was found in a likely env file at ${envHints[0]}. Load that key from trusted secret storage, export only MARROW_API_KEY, then run npx @getmarrow/install --repair.`
           : 'Set MARROW_API_KEY, then run npx @getmarrow/install --repair.'
@@ -3339,13 +3478,13 @@ async function install(options) {
         : []),
       ...(mcpProcesses.ahead_unverified
         ? ['Registry-unverified ahead Marrow MCP clients are active. Automatic repair is suppressed; run the exact registry verification action before owner-directed replacement.']
-        : !mcpProcesses.healthy
-        ? ['Stale, mixed, or version-unknown Marrow MCP clients are active. Run the exact repair command, then restart every owning harness.']
+        : !mcpProcesses.healthy && !options.update && !options.doctor
+        ? [`Stale, mixed, or version-unknown Marrow MCP clients are active. Run ${INSTALLER_UPDATE_COMMAND}; the installer will report the one required restart and later doctor verification.`]
         : []),
       ...(mcpConfigurations.ahead_unverified || changes.some((change) => change.automatic_repair_suppressed)
         ? ['Registry-unverified ahead Marrow MCP configuration was preserved. It was not copied into other managed targets, and automatic repair is suppressed for that surface.']
-        : !mcpConfigurations.healthy
-        ? ['Stale, mixed, or version-unknown Marrow MCP versions remain in owner configuration. Repair each owning workspace and restart its harness.']
+        : !mcpConfigurations.healthy && !options.update && !options.doctor
+        ? [`Stale, mixed, or version-unknown Marrow MCP versions remain in the detected workspace. Run ${INSTALLER_UPDATE_COMMAND} once to synchronize its managed surfaces.`]
         : []),
     ],
   };

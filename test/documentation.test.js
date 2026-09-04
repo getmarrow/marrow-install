@@ -53,6 +53,14 @@ test('npm entry point matches the product positioning contract', () => {
   assert.match(readme, /MARROW_TOOL_PROFILE=full/);
   assert.match(readme, /Tool visibility is not authorization/);
   assert.match(readme, /does not invoke paid write tools/);
+  const keepingCurrent = readme.slice(
+    readme.indexOf('## Keeping Marrow Current'),
+    readme.indexOf('## Automatic Controller'),
+  );
+  assert.match(keepingCurrent, /npx -y @getmarrow\/install@latest update/);
+  assert.match(keepingCurrent, /restart the detected owning harnesses once/i);
+  assert.match(keepingCurrent, /npx -y @getmarrow\/install@latest doctor --self-test/);
+  assert.match(keepingCurrent, /Do not run separate `marrow-mcp setup` and restart cycles/);
   assert.doesNotMatch(readme, /protected proof enforced/);
 });
 
