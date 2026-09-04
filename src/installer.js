@@ -82,10 +82,19 @@ function mcpVersionsInText(value) {
     .map((match) => match[1]);
 }
 
+function marrowManagedBlockInText(value) {
+  const content = String(value || '');
+  const start = content.indexOf(MARROW_BLOCK_START);
+  if (start < 0) return '';
+  const end = content.indexOf(MARROW_BLOCK_END, start + MARROW_BLOCK_START.length);
+  if (end < 0) return '';
+  return content.slice(start, end + MARROW_BLOCK_END.length);
+}
+
 function unverifiedAheadMcpVersions(versions, targetVersion = MCP_ADAPTER_VERSION) {
-  if (!compatibleMcpTargetVersion(targetVersion)) return [];
+  if (!parsedStableMcpVersion(targetVersion)) return [];
   return [...new Set((Array.isArray(versions) ? versions : [])
-    .filter((version) => compatibleMcpTargetVersion(version)
+    .filter((version) => parsedStableMcpVersion(version)
       && compareMcpVersions(version, targetVersion) > 0))].sort((left, right) => compareMcpVersions(left, right));
 }
 
@@ -612,9 +621,11 @@ function inspectMcpConfigurations(detection, options = {}) {
       if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 2 * 1024 * 1024) continue;
       filesChecked += 1;
       const raw = fs.readFileSync(filePath, 'utf8');
-      const specs = [...raw.matchAll(/@getmarrow\/mcp@(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/g)]
-        .map((match) => match[1]);
-      if (/@getmarrow\/mcp(?:@|["'\s])/.test(raw)) {
+      const inspected = path.basename(filePath) === 'AGENTS.md'
+        ? marrowManagedBlockInText(raw)
+        : raw;
+      const specs = mcpVersionsInText(inspected);
+      if (/@getmarrow\/mcp(?:@|["'\s])/.test(inspected)) {
         configurationsFound += 1;
         if (specs.length === 0) unknownVersionConfigurations += 1;
       }
@@ -2502,8 +2513,11 @@ function applyPlan(plan, options) {
   const prepared = plan.writes.map((write) => {
     const fileExists = exists(write.path);
     const before = safeRead(write.path);
+    const inspectedBefore = write.type === 'md-block'
+      ? marrowManagedBlockInText(before)
+      : before;
     const aheadUnverifiedVersions = unverifiedAheadMcpVersions(
-      mcpVersionsInText(before),
+      mcpVersionsInText(inspectedBefore),
       plan.mcp_target_version,
     );
     const automaticRepairSuppressed = aheadUnverifiedVersions.length > 0;
