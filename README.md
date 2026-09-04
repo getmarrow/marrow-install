@@ -75,17 +75,19 @@ Tool visibility is not authorization. Every visible call still reaches Marrow's 
 Marrow's hosted API, website, and dashboard update automatically; local SDK dependencies, generated runtime files, MCP hooks/configuration, and pinned package versions do not silently rewrite themselves. Keeping them current delivers new client-side features, compatibility improvements, and any published security fixes. Supported clients report their package version during authenticated status/runtime activity, and Marrow returns a `client_update` notice with the exact action when the version is behind or unknown.
 
 ```bash
-npx -y @getmarrow/install@latest activate
-npx -y @getmarrow/install@latest doctor
+# When doctor reports stale or mixed MCP configuration
+npx -y @getmarrow/install@latest update
+
+# Restart the detected owning harnesses once, then verify
+npx -y @getmarrow/install@latest doctor --self-test
 
 # Measured API read health and local backlog
 npx -y --package=@getmarrow/mcp@latest marrow-mcp ping
-
-# Use only when doctor reports drift
-npx -y @getmarrow/install@latest --repair
 ```
 
-`activate` reconciles Marrow-managed entries while retaining unrelated user hooks and configuration. After that explicit activation, the local controller can restore drifted Marrow-managed hooks and configuration. Package upgrades, owner policy, credentials, and unrelated local files remain explicit and subject to the operator's normal change policy.
+`update` resolves official npm metadata once, selects one exact verified MCP target, and synchronizes every Marrow-managed surface in the detected owning workspace while retaining unrelated user hooks and configuration. Restart the detected owning harnesses once after it completes; running processes do not change before that restart. Run the doctor verification once after restart. Do not run separate `marrow-mcp setup` and restart cycles for the same detected workspace.
+
+`activate` remains available for initial activation. After explicit activation, the local controller can restore drifted Marrow-managed hooks and configuration. Package upgrades, owner policy, credentials, explicitly disabled hooks, and unrelated local files remain explicit and subject to the operator's normal change policy.
 
 ## Automatic Controller
 
@@ -99,7 +101,11 @@ npx @getmarrow/install controller stop
 
 Persistent controller lifecycle is currently Linux-only. On macOS or Windows, activation still writes supported configuration and verifies one server-side install self-test without certifying that hooks continuously ran; run `npx @getmarrow/install sidecar` under an owner-managed service and pass `--no-controller`. The controller does not silently upgrade packages, change governance policy, rotate credentials, or modify unrelated project configuration.
 
-## What's New in v0.1.55
+## What's New in v0.1.56
+
+v0.1.56 pins the officially verified MCP `3.9.80` release from source `ee1eda3f201965a6530256accbdf175660dd8ad6` with registry integrity `sha512-uou3X18pESV39EMmddDrYN7yd6MrZzosrnQ1eRtvK5j3yuBLAlupj5kQVrrKEWAL6xwuLebXq2isivK2O/2WrA==`; SDK remains `3.7.62`. Doctor now directs stale, mixed, or version-unknown MCP installations through one `npx -y @getmarrow/install@latest update`, followed by one owning-harness restart and one `doctor --self-test` verification. The update resolves one official target and applies it consistently across detected Marrow-managed instructions, MCP launch configuration, and supported native hooks without claiming that already-running processes changed.
+
+## Previous: v0.1.55
 
 v0.1.55 pins sealed MCP candidate `3.9.79` from source `11f00049043d0aba90704ecbf69f32d2278a4573` for ordinary setup, generated launch configuration, and native hooks. Doctor, update, and repair retain exact-version resolution and never propagate a newer local version unless official registry metadata verifies it; offline operation preserves unverified-ahead owner surfaces and uses the sealed candidate for new managed targets.
 
