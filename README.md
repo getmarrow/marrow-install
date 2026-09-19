@@ -101,7 +101,11 @@ npx @getmarrow/install controller stop
 
 Persistent controller lifecycle is currently Linux-only. On macOS or Windows, activation still writes supported configuration and verifies one server-side install self-test without certifying that hooks continuously ran; run `npx @getmarrow/install sidecar` under an owner-managed service and pass `--no-controller`. The controller does not silently upgrade packages, change governance policy, rotate credentials, or modify unrelated project configuration.
 
-## What's New in v0.1.56
+## What's New in v0.1.57
+
+v0.1.57 pins the npm-verified MCP `3.9.88` and SDK `3.7.63` packages. Doctor now recognizes an installed and lockfile-verified SDK `3.7.63` instead of suggesting `3.7.62`. If a workspace has a newer stable SDK version, doctor preserves it and asks for official registry verification before replacement. The generated MCP setup, hooks, and update instructions target `3.9.88`; restart the owning harness and run `npx @getmarrow/install@latest doctor --self-test` after activation.
+
+## Previous: v0.1.56
 
 v0.1.56 pins the officially verified MCP `3.9.80` release from source `ee1eda3f201965a6530256accbdf175660dd8ad6` with registry integrity `sha512-uou3X18pESV39EMmddDrYN7yd6MrZzosrnQ1eRtvK5j3yuBLAlupj5kQVrrKEWAL6xwuLebXq2isivK2O/2WrA==`; SDK remains `3.7.62`. Doctor now directs stale, mixed, or version-unknown MCP installations through one `npx -y @getmarrow/install@latest update`, followed by one owning-harness restart and one `doctor --self-test` verification. The update resolves one official target and applies it consistently across detected Marrow-managed instructions, MCP launch configuration, and supported native hooks without claiming that already-running processes changed.
 

@@ -10,11 +10,11 @@ const { evidence: localControlEvidence } = require('./control-state');
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MARROW_BLOCK_START = '<!-- marrow:passive-start -->';
 const MARROW_BLOCK_END = '<!-- marrow:passive-end -->';
-const MCP_ADAPTER_VERSION = '3.9.80';
-const MCP_ADAPTER_SOURCE_SHA = 'ee1eda3f201965a6530256accbdf175660dd8ad6';
-const MCP_ADAPTER_INTEGRITY = 'sha512-uou3X18pESV39EMmddDrYN7yd6MrZzosrnQ1eRtvK5j3yuBLAlupj5kQVrrKEWAL6xwuLebXq2isivK2O/2WrA==';
-const SDK_ADAPTER_VERSION = '3.7.62';
-const SDK_ADAPTER_INTEGRITY = 'sha512-n1i6Be09TpAQ9BPNRKY7aCvA2iSUPpJfw8djw2MELwpNbBCtKiZ29Jji77BK/6EFLUpSIcTW/Gmdf/ccf0JRYQ==';
+const MCP_ADAPTER_VERSION = '3.9.88';
+const MCP_ADAPTER_SOURCE_SHA = '2385f0554dd9455e6a7d2c0396058710ab56611a';
+const MCP_ADAPTER_INTEGRITY = 'sha512-1WQtVU8oT1XLGFa9aINm9Ypn/xhNh/mPLpK2bziPIxRURsAGrs8TAfb23JL7HXDcmpXFgMLd8R6gmltVbBbHIg==';
+const SDK_ADAPTER_VERSION = '3.7.63';
+const SDK_ADAPTER_INTEGRITY = 'sha512-5BiV1P0J1NMVdgjqxqULfM+zGrTjHBuWm1amKZWba4yW6C3t10VlhIlj/A+4YKbKqvyZe8gXgUwW+VrYDbVQrQ==';
 const SDK_ADAPTER_TARBALL = `https://registry.npmjs.org/@getmarrow/sdk/-/sdk-${SDK_ADAPTER_VERSION}.tgz`;
 const MCP_PACKAGE_SPEC = `@getmarrow/mcp@${MCP_ADAPTER_VERSION}`;
 const ADAPTER_PROVENANCE = Object.freeze({
@@ -23,7 +23,7 @@ const ADAPTER_PROVENANCE = Object.freeze({
     version: MCP_ADAPTER_VERSION,
     source_sha: MCP_ADAPTER_SOURCE_SHA,
     integrity: MCP_ADAPTER_INTEGRITY,
-    integrity_state: 'sealed_local_candidate',
+    integrity_state: 'verified_npm_registry_metadata',
   }),
   sdk: Object.freeze({
     package: '@getmarrow/sdk',
@@ -2031,7 +2031,9 @@ function activationProfile(detection, plan, changes, client) {
       ? 'Restart Grok, inspect the installed global hooks with /hooks, and confirm they are enabled. Configuration remains client-self-reported and does not verify observed coverage.'
       : null
     : capabilityLevel === 'sdk_passive_runtime' && !sdkDependency.present
-    ? `${sdkDependency.install_command} && npx @getmarrow/install --repair`
+    ? sdkDependency.ahead_unverified
+      ? sdkDependency.warning
+      : `${sdkDependency.install_command} && npx @getmarrow/install --repair`
     : capabilityLevel === 'governed_wrapper'
     ? `npx @getmarrow/install run --agent <agent-id> -- ${client}`
     : client === 'cline' && clineConflicts.length > 0
@@ -2150,10 +2152,12 @@ function inspectSdkDependency(detection) {
     || objectTargetsSdk(packageJson.resolutions)
     || objectTargetsSdk(packageJson.pnpm?.overrides);
   let lockVerified = false;
+  let lockedVersion = null;
   try {
     const lock = JSON.parse(safeRead(path.join(detection.root, 'package-lock.json')) || '{}');
     const rootLock = lock?.packages?.[''];
     const lockedSdk = lock?.packages?.['node_modules/@getmarrow/sdk'];
+    lockedVersion = typeof lockedSdk?.version === 'string' ? lockedSdk.version : null;
     const lockedDeclaration = [
       rootLock?.dependencies,
       rootLock?.devDependencies,
@@ -2186,6 +2190,11 @@ function inspectSdkDependency(detection) {
   const declarationTrusted = typeof declaredSpec === 'string'
     && declaredSpec.trim().length > 0
     && /^[v0-9xX*<>=~^|.\s-]+$/.test(declaredSpec.trim());
+  const declaredStableVersion = typeof declaredSpec === 'string'
+    ? declaredSpec.trim().replace(/^[~^]/, '') : null;
+  const aheadVersions = [installedVersion, lockedVersion, declaredStableVersion]
+    .filter((version) => compareMcpVersions(version, SDK_ADAPTER_VERSION) > 0);
+  const aheadUnverified = aheadVersions.length > 0;
   const present = declarationTrusted
     && !overrideDetected
     && lockVerified
@@ -2201,8 +2210,12 @@ function inspectSdkDependency(detection) {
     lock_verified: lockVerified,
     installed_name: installedName,
     installed_version: installedVersion,
+    ahead_unverified: aheadUnverified,
     expected_version: SDK_ADAPTER_VERSION,
-    install_command: present ? null : `npm install @getmarrow/sdk@${SDK_ADAPTER_VERSION}`,
+    install_command: present || aheadUnverified ? null : `npm install @getmarrow/sdk@${SDK_ADAPTER_VERSION}`,
+    ...(aheadUnverified ? {
+      warning: 'A newer SDK version is configured or installed. Preserve it and verify its exact version and integrity against the official npm registry before changing it.',
+    } : {}),
   };
 }
 
@@ -3145,7 +3158,7 @@ function printReport(report) {
 
   if (report.sdkDependency?.required) {
     process.stdout.write('\nSDK dependency:\n');
-    process.stdout.write(`- @getmarrow/sdk: ${report.sdkDependency.present ? 'present' : 'missing'}\n`);
+    process.stdout.write(`- @getmarrow/sdk: ${report.sdkDependency.present ? 'present' : report.sdkDependency.ahead_unverified ? 'newer version requires verification' : 'missing'}\n`);
     if (report.sdkDependency.install_command) process.stdout.write(`- exact fix: ${report.sdkDependency.install_command}\n`);
     if (report.sdkDependency.warning) process.stdout.write(`- warning: ${report.sdkDependency.warning}\n`);
   }
