@@ -1137,7 +1137,8 @@ test('custom SDK activation rejects npm aliases even when version and installed 
     assert.equal(dependency.declaration_trusted, false);
     assert.equal(dependency.present, false);
     assert.equal(profile.complete, false);
-    assert.match(profile.exact_fix, /npm install @getmarrow\/sdk/);
+    assert.match(profile.exact_fix, /Preserve it.*official npm registry/i);
+    assert.doesNotMatch(profile.exact_fix, /npm install @getmarrow\/sdk|null &&/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
