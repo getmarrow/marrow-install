@@ -2038,9 +2038,9 @@ function activationProfile(detection, plan, changes, client) {
       ? 'Restart Grok, inspect the installed global hooks with /hooks, and confirm they are enabled. Configuration remains client-self-reported and does not verify observed coverage.'
       : null
     : capabilityLevel === 'sdk_passive_runtime' && !sdkDependency.present
-    ? sdkDependency.ahead_unverified
-      ? sdkDependency.warning
-      : `${sdkDependency.install_command} && npx @getmarrow/install --repair`
+    ? sdkDependency.install_command
+      ? `${sdkDependency.install_command} && npx @getmarrow/install --repair`
+      : sdkDependency.warning
     : capabilityLevel === 'governed_wrapper'
     ? `npx @getmarrow/install run --agent <agent-id> -- ${client}`
     : client === 'cline' && clineConflicts.length > 0
@@ -2196,6 +2196,7 @@ function inspectSdkDependency(detection) {
   }
   const declaredLowerBound = declaredStableSdkLowerBound(declaredSpec);
   const declarationTrusted = declaredLowerBound !== null;
+  const unsupportedDeclaration = declaredSpec !== null && !declarationTrusted;
   const declaredComparison = declaredLowerBound
     ? compareMcpVersions(declaredLowerBound.version, SDK_ADAPTER_VERSION) : null;
   const declaredAhead = declaredComparison !== null
@@ -2220,9 +2221,12 @@ function inspectSdkDependency(detection) {
     installed_version: installedVersion,
     ahead_unverified: aheadUnverified,
     expected_version: SDK_ADAPTER_VERSION,
-    install_command: present || aheadUnverified ? null : `npm install @getmarrow/sdk@${SDK_ADAPTER_VERSION}`,
+    install_command: present || aheadUnverified || unsupportedDeclaration
+      ? null : `npm install @getmarrow/sdk@${SDK_ADAPTER_VERSION}`,
     ...(aheadUnverified ? {
       warning: 'A newer SDK version is configured or installed. Preserve it and verify its exact version and integrity against the official npm registry before changing it.',
+    } : unsupportedDeclaration ? {
+      warning: 'The configured SDK version range is unsupported or ambiguous. Preserve it and verify the intended version against the official npm registry before changing it.',
     } : {}),
   };
 }

@@ -1024,6 +1024,19 @@ test('SDK doctor does not certify ambiguous or unsupported declarations as insta
   }
 });
 
+test('SDK doctor does not recommend a downgrade for an unsupported newer range without a lockfile', () => {
+  const dir = tempDir();
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
+    dependencies: { '@getmarrow/sdk': '>=3.8.0 <4.0.0' },
+  }));
+
+  const report = inspectSdkDependency(detectEnvironment(dir, {}));
+  assert.equal(report.present, false);
+  assert.equal(report.declaration_trusted, false);
+  assert.equal(report.install_command, null);
+  assert.match(report.warning, /Preserve it.*official npm registry/i);
+});
+
 test('activate is the one-command write and server verification path', () => {
   const parsed = parseArgs(['activate']);
   assert.equal(parsed.activate, true);
