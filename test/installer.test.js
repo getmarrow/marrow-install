@@ -998,6 +998,32 @@ test('SDK doctor preserves an installed stable version ahead of its sealed targe
   assert.match(report.warning, /Preserve it.*official npm registry/i);
 });
 
+test('SDK doctor preserves newer stable declarations without an installed package or lockfile', () => {
+  const dir = tempDir();
+  for (const spec of ['3.8.0', '^3.8.0', '~3.8.0', '>=3.8.0', '>3.7.63', 'v3.8.0']) {
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ dependencies: { '@getmarrow/sdk': spec } }));
+    const report = inspectSdkDependency(detectEnvironment(dir, {}));
+    assert.equal(report.present, false, spec);
+    assert.equal(report.ahead_unverified, true, spec);
+    assert.equal(report.install_command, null, spec);
+    assert.match(report.warning, /Preserve it.*official npm registry/i, spec);
+  }
+});
+
+test('SDK doctor does not certify ambiguous or unsupported declarations as installed', () => {
+  const dir = tempDir();
+  const moduleDir = path.join(dir, 'node_modules', '@getmarrow', 'sdk');
+  fs.mkdirSync(moduleDir, { recursive: true });
+  fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({ name: '@getmarrow/sdk', version: '3.7.63' }));
+  for (const spec of ['>=3.7.63 <4.0.0', '3.7.x', '3.7.63 || 3.8.0']) {
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ dependencies: { '@getmarrow/sdk': spec } }));
+    writeSdkLock(dir, spec);
+    const report = inspectSdkDependency(detectEnvironment(dir, {}));
+    assert.equal(report.present, false, spec);
+    assert.equal(report.declaration_trusted, false, spec);
+  }
+});
+
 test('activate is the one-command write and server verification path', () => {
   const parsed = parseArgs(['activate']);
   assert.equal(parsed.activate, true);

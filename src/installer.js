@@ -68,6 +68,13 @@ function compareMcpVersions(left, right) {
   return 0;
 }
 
+function declaredStableSdkLowerBound(spec) {
+  if (typeof spec !== 'string') return null;
+  const match = spec.trim().match(/^(v|\^|~|>=|>)?(\d{1,6}\.\d{1,6}\.\d{1,9})$/);
+  if (!match || !parsedStableMcpVersion(match[2])) return null;
+  return { version: match[2], exclusive: match[1] === '>' };
+}
+
 function compatibleMcpTargetVersion(value) {
   const candidate = parsedStableMcpVersion(value);
   const sealed = parsedStableMcpVersion(MCP_ADAPTER_VERSION);
@@ -2187,14 +2194,15 @@ function inspectSdkDependency(detection) {
     installedVersion = null;
     installedName = null;
   }
-  const declarationTrusted = typeof declaredSpec === 'string'
-    && declaredSpec.trim().length > 0
-    && /^[v0-9xX*<>=~^|.\s-]+$/.test(declaredSpec.trim());
-  const declaredStableVersion = typeof declaredSpec === 'string'
-    ? declaredSpec.trim().replace(/^[~^]/, '') : null;
-  const aheadVersions = [installedVersion, lockedVersion, declaredStableVersion]
+  const declaredLowerBound = declaredStableSdkLowerBound(declaredSpec);
+  const declarationTrusted = declaredLowerBound !== null;
+  const declaredComparison = declaredLowerBound
+    ? compareMcpVersions(declaredLowerBound.version, SDK_ADAPTER_VERSION) : null;
+  const declaredAhead = declaredComparison !== null
+    && (declaredComparison > 0 || (declaredLowerBound.exclusive && declaredComparison === 0));
+  const aheadVersions = [installedVersion, lockedVersion]
     .filter((version) => compareMcpVersions(version, SDK_ADAPTER_VERSION) > 0);
-  const aheadUnverified = aheadVersions.length > 0;
+  const aheadUnverified = aheadVersions.length > 0 || declaredAhead;
   const present = declarationTrusted
     && !overrideDetected
     && lockVerified
