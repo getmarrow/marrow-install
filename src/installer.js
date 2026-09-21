@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
+const { spawnSync } = require('node:child_process');
 const { version: INSTALLER_ADAPTER_VERSION } = require('../package.json');
 const { controllerStatus, controllerSupportedPlatform, ensureGovernanceController } = require('./controller-manager');
 const { firstCapturePath, harnessReloadPlan } = require('./first-hour');
@@ -10,9 +11,9 @@ const { evidence: localControlEvidence } = require('./control-state');
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MARROW_BLOCK_START = '<!-- marrow:passive-start -->';
 const MARROW_BLOCK_END = '<!-- marrow:passive-end -->';
-const MCP_ADAPTER_VERSION = '3.9.88';
-const MCP_ADAPTER_SOURCE_SHA = '2385f0554dd9455e6a7d2c0396058710ab56611a';
-const MCP_ADAPTER_INTEGRITY = 'sha512-1WQtVU8oT1XLGFa9aINm9Ypn/xhNh/mPLpK2bziPIxRURsAGrs8TAfb23JL7HXDcmpXFgMLd8R6gmltVbBbHIg==';
+const MCP_ADAPTER_VERSION = '3.9.89';
+const MCP_ADAPTER_SOURCE_SHA = 'ff229e17419f65aeebd7fa7754dd61cbda61900d';
+const MCP_ADAPTER_INTEGRITY = 'sha512-KC/P4dStzOOfZKxSwigQE4TWCt1TBgYINQzlXrnA5jpYHRrT2Jo73vaV4FiucVPOT+xyU1uCci+bmJoC35aZ0g==';
 const SDK_ADAPTER_VERSION = '3.7.63';
 const SDK_ADAPTER_INTEGRITY = 'sha512-5BiV1P0J1NMVdgjqxqULfM+zGrTjHBuWm1amKZWba4yW6C3t10VlhIlj/A+4YKbKqvyZe8gXgUwW+VrYDbVQrQ==';
 const SDK_ADAPTER_TARBALL = `https://registry.npmjs.org/@getmarrow/sdk/-/sdk-${SDK_ADAPTER_VERSION}.tgz`;
@@ -278,10 +279,10 @@ const GROK_PRE_ACTION_GUARD_SOURCE = [
   'child.stdin.end(Buffer.concat(input));}catch{fail();}});',
 ].join('');
 const GROK_PRE_ACTION_HOOK_COMMAND = `node -e '${GROK_PRE_ACTION_GUARD_SOURCE}'`;
-const NATIVE_HOOK_MATCHER = 'Bash|Edit|Write|MultiEdit|mcp__(?!marrow_).*';
+const NATIVE_HOOK_MATCHER = 'Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|functions\\.(?!mcp__marrow__marrow_).*|mcp__(?!marrow__marrow_).*';
 const CODEX_NATIVE_HOOK_MATCHER = 'Bash|apply_patch|Edit|Write|MultiEdit|mcp__(?!marrow__marrow_).*|functions\\.(?!marrow_).*';
-const CURSOR_NATIVE_HOOK_MATCHER = 'Shell|Write|Delete|Task|MCP:(?!marrow(?:_.*|:marrow_.*)$).*';
-const GEMINI_NATIVE_HOOK_MATCHER = '^(?:run_shell_command|write_file|replace|edit_file|delete_file|mcp_(?!marrow_marrow_)[A-Za-z0-9_]{1,192})$';
+const CURSOR_NATIVE_HOOK_MATCHER = 'Shell|Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|MCP:(?!marrow(?:_.*|:marrow_.*)$).*';
+const GEMINI_NATIVE_HOOK_MATCHER = '^(?:run_shell_command|write_file|replace|edit_file|delete_file|read_file|read_many_files|glob|grep_search|list_directory|get_file_info|web_search|google_web_search|mcp_(?!marrow_marrow_)[A-Za-z0-9_]{1,192})$';
 const GROK_NATIVE_HOOK_MATCHER = 'run_terminal_command|search_replace|write|spawn_subagent|use_tool|workflow|image_gen|image_edit|image_to_video|reference_to_video';
 const CODEX_HOOK_TIMEOUT_SECONDS = 5;
 const CODEX_SESSION_TIMEOUT_SECONDS = 3;
@@ -710,6 +711,7 @@ function sourceClient() {
 function parseArgs(argv, env = process.env) {
   const options = {
     cwd: process.cwd(),
+    home: env.HOME || env.USERPROFILE || os.homedir(),
     yes: false,
     dryRun: false,
     doctor: false,
@@ -720,6 +722,7 @@ function parseArgs(argv, env = process.env) {
     agentId: env.MARROW_FLEET_AGENT_ID || env.MARROW_AGENT_ID || '',
     toolProfile: resolveToolProfile(env.MARROW_TOOL_PROFILE),
     selfTest: true,
+    loopGuardSelfTest: true,
     selfTestExplicitlyDisabled: false,
     json: false,
     activate: false,
@@ -873,6 +876,32 @@ function safeRead(filePath) {
   return exists(filePath) ? fs.readFileSync(filePath, 'utf8') : '';
 }
 
+function assertSafeGrokHookTarget(homePath, targetPath) {
+  const home = path.resolve(homePath);
+  const target = path.resolve(targetPath);
+  const expected = path.join(home, '.grok', 'hooks', 'marrow.json');
+  if (target !== expected) throw new Error('Refusing Grok hook write outside the direct owner hook path');
+  const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+  const checkDirectory = (directory) => {
+    if (!exists(directory)) return;
+    const stat = fs.lstatSync(directory);
+    if (!stat.isDirectory() || stat.isSymbolicLink()
+      || (uid !== null && stat.uid !== uid) || (stat.mode & 0o022) !== 0) {
+      throw new Error(`Refusing Grok hook write through unsafe owner path: ${directory}`);
+    }
+  };
+  checkDirectory(home);
+  checkDirectory(path.join(home, '.grok'));
+  checkDirectory(path.join(home, '.grok', 'hooks'));
+  if (exists(target)) {
+    const stat = fs.lstatSync(target);
+    if (!stat.isFile() || stat.isSymbolicLink()
+      || (uid !== null && stat.uid !== uid) || (stat.mode & 0o022) !== 0) {
+      throw new Error('Refusing Grok hook write to unsafe owner file');
+    }
+  }
+}
+
 function findUp(startDir, names, maxDepth = 8) {
   let dir = path.resolve(startDir);
   for (let depth = 0; depth <= maxDepth; depth += 1) {
@@ -923,6 +952,7 @@ function detectEnvironment(cwd = process.cwd(), env = process.env) {
 
   return {
     root,
+    home,
     paths,
     node: exists(paths.packageJson),
     python: exists(paths.pyproject) || exists(paths.requirements) || exists(paths.setupPy),
@@ -2061,6 +2091,9 @@ function activationProfile(detection, plan, changes, client) {
     passive_live: false,
     configuration_complete: complete,
     complete,
+    loop_guard_configured: capabilityLevel === 'native_hooks' && complete,
+    loop_guard_self_tested: false,
+    loop_guard_observed: false,
     exact_fix: exactFix,
     ...(client === 'cline' ? {
       hook_conflicts: clineConflicts,
@@ -2421,12 +2454,14 @@ function buildPlan(detection, options) {
         transform: (filePath) => retarget(upsertGeminiHooks(filePath)),
       });
     }
-    if (options.update && detection.grok && managedGrokHooksFile(detection.paths.grokHooks)) {
+    if (detection.grok) {
       writes.push({
-        type: 'json-transform',
+        type: 'managed-json-transform',
         path: detection.paths.grokHooks,
-        root: path.resolve(detection.paths.grokHooks, '..', '..', '..'),
+        root: detection.home,
         label: 'Grok native hooks',
+        isManaged: managedGrokHooksFile,
+        conflict_fix: 'Preserve or move the unmanaged owner Grok hook file after owner review, then rerun npx @getmarrow/install update.',
         transform: (filePath) => retarget(upsertGrokHooks(filePath)),
       });
     }
@@ -2533,6 +2568,9 @@ function applyPlan(plan, options) {
   if (!Array.isArray(plan?.writes) || plan.writes.length === 0) return [];
   const root = path.resolve(plan.root || path.dirname(plan.writes[0].path));
   for (const write of plan.writes) {
+    if (write.label === 'Grok native hooks') {
+      assertSafeGrokHookTarget(path.resolve(write.root), write.path);
+    }
     assertContainedManagedTarget(path.resolve(write.root || root), write.path);
   }
   const prepared = plan.writes.map((write) => {
@@ -2560,6 +2598,13 @@ function applyPlan(plan, options) {
       after = upsertBlock(before, write.block);
     } else if (write.type === 'json-transform') {
       after = write.transform(write.path);
+    } else if (write.type === 'managed-json-transform') {
+      if (fileExists && !write.isManaged(write.path)) {
+        after = before;
+        hookConflict = true;
+      } else {
+        after = write.transform(write.path);
+      }
     } else if (write.type === 'owned-executable') {
       if (fileExists && before !== write.content) {
         after = before;
@@ -2637,6 +2682,63 @@ async function requestJson(url, options) {
     throw new Error(String(message));
   }
   return json.data || json;
+}
+
+function runLoopGuardSelfTest(options = {}) {
+  const target = executableMcpTarget(options);
+  const isolatedHome = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-install-loop-guard-'));
+  const command = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+  const args = ['-y', `--package=@getmarrow/mcp@${target.version}`, 'marrow-mcp', 'loop-guard-self-test'];
+  try {
+    const invocation = {
+      command,
+      args,
+      cwd: isolatedHome,
+      env: {
+        ...process.env,
+        HOME: isolatedHome,
+        USERPROFILE: isolatedHome,
+        MARROW_API_KEY: '',
+        MARROW_KEY: '',
+      },
+      encoding: 'utf8',
+      timeout: 15_000,
+      maxBuffer: 16 * 1024,
+    };
+    const result = typeof options.loopGuardSelfTestRunner === 'function'
+      ? options.loopGuardSelfTestRunner(invocation)
+      : spawnSync(command, args, invocation);
+    if (!result || result.error || result.status !== 0) {
+      const reason = result?.error?.message || String(result?.stderr || '').trim() || `exit ${result?.status ?? 'unknown'}`;
+      throw new Error(`MCP ${target.version} isolated loop-guard self-test failed: ${reason.slice(0, 300)}`);
+    }
+    let proof;
+    try {
+      proof = JSON.parse(String(result.stdout || ''));
+    } catch {
+      throw new Error(`MCP ${target.version} isolated loop-guard self-test returned invalid JSON`);
+    }
+    const valid = proof && !Array.isArray(proof)
+      && proof.pass === true
+      && proof.isolated === true
+      && proof.live_hook_observed === false
+      && proof.repeat_denied === true
+      && proof.mutation_reset === true
+      && proof.owner_disabled_bypass === true;
+    if (!valid) throw new Error(`MCP ${target.version} isolated loop-guard self-test returned incomplete proof`);
+    return {
+      attempted: true,
+      passed: true,
+      isolated: true,
+      mcp_version: target.version,
+      repeat_denied: true,
+      mutation_reset: true,
+      owner_disabled_bypass: true,
+      live_hook_observed: false,
+    };
+  } finally {
+    fs.rmSync(isolatedHome, { recursive: true, force: true });
+  }
 }
 
 function isCanonicalTimestamp(value) {
@@ -3042,11 +3144,21 @@ function printReport(report) {
   for (const change of report.changes) {
     const marker = change.automatic_repair_suppressed
       ? 'preserved unverified-ahead surface; repair suppressed'
+      : change.hook_conflict ? 'preserved unmanaged owner file; review required'
       : change.applied ? 'wrote' : change.changed ? 'would write' : 'unchanged';
     process.stdout.write(`- ${marker}: ${change.label} (${change.path})\n`);
     if (change.automatic_repair_suppressed && change.exact_fix) {
       process.stdout.write(`  exact verification: ${change.exact_fix}\n`);
     }
+    if (change.hook_conflict && change.exact_fix) process.stdout.write(`  exact fix: ${change.exact_fix}\n`);
+  }
+
+  process.stdout.write('\nLocal session loop guard:\n');
+  process.stdout.write(`- configured: ${report.loop_guard_configured ? 'yes' : 'no'}\n`);
+  process.stdout.write(`- isolated self-test passed: ${report.loop_guard_self_tested ? 'yes' : 'no'}\n`);
+  process.stdout.write(`- observed in a reloaded host: ${report.loop_guard_observed ? 'yes' : 'no'}\n`);
+  if (!report.loop_guard_observed) {
+    process.stdout.write('- next: restart the host and complete its hook trust/review step before relying on live enforcement\n');
   }
 
   process.stdout.write('\nSelf-test:\n');
@@ -3194,6 +3306,9 @@ function printReport(report) {
     process.stdout.write(`- missing env: ${report.doctor.missingEnv.length ? report.doctor.missingEnv.join(', ') : 'none'}\n`);
     if (report.doctor.envHints.length) process.stdout.write(`- possible env files: ${report.doctor.envHints.join(', ')}\n`);
     process.stdout.write(`- missing hooks/config: ${report.doctor.missingHooks.length ? report.doctor.missingHooks.join('; ') : 'none'}\n`);
+    process.stdout.write(`- loop guard configured: ${report.doctor.loop_guard_configured ? 'yes' : 'no'}\n`);
+    process.stdout.write(`- loop guard isolated self-test: ${report.doctor.loop_guard_self_tested ? 'passed' : 'not passed'}\n`);
+    process.stdout.write(`- loop guard observed after reload/trust: ${report.doctor.loop_guard_observed ? 'yes' : 'no'}\n`);
     if (report.doctor.mcpProcesses?.available) {
       const processes = report.doctor.mcpProcesses;
       process.stdout.write(`- MCP process versions: ${processes.active_versions.length ? processes.active_versions.join(', ') : processes.active_processes ? 'unknown' : 'none'}\n`);
@@ -3244,7 +3359,11 @@ async function install(options) {
   options.toolProfile = resolveToolProfile(options.toolProfile === undefined
     ? process.env.MARROW_TOOL_PROFILE
     : options.toolProfile);
-  const detection = detectEnvironment(options.cwd);
+  const detection = detectEnvironment(options.cwd, {
+    ...process.env,
+    HOME: options.home || options.cwd,
+    USERPROFILE: options.home || options.cwd,
+  });
   const client = detectedClient(detection);
   options.client = client;
   options.agentId = String(options.agentId || '').trim() || stableAgentId(detection.root, client);
@@ -3265,6 +3384,28 @@ async function install(options) {
   const writeMode = options.doctor ? 'doctor' : options.dryRun ? 'dry-run' : options.repair ? 'repair' : options.yes ? 'write' : 'dry-run';
   const changes = applyPlan(plan, options);
   let profile = activationProfile(detection, plan, changes, client);
+  const localControl = localControlEvidence({
+    apiKey: options.apiKey,
+    home: options.controlHome || options.home || detection.home,
+  });
+  const loopGuardConfigured = profile.capability_level === 'native_hooks'
+    && profile.configuration_complete === true;
+  const loopGuardSelfTest = options.loopGuardSelfTest === true && !options.dryRun
+    ? runLoopGuardSelfTest(options)
+    : {
+      attempted: false,
+      passed: false,
+      isolated: true,
+      mcp_version: mcpTarget.version,
+      live_hook_observed: false,
+    };
+  profile = {
+    ...profile,
+    loop_guard_configured: loopGuardConfigured,
+    loop_guard_self_tested: loopGuardSelfTest.passed === true,
+    loop_guard_observed: false,
+    loop_guard_enabled: localControl.enabled === true,
+  };
   options.activation = options.activate ? {
     harness: client,
     agent_id: options.agentId,
@@ -3393,7 +3534,6 @@ async function install(options) {
   const changedConfig = changes.some((change) => change.applied) || configRepairs.some((repair) => repair.changed);
   const selfTestPassed = Boolean(!selfTest.skipped && selfTest.active && !selfTest.error);
   const controllerPlatform = options.controllerPlatform || process.platform;
-  const localControl = localControlEvidence({ apiKey: options.apiKey, home: options.controlHome });
   let controller = await controllerStatus({
     root: detection.root,
     agentId: options.agentId,
@@ -3478,6 +3618,10 @@ async function install(options) {
       receipt: selfTest.activation_receipt || null,
       profile,
     },
+    loop_guard_configured: loopGuardConfigured,
+    loop_guard_self_tested: loopGuardSelfTest.passed === true,
+    loop_guard_observed: false,
+    loop_guard: loopGuardSelfTest,
     harnessReload,
     firstCapture: firstCapturePath(detection, options.agentId),
     changes,
@@ -3495,6 +3639,9 @@ async function install(options) {
       restart_required: mcpUpdateRequired || updateAwaitingRestart,
       restart_instruction: mcpUpdateRequired || updateAwaitingRestart ? INSTALLER_RESTART_INSTRUCTION : null,
       verification_command: mcpUpdateRequired || updateAwaitingRestart ? INSTALLER_DOCTOR_COMMAND : null,
+      loop_guard_configured: loopGuardConfigured,
+      loop_guard_self_tested: loopGuardSelfTest.passed === true,
+      loop_guard_observed: false,
       recommendedFix: registryVerificationAction
         || (updateAwaitingRestart ? INSTALLER_RESTART_INSTRUCTION : null)
         || mcpProcesses.exact_fix || mcpConfigurations.exact_fix || configDiagnostics.npm_token.recommended_fix || (!options.apiKey
@@ -3550,6 +3697,7 @@ module.exports = {
   applyPlan,
   install,
   runSelfTest,
+  runLoopGuardSelfTest,
   runCli,
   passiveRuntimeSource,
   inspectNpmTokenConfig,
@@ -3572,6 +3720,9 @@ module.exports = {
   GROK_ACTION_RESULT_HOOK_COMMAND,
   GROK_SESSION_END_HOOK_COMMAND,
   GROK_NATIVE_HOOK_MATCHER,
+  NATIVE_HOOK_MATCHER,
+  CURSOR_NATIVE_HOOK_MATCHER,
+  GEMINI_NATIVE_HOOK_MATCHER,
   printReport,
   buildMcpToolProfileReport,
   resolveMcpTargetVersion,
