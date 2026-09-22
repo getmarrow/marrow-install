@@ -759,7 +759,7 @@ test('local integration registry covers major harnesses and model CLIs', () => {
   assert.ok(labels.includes('ci'));
   assert.ok(labels.includes('custom'));
   assert.ok(mcpSetupCommands.length > 0);
-  assert.ok(mcpSetupCommands.every((command) => command.includes('--package=@getmarrow/mcp@3.9.90')));
+  assert.ok(mcpSetupCommands.every((command) => command.includes('--package=@getmarrow/mcp@3.9.91')));
   assert.ok(mcpSetupCommands.every((command) => !command.includes('@getmarrow/mcp@latest')));
 });
 
@@ -779,7 +779,7 @@ test('governed runner attaches stable client attribution from env and CLI', () =
     assert.equal(headers(envParsed.options)['X-Marrow-Package-Version'], '0.1.59');
     assert.equal(headers(envParsed.options)['X-Marrow-Install-Version'], '0.1.59');
     assert.equal(headers(envParsed.options)['X-Marrow-SDK-Version'], '3.7.63');
-    assert.equal(headers(envParsed.options)['X-Marrow-MCP-Version'], '3.9.90');
+    assert.equal(headers(envParsed.options)['X-Marrow-MCP-Version'], '3.9.91');
 
     const cliParsed = parseArgs(['run', '--client', 'Hermes', '--agent', 'hermes-agent', '--', 'hermes', '/goal']);
     const meta = sourceMeta(cliParsed.options, 'runtime', {

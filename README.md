@@ -103,7 +103,7 @@ Persistent controller lifecycle is currently Linux-only. On macOS or Windows, ac
 
 ## What's New in v0.1.59
 
-v0.1.59 pins published MCP `3.9.90` from source `eaf59b6f3a313ce97e37d7b46d65cc1159f72035` with packed integrity `sha512-iMhITxdVppUA/LJ8obeXrucqJq3Pdeyvh9SA6T/UM5i8LKy8EtlKdhQhm3zmVNhZBwXL4LpAVAQCq/0JTG9YPw==`. SDK remains `3.7.63`. This stops a later install from rewriting managed hooks back to MCP `3.9.89`. Restart the owning harness after update before relying on the new pin. The published `0.1.58` installer cannot deliver this pin.
+v0.1.59 pins published MCP `3.9.91` from source `96b58c9e5ec0356d5672edbb89275e3fbb6d3233` with packed integrity `sha512-2xbKhq1LQ2TlOM4XBpoLcBQNS1fnjxZFbSFwC/lwCUppU1M5NQ6fFCxcLrvHTNt0FM16WlVzxUDBtG8OzoFbuA==`. SDK remains `3.7.63`. This stops a later install from rewriting managed hooks back to MCP `3.9.89`. Restart the owning harness after update before relying on the new pin. The published `0.1.58` installer cannot deliver this pin.
 
 ### Previous release: v0.1.58
 
