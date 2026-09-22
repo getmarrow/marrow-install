@@ -101,7 +101,11 @@ npx @getmarrow/install controller stop
 
 Persistent controller lifecycle is currently Linux-only. On macOS or Windows, activation still writes supported configuration and verifies one server-side install self-test without certifying that hooks continuously ran; run `npx @getmarrow/install sidecar` under an owner-managed service and pass `--no-controller`. The controller does not silently upgrade packages, change governance policy, rotate credentials, or modify unrelated project configuration.
 
-## What's New in v0.1.58
+## What's New in v0.1.59
+
+v0.1.59 pins published MCP `3.9.90` from source `eaf59b6f3a313ce97e37d7b46d65cc1159f72035` with packed integrity `sha512-iMhITxdVppUA/LJ8obeXrucqJq3Pdeyvh9SA6T/UM5i8LKy8EtlKdhQhm3zmVNhZBwXL4LpAVAQCq/0JTG9YPw==`. SDK remains `3.7.63`. This stops a later install from rewriting managed hooks back to MCP `3.9.89`. Restart the owning harness after update before relying on the new pin. The published `0.1.58` installer cannot deliver this pin.
+
+### Previous release: v0.1.58
 
 v0.1.58 pins MCP `3.9.89` from source `ff229e17419f65aeebd7fa7754dd61cbda61900d` with packed integrity `sha512-KC/P4dStzOOfZKxSwigQE4TWCt1TBgYINQzlXrnA5jpYHRrT2Jo73vaV4FiucVPOT+xyU1uCci+bmJoC35aZ0g==`; SDK remains `3.7.63`. Supported native hooks now include their host read, search, and status surfaces so MCP's private local session loop guard can stop unchanged successful checks, polls, and failed retries without adding routine backend writes. Install and update run `marrow-mcp loop-guard-self-test` against isolated temporary state and report configuration, isolated proof, and live host observation separately. Missing local control state stays enabled by default; an explicit owner disable is preserved byte-for-byte and prevents the controller from starting. Grok's trusted global hook file is created only at its direct owner-safe path, managed files are reconciled, and unmanaged files are preserved for owner review. Restart and complete each host's hook trust or review flow before relying on live enforcement.
 
