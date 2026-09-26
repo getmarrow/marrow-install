@@ -103,7 +103,7 @@ Persistent controller lifecycle is currently Linux-only. On macOS or Windows, ac
 
 ## What's New in v0.1.60
 
-v0.1.60 pins MCP `3.9.92` from source `19aed9429a272034fc9fbc6f203a7bdbf10b567d` with packed integrity `sha512-zrkX+R0VkUMzpBqS342tNmPbhaIXv3cgqHuTA85rEUekzOAFaLwqW6lg0cz/ogKxUc3oSkJPb85qPzOP91MQAw==`. This delivers the MCP reliability fix that keeps response-body reads inside the existing request deadline, preserves cancellation, and reports bounded, sanitized control-path errors. SDK remains `3.7.63`. The `0.1.59` installer cannot deliver this pin. Update once, restart the owning harness, then run `doctor --self-test` before relying on the new client.
+v0.1.60 pins MCP `3.9.92` from source `d0d97d1b584c661d9a72696de7af02566fb317e3` with packed integrity `sha512-CAVbzDFanzI/b9EPennC1dUr8/Qq8wMiIl71/25puAfuW7CPSZ+qkhmMDIEnP50k3EgZHEdJo3sUTOJ1P7dzwA==`. This delivers the MCP reliability fix that keeps response-body reads inside the existing request deadline, preserves cancellation, and reports bounded, sanitized control-path errors. SDK remains `3.7.63`. The `0.1.59` installer cannot deliver this pin. Update once, restart the owning harness, then run `doctor --self-test` before relying on the new client.
 
 ### Previous release: v0.1.59
 
