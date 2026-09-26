@@ -101,7 +101,11 @@ npx @getmarrow/install controller stop
 
 Persistent controller lifecycle is currently Linux-only. On macOS or Windows, activation still writes supported configuration and verifies one server-side install self-test without certifying that hooks continuously ran; run `npx @getmarrow/install sidecar` under an owner-managed service and pass `--no-controller`. The controller does not silently upgrade packages, change governance policy, rotate credentials, or modify unrelated project configuration.
 
-## What's New in v0.1.59
+## What's New in v0.1.60
+
+v0.1.60 pins MCP `3.9.92` from source `19aed9429a272034fc9fbc6f203a7bdbf10b567d` with packed integrity `sha512-zrkX+R0VkUMzpBqS342tNmPbhaIXv3cgqHuTA85rEUekzOAFaLwqW6lg0cz/ogKxUc3oSkJPb85qPzOP91MQAw==`. This delivers the MCP reliability fix that keeps response-body reads inside the existing request deadline, preserves cancellation, and reports bounded, sanitized control-path errors. SDK remains `3.7.63`. The `0.1.59` installer cannot deliver this pin. Update once, restart the owning harness, then run `doctor --self-test` before relying on the new client.
+
+### Previous release: v0.1.59
 
 v0.1.59 pins published MCP `3.9.91` from source `96b58c9e5ec0356d5672edbb89275e3fbb6d3233` with packed integrity `sha512-2xbKhq1LQ2TlOM4XBpoLcBQNS1fnjxZFbSFwC/lwCUppU1M5NQ6fFCxcLrvHTNt0FM16WlVzxUDBtG8OzoFbuA==`. SDK remains `3.7.63`. This stops a later install from rewriting managed hooks back to MCP `3.9.89`. Restart the owning harness after update before relying on the new pin. The published `0.1.58` installer cannot deliver this pin.
 
