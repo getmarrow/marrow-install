@@ -32,8 +32,8 @@ test('release-candidate adapter provenance matches the exact MCP source and cert
     mcp: {
       package: '@getmarrow/mcp',
       version: '3.9.92',
-      source_sha: '19aed9429a272034fc9fbc6f203a7bdbf10b567d',
-      integrity: 'sha512-zrkX+R0VkUMzpBqS342tNmPbhaIXv3cgqHuTA85rEUekzOAFaLwqW6lg0cz/ogKxUc3oSkJPb85qPzOP91MQAw==',
+      source_sha: 'd0d97d1b584c661d9a72696de7af02566fb317e3',
+      integrity: 'sha512-CAVbzDFanzI/b9EPennC1dUr8/Qq8wMiIl71/25puAfuW7CPSZ+qkhmMDIEnP50k3EgZHEdJo3sUTOJ1P7dzwA==',
       integrity_state: 'verified_npm_registry_metadata',
     },
     sdk: {
@@ -385,8 +385,8 @@ test('latest-target resolution stays offline-safe and rejects unverified or inco
   assert.deepEqual(resolveMcpTargetVersion({ currentVersions: ['3.9.92'] }), {
     version: '3.9.92',
     source: 'sealed_installer',
-    integrity: 'sha512-zrkX+R0VkUMzpBqS342tNmPbhaIXv3cgqHuTA85rEUekzOAFaLwqW6lg0cz/ogKxUc3oSkJPb85qPzOP91MQAw==',
-    source_sha: '19aed9429a272034fc9fbc6f203a7bdbf10b567d',
+    integrity: 'sha512-CAVbzDFanzI/b9EPennC1dUr8/Qq8wMiIl71/25puAfuW7CPSZ+qkhmMDIEnP50k3EgZHEdJo3sUTOJ1P7dzwA==',
+    source_sha: 'd0d97d1b584c661d9a72696de7af02566fb317e3',
   });
   assert.equal(resolveMcpTargetVersion({
     registryMetadata: {
