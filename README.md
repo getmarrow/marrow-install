@@ -101,7 +101,11 @@ npx @getmarrow/install controller stop
 
 Persistent controller lifecycle is currently Linux-only. On macOS or Windows, activation still writes supported configuration and verifies one server-side install self-test without certifying that hooks continuously ran; run `npx @getmarrow/install sidecar` under an owner-managed service and pass `--no-controller`. The controller does not silently upgrade packages, change governance policy, rotate credentials, or modify unrelated project configuration.
 
-## What's New in v0.1.61
+## What's New in v0.1.62
+
+v0.1.62 delivers the model-cost capture corrections in MCP `3.9.94` (source `9456bc63de4cc92f16726d996695516be9395f26`, packed integrity `sha512-gEQejUWkcuKd1p930TLsWCSMM4rjmr/Wzz0++qa69B6hj/e64lMdT9xO+jZP8+yl4WLKgcfo0raHANllUe96/A==`) and SDK `3.7.64` (source `40b68dee609e9351fa6c79aee629fc88869a3b4f`, packed integrity `sha512-8qJj/8ouHEz1NnZkmujtFxUm/fWldqR/rHv62/sqabaxT0H90xCCHxodLOkV0SVxDscAtnahioZakqkeGNUwyA==`). Published installer0.1.61 pins older bytes and cannot deliver these fixes. Only observed usage with sufficient host, model, token and pricing evidence becomes calculated cost; unobservable host usage, unsupported streams and mixed cache TTL writes stay incomplete. No baseline or net savings is invented. Update once, restart the owning harness and run `doctor --self-test` to verify actual active versions.
+
+### Previous release: v0.1.61
 
 v0.1.61 pins MCP `3.9.93` from source `2174aa09c9bba2f38a15bef4d8020803d6d36073` with packed integrity `sha512-X3ccZUKJqQxiEWq5jJE3xQzcBZbMxEcYxIuU0aKNNo5U1iji9N99pPa2Awm0fdZaRzYOYtdVbWrAmfPDvuYaKQ==`. This corrects the full11 canary operation identity so valid numeric UUIDs reach Auto and terminal outcome closure without weakening privacy validation. SDK remains `3.7.63`. The published `0.1.60` installer cannot deliver this pin. Update once, restart the owning harness, then run `doctor --self-test` before relying on the new client.
 
