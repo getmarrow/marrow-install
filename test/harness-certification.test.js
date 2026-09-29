@@ -1,3 +1,4 @@
+require('./support/isolated-environment');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
