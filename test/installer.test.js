@@ -2351,18 +2351,66 @@ test('self-test follows a pending think acknowledgement until the decision exist
   assert.equal(harness.calls.commit[0].body.decision_id, 'dec-after-pending');
 });
 
-test('self-test uses a created decision id carried by a pending think acknowledgement', async () => {
+function createdPendingThink(key, overrides = {}) {
+  return { status: 202, body: { data: {
+    retryable: true, committed: false, idempotency_key: key, decision_id: 'dec-created',
+    decision_state: 'created', reconciliation_state: 'runtime_continuation_persistence_pending',
+    safe_to_continue: false, ...overrides,
+  } } };
+}
+
+test('self-test keeps reconciling a created pending think and commits only the confirmed decision id', async () => {
   const harness = selfTestWriteHarness([
-    (key) => ({ status: 202, body: { data: {
-      retryable: true, committed: false, idempotency_key: key, decision_id: 'dec-created',
-      decision_state: 'created', reconciliation_state: 'runtime_continuation_persistence_pending',
-    } } }),
+    (key) => createdPendingThink(key),
+    () => ({ status: 200, body: { data: { decision_id: 'dec-created' } } }),
   ]);
   await withFetch(harness.fetchStub, async () => {
     await assert.rejects(harness.run(), /stop-after-commit/);
   });
-  assert.equal(harness.calls.think.length, 1);
+  assert.equal(harness.calls.think.length, 2);
+  assert.equal(harness.calls.think[1].key, harness.calls.think[0].key);
+  assert.equal(harness.calls.commit.length, 1);
   assert.equal(harness.calls.commit[0].body.decision_id, 'dec-created');
+});
+
+test('self-test never commits a pending decision id or a mismatched reconciliation', async () => {
+  const neverConfirmed = selfTestWriteHarness([(key) => createdPendingThink(key)]);
+  await withFetch(neverConfirmed.fetchStub, async () => {
+    await assert.rejects(neverConfirmed.run(), /self-test did not return decision_id after 3 attempts \(last: pending\)/);
+  });
+  assert.equal(neverConfirmed.calls.think.length, 3);
+  assert.equal(neverConfirmed.calls.commit.length, 0);
+
+  const changedId = selfTestWriteHarness([
+    (key) => createdPendingThink(key),
+    () => ({ status: 200, body: { data: { decision_id: 'dec-other' } } }),
+  ]);
+  await withFetch(changedId.fetchStub, async () => {
+    await assert.rejects(changedId.run(), /different decision id than its pending acknowledgement/);
+  });
+  assert.equal(changedId.calls.think.length, 2);
+  assert.equal(changedId.calls.commit.length, 0);
+
+  for (const response of [
+    () => createdPendingThink('install-self-test:someone-else:think'),
+    () => ({ status: 200, body: { data: { decision_id: 'dec-created', idempotency_key: 'install-self-test:someone-else:think' } } }),
+  ]) {
+    const wrongEcho = selfTestWriteHarness([response]);
+    await withFetch(wrongEcho.fetchStub, async () => {
+      await assert.rejects(wrongEcho.run(), /self-test write returned a different idempotency key/);
+    });
+    assert.equal(wrongEcho.calls.think.length, 1);
+    assert.equal(wrongEcho.calls.commit.length, 0);
+  }
+
+  const unconfirmedCommit = selfTestWriteHarness(
+    [() => ({ status: 200, body: { data: { decision_id: 'dec-commit' } } })],
+    [() => ({ status: 202, body: { data: { retryable: true, committed: false, decision_id: 'dec-commit' } } })],
+  );
+  await withFetch(unconfirmedCommit.fetchStub, async () => {
+    await assert.rejects(unconfirmedCommit.run(), /pending acknowledgement without its idempotency key/);
+  });
+  assert.equal(unconfirmedCommit.calls.commit.length, 1);
 });
 
 test('self-test reports the last state after bounded think attempts and does not retry client errors', async () => {
@@ -2393,4 +2441,70 @@ test('self-test retries a transient commit failure with its own idempotency key'
   });
   assert.equal(harness.calls.commit.length, 2);
   assert.equal(harness.calls.commit[1].key, harness.calls.commit[0].key);
+});
+
+test('doctor never recommends starting a stale controller while local control is owner-disabled', async () => {
+  const root = tempDir();
+  const home = tempDir();
+  const stateDirectory = tempDir();
+  const originalStateDirectory = process.env.MARROW_SIDECAR_STATE_DIR;
+  process.env.MARROW_SIDECAR_STATE_DIR = stateDirectory;
+  try {
+    fs.chmodSync(stateDirectory, 0o700);
+    const exited = require('node:child_process').spawnSync(process.execPath, ['-e', '']);
+    const statePath = path.join(stateDirectory, 'active.json');
+    fs.writeFileSync(statePath, JSON.stringify({
+      instance_id: 'sidecar-409c8dcb-be07-4367-a610-4b130ec24f24',
+      pid: exited.pid,
+      host: '127.0.0.1',
+      port: 35483,
+      token: 'a'.repeat(64),
+      started_at: '2026-09-20T02:06:58.885Z',
+    }), { mode: 0o600 });
+    fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
+    const options = {
+      cwd: root,
+      mode: 'mcp',
+      yes: false,
+      dryRun: false,
+      doctor: true,
+      selfTest: false,
+      apiKey: '',
+      baseUrl: 'https://api.getmarrow.ai',
+      agentId: 'stale-controller-fixture',
+      controlHome: home,
+      controllerPlatform: 'linux',
+      processCommands: [],
+      mcpRegistryMetadata: null,
+    };
+
+    const enabled = await install(options);
+    assert.equal(enabled.controller.state, 'stale');
+    assert.equal(enabled.controller.started_at, '2026-09-20T02:06:58.885Z');
+    assert.equal(enabled.controller.exact_fix, 'Run npx @getmarrow/install controller ensure.');
+
+    control.writeLocalControlState(false, { home });
+    const disabled = await install(options);
+    assert.equal(disabled.local_control.enabled, false);
+    assert.equal(disabled.controller.state, 'stale');
+    assert.equal(disabled.controller.required, false);
+    assert.equal(disabled.controller.exact_fix, null);
+    assert.match(disabled.controller.reason, /disabled by the owner, so the controller is intentionally not started/);
+    let output = '';
+    const originalWrite = process.stdout.write;
+    process.stdout.write = (chunk) => { output += String(chunk); return true; };
+    try {
+      printReport(disabled);
+    } finally {
+      process.stdout.write = originalWrite;
+    }
+    const controllerSection = output.slice(output.indexOf('Automatic controller:'));
+    assert.match(controllerSection, /- state: stale\n- started: 2026-09-20T02:06:58.885Z\n- reason: Local control is disabled/);
+    assert.doesNotMatch(output, /controller ensure/);
+    assert.equal(fs.existsSync(statePath), true);
+  } finally {
+    if (originalStateDirectory === undefined) delete process.env.MARROW_SIDECAR_STATE_DIR;
+    else process.env.MARROW_SIDECAR_STATE_DIR = originalStateDirectory;
+    for (const directory of [root, home, stateDirectory]) fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
