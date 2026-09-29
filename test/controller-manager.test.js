@@ -339,3 +339,60 @@ test('controller rejects state beneath a non-sticky world-writable ancestor', as
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('controller without a configured agent id sends none and reports heartbeat backoff', async () => {
+  const http = require('node:http');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-controller-heartbeat-'));
+  const project = path.join(root, 'project');
+  const stateDirectory = path.join(root, 'state');
+  fs.mkdirSync(project, { mode: 0o700 });
+  fs.writeFileSync(path.join(project, 'package.json'), '{}\n');
+  const heartbeats = [];
+  const api = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
+    if (req.url === '/v1/agent/enforcement' && body.operation === 'heartbeat') heartbeats.push({ headers: req.headers, body });
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Enforcement target was not found.', code: 'NOT_FOUND', details: { code: 'AGENT_ENFORCEMENT_AGENT_NOT_FOUND' } }));
+  });
+  await new Promise((resolve) => api.listen(0, '127.0.0.1', resolve));
+  const prior = process.env.MARROW_SIDECAR_STATE_DIR;
+  process.env.MARROW_SIDECAR_STATE_DIR = stateDirectory;
+  const identity = { root: project, agentId: '', identityAgentId: 'stable-local-identity' };
+  try {
+    const started = await ensureGovernanceController({
+      ...identity,
+      apiKey: 'test-controller-api-key',
+      baseUrl: `http://127.0.0.1:${api.address().port}`,
+      client: 'codex',
+      mode: 'md',
+      profile: 'default',
+      policy: 'warn',
+    });
+    assert.equal(started.active, true);
+    const state = readState(identity);
+    const args = fs.readFileSync(`/proc/${state.pid}/cmdline`, 'utf8').split('\0');
+    assert.equal(args.includes('--agent'), false);
+    let status = await controllerStatus(identity);
+    const deadline = Date.now() + 5000;
+    while (status.heartbeat?.state === 'pending' && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      status = await controllerStatus(identity);
+    }
+    assert.equal(status.active, true);
+    assert.equal(heartbeats.length, 1);
+    assert.equal(Object.hasOwn(heartbeats[0].headers, 'x-marrow-agent-id'), false);
+    assert.equal(Object.hasOwn(heartbeats[0].body, 'agent_id'), false);
+    assert.equal(status.heartbeat.state, 'backing_off');
+    assert.equal(status.heartbeat.status, 404);
+    assert.equal(status.heartbeat.code, 'AGENT_ENFORCEMENT_AGENT_NOT_FOUND');
+    assert.equal(controllerIdentity(identity), controllerIdentity({ root: project, agentId: 'stable-local-identity' }));
+  } finally {
+    await stopGovernanceController(identity);
+    await new Promise((resolve) => api.close(resolve));
+    if (prior === undefined) delete process.env.MARROW_SIDECAR_STATE_DIR;
+    else process.env.MARROW_SIDECAR_STATE_DIR = prior;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
