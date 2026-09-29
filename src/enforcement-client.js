@@ -1,5 +1,8 @@
 const crypto = require('node:crypto');
 
+// A background heartbeat must never hang on a stalled API response.
+const HEARTBEAT_REQUEST_TIMEOUT_MS = 15_000;
+
 function sha256(value) {
   return crypto.createHash('sha256').update(String(value || '')).digest('hex');
 }
@@ -28,11 +31,11 @@ function permitProtocolVersion(input) {
   return version === 1 || version === 2 ? version : 1;
 }
 
-async function enforcementRequest(requestJson, options, operation, input = {}) {
-  return requestJson(options, 'POST', '/v1/agent/enforcement', {
-    operation,
-    ...input,
-  });
+async function enforcementRequest(requestJson, options, operation, input = {}, requestOptions = undefined) {
+  const body = { operation, ...input };
+  return requestOptions
+    ? requestJson(options, 'POST', '/v1/agent/enforcement', body, {}, requestOptions)
+    : requestJson(options, 'POST', '/v1/agent/enforcement', body);
 }
 
 async function issueActionPermit(requestJson, options, input) {
@@ -86,7 +89,7 @@ async function recordEnforcementHeartbeat(requestJson, options, input = {}) {
     config_fingerprint: input.configFingerprint || null,
     expected_hooks: input.expectedHooks || ['pre_action', 'action_result', 'outcome_closure'],
     observed_hooks: input.observedHooks || ['pre_action'],
-  });
+  }, { timeoutMs: HEARTBEAT_REQUEST_TIMEOUT_MS });
 }
 
 async function readEnforcementCoverage(requestJson, options) {
@@ -96,6 +99,7 @@ async function readEnforcementCoverage(requestJson, options) {
 }
 
 module.exports = {
+  HEARTBEAT_REQUEST_TIMEOUT_MS,
   actionBinding,
   sha256,
   permitProtocolVersion,

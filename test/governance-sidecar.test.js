@@ -165,7 +165,7 @@ function httpError(status, code) {
   return error;
 }
 
-test('heartbeat policy backs off with jitter and opens the circuit after five identical 4xx responses', () => {
+test('heartbeat policy backs off with jitter, then probes about hourly after five identical 4xx responses', () => {
   const policy = createHeartbeatPolicy({ intervalMs: 1000, maxBackoffMs: 60_000, random: () => 0.5 });
   const delays = [];
   for (let attempt = 1; attempt <= 4; attempt += 1) {
@@ -175,14 +175,37 @@ test('heartbeat policy backs off with jitter and opens the circuit after five id
     delays.push(result.delayMs);
   }
   assert.deepEqual(delays, [1500, 3000, 6000, 12000]);
-  const stopped = policy.failure(httpError(404, 'AGENT_ENFORCEMENT_AGENT_NOT_FOUND'));
-  assert.equal(stopped.delayMs, null);
+  const opened = policy.failure(httpError(404, 'AGENT_ENFORCEMENT_AGENT_NOT_FOUND'));
+  assert.equal(opened.delayMs, 3_600_000);
   assert.equal(policy.open, true);
-  assert.equal(stopped.state.state, 'stopped');
-  assert.equal(stopped.state.failures, 5);
-  assert.match(stopped.state.exact_fix, /no registered agent for this controller \(HTTP 404 AGENT_ENFORCEMENT_AGENT_NOT_FOUND\)/);
-  assert.match(stopped.state.exact_fix, /MARROW_FLEET_AGENT_ID/);
-  assert.match(stopped.state.exact_fix, /controller stop && npx @getmarrow\/install controller ensure/);
+  assert.equal(opened.state.state, 'circuit_open');
+  assert.equal(opened.state.failures, 5);
+  assert.equal(opened.state.retry_in_ms, 3_600_000);
+  assert.match(opened.state.exact_fix, /no registered agent for this controller \(HTTP 404 AGENT_ENFORCEMENT_AGENT_NOT_FOUND\)/);
+  assert.match(opened.state.exact_fix, /MARROW_FLEET_AGENT_ID/);
+  assert.match(opened.state.exact_fix, /controller stop && npx @getmarrow\/install controller ensure/);
+  assert.equal(opened.notice, `Marrow controller paused enforcement heartbeats and retries about once an hour. ${opened.state.exact_fix}`);
+
+  const probe = policy.failure(httpError(404, 'AGENT_ENFORCEMENT_AGENT_NOT_FOUND'));
+  assert.equal(probe.delayMs, 3_600_000);
+  assert.equal(probe.state.state, 'circuit_open');
+  assert.equal(probe.notice, null);
+  const transientProbe = policy.failure(httpError(503, 'COORDINATOR_UNAVAILABLE'));
+  assert.equal(transientProbe.state.state, 'circuit_open');
+  assert.equal(transientProbe.state.exact_fix, opened.state.exact_fix);
+  assert.equal(transientProbe.notice, null);
+  const changedFix = policy.failure(httpError(403, 'ACTION_PERMIT_AGENT_CREDENTIAL_SCOPE_INVALID'));
+  assert.match(changedFix.notice, /API key or agent scope/);
+  const recovered = policy.success();
+  assert.equal(policy.open, false);
+  assert.equal(recovered.notice, 'Marrow controller resumed enforcement heartbeats.');
+  assert.equal(policy.failure(httpError(404, 'AGENT_ENFORCEMENT_AGENT_NOT_FOUND')).delayMs, 1500);
+  for (const [value, delay] of [[0, 2_700_000], [1, 4_500_000]]) {
+    const jittered = createHeartbeatPolicy({ intervalMs: 1000, random: () => value });
+    let last;
+    for (let attempt = 0; attempt < 5; attempt += 1) last = jittered.failure(httpError(401));
+    assert.equal(last.delayMs, delay);
+  }
 
   const jitter = [0, 1].map((value) => createHeartbeatPolicy({ intervalMs: 1000, random: () => value })
     .failure(httpError(400, 'MARROW_UNKNOWN_FIELDS')).delayMs);
@@ -196,7 +219,7 @@ test('heartbeat policy backs off with jitter and opens the circuit after five id
     const scoped = createHeartbeatPolicy({ intervalMs: 1000, random: () => 0 });
     let last;
     for (let attempt = 0; attempt < 5; attempt += 1) last = scoped.failure(httpError(status, code));
-    assert.equal(last.delayMs, null, String(status));
+    assert.equal(last.state.state, 'circuit_open', String(status));
     assert.match(last.state.exact_fix, fix);
   }
 });
@@ -224,7 +247,7 @@ test('heartbeat policy keeps retrying 5xx, 429 and network failures at a capped 
 test('heartbeat policy resets after success and only counts identical consecutive 4xx failures', () => {
   const policy = createHeartbeatPolicy({ intervalMs: 1000, random: () => 0 });
   for (let attempt = 0; attempt < 4; attempt += 1) policy.failure(httpError(404, 'AGENT_ENFORCEMENT_AGENT_NOT_FOUND'));
-  assert.deepEqual(policy.success(), { delayMs: 1000, state: { state: 'ok', failures: 0, exact_fix: null } });
+  assert.deepEqual(policy.success(), { delayMs: 1000, state: { state: 'ok', failures: 0, exact_fix: null }, notice: null });
   const afterSuccess = policy.failure(httpError(404, 'AGENT_ENFORCEMENT_AGENT_NOT_FOUND'));
   assert.equal(afterSuccess.delayMs, 1000);
   assert.equal(afterSuccess.state.failures, 1);
@@ -237,50 +260,98 @@ test('heartbeat policy resets after success and only counts identical consecutiv
   assert.equal(alternating.open, false);
 });
 
-test('sidecar stops heartbeats after five identical 404 responses and reports the fix once', async () => {
+test('sidecar pauses heartbeats after five identical 404 responses, probes slowly, and recovers', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-sidecar-heartbeat-'));
   const prior = process.env.MARROW_SIDECAR_STATE_DIR;
   process.env.MARROW_SIDECAR_STATE_DIR = dir;
   const originalWrite = process.stderr.write;
   const messages = [];
   process.stderr.write = (chunk) => { messages.push(String(chunk)); return true; };
-  let heartbeats = 0;
+  const heartbeatTimes = [];
   let sidecar;
   try {
-    sidecar = await startGovernanceSidecar({ apiKey: 'test-key', sidecarPort: 0, heartbeatIntervalMs: 20, heartbeatRandom: () => 0 }, {
+    sidecar = await startGovernanceSidecar({
+      apiKey: 'test-key', sidecarPort: 0, heartbeatIntervalMs: 20, heartbeatProbeMs: 400, heartbeatRandom: () => 0,
+    }, {
       permit: async () => ({}),
       verify: async () => ({}),
       close: async () => ({}),
       coverage: async () => ({}),
       heartbeat: async () => {
-        heartbeats += 1;
-        throw httpError(404, 'AGENT_ENFORCEMENT_AGENT_NOT_FOUND');
+        heartbeatTimes.push(Date.now());
+        if (heartbeatTimes.length <= 6) throw httpError(404, 'AGENT_ENFORCEMENT_AGENT_NOT_FOUND');
+        return { accepted: true };
       },
     });
     const state = JSON.parse(fs.readFileSync(sidecar.stateFile, 'utf8'));
     const health = async () => (await fetch(`http://127.0.0.1:${sidecar.port}/health`, {
       headers: { Authorization: `Bearer ${state.token}` },
     })).json();
+    const waitFor = async (predicate) => {
+      const deadline = Date.now() + 5000;
+      let current = await health();
+      while (!predicate(current) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        current = await health();
+      }
+      return current;
+    };
     const first = await health();
     assert.equal(first.heartbeat.state, 'backing_off');
     assert.equal(first.heartbeat.status, 404);
     assert.equal(first.heartbeat.code, 'AGENT_ENFORCEMENT_AGENT_NOT_FOUND');
-    const deadline = Date.now() + 5000;
-    let current = first;
-    while (current.heartbeat.state !== 'stopped' && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 25));
-      current = await health();
-    }
-    assert.equal(current.heartbeat.state, 'stopped');
-    assert.equal(current.heartbeat.failures, 5);
-    assert.match(current.heartbeat.exact_fix, /no registered agent for this controller/);
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    assert.equal(heartbeats, 5);
-    const stopped = messages.filter((message) => message.includes('stopped enforcement heartbeats'));
-    assert.equal(stopped.length, 1);
-    assert.ok(stopped[0].includes(current.heartbeat.exact_fix));
+
+    const opened = await waitFor((current) => current.heartbeat.state === 'circuit_open');
+    assert.equal(opened.heartbeat.failures, 5);
+    assert.equal(heartbeatTimes.length, 5);
+    assert.match(opened.heartbeat.exact_fix, /no registered agent for this controller/);
+
+    const recovered = await waitFor((current) => current.heartbeat.state === 'ok');
+    assert.equal(recovered.heartbeat.state, 'ok');
+    assert.ok(heartbeatTimes[5] - heartbeatTimes[4] >= 300, 'first probe waits for the slow retry');
+    assert.ok(heartbeatTimes[6] - heartbeatTimes[5] >= 300, 'second probe waits for the slow retry');
+    const paused = messages.filter((message) => message.includes('paused enforcement heartbeats'));
+    assert.equal(paused.length, 1);
+    assert.ok(paused[0].includes(opened.heartbeat.exact_fix));
+    assert.equal(messages.filter((message) => message.includes('resumed enforcement heartbeats')).length, 1);
   } finally {
     process.stderr.write = originalWrite;
+    sidecar?.close();
+    if (prior === undefined) delete process.env.MARROW_SIDECAR_STATE_DIR;
+    else process.env.MARROW_SIDECAR_STATE_DIR = prior;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a hung heartbeat never stalls controller maintenance', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-sidecar-hang-'));
+  const prior = process.env.MARROW_SIDECAR_STATE_DIR;
+  process.env.MARROW_SIDECAR_STATE_DIR = dir;
+  let heartbeats = 0;
+  let maintenance = 0;
+  let sidecar;
+  try {
+    sidecar = await startGovernanceSidecar({ apiKey: 'test-key', sidecarPort: 0, heartbeatIntervalMs: 20 }, {
+      permit: async () => ({}),
+      verify: async () => ({}),
+      close: async () => ({}),
+      coverage: async () => ({}),
+      maintain: async () => {
+        maintenance += 1;
+        return { state: 'clear', checked_at: new Date().toISOString(), repaired: [], exact_fix: null };
+      },
+      heartbeat: async () => {
+        heartbeats += 1;
+        if (heartbeats === 1) return { accepted: true };
+        return new Promise(() => {});
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const hungAt = maintenance;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(heartbeats, 2);
+    assert.ok(maintenance - hungAt >= 5, `maintenance kept running (${hungAt} -> ${maintenance})`);
+  } finally {
     sidecar?.close();
     if (prior === undefined) delete process.env.MARROW_SIDECAR_STATE_DIR;
     else process.env.MARROW_SIDECAR_STATE_DIR = prior;

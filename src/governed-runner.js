@@ -516,12 +516,13 @@ function dataOf(json) {
   return json && typeof json === 'object' && json.data && typeof json.data === 'object' ? json.data : json;
 }
 
-async function requestJson(options, method, route, body, extraHeaders = {}) {
+async function requestJson(options, method, route, body, extraHeaders = {}, { timeoutMs } = {}) {
   if (!options.apiKey) throw new Error('MARROW_API_KEY is required. Use --fail-open only for non-production local commands.');
   const response = await fetch(new URL(route, options.baseUrl.replace(/\/$/, '/')), {
     method,
     headers: { ...headers(options), ...extraHeaders },
     body: body === undefined ? undefined : JSON.stringify(body),
+    ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
   });
   const text = await response.text();
   let json = {};
@@ -2425,6 +2426,7 @@ module.exports = {
   verifyPermitOnly,
   coverageOnly,
   sidecarOnly,
+  requestJson,
   controllerOnly,
   actionBinding,
   gateOnly,

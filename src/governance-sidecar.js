@@ -8,6 +8,7 @@ const MAX_BODY_BYTES = 64 * 1024;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const HEARTBEAT_MAX_BACKOFF_MS = 30 * 60_000;
 const HEARTBEAT_CIRCUIT_THRESHOLD = 5;
+const HEARTBEAT_PROBE_MS = 60 * 60_000;
 const CONTROLLER_RESTART = 'npx @getmarrow/install controller stop && npx @getmarrow/install controller ensure';
 
 function heartbeatFailure(error) {
@@ -26,34 +27,43 @@ function heartbeatFailure(error) {
 function heartbeatExactFix({ status, code }) {
   const failure = `HTTP ${status}${code ? ` ${code}` : ''}`;
   if (status === 404) {
-    return `Marrow has no registered agent for this controller (${failure}). Create the agent or bind this API key to a registered agent, set MARROW_FLEET_AGENT_ID to its id if the key is not bound, then run ${CONTROLLER_RESTART}.`;
+    return `Marrow has no registered agent for this controller (${failure}). Create the agent or bind this API key to a registered agent, set MARROW_FLEET_AGENT_ID to its id if the key is not bound, then run ${CONTROLLER_RESTART} to retry now.`;
   }
   if (status === 401 || status === 403) {
-    return `Marrow rejected this controller's API key or agent scope (${failure}). Use an active key bound to the registered agent, then run ${CONTROLLER_RESTART}.`;
+    return `Marrow rejected this controller's API key or agent scope (${failure}). Use an active key bound to the registered agent, then run ${CONTROLLER_RESTART} to retry now.`;
   }
-  return `Marrow rejected the controller heartbeat (${failure}). Run npx -y @getmarrow/install@latest update, then ${CONTROLLER_RESTART}.`;
+  return `Marrow rejected the controller heartbeat (${failure}). Run npx -y @getmarrow/install@latest update, then ${CONTROLLER_RESTART} to retry now.`;
 }
 
 // Heartbeats back off exponentially with jitter after any failure. Repeated identical 4xx
-// responses open the circuit and stop heartbeats until the controller restarts; 5xx, 429,
-// and network failures keep retrying at the capped backoff.
+// responses open the circuit: heartbeats then drop to one jittered probe about every hour,
+// so a fleet-wide transient 401/403/404 recovers without restarts. 5xx, 429, and network
+// failures keep retrying at the capped backoff. A notice is returned only when the circuit
+// opens, when its fix changes, and when heartbeats recover.
 function createHeartbeatPolicy({
   intervalMs = HEARTBEAT_INTERVAL_MS,
   maxBackoffMs = HEARTBEAT_MAX_BACKOFF_MS,
   circuitThreshold = HEARTBEAT_CIRCUIT_THRESHOLD,
+  probeMs = HEARTBEAT_PROBE_MS,
   random = Math.random,
 } = {}) {
   let consecutive = 0;
   let identical = 0;
   let last = null;
-  let open = false;
+  let openFix = null;
   return {
-    get open() { return open; },
+    get open() { return openFix !== null; },
     success() {
+      const recovered = openFix !== null;
       consecutive = 0;
       identical = 0;
       last = null;
-      return { delayMs: intervalMs, state: { state: 'ok', failures: 0, exact_fix: null } };
+      openFix = null;
+      return {
+        delayMs: intervalMs,
+        state: { state: 'ok', failures: 0, exact_fix: null },
+        notice: recovered ? 'Marrow controller resumed enforcement heartbeats.' : null,
+      };
     },
     failure(error) {
       const failure = heartbeatFailure(error);
@@ -61,13 +71,18 @@ function createHeartbeatPolicy({
       identical = last?.signature === failure.signature ? identical + 1 : 1;
       last = failure;
       const summary = { status: failure.status, code: failure.code, failures: identical };
-      if (failure.permanent && identical >= circuitThreshold) {
-        open = true;
-        return { delayMs: null, state: { state: 'stopped', ...summary, exact_fix: heartbeatExactFix(failure) } };
+      if (openFix !== null || (failure.permanent && identical >= circuitThreshold)) {
+        const fix = failure.permanent ? heartbeatExactFix(failure) : openFix;
+        const notice = fix === openFix
+          ? null
+          : `Marrow controller paused enforcement heartbeats and retries about once an hour. ${fix}`;
+        openFix = fix;
+        const delayMs = Math.round(probeMs * (0.75 + random() * 0.5));
+        return { delayMs, state: { state: 'circuit_open', ...summary, retry_in_ms: delayMs, exact_fix: fix }, notice };
       }
       const ceiling = Math.min(maxBackoffMs, intervalMs * 2 ** consecutive);
       const delayMs = Math.round(ceiling / 2 + random() * (ceiling / 2));
-      return { delayMs, state: { state: 'backing_off', ...summary, retry_in_ms: delayMs, exact_fix: null } };
+      return { delayMs, state: { state: 'backing_off', ...summary, retry_in_ms: delayMs, exact_fix: null }, notice: null };
     },
   };
 }
@@ -270,27 +285,34 @@ async function startGovernanceSidecar(options, handlers) {
 
   const heartbeatPolicy = createHeartbeatPolicy({
     intervalMs: options.heartbeatIntervalMs,
+    probeMs: options.heartbeatProbeMs,
     random: options.heartbeatRandom,
   });
   let nextHeartbeatAt = 0;
-  let tickRunning = false;
-  const tick = async () => {
-    if (tickRunning) return;
-    tickRunning = true;
+  // Maintenance and heartbeat have separate in-flight guards, so a hung heartbeat request
+  // never stalls drift repair.
+  let maintenanceRunning = false;
+  let heartbeatRunning = false;
+  const runMaintenance = async () => {
+    if (!handlers.maintain || maintenanceRunning) return;
+    maintenanceRunning = true;
     try {
-      if (handlers.maintain) {
-        try {
-          latestMaintenance = await handlers.maintain();
-        } catch {
-          latestMaintenance = {
-            state: 'attention_required',
-            checked_at: new Date().toISOString(),
-            repaired: [],
-            exact_fix: 'Run npx @getmarrow/install --repair in the managed project.',
-          };
-        }
-      }
-      if (heartbeatPolicy.open || Date.now() < nextHeartbeatAt) return;
+      latestMaintenance = await handlers.maintain();
+    } catch {
+      latestMaintenance = {
+        state: 'attention_required',
+        checked_at: new Date().toISOString(),
+        repaired: [],
+        exact_fix: 'Run npx @getmarrow/install --repair in the managed project.',
+      };
+    } finally {
+      maintenanceRunning = false;
+    }
+  };
+  const runHeartbeat = async () => {
+    if (heartbeatRunning || Date.now() < nextHeartbeatAt) return;
+    heartbeatRunning = true;
+    try {
       let result;
       try {
         latestCoverage = await handlers.heartbeat({ sidecarInstanceId: instanceId });
@@ -300,15 +322,13 @@ async function startGovernanceSidecar(options, handlers) {
         result = heartbeatPolicy.failure(error);
       }
       latestHeartbeat = { ...result.state, checked_at: new Date().toISOString() };
-      if (result.delayMs === null) {
-        process.stderr.write(`Marrow controller stopped enforcement heartbeats. ${result.state.exact_fix}\n`);
-      } else {
-        nextHeartbeatAt = Date.now() + result.delayMs;
-      }
+      nextHeartbeatAt = Date.now() + result.delayMs;
+      if (result.notice) process.stderr.write(`${result.notice}\n`);
     } finally {
-      tickRunning = false;
+      heartbeatRunning = false;
     }
   };
+  const tick = () => Promise.all([runMaintenance(), runHeartbeat()]);
   await tick();
   const timer = setInterval(tick, options.heartbeatIntervalMs || HEARTBEAT_INTERVAL_MS);
   timer.unref();

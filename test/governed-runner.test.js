@@ -1393,3 +1393,33 @@ test('controller CLI keeps its local identity when no agent id is configured', a
     fs.rmSync(home, { recursive: true, force: true });
   }
 });
+
+test('requestJson aborts a hung request only when a timeout is given', async () => {
+  const { requestJson } = require('../src/governed-runner');
+  const originalFetch = globalThis.fetch;
+  const signals = [];
+  globalThis.fetch = (url, init = {}) => {
+    signals.push(init.signal);
+    if (!init.signal) return Promise.resolve(Response.json({ data: { ok: true } }));
+    return new Promise((resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });
+    });
+  };
+  const options = { apiKey: 'test-key', baseUrl: 'http://127.0.0.1:9', sessionId: 'session-1', client: 'codex' };
+  // AbortSignal.timeout uses an unref'd timer; a real socket keeps the loop alive, this stub does not.
+  const keepAlive = setInterval(() => {}, 1000);
+  try {
+    assert.deepEqual(await requestJson(options, 'GET', '/v1/agent/status'), { ok: true });
+    const started = Date.now();
+    await assert.rejects(
+      requestJson(options, 'POST', '/v1/agent/enforcement', { operation: 'heartbeat' }, {}, { timeoutMs: 50 }),
+      (error) => error.name === 'TimeoutError',
+    );
+    assert.ok(Date.now() - started < 2000);
+    assert.equal(signals[0], undefined);
+    assert.ok(signals[1] instanceof AbortSignal);
+  } finally {
+    clearInterval(keepAlive);
+    globalThis.fetch = originalFetch;
+  }
+});
