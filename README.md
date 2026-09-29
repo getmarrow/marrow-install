@@ -105,7 +105,22 @@ Persistent controller lifecycle is currently Linux-only. On macOS or Windows, ac
 
 The controller is not a boot service. After a host restart, or any exit that skips its shutdown handler, doctor reports it as `stale` until the next install, update, or `controller ensure`. While local control is disabled, the controller is not started, and doctor reports a stopped or stale controller as not required instead of recommending `controller ensure`; unsafe controller state or an unverified or unresponsive controller process keeps its exact fix.
 
-## What's New in v0.1.64
+## What's New in v0.1.65
+
+v0.1.65 pins MCP `3.9.97` (source `656e58e88d5cb34fa0bd535876adf3e252417fc2`, packed integrity `sha512-nvmZElAR1MaB1WKgHuRUL7LX2bztU9GAeGtl5ZQ4xNzXcmlsAz8g/5AwQ0XnXilCz+6ktH1Rz1tJilP5wwyNRA==`) while keeping SDK `3.7.64` unchanged. Changes:
+
+- `doctor` no longer reports hooks as missing after a harness re-saves its settings file.
+- `update` refuses to write into an unrelated folder and only touches Marrow-managed roots.
+- The install self-test handles pending decisions and never commits one as a success.
+- Controller reporting is clearer; a disabled controller stays quiet while exact fixes for non-benign states are still shown.
+- Enforcement heartbeats back off after repeated failures and retry once an hour.
+- The agent id is never derived from the OS username.
+- Permit verification sends `protocol_version`.
+- The test suite is isolated from the real HOME and Marrow credentials.
+
+Restart the owning harness, review hook trust and run `doctor --self-test` after updating. Package publication and registry integrity verification must precede claiming these candidate pins are publicly available.
+
+### Previous release: v0.1.64
 
 v0.1.64 pins MCP `3.9.96` (source `031c944936271fd6e8768ad2619ee0430b68e2c7`, packed integrity `sha512-kuBpuWaWAvusS+FbXXFw1fOEGja4T8ahj/vkmXTd/CWjz0t6teT6g9c1HfJhAK6KLzesZtcvUdZLn6pBErKP9Q==`) while keeping SDK `3.7.64` unchanged. The embedded MCP pin requires this installer patch to deliver the native pre-action hook permit fix: protected actions are no longer denied after an allowing runtime gate, and unprotected actions stop at the gate without creating a decision or permit. Policy decisions, proof requirements and fail-closed behavior are unchanged. `activate` and `doctor --self-test` now resend the identical self-test decision and commit with a stable `Idempotency-Key` after a transient 429/502/503/504 or a durable pending acknowledgement (at most three attempts, about one second apart), instead of failing with "self-test did not return decision_id"; client errors still fail immediately, and a final failure names the last state. Restart the owning harness, review hook trust and run `doctor --self-test` after updating. Package publication and registry integrity verification must precede claiming these candidate pins are publicly available.
 
