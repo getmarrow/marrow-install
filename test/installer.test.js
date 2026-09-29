@@ -163,6 +163,121 @@ test('update preserves explicit owner disable bytes and does not ensure the cont
   }
 });
 
+function managedHomeWithStaleClaudeHooks() {
+  const home = tempDir();
+  fs.writeFileSync(path.join(home, 'CLAUDE.md'), '# Claude\n');
+  fs.mkdirSync(path.join(home, '.grok'), { mode: 0o700 });
+  const plan = buildPlan(detectEnvironment(home, { HOME: home }), { mode: 'mcp', agentId: 'managed-home-fixture' });
+  applyPlan({ ...plan, writes: plan.writes.filter((write) => write.label !== 'Grok native hooks') }, {
+    yes: true, dryRun: false, doctor: false,
+  });
+  const settingsPath = path.join(home, '.claude', 'settings.json');
+  fs.writeFileSync(settingsPath, fs.readFileSync(settingsPath, 'utf8').replaceAll('@getmarrow/mcp@3.9.96', '@getmarrow/mcp@3.9.95'));
+  return home;
+}
+
+function snapshotTree(directory) {
+  const entries = {};
+  const walk = (current) => {
+    for (const name of fs.readdirSync(current).sort()) {
+      const target = path.join(current, name);
+      const stat = fs.lstatSync(target);
+      if (stat.isDirectory()) walk(target);
+      else entries[path.relative(directory, target)] = fs.readFileSync(target, 'utf8');
+    }
+  };
+  walk(directory);
+  return entries;
+}
+
+function updateOptions(root, home) {
+  return {
+    cwd: root,
+    home,
+    mode: 'auto',
+    yes: true,
+    repair: true,
+    update: true,
+    doctor: false,
+    dryRun: false,
+    selfTest: false,
+    apiKey: '',
+    baseUrl: 'https://api.getmarrow.ai',
+    agentId: 'update-root-fixture',
+    controller: false,
+    processCommands: [],
+    mcpRegistryMetadata: null,
+  };
+}
+
+test('update from an unrelated checkout stops without writing and names the managed home command', async () => {
+  const home = managedHomeWithStaleClaudeHooks();
+  const checkout = path.join(home, 'builds', 'unrelated-backend');
+  const originalHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    fs.mkdirSync(path.join(checkout, '.git'), { recursive: true });
+    fs.writeFileSync(path.join(checkout, 'package.json'), '{"name":"unrelated-backend"}\n');
+    const before = snapshotTree(home);
+
+    await assert.rejects(install(updateOptions(checkout, home)), (error) => {
+      assert.match(error.message, new RegExp(`Refusing to update ${checkout}: it has no Marrow-managed files`));
+      assert.ok(error.message.includes(`npx -y @getmarrow/install@latest update --cwd ${home}`));
+      assert.ok(error.message.includes('run the install command from that directory instead: npx -y @getmarrow/install@latest'));
+      return true;
+    });
+
+    const cli = require('node:child_process').spawnSync(
+      process.execPath,
+      [path.join(__dirname, '..', 'bin', 'marrow-install.js'), 'update'],
+      { cwd: checkout, env: { PATH: process.env.PATH, HOME: home }, encoding: 'utf8' },
+    );
+    assert.equal(cli.status, 1);
+    assert.match(cli.stderr, /marrow-install failed: Refusing to update .*unrelated-backend: it has no Marrow-managed files/);
+    assert.ok(cli.stderr.includes(`update --cwd ${home}`));
+
+    assert.deepEqual(snapshotTree(home), before);
+    for (const name of ['.marrow', '.mcp.json', 'AGENTS.md']) {
+      assert.equal(fs.existsSync(path.join(checkout, name)), false, name);
+    }
+    assert.equal(fs.existsSync(path.join(home, '.grok', 'hooks', 'marrow.json')), false);
+  } finally {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('update targets the managed home root, and deliberate project install then update keep working', async () => {
+  const home = managedHomeWithStaleClaudeHooks();
+  const project = tempDir();
+  const originalHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const homeUpdate = await install(updateOptions(home, home));
+    assert.equal(homeUpdate.root, home);
+    const homeSettings = fs.readFileSync(path.join(home, '.claude', 'settings.json'), 'utf8');
+    assert.match(homeSettings, /@getmarrow\/mcp@3\.9\.96 marrow-mcp pre-action-hook/);
+    assert.doesNotMatch(homeSettings, /@getmarrow\/mcp@3\.9\.95/);
+
+    fs.mkdirSync(path.join(project, '.git'));
+    fs.writeFileSync(path.join(project, 'package.json'), '{}\n');
+    const deliberate = await install({ ...updateOptions(project, home), repair: false, update: false, mode: 'mcp' });
+    assert.equal(deliberate.root, project);
+    assert.match(fs.readFileSync(path.join(project, 'AGENTS.md'), 'utf8'), /<!-- marrow:passive-start -->/);
+    assert.equal(fs.existsSync(path.join(project, '.mcp.json')), true);
+
+    const projectUpdate = await install(updateOptions(project, home));
+    assert.equal(projectUpdate.root, project);
+    assert.equal(projectUpdate.writeMode, 'repair');
+  } finally {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
 test('doctor identifies stale and mixed MCP processes without exposing command lines', () => {
   const report = inspectMcpProcesses({ commands: [
     'npx -y @getmarrow/mcp@2.8.0',
@@ -1275,6 +1390,133 @@ test('applyPlan distinguishes files written now from configuration already prese
   assert.equal(change.changed, false);
   assert.equal(change.applied, false);
   assert.equal(change.already_present, true);
+});
+
+function reversedKeyOrder(value) {
+  if (Array.isArray(value)) return value.map(reversedKeyOrder);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.keys(value).reverse().map((key) => [key, reversedKeyOrder(value[key])]));
+}
+
+test('managed JSON that differs only in key order or formatting is present and never rewritten', () => {
+  const root = tempDir();
+  const home = tempDir();
+  try {
+    fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
+    fs.writeFileSync(path.join(root, 'CLAUDE.md'), '# Claude\n');
+    for (const directory of ['.codex', '.cursor', '.windsurf', '.gemini']) {
+      fs.mkdirSync(path.join(root, directory), { recursive: true });
+    }
+    fs.mkdirSync(path.join(home, '.grok'), { recursive: true, mode: 0o700 });
+    const plan = buildPlan(detectEnvironment(root, { HOME: home }), { mode: 'mcp', agentId: 'semantic-json-fixture' });
+    applyPlan(plan, { yes: true, dryRun: false, doctor: false });
+    const jsonWrites = plan.writes.filter((write) => /json-transform$/.test(write.type));
+    assert.deepEqual(jsonWrites.map((write) => write.label).sort(), [
+      'Claude Code MCP passive hooks',
+      'Codex native hooks',
+      'Cursor MCP server config',
+      'Cursor native hooks',
+      'Gemini CLI native hooks',
+      'Grok native hooks',
+      'Project MCP server config',
+      'Windsurf native hooks',
+    ]);
+
+    const resaved = new Map();
+    for (const write of jsonWrites) {
+      const text = JSON.stringify(reversedKeyOrder(JSON.parse(fs.readFileSync(write.path, 'utf8'))), null, '\t');
+      fs.writeFileSync(write.path, text);
+      resaved.set(write.path, text);
+    }
+    const claudeEntry = JSON.parse(resaved.get(plan.writes.find((write) => write.label === 'Claude Code MCP passive hooks').path))
+      .hooks.PreToolUse[0];
+    assert.deepEqual(Object.keys(claudeEntry), ['matcher', 'hooks']);
+
+    for (const options of [{ doctor: true }, { yes: true, dryRun: false, doctor: false }]) {
+      const changes = applyPlan(plan, options)
+        .filter((change) => jsonWrites.some((write) => write.path === change.path));
+      for (const change of changes) {
+        assert.equal(change.changed, false, change.label);
+        assert.equal(change.applied, false, change.label);
+        assert.equal(change.already_present, true, change.label);
+      }
+    }
+    for (const [filePath, text] of resaved) assert.equal(fs.readFileSync(filePath, 'utf8'), text);
+
+    const claudePath = path.join(root, '.claude', 'settings.json');
+    fs.writeFileSync(claudePath, resaved.get(claudePath).replaceAll('@getmarrow/mcp@3.9.96', '@getmarrow/mcp@3.9.95'));
+    const stale = applyPlan(plan, { doctor: true }).find((change) => change.path === claudePath);
+    assert.equal(stale.changed, true);
+    assert.equal(stale.already_present, false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('a stale MCP pin hidden in an earlier duplicate JSON key is still repaired and doctor converges', () => {
+  const root = tempDir();
+  try {
+    fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
+    const detection = detectEnvironment(root, { HOME: root });
+    const plan = buildPlan(detection, { mode: 'mcp', agentId: 'duplicate-key-fixture' });
+    applyPlan(plan, { yes: true, dryRun: false, doctor: false });
+    const mcpPath = path.join(root, '.mcp.json');
+    const current = fs.readFileSync(mcpPath, 'utf8');
+    const staleServers = { marrow: { command: 'npx', args: ['-y', '--package=@getmarrow/mcp@3.9.10', 'marrow-mcp'] } };
+    const duplicated = current.replace('{', `{\n  "mcpServers": ${JSON.stringify(staleServers)},`);
+    assert.deepEqual(JSON.parse(duplicated), JSON.parse(current));
+    fs.writeFileSync(mcpPath, duplicated);
+    assert.deepEqual(inspectMcpConfigurations(detection, { paths: [mcpPath] }).stale_versions, ['3.9.10']);
+
+    const doctor = applyPlan(plan, { doctor: true }).find((change) => change.path === mcpPath);
+    assert.equal(doctor.changed, true);
+    assert.equal(doctor.already_present, false);
+    const repaired = applyPlan(plan, { yes: true, dryRun: false, doctor: false }).find((change) => change.path === mcpPath);
+    assert.equal(repaired.applied, true);
+    assert.doesNotMatch(fs.readFileSync(mcpPath, 'utf8'), /@getmarrow\/mcp@3\.9\.10/);
+    assert.deepEqual(inspectMcpConfigurations(detection, { paths: [mcpPath] }).stale_versions, []);
+    assert.equal(applyPlan(plan, { doctor: true }).find((change) => change.path === mcpPath).already_present, true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('doctor does not report Claude hooks missing after Claude Code re-saves settings with matcher first', async () => {
+  const root = tempDir();
+  try {
+    fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
+    fs.writeFileSync(path.join(root, 'CLAUDE.md'), '# Claude\n');
+    const options = {
+      cwd: root,
+      mode: 'mcp',
+      selfTest: false,
+      loopGuardSelfTest: false,
+      apiKey: '',
+      baseUrl: 'https://api.getmarrow.ai',
+      agentId: 'claude-resave-fixture',
+      controller: false,
+      processCommands: [],
+      mcpRegistryMetadata: null,
+    };
+    await install({ ...options, yes: true, dryRun: false, doctor: false });
+    const settingsPath = path.join(root, '.claude', 'settings.json');
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    for (const entries of Object.values(settings.hooks)) {
+      entries.forEach((entry, index) => {
+        entries[index] = entry.matcher === undefined ? entry : { matcher: entry.matcher, hooks: entry.hooks };
+      });
+    }
+    const resaved = JSON.stringify({ autoMode: { enabled: true }, ...settings }, null, 2);
+    fs.writeFileSync(settingsPath, resaved);
+
+    const report = await install({ ...options, yes: false, dryRun: false, doctor: true });
+    assert.equal(report.doctor.missingHooks.includes('Claude Code MCP passive hooks'), false);
+    assert.deepEqual(report.activation.profile.observed_hooks.sort(), ['action_result', 'pre_action', 'prompt', 'session_end']);
+    assert.equal(fs.readFileSync(settingsPath, 'utf8'), resaved);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('applyPlan rejects symlinked targets and cannot modify files outside the project', () => {
