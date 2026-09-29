@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 
 const {
+  HEARTBEAT_REQUEST_TIMEOUT_MS,
   closeActionPermit,
   issueActionPermit,
   permitProtocolVersion,
@@ -11,8 +12,8 @@ const {
 
 function recorder() {
   const calls = [];
-  const requestJson = async (options, method, route, body) => {
-    calls.push({ method, route, body: JSON.parse(JSON.stringify(body)) });
+  const requestJson = async (options, method, route, body, extraHeaders, requestOptions) => {
+    calls.push({ method, route, body: JSON.parse(JSON.stringify(body)), requestOptions });
     return {};
   };
   return { calls, requestJson };
@@ -52,4 +53,6 @@ test('enforcement requests omit agent_id so the server resolves the key-bound or
   for (const call of calls) assert.equal(Object.hasOwn(call.body, 'agent_id'), false, call.body.operation);
   assert.equal(Object.hasOwn(calls[0].body, 'protocol_version'), false);
   assert.equal(Object.hasOwn(calls[3].body, 'protocol_version'), false);
+  assert.equal(HEARTBEAT_REQUEST_TIMEOUT_MS, 15_000);
+  assert.deepEqual(calls.map((call) => call.requestOptions), [undefined, undefined, undefined, { timeoutMs: 15_000 }]);
 });
