@@ -1276,3 +1276,151 @@ test('govern TUI exit row does not redraw after cleanup', async () => {
   const afterCursorRestore = output.slice(output.lastIndexOf('\x1b[?25h') + '\x1b[?25h'.length);
   assert.doesNotMatch(afterCursorRestore, /Marrow Governed Setup/);
 });
+
+function withoutAgentEnv(fn) {
+  const names = ['MARROW_FLEET_AGENT_ID', 'MARROW_AGENT_ID'];
+  const prior = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  for (const name of names) delete process.env[name];
+  const restore = () => {
+    for (const [name, value] of Object.entries(prior)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  };
+  return Promise.resolve().then(fn).finally(restore);
+}
+
+test('governed runner sends no agent id unless one is configured, never the local username', async () => {
+  await withoutAgentEnv(() => {
+    const parsed = parseArgs(['run', '--key', 'test-key', '--', 'echo', 'ok']);
+    assert.equal(parsed.options.agentId, '');
+    assert.notEqual(parsed.options.agentId, os.userInfo().username);
+    assert.equal(Object.hasOwn(headers(parsed.options), 'X-Marrow-Agent-Id'), false);
+    assert.equal(Object.hasOwn(sourceMeta(parsed.options, 'runtime'), 'agent_id'), false);
+
+    process.env.MARROW_FLEET_AGENT_ID = 'registered-agent';
+    const configured = parseArgs(['run', '--key', 'test-key', '--', 'echo', 'ok']);
+    assert.equal(configured.options.agentId, 'registered-agent');
+    assert.equal(headers(configured.options)['X-Marrow-Agent-Id'], 'registered-agent');
+    assert.equal(sourceMeta(configured.options, 'runtime').agent_id, 'registered-agent');
+  });
+});
+
+test('protected governed run omits the agent id and echoes the issued permit protocol on verify and close', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-runner-protocol-'));
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const pathname = new URL(String(url)).pathname;
+    const body = init.body ? JSON.parse(String(init.body)) : {};
+    calls.push({ pathname, body, headers: Object.keys(init.headers || {}).map((name) => name.toLowerCase()) });
+    if (pathname === '/v1/agent/runtime') {
+      return Response.json({ data: {
+        risk_gate: { allow: true, decision: 'allow', risk_level: 'high' },
+        gate_receipt: { id: 'gate-one', required: true },
+        proof_pack: { required: true, required_fields: ['test'] },
+      } });
+    }
+    if (pathname === '/v1/agent/think') return Response.json({ data: { decision_id: 'decision-one' } });
+    if (pathname === '/v1/agent/enforcement' && body.operation === 'issue') {
+      return Response.json({ permit: 'opaque-permit', permit_id: 'permit-one', protocol_version: 2 });
+    }
+    if (pathname === '/v1/agent/enforcement' && body.operation === 'verify') return Response.json({ verified: true });
+    if (pathname === '/v1/agent/enforcement' && body.operation === 'close') return Response.json({ closed: true });
+    if (pathname === '/v1/agent/commit') return Response.json({ data: { committed: true } });
+    return Response.json({ data: {} });
+  };
+  try {
+    await withoutAgentEnv(async () => {
+      const parsed = parseArgs([
+        'run', '--key', 'test-key', '--type', 'deploy', '--action', 'deploy production', '--policy', 'enforce', '--',
+        process.execPath, '-e', '',
+      ]);
+      const result = await runGoverned(parsed, { controlStateOptions: { home } });
+      assert.equal(result.exitCode, 0);
+      assert.equal(result.permit_verified, true);
+    });
+    const enforcement = (operation) => calls.find((call) => call.pathname === '/v1/agent/enforcement' && call.body.operation === operation).body;
+    assert.equal(enforcement('verify').protocol_version, 2);
+    assert.equal(enforcement('close').protocol_version, 2);
+    assert.equal(Object.hasOwn(enforcement('issue'), 'protocol_version'), false);
+    for (const call of calls) {
+      assert.equal(call.headers.includes('x-marrow-agent-id'), false, call.pathname);
+      assert.equal(Object.hasOwn(call.body, 'agent_id'), false, call.pathname);
+      assert.equal(Object.hasOwn(call.body.source_meta || {}, 'agent_id'), false, call.pathname);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('controller CLI keeps its local identity when no agent id is configured', async () => {
+  const { controllerIdentity } = require('../src/controller-manager');
+  const { controllerOnly } = require('../src/governed-runner');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-runner-controller-home-'));
+  const priorHome = process.env.HOME;
+  const priorStateDirectory = process.env.MARROW_SIDECAR_STATE_DIR;
+  process.env.HOME = home;
+  delete process.env.MARROW_SIDECAR_STATE_DIR;
+  try {
+    await withoutAgentEnv(async () => {
+      const identity = controllerIdentity({ root: process.cwd(), agentId: os.userInfo().username });
+      const directory = path.join(home, '.marrow', 'controllers', identity);
+      fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+      for (const segment of ['.marrow', path.join('.marrow', 'controllers'), path.join('.marrow', 'controllers', identity)]) {
+        fs.chmodSync(path.join(home, segment), 0o700);
+      }
+      const exited = require('node:child_process').spawnSync(process.execPath, ['-e', '']);
+      fs.writeFileSync(path.join(directory, 'active.json'), JSON.stringify({
+        instance_id: 'sidecar-409c8dcb-be07-4367-a610-4b130ec24f24',
+        pid: exited.pid,
+        host: '127.0.0.1',
+        port: 35483,
+        token: 'b'.repeat(64),
+        started_at: '2026-09-20T02:06:58.885Z',
+      }), { mode: 0o600 });
+      const parsed = parseArgs(['controller', 'status', '--json']);
+      assert.equal(parsed.options.agentId, '');
+      const result = await controllerOnly(parsed);
+      assert.equal(result.controller.state, 'stale');
+      assert.equal(result.controller.instance_id, 'sidecar-409c8dcb-be07-4367-a610-4b130ec24f24');
+    });
+  } finally {
+    if (priorHome === undefined) delete process.env.HOME;
+    else process.env.HOME = priorHome;
+    if (priorStateDirectory === undefined) delete process.env.MARROW_SIDECAR_STATE_DIR;
+    else process.env.MARROW_SIDECAR_STATE_DIR = priorStateDirectory;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('requestJson aborts a hung request only when a timeout is given', async () => {
+  const { requestJson } = require('../src/governed-runner');
+  const originalFetch = globalThis.fetch;
+  const signals = [];
+  globalThis.fetch = (url, init = {}) => {
+    signals.push(init.signal);
+    if (!init.signal) return Promise.resolve(Response.json({ data: { ok: true } }));
+    return new Promise((resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });
+    });
+  };
+  const options = { apiKey: 'test-key', baseUrl: 'http://127.0.0.1:9', sessionId: 'session-1', client: 'codex' };
+  // AbortSignal.timeout uses an unref'd timer; a real socket keeps the loop alive, this stub does not.
+  const keepAlive = setInterval(() => {}, 1000);
+  try {
+    assert.deepEqual(await requestJson(options, 'GET', '/v1/agent/status'), { ok: true });
+    const started = Date.now();
+    await assert.rejects(
+      requestJson(options, 'POST', '/v1/agent/enforcement', { operation: 'heartbeat' }, {}, { timeoutMs: 50 }),
+      (error) => error.name === 'TimeoutError',
+    );
+    assert.ok(Date.now() - started < 2000);
+    assert.equal(signals[0], undefined);
+    assert.ok(signals[1] instanceof AbortSignal);
+  } finally {
+    clearInterval(keepAlive);
+    globalThis.fetch = originalFetch;
+  }
+});

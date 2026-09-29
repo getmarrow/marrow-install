@@ -352,7 +352,9 @@ function parseBaseOptions(argv, startIndex = 0) {
   const options = {
     apiKey: process.env.MARROW_API_KEY || process.env.MARROW_KEY || '',
     baseUrl: process.env.MARROW_BASE_URL || DEFAULT_BASE_URL,
-    agentId: process.env.MARROW_FLEET_AGENT_ID || process.env.MARROW_AGENT_ID || os.userInfo().username || 'agent',
+    // A local username is never a registered agent. With no configured id, the server
+    // resolves the key-bound agent or the plan seat instead.
+    agentId: process.env.MARROW_FLEET_AGENT_ID || process.env.MARROW_AGENT_ID || '',
     sessionId: process.env.MARROW_SESSION_ID || '',
     profile: process.env.MARROW_GOVERN_PROFILE || 'default',
     policy: process.env.MARROW_GOVERN_POLICY || 'enforce',
@@ -481,7 +483,6 @@ function headers(options) {
   const h = {
     Authorization: `Bearer ${options.apiKey}`,
     'Content-Type': 'application/json',
-    'X-Marrow-Agent-Id': options.agentId,
     'X-Marrow-Session-Id': options.sessionId,
     'X-Marrow-Client': sourceClient(options.client),
     'X-Marrow-Package': '@getmarrow/install',
@@ -491,6 +492,7 @@ function headers(options) {
     'X-Marrow-MCP-Version': ADAPTER_PROVENANCE.mcp.version,
     'User-Agent': '@getmarrow/install governed-runner',
   };
+  if (options.agentId) h['X-Marrow-Agent-Id'] = options.agentId;
   return h;
 }
 
@@ -501,7 +503,7 @@ function sourceMeta(options, channel, extra = {}) {
     client,
     harness: client,
     runner: '@getmarrow/install',
-    agent_id: options.agentId,
+    ...(options.agentId ? { agent_id: options.agentId } : {}),
     session_id: options.sessionId,
     profile: options.profile,
     governed: true,
@@ -514,12 +516,13 @@ function dataOf(json) {
   return json && typeof json === 'object' && json.data && typeof json.data === 'object' ? json.data : json;
 }
 
-async function requestJson(options, method, route, body, extraHeaders = {}) {
+async function requestJson(options, method, route, body, extraHeaders = {}, { timeoutMs } = {}) {
   if (!options.apiKey) throw new Error('MARROW_API_KEY is required. Use --fail-open only for non-production local commands.');
   const response = await fetch(new URL(route, options.baseUrl.replace(/\/$/, '/')), {
     method,
     headers: { ...headers(options), ...extraHeaders },
     body: body === undefined ? undefined : JSON.stringify(body),
+    ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
   });
   const text = await response.text();
   let json = {};
@@ -613,7 +616,7 @@ async function recommendGovernanceMode(options, project = detectProjectSignals()
       environment: process.env.NODE_ENV || process.env.MARROW_GOVERN_PROFILE || options.profile,
     },
     agent: {
-      id: options.agentId,
+      id: options.agentId || undefined,
       role: 'setup',
     },
     source_meta: sourceMeta(options, 'mode_recommend', { action }),
@@ -631,7 +634,7 @@ async function recordGovernanceModeSelection(options, state) {
       environment: process.env.NODE_ENV || process.env.MARROW_GOVERN_PROFILE || options.profile,
     },
     agent: {
-      id: options.agentId,
+      id: options.agentId || undefined,
       role: 'setup',
     },
     selected_mode: selected,
@@ -842,6 +845,7 @@ async function runGoverned(parsed, execution = {}) {
         target,
         surfaces,
         permit: actionPermit.permit,
+        protocolVersion: actionPermit.protocol_version,
       });
       if (verified?.verified !== true) throw new Error('Marrow action permit verification failed.');
       permitVerified = true;
@@ -899,6 +903,7 @@ async function runGoverned(parsed, execution = {}) {
       permitClosed = await closeActionPermit(requestJson, options, {
         permit: actionPermit.permit,
         permitId: actionPermit.permit_id,
+        protocolVersion: actionPermit.protocol_version,
         decisionId,
         success,
         evidence: proof,
@@ -1017,7 +1022,9 @@ async function sidecarOnly(parsed) {
 }
 
 async function controllerOnly(parsed) {
-  const options = { ...parsed.options, root: process.cwd(), mode: 'auto' };
+  // Keep the local controller identity stable; only the server-facing agent id changed.
+  const identityAgentId = parsed.options.agentId || os.userInfo().username || 'agent';
+  const options = { ...parsed.options, identityAgentId, root: process.cwd(), mode: 'auto' };
   let result;
   if (parsed.action === 'ensure') result = await ensureGovernanceController(options);
   else if (parsed.action === 'start') result = await startGovernanceController(options);
@@ -1441,7 +1448,7 @@ function fleetPanel(snapshot) {
   return [
     'Marrow Fleet Operator',
     '',
-    `Agent: ${snapshot.agent_id}`,
+    `Agent: ${snapshot.agent_id || 'resolved by API key'}`,
     `Snapshot: ${snapshot.generated_at}`,
     '',
     `Live agents: ${snapshot.live_agents ?? 'unknown'}`,
@@ -1747,7 +1754,7 @@ async function integrationsOnly(parsed) {
 function governPanel(options) {
   const rows = detectHarnesses();
   const project = detectProjectSignals();
-  const agentId = displayText(options.agentId, 80);
+  const agentId = displayText(options.agentId, 80) || 'resolved by API key';
   const profile = displayText(options.profile, 80);
   const policy = displayText(options.policy, 24);
   const lines = [
@@ -1770,7 +1777,7 @@ function governPanel(options) {
       : '  recommendation: export MARROW_API_KEY to get an account/fleet-backed mode recommendation.',
     '',
     'Recommended first commands:',
-    `  npx @getmarrow/install run --agent ${shellQuoteDisplay(options.agentId)} --profile production --policy enforce -- codex`,
+    `  npx @getmarrow/install run ${options.agentId ? `--agent ${shellQuoteDisplay(options.agentId)} ` : ''}--profile production --policy enforce -- codex`,
     `  npx @getmarrow/install run --agent deploy-agent --type deploy --policy enforce -- wrangler deploy`,
     `  npx @getmarrow/install gate "deploy production worker after tests pass"`,
     '',
@@ -1817,7 +1824,7 @@ function commandForSelection(state, options) {
   }
   const command = harness.command === '<your-agent-command>' ? '<your-command>' : harness.command;
   const renderedCommand = command.split(/\s+/).filter(Boolean).map(shellQuote).join(' ');
-  return `MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --agent ${shellQuoteDisplay(options.agentId)} --profile ${shellQuoteDisplay(options.profile)} --policy ${shellQuoteDisplay(mode.policy)} -- ${renderedCommand}`;
+  return `MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run ${options.agentId ? `--agent ${shellQuoteDisplay(options.agentId)} ` : ''}--profile ${shellQuoteDisplay(options.profile)} --policy ${shellQuoteDisplay(mode.policy)} -- ${renderedCommand}`;
 }
 
 function buildGovernState(options, cwd = process.cwd()) {
@@ -1910,7 +1917,7 @@ function renderGovernTui(state, options) {
     '| Passive agent governance for day-one use                   |',
     '+------------------------------------------------------------+',
     '',
-    `Agent: ${displayText(options.agentId, 36)}   Profile: ${displayText(options.profile, 24)}   API key: ${options.apiKey ? 'present' : 'missing'}`,
+    `Agent: ${displayText(options.agentId, 36) || 'resolved by API key'}   Profile: ${displayText(options.profile, 24)}   API key: ${options.apiKey ? 'present' : 'missing'}`,
     `Project: ${displayText(state.project?.name || 'workspace', 36)}   Signals: ${displayText((state.project?.signals || []).slice(0, 4).join(', ') || 'none', 52)}`,
     '',
     'Navigation: Up/Down move   Left/Right change   Enter select',
@@ -2036,7 +2043,7 @@ function renderFleetTui(state) {
     '| Live fleet health, proof debt, gates, and exact fixes       |',
     '+------------------------------------------------------------+',
     '',
-    `Agent: ${displayText(snapshot.agent_id, 36)}   Snapshot: ${displayText(snapshot.generated_at, 36)}`,
+    `Agent: ${displayText(snapshot.agent_id, 36) || 'resolved by API key'}   Snapshot: ${displayText(snapshot.generated_at, 36)}`,
     `API: ${displayText(snapshot.base_url, 60)}`,
     '',
     'Navigation: Up/Down move   Left/Right select agent   Enter inspect/print',
@@ -2419,6 +2426,7 @@ module.exports = {
   verifyPermitOnly,
   coverageOnly,
   sidecarOnly,
+  requestJson,
   controllerOnly,
   actionBinding,
   gateOnly,

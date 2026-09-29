@@ -3494,6 +3494,8 @@ function printReport(report) {
 }
 
 async function install(options) {
+  // The controller keeps the stable local id for its identity, but only sends a configured id.
+  const configuredAgentId = String(options.agentId || '').trim();
   if (options.activate && (options.yes !== true || options.dryRun || options.doctor)) {
     throw new Error('activate requires write mode (--yes) because hooks must be installed during this run');
   }
@@ -3703,7 +3705,8 @@ async function install(options) {
       controller = await ensureGovernanceController({
         apiKey: options.apiKey,
         baseUrl: options.baseUrl,
-        agentId: options.agentId,
+        agentId: configuredAgentId,
+        identityAgentId: options.agentId,
         client,
         root: detection.root,
         mode: plan.mode,
