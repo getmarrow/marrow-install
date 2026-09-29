@@ -2769,11 +2769,14 @@ function selfTestRetryDelayMs(response, data, override) {
   return Math.min(delay, SELF_TEST_MAX_RETRY_DELAY_MS);
 }
 
-// A first write can meet a transient 5xx, or a durable "pending" acknowledgement
-// that has no decision id yet. Marrow's contract is to resend the identical request
-// with the same Idempotency-Key, so a retry can never create a second record.
+// A first write can meet a transient 5xx, or a durable "pending" acknowledgement.
+// Marrow's contract is to resend the identical request with the same Idempotency-Key,
+// so a retry can never create a second record. As in the MCP client, a pending
+// acknowledgement is never complete, even when it names a created decision: that id
+// is pinned and the final response must carry the same one.
 async function selfTestWrite(url, options, { idempotencyKey, complete, retryDelayMs }) {
   let lastState = 'no response';
+  let pinnedDecisionId = null;
   for (let attempt = 1; attempt <= SELF_TEST_WRITE_ATTEMPTS; attempt += 1) {
     const res = await fetch(url, { ...options, headers: { ...options.headers, 'idempotency-key': idempotencyKey } });
     const text = await res.text();
@@ -2785,10 +2788,18 @@ async function selfTestWrite(url, options, { idempotencyKey, complete, retryDela
     }
     const data = json.data || json;
     if (res.ok) {
-      const result = complete(data);
-      if (result !== undefined) return result;
-      const pending = data?.retryable === true && data?.committed === false && data?.idempotency_key === idempotencyKey;
-      if (!pending) return undefined;
+      if (data?.idempotency_key !== undefined && data.idempotency_key !== idempotencyKey) {
+        throw new Error('self-test write returned a different idempotency key');
+      }
+      const decisionId = selfTestDecisionId(data);
+      if (pinnedDecisionId && decisionId && decisionId !== pinnedDecisionId) {
+        throw new Error('self-test write returned a different decision id than its pending acknowledgement');
+      }
+      if (data?.retryable !== true || data?.committed !== false) return complete(data);
+      if (data.idempotency_key !== idempotencyKey) {
+        throw new Error('self-test write returned a pending acknowledgement without its idempotency key');
+      }
+      if (decisionId && data.decision_state === 'created') pinnedDecisionId = decisionId;
       lastState = 'pending';
     } else if (SELF_TEST_TRANSIENT_STATUSES.has(res.status)) {
       const reason = String(json.error || json.message || '').slice(0, 200);
@@ -2805,9 +2816,7 @@ async function selfTestWrite(url, options, { idempotencyKey, complete, retryDela
 
 function selfTestDecisionId(data) {
   const decisionId = data?.decision_id || data?.decisionId;
-  if (typeof decisionId !== 'string' || !decisionId) return undefined;
-  const pending = data.retryable === true && data.committed === false;
-  return !pending || data.decision_state === 'created' ? decisionId : undefined;
+  return typeof decisionId === 'string' && decisionId ? decisionId : undefined;
 }
 
 function runLoopGuardSelfTest(options = {}) {
@@ -2942,7 +2951,7 @@ async function runSelfTest(options) {
     }),
   }, {
     idempotencyKey: `${selfTestKey}:commit`,
-    complete: (data) => (data?.retryable === true && data?.committed === false ? undefined : data),
+    complete: (data) => data,
     retryDelayMs: options.selfTestRetryDelayMs,
   });
   if (commit?.failed) {
@@ -3430,6 +3439,7 @@ function printReport(report) {
   process.stdout.write('\nAutomatic controller:\n');
   process.stdout.write(`- state: ${report.controller?.active ? 'active' : report.controller?.state || 'unavailable'}\n`);
   if (report.controller?.started_at) process.stdout.write(`- started: ${report.controller.started_at}\n`);
+  if (report.controller?.reason) process.stdout.write(`- reason: ${report.controller.reason}\n`);
   if (report.controller?.exact_fix) process.stdout.write(`- exact fix: ${report.controller.exact_fix}\n`);
 
   if (report.writeMode === 'doctor') {
@@ -3711,6 +3721,19 @@ async function install(options) {
       };
       if (options.activate) throw new Error(`Marrow activation failed: local controller did not start: ${message}`);
     }
+  }
+  // Only a controller that is simply not running is expected while the owner has disabled
+  // local control. Unsafe state, an unverified or unresponsive process, and unsupported
+  // platforms keep their exact fix.
+  if (localControl.state === 'disabled'
+    && controllerSupportedPlatform(controllerPlatform)
+    && ['stopped', 'stale'].includes(controller.state)) {
+    controller = {
+      ...controller,
+      required: false,
+      exact_fix: null,
+      reason: 'Local control is disabled by the owner, so the controller is intentionally not started. It starts again on the next install or update after npx @getmarrow/install control enable.',
+    };
   }
   const remediation = options.repair
     ? {
