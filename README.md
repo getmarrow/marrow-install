@@ -101,7 +101,7 @@ npx @getmarrow/install controller stop
 
 Persistent controller lifecycle is currently Linux-only. On macOS or Windows, activation still writes supported configuration and verifies one server-side install self-test without certifying that hooks continuously ran; run `npx @getmarrow/install sidecar` under an owner-managed service and pass `--no-controller`. The controller does not silently upgrade packages, change governance policy, rotate credentials, or modify unrelated project configuration.
 
-The controller is not a boot service. After a host restart, or any exit that skips its shutdown handler, doctor reports it as `stale` until the next install, update, or `controller ensure`. While local control is disabled, the controller is not started, and doctor reports it as not required instead of recommending `controller ensure`.
+The controller is not a boot service. After a host restart, or any exit that skips its shutdown handler, doctor reports it as `stale` until the next install, update, or `controller ensure`. While local control is disabled, the controller is not started, and doctor reports a stopped or stale controller as not required instead of recommending `controller ensure`; unsafe controller state or an unverified or unresponsive controller process keeps its exact fix.
 
 ## What's New in v0.1.64
 

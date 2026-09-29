@@ -2508,3 +2508,106 @@ test('doctor never recommends starting a stale controller while local control is
     for (const directory of [root, home, stateDirectory]) fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('disabled local control keeps the exact fix for unsafe, unverified, unresponsive and unsupported controllers', async () => {
+  const { spawn } = require('node:child_process');
+  const http = require('node:http');
+  const root = tempDir();
+  const home = tempDir();
+  const stateDirectory = tempDir();
+  const childStateDirectory = tempDir();
+  const childProject = tempDir();
+  const originalStateDirectory = process.env.MARROW_SIDECAR_STATE_DIR;
+  process.env.MARROW_SIDECAR_STATE_DIR = stateDirectory;
+  let child;
+  try {
+    fs.chmodSync(stateDirectory, 0o700);
+    fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
+    control.writeLocalControlState(false, { home });
+    const statePath = path.join(stateDirectory, 'active.json');
+    const writeState = (pid, { mode = 0o600, port = 35483 } = {}) => {
+      fs.rmSync(statePath, { force: true });
+      fs.writeFileSync(statePath, JSON.stringify({
+        instance_id: 'sidecar-409c8dcb-be07-4367-a610-4b130ec24f24',
+        pid,
+        host: '127.0.0.1',
+        port,
+        token: 'c'.repeat(64),
+        started_at: '2026-09-20T02:06:58.885Z',
+      }), { mode });
+      fs.chmodSync(statePath, mode);
+    };
+    const doctor = (controllerPlatform = 'linux') => install({
+      cwd: root,
+      mode: 'mcp',
+      yes: false,
+      dryRun: false,
+      doctor: true,
+      selfTest: false,
+      apiKey: '',
+      baseUrl: 'https://api.getmarrow.ai',
+      agentId: 'controller-state-fixture',
+      controlHome: home,
+      controllerPlatform,
+      processCommands: [],
+      mcpRegistryMetadata: null,
+    });
+    const expectExactFixKept = (report, state, fix) => {
+      assert.equal(report.local_control.enabled, false);
+      assert.equal(report.controller.state, state);
+      assert.match(report.controller.exact_fix, fix, state);
+      assert.equal(report.controller.required, undefined, state);
+      assert.equal(report.controller.reason, undefined, state);
+    };
+
+    const stopped = await doctor();
+    assert.equal(stopped.controller.state, 'stopped');
+    assert.equal(stopped.controller.required, false);
+    assert.equal(stopped.controller.exact_fix, null);
+    assert.match(stopped.controller.reason, /intentionally not started/);
+
+    writeState(process.pid, { mode: 0o644 });
+    expectExactFixKept(await doctor(), 'invalid_state', /controller stop, then npx @getmarrow\/install controller ensure/);
+
+    writeState(process.pid);
+    expectExactFixKept(await doctor(), 'identity_mismatch', /will not signal an unverified PID/);
+
+    fs.chmodSync(childStateDirectory, 0o700);
+    child = spawn(process.execPath, [path.join(__dirname, '..', 'bin', 'marrow-install.js'), 'sidecar', '--client', 'codex'], {
+      env: {
+        PATH: process.env.PATH,
+        HOME: home,
+        MARROW_API_KEY: 'test-controller-api-key',
+        MARROW_BASE_URL: 'http://127.0.0.1:9',
+        MARROW_SIDECAR_STATE_DIR: childStateDirectory,
+        MARROW_CONTROLLER_PROJECT_ROOT: childProject,
+        MARROW_CONTROLLER_MANAGED_MODE: 'md',
+      },
+      stdio: 'ignore',
+    });
+    const deadline = Date.now() + 5000;
+    while (!fs.existsSync(path.join(childStateDirectory, 'active.json')) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(fs.existsSync(path.join(childStateDirectory, 'active.json')), true);
+    const closed = http.createServer();
+    await new Promise((resolve) => closed.listen(0, '127.0.0.1', resolve));
+    const closedPort = closed.address().port;
+    await new Promise((resolve) => closed.close(resolve));
+    writeState(child.pid, { port: closedPort });
+    expectExactFixKept(await doctor(), 'unreachable', /controller stop, then npx @getmarrow\/install controller ensure/);
+
+    expectExactFixKept(await doctor('darwin'), 'unsupported_platform', /owner-managed service/);
+  } finally {
+    if (child && child.exitCode === null) {
+      const exited = new Promise((resolve) => child.once('exit', resolve));
+      child.kill('SIGTERM');
+      await exited;
+    }
+    if (originalStateDirectory === undefined) delete process.env.MARROW_SIDECAR_STATE_DIR;
+    else process.env.MARROW_SIDECAR_STATE_DIR = originalStateDirectory;
+    for (const directory of [root, home, stateDirectory, childStateDirectory, childProject]) {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  }
+});
