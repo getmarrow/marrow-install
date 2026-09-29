@@ -2273,8 +2273,124 @@ test('activation endpoint failure rejects install instead of returning a false s
       apiKey: 'test-api-key',
       baseUrl: 'https://api.example.test',
       agentId: 'agent-one',
-    }), /Marrow activation failed: activation service unavailable/);
+      selfTestRetryDelayMs: 0,
+    }), /Marrow activation failed: self-test did not return decision_id after 3 attempts \(last: HTTP 503: activation service unavailable\)/);
   } finally {
     global.fetch = originalFetch;
   }
+});
+
+function selfTestWriteHarness(thinkResponses, commitResponses = [() => ({ status: 200, body: { data: { ok: true } } })]) {
+  const calls = { think: [], commit: [] };
+  const fetchStub = async (url, request = {}) => {
+    const href = String(url);
+    const key = request.headers?.['idempotency-key'];
+    if (href.endsWith('/v1/agent/think')) {
+      const next = thinkResponses[Math.min(calls.think.length, thinkResponses.length - 1)];
+      calls.think.push({ key, body: request.body });
+      const { status, body } = next(key);
+      return new Response(JSON.stringify(body), { status });
+    }
+    if (href.endsWith('/v1/agent/commit')) {
+      const next = commitResponses[Math.min(calls.commit.length, commitResponses.length - 1)];
+      calls.commit.push({ key, body: JSON.parse(request.body) });
+      const { status, body } = next(key);
+      return new Response(JSON.stringify(body), { status });
+    }
+    return new Response(JSON.stringify({ error: 'stop-after-commit' }), { status: 400 });
+  };
+  const run = () => runSelfTest({
+    selfTest: true,
+    apiKey: 'mrw_test_key',
+    baseUrl: 'https://api.getmarrow.ai',
+    agentId: 'installer-test',
+    selfTestRetryDelayMs: 0,
+  });
+  return { calls, fetchStub, run };
+}
+
+async function withFetch(stub, fn) {
+  const originalFetch = global.fetch;
+  global.fetch = stub;
+  try {
+    await fn();
+  } finally {
+    global.fetch = originalFetch;
+  }
+}
+
+test('self-test retries a transient think 503 with the same idempotency key', async () => {
+  const harness = selfTestWriteHarness([
+    () => ({ status: 503, body: { error: 'Authentication store timed out; retry once.', code: 'AUTH_STORE_TIMEOUT' } }),
+    () => ({ status: 200, body: { data: { decision_id: 'dec-after-503' } } }),
+  ]);
+  await withFetch(harness.fetchStub, async () => {
+    await assert.rejects(harness.run(), /stop-after-commit/);
+  });
+  assert.equal(harness.calls.think.length, 2);
+  assert.match(harness.calls.think[0].key, /^install-self-test:[0-9a-f-]{36}:think$/);
+  assert.equal(harness.calls.think[1].key, harness.calls.think[0].key);
+  assert.equal(harness.calls.think[1].body, harness.calls.think[0].body);
+  assert.equal(harness.calls.commit.length, 1);
+  assert.equal(harness.calls.commit[0].body.decision_id, 'dec-after-503');
+  assert.match(harness.calls.commit[0].key, /^install-self-test:[0-9a-f-]{36}:commit$/);
+});
+
+test('self-test follows a pending think acknowledgement until the decision exists', async () => {
+  const harness = selfTestWriteHarness([
+    (key) => ({ status: 202, body: { data: {
+      retryable: true, committed: false, idempotency_key: key, phase: 'think_pending',
+      decision_state: 'pending', retry_after_ms: 1000,
+    } } }),
+    () => ({ status: 200, body: { data: { decision_id: 'dec-after-pending' } } }),
+  ]);
+  await withFetch(harness.fetchStub, async () => {
+    await assert.rejects(harness.run(), /stop-after-commit/);
+  });
+  assert.equal(harness.calls.think.length, 2);
+  assert.equal(harness.calls.commit[0].body.decision_id, 'dec-after-pending');
+});
+
+test('self-test uses a created decision id carried by a pending think acknowledgement', async () => {
+  const harness = selfTestWriteHarness([
+    (key) => ({ status: 202, body: { data: {
+      retryable: true, committed: false, idempotency_key: key, decision_id: 'dec-created',
+      decision_state: 'created', reconciliation_state: 'runtime_continuation_persistence_pending',
+    } } }),
+  ]);
+  await withFetch(harness.fetchStub, async () => {
+    await assert.rejects(harness.run(), /stop-after-commit/);
+  });
+  assert.equal(harness.calls.think.length, 1);
+  assert.equal(harness.calls.commit[0].body.decision_id, 'dec-created');
+});
+
+test('self-test reports the last state after bounded think attempts and does not retry client errors', async () => {
+  const unavailable = selfTestWriteHarness([() => ({ status: 503, body: { error: 'unavailable' } })]);
+  await withFetch(unavailable.fetchStub, async () => {
+    await assert.rejects(unavailable.run(), /self-test did not return decision_id after 3 attempts \(last: HTTP 503: unavailable\)/);
+  });
+  assert.equal(unavailable.calls.think.length, 3);
+  assert.equal(unavailable.calls.commit.length, 0);
+
+  const rejected = selfTestWriteHarness([() => ({ status: 401, body: { error: 'Invalid API key' } })]);
+  await withFetch(rejected.fetchStub, async () => {
+    await assert.rejects(rejected.run(), /Invalid API key/);
+  });
+  assert.equal(rejected.calls.think.length, 1);
+});
+
+test('self-test retries a transient commit failure with its own idempotency key', async () => {
+  const harness = selfTestWriteHarness(
+    [() => ({ status: 200, body: { data: { decision_id: 'dec-commit-retry' } } })],
+    [
+      () => ({ status: 503, body: { error: 'unavailable' } }),
+      () => ({ status: 200, body: { data: { committed: true } } }),
+    ],
+  );
+  await withFetch(harness.fetchStub, async () => {
+    await assert.rejects(harness.run(), /stop-after-commit/);
+  });
+  assert.equal(harness.calls.commit.length, 2);
+  assert.equal(harness.calls.commit[1].key, harness.calls.commit[0].key);
 });

@@ -2684,6 +2684,60 @@ async function requestJson(url, options) {
   return json.data || json;
 }
 
+const SELF_TEST_WRITE_ATTEMPTS = 3;
+const SELF_TEST_RETRY_DELAY_MS = 1_000;
+const SELF_TEST_MAX_RETRY_DELAY_MS = 2_000;
+const SELF_TEST_TRANSIENT_STATUSES = new Set([429, 502, 503, 504]);
+
+function selfTestRetryDelayMs(response, data, override) {
+  if (Number.isFinite(override) && override >= 0) return override;
+  const hinted = Number(data?.retry_after_ms);
+  const header = Number(response?.headers?.get?.('retry-after')) * 1000;
+  const delay = hinted > 0 ? hinted : header > 0 ? header : SELF_TEST_RETRY_DELAY_MS;
+  return Math.min(delay, SELF_TEST_MAX_RETRY_DELAY_MS);
+}
+
+// A first write can meet a transient 5xx, or a durable "pending" acknowledgement
+// that has no decision id yet. Marrow's contract is to resend the identical request
+// with the same Idempotency-Key, so a retry can never create a second record.
+async function selfTestWrite(url, options, { idempotencyKey, complete, retryDelayMs }) {
+  let lastState = 'no response';
+  for (let attempt = 1; attempt <= SELF_TEST_WRITE_ATTEMPTS; attempt += 1) {
+    const res = await fetch(url, { ...options, headers: { ...options.headers, 'idempotency-key': idempotencyKey } });
+    const text = await res.text();
+    let json = {};
+    try {
+      json = text ? JSON.parse(text) : {};
+    } catch {
+      json = { raw: text.slice(0, 500) };
+    }
+    const data = json.data || json;
+    if (res.ok) {
+      const result = complete(data);
+      if (result !== undefined) return result;
+      const pending = data?.retryable === true && data?.committed === false && data?.idempotency_key === idempotencyKey;
+      if (!pending) return undefined;
+      lastState = 'pending';
+    } else if (SELF_TEST_TRANSIENT_STATUSES.has(res.status)) {
+      const reason = String(json.error || json.message || '').slice(0, 200);
+      lastState = reason ? `HTTP ${res.status}: ${reason}` : `HTTP ${res.status}`;
+    } else {
+      throw new Error(String(json.error || json.message || `HTTP ${res.status}`));
+    }
+    if (attempt < SELF_TEST_WRITE_ATTEMPTS) {
+      await new Promise((resolve) => setTimeout(resolve, selfTestRetryDelayMs(res, data, retryDelayMs)));
+    }
+  }
+  return { failed: lastState };
+}
+
+function selfTestDecisionId(data) {
+  const decisionId = data?.decision_id || data?.decisionId;
+  if (typeof decisionId !== 'string' || !decisionId) return undefined;
+  const pending = data.retryable === true && data.committed === false;
+  return !pending || data.decision_state === 'created' ? decisionId : undefined;
+}
+
 function runLoopGuardSelfTest(options = {}) {
   const target = executableMcpTarget(options);
   const isolatedHome = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-install-loop-guard-'));
@@ -2782,7 +2836,8 @@ async function runSelfTest(options) {
   if (options.agentId) headers['x-marrow-agent-id'] = options.agentId;
 
   const baseUrl = options.baseUrl.replace(/\/+$/, '');
-  const think = await requestJson(`${baseUrl}/v1/agent/think`, {
+  const selfTestKey = `install-self-test:${crypto.randomUUID()}`;
+  const think = await selfTestWrite(`${baseUrl}/v1/agent/think`, {
     method: 'POST',
     headers,
     body: JSON.stringify({
@@ -2794,12 +2849,18 @@ async function runSelfTest(options) {
         user_intent: 'operate',
       },
     }),
+  }, {
+    idempotencyKey: `${selfTestKey}:think`,
+    complete: (data) => selfTestDecisionId(data),
+    retryDelayMs: options.selfTestRetryDelayMs,
   });
 
-  const decisionId = think.decision_id || think.decisionId;
-  if (!decisionId) throw new Error('self-test did not return decision_id');
+  const decisionId = typeof think === 'string' ? think : undefined;
+  if (!decisionId) {
+    throw new Error(`self-test did not return decision_id${think?.failed ? ` after ${SELF_TEST_WRITE_ATTEMPTS} attempts (last: ${think.failed})` : ''}`);
+  }
 
-  await requestJson(`${baseUrl}/v1/agent/commit`, {
+  const commit = await selfTestWrite(`${baseUrl}/v1/agent/commit`, {
     method: 'POST',
     headers,
     body: JSON.stringify({
@@ -2807,7 +2868,14 @@ async function runSelfTest(options) {
       success: true,
       outcome: 'Marrow passive installer self-test completed successfully',
     }),
+  }, {
+    idempotencyKey: `${selfTestKey}:commit`,
+    complete: (data) => (data?.retryable === true && data?.committed === false ? undefined : data),
+    retryDelayMs: options.selfTestRetryDelayMs,
   });
+  if (commit?.failed) {
+    throw new Error(`self-test commit did not complete after ${SELF_TEST_WRITE_ATTEMPTS} attempts (last: ${commit.failed})`);
+  }
 
   const status = await requestJson(`${baseUrl}/v1/agent/status`, { headers });
   const context = await requestJson(`${baseUrl}/v1/agent/context`, { headers })
