@@ -1,5 +1,8 @@
 const crypto = require('node:crypto');
 
+// A background heartbeat must never hang on a stalled API response.
+const HEARTBEAT_REQUEST_TIMEOUT_MS = 15_000;
+
 function sha256(value) {
   return crypto.createHash('sha256').update(String(value || '')).digest('hex');
 }
@@ -17,11 +20,22 @@ function actionBinding(input) {
   };
 }
 
-async function enforcementRequest(requestJson, options, operation, input = {}) {
-  return requestJson(options, 'POST', '/v1/agent/enforcement', {
-    operation,
-    ...input,
-  });
+// The server resolves the key-bound or seat agent when no agent id is configured.
+function configuredAgentId(options) {
+  return String(options.agentId || '').trim() || undefined;
+}
+
+// Verify and close must declare the protocol the permit was issued under (1 or 2).
+function permitProtocolVersion(input) {
+  const version = input.protocolVersion ?? input.protocol_version;
+  return version === 1 || version === 2 ? version : 1;
+}
+
+async function enforcementRequest(requestJson, options, operation, input = {}, requestOptions = undefined) {
+  const body = { operation, ...input };
+  return requestOptions
+    ? requestJson(options, 'POST', '/v1/agent/enforcement', body, {}, requestOptions)
+    : requestJson(options, 'POST', '/v1/agent/enforcement', body);
 }
 
 async function issueActionPermit(requestJson, options, input) {
@@ -29,7 +43,7 @@ async function issueActionPermit(requestJson, options, input) {
   return enforcementRequest(requestJson, options, 'issue', {
     ...binding,
     session_id: options.sessionId,
-    agent_id: options.agentId,
+    agent_id: configuredAgentId(options),
     harness: options.client,
     policy_mode: options.policy,
     decision_id: input.decisionId || null,
@@ -46,8 +60,9 @@ async function verifyActionPermit(requestJson, options, input) {
     ...binding,
     surfaces: Array.isArray(input.surfaces) ? input.surfaces : [],
     permit: input.permit,
+    protocol_version: permitProtocolVersion(input),
     session_id: options.sessionId,
-    agent_id: options.agentId,
+    agent_id: configuredAgentId(options),
     harness: options.client,
   });
 }
@@ -58,22 +73,23 @@ async function closeActionPermit(requestJson, options, input) {
     permit_id: input.permitId || null,
     decision_id: input.decisionId || null,
     session_id: options.sessionId,
-    agent_id: options.agentId,
+    agent_id: configuredAgentId(options),
     success: Boolean(input.success),
     evidence: input.evidence || {},
+    protocol_version: permitProtocolVersion(input),
   });
 }
 
 async function recordEnforcementHeartbeat(requestJson, options, input = {}) {
   return enforcementRequest(requestJson, options, 'heartbeat', {
     session_id: options.sessionId,
-    agent_id: options.agentId,
+    agent_id: configuredAgentId(options),
     harness: options.client,
     sidecar_instance_id: input.sidecarInstanceId || null,
     config_fingerprint: input.configFingerprint || null,
     expected_hooks: input.expectedHooks || ['pre_action', 'action_result', 'outcome_closure'],
     observed_hooks: input.observedHooks || ['pre_action'],
-  });
+  }, { timeoutMs: HEARTBEAT_REQUEST_TIMEOUT_MS });
 }
 
 async function readEnforcementCoverage(requestJson, options) {
@@ -83,8 +99,10 @@ async function readEnforcementCoverage(requestJson, options) {
 }
 
 module.exports = {
+  HEARTBEAT_REQUEST_TIMEOUT_MS,
   actionBinding,
   sha256,
+  permitProtocolVersion,
   enforcementRequest,
   issueActionPermit,
   verifyActionPermit,

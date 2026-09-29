@@ -12,7 +12,7 @@ const LIFECYCLE_LOCK_STALE_MS = 30_000;
 
 function controllerIdentity(options = {}) {
   const root = path.resolve(options.root || process.cwd());
-  const agentId = String(options.agentId || process.env.MARROW_FLEET_AGENT_ID || process.env.MARROW_AGENT_ID || 'agent').trim() || 'agent';
+  const agentId = String(options.identityAgentId || options.agentId || process.env.MARROW_FLEET_AGENT_ID || process.env.MARROW_AGENT_ID || 'agent').trim() || 'agent';
   return crypto.createHash('sha256').update(`${root}\0${agentId}`).digest('hex').slice(0, 24);
 }
 
@@ -201,13 +201,17 @@ async function controllerStatus(options = {}) {
     const maintenance = body.maintenance && typeof body.maintenance === 'object'
       ? body.maintenance
       : null;
+    const heartbeat = body.heartbeat && typeof body.heartbeat === 'object'
+      ? body.heartbeat
+      : null;
     return {
       active: true,
       state: 'active',
       started_at: state.started_at,
       instance_id: state.instance_id,
       maintenance,
-      exact_fix: maintenance?.exact_fix || null,
+      heartbeat,
+      exact_fix: maintenance?.exact_fix || heartbeat?.exact_fix || null,
     };
   } catch {
     return {
@@ -233,8 +237,10 @@ function cleanControllerEnv(options) {
   }
   env.MARROW_API_KEY = options.apiKey;
   env.MARROW_BASE_URL = options.baseUrl;
-  env.MARROW_FLEET_AGENT_ID = options.agentId;
-  env.MARROW_AGENT_ID = options.agentId;
+  if (options.agentId) {
+    env.MARROW_FLEET_AGENT_ID = options.agentId;
+    env.MARROW_AGENT_ID = options.agentId;
+  }
   env.MARROW_CLIENT = options.client;
   env.MARROW_GOVERN_PROFILE = options.profile;
   env.MARROW_GOVERN_POLICY = options.policy;
@@ -370,7 +376,7 @@ async function startGovernanceController(options) {
     const args = [
       binPath,
       'sidecar',
-      '--agent', options.agentId,
+      ...(options.agentId ? ['--agent', options.agentId] : []),
       '--client', options.client,
       '--profile', options.profile,
       '--policy', options.policy,
