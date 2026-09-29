@@ -87,6 +87,8 @@ npx -y --package=@getmarrow/mcp@latest marrow-mcp ping
 
 `update` resolves official npm metadata once, selects one exact verified MCP target, and synchronizes every Marrow-managed surface in the detected owning workspace while retaining unrelated user hooks and configuration. Restart the detected owning harnesses once after it completes; running processes do not change before that restart. Run the doctor verification once after restart. Do not run separate `marrow-mcp setup` and restart cycles for the same detected workspace.
 
+`update` and `--repair` only refresh an existing install. Run from a directory with no Marrow-managed files while your home directory is managed, they stop without writing and print the exact `update --cwd <home>` command; to add Marrow to that project, run the install command there instead. Managed JSON that differs only in key order or formatting, for example after a harness re-saves its settings, counts as present and is not rewritten.
+
 `activate` remains available for initial activation. After explicit activation, the local controller can restore drifted Marrow-managed hooks and configuration. Package upgrades, owner policy, credentials, explicitly disabled hooks, and unrelated local files remain explicit and subject to the operator's normal change policy.
 
 ## Automatic Controller
