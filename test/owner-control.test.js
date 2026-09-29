@@ -1,3 +1,4 @@
+const { isolatedHome } = require('./support/isolated-environment');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -7,6 +8,18 @@ const control = require('../src/control-state');
 const runner = require('../src/governed-runner');
 
 function tempHome() { return fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-owner-control-')); }
+
+test('tests resolve default control state in an isolated home without Marrow credentials', async () => {
+  assert.equal(os.homedir(), isolatedHome);
+  assert.deepEqual(Object.keys(process.env).filter((name) => /^(MARROW|OPENCLAW)_/.test(name)), []);
+  assert.deepEqual(control.readLocalControlState(), { enabled: true, state: 'default_enabled', changed_at: null });
+  const originalFetch = global.fetch; let calls = 0;
+  global.fetch = async () => { calls += 1; return { ok: true }; };
+  try {
+    assert.equal(await control.bestEffortLifecycle({ event_type: 'journey_update' }), false);
+    assert.equal(calls, 0);
+  } finally { global.fetch = originalFetch; }
+});
 
 test('owner control requires confirmation and disable/enable are byte-idempotent private atomic writes', async () => {
   const home = tempHome();
