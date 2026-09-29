@@ -968,6 +968,54 @@ function detectEnvironment(cwd = process.cwd(), env = process.env) {
   };
 }
 
+const MARROW_MANAGED_ROOT_FILES = Object.freeze([
+  'AGENTS.md',
+  'CLAUDE.md',
+  '.mcp.json',
+  path.join('.claude', 'settings.json'),
+  path.join('.codex', 'hooks.json'),
+  path.join('.cursor', 'hooks.json'),
+  path.join('.cursor', 'mcp.json'),
+  path.join('.cursor', 'rules', 'marrow.mdc'),
+  path.join('.windsurf', 'hooks.json'),
+  path.join('.gemini', 'settings.json'),
+  path.join('.clinerules', 'hooks', 'PreToolUse'),
+  path.join('.clinerules', 'hooks', 'PostToolUse'),
+  path.join('.clinerules', 'hooks', 'TaskCancel'),
+  path.join('.marrow', 'passive-runtime.mjs'),
+]);
+const MARROW_MANAGED_TEXT_RE = /@getmarrow\/mcp|marrow-mcp|<!-- marrow:passive-start -->/;
+
+function marrowManagedRootFiles(root) {
+  return MARROW_MANAGED_ROOT_FILES.filter((relative) => {
+    try {
+      const filePath = path.join(path.resolve(root), relative);
+      const stat = fs.lstatSync(filePath);
+      if (!stat.isFile() || stat.size > 2 * 1024 * 1024) return false;
+      return relative === path.join('.marrow', 'passive-runtime.mjs')
+        || MARROW_MANAGED_TEXT_RE.test(fs.readFileSync(filePath, 'utf8'));
+    } catch {
+      return false;
+    }
+  });
+}
+
+function shellArgument(value) {
+  return /^[A-Za-z0-9_./:@%+=-]+$/.test(value) ? value : `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function assertUpdateTargetsManagedRoot(detection) {
+  const root = path.resolve(detection.root);
+  const home = path.resolve(detection.home);
+  if (root === home || marrowManagedRootFiles(root).length > 0) return;
+  if (marrowManagedRootFiles(home).length === 0) return;
+  throw new Error([
+    `Refusing to update ${root}: it has no Marrow-managed files, and update never creates new Marrow project files in an unmanaged directory.`,
+    `Marrow-managed configuration was found at ${home}. To update it, run: ${INSTALLER_UPDATE_COMMAND} --cwd ${shellArgument(home)}`,
+    `To install Marrow into ${root} deliberately, run the install command from that directory instead: npx -y @getmarrow/install@latest`,
+  ].join('\n'));
+}
+
 function findLikelyEnvFiles(detection, env = process.env) {
   const home = env.HOME || env.USERPROFILE || os.homedir();
   const candidates = [
@@ -1246,6 +1294,28 @@ function parseJsonObject(filePath) {
     throw new Error(`Expected JSON object in ${filePath}`);
   }
   return parsed;
+}
+
+function canonicalJsonValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalJsonValue);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalJsonValue(value[key])]));
+}
+
+function sameJsonDocument(left, right) {
+  try {
+    return JSON.stringify(canonicalJsonValue(JSON.parse(left.trim())))
+      === JSON.stringify(canonicalJsonValue(JSON.parse(right.trim())));
+  } catch {
+    return false;
+  }
+}
+
+// JSON.parse keeps the last duplicate key, so equal documents keep their bytes only when the
+// raw text also pins the same MCP versions; otherwise a stale earlier duplicate is never repaired.
+function equivalentManagedJson(before, after) {
+  const pinnedVersions = (text) => [...new Set(mcpVersionsInText(text))].sort().join(',');
+  return sameJsonDocument(before, after) && pinnedVersions(before) === pinnedVersions(after);
 }
 
 function upsertBlock(content, block) {
@@ -2598,12 +2668,14 @@ function applyPlan(plan, options) {
       after = upsertBlock(before, write.block);
     } else if (write.type === 'json-transform') {
       after = write.transform(write.path);
+      if (equivalentManagedJson(before, after)) after = before;
     } else if (write.type === 'managed-json-transform') {
       if (fileExists && !write.isManaged(write.path)) {
         after = before;
         hookConflict = true;
       } else {
         after = write.transform(write.path);
+        if (equivalentManagedJson(before, after)) after = before;
       }
     } else if (write.type === 'owned-executable') {
       if (fileExists && before !== write.content) {
@@ -3432,6 +3504,7 @@ async function install(options) {
     HOME: options.home || options.cwd,
     USERPROFILE: options.home || options.cwd,
   });
+  if (options.repair || options.update) assertUpdateTargetsManagedRoot(detection);
   const client = detectedClient(detection);
   options.client = client;
   options.agentId = String(options.agentId || '').trim() || stableAgentId(detection.root, client);
