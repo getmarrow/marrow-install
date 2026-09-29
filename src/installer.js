@@ -1311,6 +1311,13 @@ function sameJsonDocument(left, right) {
   }
 }
 
+// JSON.parse keeps the last duplicate key, so equal documents keep their bytes only when the
+// raw text also pins the same MCP versions; otherwise a stale earlier duplicate is never repaired.
+function equivalentManagedJson(before, after) {
+  const pinnedVersions = (text) => [...new Set(mcpVersionsInText(text))].sort().join(',');
+  return sameJsonDocument(before, after) && pinnedVersions(before) === pinnedVersions(after);
+}
+
 function upsertBlock(content, block) {
   if (content.includes(MARROW_BLOCK_START) && content.includes(MARROW_BLOCK_END)) {
     const start = content.indexOf(MARROW_BLOCK_START);
@@ -2661,14 +2668,14 @@ function applyPlan(plan, options) {
       after = upsertBlock(before, write.block);
     } else if (write.type === 'json-transform') {
       after = write.transform(write.path);
-      if (sameJsonDocument(before, after)) after = before;
+      if (equivalentManagedJson(before, after)) after = before;
     } else if (write.type === 'managed-json-transform') {
       if (fileExists && !write.isManaged(write.path)) {
         after = before;
         hookConflict = true;
       } else {
         after = write.transform(write.path);
-        if (sameJsonDocument(before, after)) after = before;
+        if (equivalentManagedJson(before, after)) after = before;
       }
     } else if (write.type === 'owned-executable') {
       if (fileExists && before !== write.content) {

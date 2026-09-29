@@ -1454,6 +1454,34 @@ test('managed JSON that differs only in key order or formatting is present and n
   }
 });
 
+test('a stale MCP pin hidden in an earlier duplicate JSON key is still repaired and doctor converges', () => {
+  const root = tempDir();
+  try {
+    fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
+    const detection = detectEnvironment(root, { HOME: root });
+    const plan = buildPlan(detection, { mode: 'mcp', agentId: 'duplicate-key-fixture' });
+    applyPlan(plan, { yes: true, dryRun: false, doctor: false });
+    const mcpPath = path.join(root, '.mcp.json');
+    const current = fs.readFileSync(mcpPath, 'utf8');
+    const staleServers = { marrow: { command: 'npx', args: ['-y', '--package=@getmarrow/mcp@3.9.10', 'marrow-mcp'] } };
+    const duplicated = current.replace('{', `{\n  "mcpServers": ${JSON.stringify(staleServers)},`);
+    assert.deepEqual(JSON.parse(duplicated), JSON.parse(current));
+    fs.writeFileSync(mcpPath, duplicated);
+    assert.deepEqual(inspectMcpConfigurations(detection, { paths: [mcpPath] }).stale_versions, ['3.9.10']);
+
+    const doctor = applyPlan(plan, { doctor: true }).find((change) => change.path === mcpPath);
+    assert.equal(doctor.changed, true);
+    assert.equal(doctor.already_present, false);
+    const repaired = applyPlan(plan, { yes: true, dryRun: false, doctor: false }).find((change) => change.path === mcpPath);
+    assert.equal(repaired.applied, true);
+    assert.doesNotMatch(fs.readFileSync(mcpPath, 'utf8'), /@getmarrow\/mcp@3\.9\.10/);
+    assert.deepEqual(inspectMcpConfigurations(detection, { paths: [mcpPath] }).stale_versions, []);
+    assert.equal(applyPlan(plan, { doctor: true }).find((change) => change.path === mcpPath).already_present, true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('doctor does not report Claude hooks missing after Claude Code re-saves settings with matcher first', async () => {
   const root = tempDir();
   try {
