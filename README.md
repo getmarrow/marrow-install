@@ -107,7 +107,7 @@ The controller is not a boot service. After a host restart, or any exit that ski
 
 ## What's New in v0.1.65
 
-v0.1.65 pins MCP `3.9.97` (source `5e54d73a05f28c23a87893ea89d42797f4e22271`, packed integrity `sha512-QJ/aDssW67n08l7BZ3TueLu4SlUT8ffq4ZezCdpj1TS95LunJxpWKH8+2WKzd5U1/m53oF0+u+IuUINgpAHZMA==`) while keeping SDK `3.7.64` unchanged. Changes:
+v0.1.65 pins MCP `3.9.97` (source `be607e1dffd4d9e6a3c40f01151e509c115fba3f`, packed integrity `sha512-wab1kvgec8WhDDrpkajauLu2QdADXudIxkic0BAgzV96FZVHY0ME45hrOyQmqfkI+OtKriYdgIFp90peWGh2mA==`) while keeping SDK `3.7.64` unchanged. Changes:
 
 - `doctor` no longer reports hooks as missing after a harness re-saves its settings file.
 - `update` refuses to write into an unrelated folder and only touches Marrow-managed roots.
