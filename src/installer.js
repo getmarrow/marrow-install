@@ -3649,7 +3649,12 @@ async function install(options) {
       if (options.activate) throw new Error(`Marrow activation failed: local controller did not start: ${message}`);
     }
   }
-  if (localControl.state === 'disabled' && !controller.active) {
+  // Only a controller that is simply not running is expected while the owner has disabled
+  // local control. Unsafe state, an unverified or unresponsive process, and unsupported
+  // platforms keep their exact fix.
+  if (localControl.state === 'disabled'
+    && controllerSupportedPlatform(controllerPlatform)
+    && ['stopped', 'stale'].includes(controller.state)) {
     controller = {
       ...controller,
       required: false,
