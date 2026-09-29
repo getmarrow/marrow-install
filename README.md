@@ -101,7 +101,11 @@ npx @getmarrow/install controller stop
 
 Persistent controller lifecycle is currently Linux-only. On macOS or Windows, activation still writes supported configuration and verifies one server-side install self-test without certifying that hooks continuously ran; run `npx @getmarrow/install sidecar` under an owner-managed service and pass `--no-controller`. The controller does not silently upgrade packages, change governance policy, rotate credentials, or modify unrelated project configuration.
 
-## What's New in v0.1.63
+## What's New in v0.1.64
+
+v0.1.64 pins MCP `3.9.96` (source `031c944936271fd6e8768ad2619ee0430b68e2c7`, packed integrity `sha512-kuBpuWaWAvusS+FbXXFw1fOEGja4T8ahj/vkmXTd/CWjz0t6teT6g9c1HfJhAK6KLzesZtcvUdZLn6pBErKP9Q==`) while keeping SDK `3.7.64` unchanged. The embedded MCP pin requires this installer patch to deliver the native pre-action hook permit fix: protected actions are no longer denied after an allowing runtime gate, and unprotected actions stop at the gate without creating a decision or permit. Policy decisions, proof requirements and fail-closed behavior are unchanged. Restart the owning harness, review hook trust and run `doctor --self-test` after updating. Package publication and registry integrity verification must precede claiming these candidate pins are publicly available.
+
+### Previous release: v0.1.63
 
 v0.1.63 pins MCP `3.9.95` (source `967b17735b26534b7dc0536ec93c481a5dc07297`, packed integrity `sha512-Sw8RIyxHkjxllwwh+9za5ItoM9X0NwN4R8+Qdd7nvOuU6qAm9LotIC09GOJDim3o9jc9m8yTqxKciroRTS12EQ==`) while keeping SDK `3.7.64` unchanged. The embedded MCP pin requires this installer patch to deliver the stdin usage-loss correction and safe bounded native Codex capture. Supported transcript schema is Codex `0.157.1`; capture covers only the latest proven model-call delta. Unknown versions, missing model/turn or billing metadata, unsafe paths and unproven subagent bindings remain incomplete or unpriced. Capture does not prove a baseline, complete overhead or savings. Restart the owning harness and run `doctor --self-test` after updating. Package publication and registry integrity verification must precede claiming these candidate pins are publicly available.
 
