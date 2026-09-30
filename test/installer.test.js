@@ -14,7 +14,6 @@ const {
   applyPlan,
   detectEnvironment,
   install,
-  inspectNpmTokenConfig,
   inspectSdkDependency,
   inspectMcpConfigurations,
   inspectMcpProcesses,
@@ -258,7 +257,7 @@ test('update targets the managed home root, and deliberate project install then 
     const homeUpdate = await install(updateOptions(home, home));
     assert.equal(homeUpdate.root, home);
     const homeSettings = fs.readFileSync(path.join(home, '.claude', 'settings.json'), 'utf8');
-    assert.match(homeSettings, /@getmarrow\/mcp@3\.9\.97 marrow-mcp pre-action-hook/);
+    assert.match(homeSettings, /@getmarrow\/mcp@3\.9\.97 marrow-mcp claude-pre-action-hook/);
     assert.doesNotMatch(homeSettings, /@getmarrow\/mcp@3\.9\.95/);
 
     fs.mkdirSync(path.join(project, '.git'));
@@ -1604,7 +1603,7 @@ test('install --yes writes passive runtime and instructions idempotently', async
   assert.ok(settings.hooks.UserPromptSubmit);
 });
 
-test('generated passive runtime prefers current process identity and falls back to installed identity', async () => {
+test('generated config never carries a derived agent id and the self-test reports the server-resolved one (F-C)', async () => {
   const dir = tempDir();
   const sdkDir = path.join(dir, 'node_modules', '@getmarrow', 'sdk');
   fs.writeFileSync(path.join(dir, 'package.json'), '{}');
@@ -1641,7 +1640,12 @@ test('generated passive runtime prefers current process identity and falls back 
       return new Response(JSON.stringify({ data: { decision_id: 'installer-identity-decision' } }), { status: 200 });
     }
     if (href.endsWith('/v1/agent/status')) {
-      return new Response(JSON.stringify({ data: { ok: true, enabled: true, health: 'healthy' } }), { status: 200 });
+      return new Response(JSON.stringify({ data: {
+        ok: true,
+        enabled: true,
+        health: 'healthy',
+        identity: { agent_id: 'free-seat-fixture', bound_agent_ids: ['free-seat-fixture'] },
+      } }), { status: 200 });
     }
     if (href.endsWith('/v1/agent/runtime')) {
       return new Response(JSON.stringify({ data: { ok: true, risk_gate: { allow: true } } }), { status: 200 });
@@ -1679,12 +1683,16 @@ test('generated passive runtime prefers current process identity and falls back 
   const mcpRaw = fs.readFileSync(mcpPath, 'utf8');
   const runtimeRaw = fs.readFileSync(runtimePath, 'utf8');
   const mcp = JSON.parse(mcpRaw);
-  const generatedAgentId = report.activation.agent_id;
+  const envExample = fs.readFileSync(path.join(dir, '.marrow', 'env.example'), 'utf8');
 
-  assert.ok(generatedAgentId);
+  // Nothing server-facing carries a locally derived <client>-<hash> id.
   assert.ok(selfTestAgentIds.length > 0);
-  assert.equal(selfTestAgentIds.every((agentId) => agentId === generatedAgentId), true);
-  assert.equal(mcp.mcpServers.marrow.env.MARROW_FLEET_AGENT_ID, generatedAgentId);
+  assert.equal(selfTestAgentIds.every((agentId) => agentId === undefined), true);
+  assert.equal(report.activation.agent_id, 'free-seat-fixture');
+  assert.equal(report.activation.agent_id_source, 'server_status_identity');
+  assert.equal(Object.hasOwn(mcp.mcpServers.marrow.env, 'MARROW_FLEET_AGENT_ID'), false);
+  assert.match(runtimeRaw, /const installedAgentId = "";/);
+  assert.doesNotMatch(`${mcpRaw}\n${runtimeRaw}\n${envExample}`, /(?:custom|codex|claude-code|hermes)-[a-f0-9]{12}/);
   assert.equal(mcp.mcpServers.marrow.env.MARROW_BASE_URL, 'https://api.identity.example.test');
   assert.equal('MARROW_API_KEY' in mcp.mcpServers.marrow.env, false);
   assert.doesNotMatch(mcpRaw, /MARROW_API_KEY|\$\{MARROW_(?:API_KEY|BASE_URL|FLEET_AGENT_ID)\}/);
@@ -1718,8 +1726,8 @@ test('generated passive runtime prefers current process identity and falls back 
     assert.equal(agentIdentity.agentId, 'codex-bob-agent-current');
 
     delete process.env.MARROW_AGENT_ID;
-    const installedIdentity = await runRuntime('installed-identity');
-    assert.equal(installedIdentity.agentId, generatedAgentId);
+    const serverIdentity = await runRuntime('server-identity');
+    assert.equal(serverIdentity.agentId, undefined);
   } finally {
     delete globalThis.__MARROW_PASSIVE_RUNTIME__;
     delete globalThis.__MARROW_INSTALL_IDENTITY_CAPTURE__;
@@ -1855,112 +1863,54 @@ test('install reports missing SDK dependency for passive runtime projects', asyn
   assert.equal(sdk.install_command, null);
 });
 
-test('doctor detects npm token config mismatches without leaking token values', async () => {
+test('the public installer never reads, reports or writes npm publishing tokens (N-2)', async () => {
+  const installer = require('../src/installer');
+  assert.equal(Object.hasOwn(installer, 'inspectNpmTokenConfig'), false);
+  const source = fs.readdirSync(path.join(__dirname, '..', 'src'))
+    .map((name) => fs.readFileSync(path.join(__dirname, '..', 'src', name), 'utf8'))
+    .join('\n');
+  assert.doesNotMatch(source, /NPM_TOKEN|npm-getmarrow-token|_authToken|\.npmrc/);
+  assert.doesNotMatch(source, /credentials['"],\s*['"]marrow-mcp\.env|gateway\.systemd\.env/);
+
   const dir = tempDir();
   const home = tempDir();
   fs.mkdirSync(path.join(home, '.openclaw', 'credentials'), { recursive: true });
-  fs.writeFileSync(path.join(home, '.openclaw', '.env'), 'NPM_TOKEN=npm_new_secret_123456789\n');
-  fs.writeFileSync(path.join(home, '.npmrc'), '//registry.npmjs.org/:_authToken=npm_old_secret_123456789\n', { mode: 0o600 });
-
+  fs.writeFileSync(path.join(home, '.openclaw', '.env'), 'NPM_TOKEN=npm_fixture_source_value\n');
+  fs.writeFileSync(path.join(home, '.openclaw', 'credentials', 'npm-getmarrow-token.txt'), 'npm_fixture_file_value\n');
+  const npmrc = 'prefix=/tmp/npm\n//registry.npmjs.org/:_authToken=${NPM_TOKEN}\n';
+  fs.writeFileSync(path.join(home, '.npmrc'), npmrc, { mode: 0o600 });
   const originalHome = process.env.HOME;
   process.env.HOME = home;
   try {
-    const report = await install({
-      cwd: dir,
-      mode: 'md',
-      yes: false,
-      dryRun: true,
-      doctor: true,
-      selfTest: false,
-      apiKey: 'mrw_test_key',
-      baseUrl: 'https://api.getmarrow.ai',
-      agentId: '',
-      processCommands: [],
-      mcpConfigPaths: [],
-    });
-
-    const text = JSON.stringify(report);
-    assert.equal(report.configDiagnostics.npm_token.mismatch, true);
-    assert.equal(report.configDiagnostics.npm_token.repairable, true);
-    assert.doesNotMatch(text, /npm_new_secret|npm_old_secret/);
-    assert.match(report.doctor.recommendedFix, /--repair/);
+    for (const options of [
+      { doctor: true, dryRun: true, yes: false, repair: false },
+      { doctor: false, dryRun: false, yes: true, repair: true, update: true },
+    ]) {
+      const report = await install({
+        cwd: dir,
+        home,
+        mode: 'md',
+        ...options,
+        selfTest: false,
+        controller: false,
+        apiKey: 'mrw_test_key',
+        baseUrl: 'https://api.getmarrow.ai',
+        agentId: '',
+        processCommands: [],
+        mcpConfigPaths: [],
+      });
+      const text = JSON.stringify(report);
+      assert.equal(Object.hasOwn(report, 'configDiagnostics'), false);
+      assert.equal(Object.hasOwn(report, 'configRepairs'), false);
+      assert.doesNotMatch(text, /npm_fixture|npm_token|npmrc/i);
+      assert.equal(fs.readFileSync(path.join(home, '.npmrc'), 'utf8'), npmrc);
+      assert.equal(fs.existsSync(path.join(home, '.npmrc.marrow-backup')), false);
+    }
   } finally {
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
-  }
-});
-
-test('repair syncs npmrc token from active OpenClaw token source', async () => {
-  const dir = tempDir();
-  const home = tempDir();
-  fs.mkdirSync(path.join(home, '.openclaw'), { recursive: true });
-  fs.writeFileSync(path.join(home, '.openclaw', '.env'), 'NPM_TOKEN=npm_new_secret_123456789\n');
-  fs.writeFileSync(path.join(home, '.npmrc'), 'prefix=/tmp/npm\n//registry.npmjs.org/:_authToken=npm_old_secret_123456789\n', { mode: 0o600 });
-  fs.chmodSync(path.join(home, '.npmrc'), 0o644);
-
-  const originalHome = process.env.HOME;
-  process.env.HOME = home;
-  try {
-    const report = await install({
-      cwd: dir,
-      mode: 'md',
-      yes: true,
-      repair: true,
-      dryRun: false,
-      selfTest: false,
-      apiKey: 'mrw_test_key',
-      baseUrl: 'https://api.getmarrow.ai',
-      agentId: '',
-    });
-    const npmrc = fs.readFileSync(path.join(home, '.npmrc'), 'utf8');
-    const npmrcMode = fs.statSync(path.join(home, '.npmrc')).mode & 0o777;
-    const backupMode = fs.statSync(path.join(home, '.npmrc.marrow-backup')).mode & 0o777;
-    const diagnostics = inspectNpmTokenConfig();
-
-    assert.equal(report.configRepairs[0].type, 'npm_token_npmrc_sync');
-    assert.equal(report.configRepairs[0].changed, true);
-    assert.match(npmrc, /prefix=\/tmp\/npm/);
-    assert.match(npmrc, /npm_new_secret_123456789/);
-    assert.equal(npmrcMode, 0o600);
-    assert.equal(backupMode, 0o600);
-    assert.equal(diagnostics.safe.npm_token.mismatch, false);
-  } finally {
-    if (originalHome === undefined) delete process.env.HOME;
-    else process.env.HOME = originalHome;
-  }
-});
-
-test('repair refuses a symlinked npmrc without modifying its target', async () => {
-  const dir = tempDir();
-  const home = tempDir();
-  const outside = path.join(tempDir(), 'outside-npmrc');
-  fs.mkdirSync(path.join(home, '.openclaw'), { recursive: true });
-  fs.writeFileSync(path.join(home, '.openclaw', '.env'), 'NPM_TOKEN=npm_new_secret_123456789\n');
-  fs.writeFileSync(outside, 'outside=unchanged\n', { mode: 0o600 });
-  fs.symlinkSync(outside, path.join(home, '.npmrc'));
-
-  const originalHome = process.env.HOME;
-  process.env.HOME = home;
-  try {
-    const report = await install({
-      cwd: dir,
-      mode: 'md',
-      yes: true,
-      repair: true,
-      dryRun: false,
-      selfTest: false,
-      apiKey: 'mrw_test_key',
-      baseUrl: 'https://api.getmarrow.ai',
-      agentId: '',
-    });
-    assert.equal(report.configDiagnostics.npm_token.unsafe_path, true);
-    assert.equal(report.configDiagnostics.npm_token.repairable, false);
-    assert.equal(report.configRepairs.length, 0);
-    assert.equal(fs.readFileSync(outside, 'utf8'), 'outside=unchanged\n');
-    assert.equal(fs.lstatSync(path.join(home, '.npmrc')).isSymbolicLink(), true);
-  } finally {
-    if (originalHome === undefined) delete process.env.HOME;
-    else process.env.HOME = originalHome;
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
   }
 });
 
@@ -2242,8 +2192,8 @@ test('self-test returns first five-minute value signal and proof', async () => {
       agentId: 'installer-test',
     });
     assert.equal(requestHeaders['x-marrow-package'], '@getmarrow/install');
-    assert.equal(requestHeaders['x-marrow-package-version'], '0.1.65');
-    assert.equal(requestHeaders['x-marrow-install-version'], '0.1.65');
+    assert.equal(requestHeaders['x-marrow-package-version'], '0.1.66');
+    assert.equal(requestHeaders['x-marrow-install-version'], '0.1.66');
     assert.equal(requestHeaders['x-marrow-sdk-version'], '3.7.64');
     assert.equal(requestHeaders['x-marrow-mcp-version'], '3.9.97');
     assert.equal(result.mcp_tool_profile.configured_profile, 'unset');

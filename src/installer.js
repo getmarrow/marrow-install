@@ -4,9 +4,21 @@ const os = require('node:os');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const { version: INSTALLER_ADAPTER_VERSION } = require('../package.json');
-const { controllerStatus, controllerSupportedPlatform, ensureGovernanceController } = require('./controller-manager');
+const {
+  controllerStatus,
+  controllerSupportedPlatform,
+  ensureCurrentGovernanceController,
+} = require('./controller-manager');
 const { firstCapturePath, harnessReloadPlan } = require('./first-hour');
 const { evidence: localControlEvidence } = require('./control-state');
+const {
+  hermesEnvHasKey,
+  hermesPaths,
+  manualBlock: hermesManualBlock,
+  marrowEnvKeyNames: hermesMarrowEnvKeyNames,
+  planHermesMcpConfig,
+} = require('./hermes-config');
+const { ensureOwnerApiKey, readOwnerApiKey } = require('./owner-env');
 
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MARROW_BLOCK_START = '<!-- marrow:passive-start -->';
@@ -229,10 +241,13 @@ function alignMcpRecommendationVersions(value, targetVersion, key = '', verifica
     alignMcpRecommendationVersions(entryValue, targetVersion, entryKey, verificationAction),
   ]));
 }
-const MCP_CONTEXT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp context-hook`;
-const MCP_PRE_ACTION_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp pre-action-hook`;
-const MCP_ACTION_RESULT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp hook`;
-const MCP_SESSION_END_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp session-hook`;
+// Claude Code hooks use the Claude-specific entrypoints that MCP setup also writes. MCP labels a
+// hook by its entrypoint, and the bare spellings resolve to the generic mcp-client harness.
+// Writing the same spelling as `marrow-mcp setup` means neither writer rewrites the other.
+const MCP_CONTEXT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp claude-context-hook`;
+const MCP_PRE_ACTION_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp claude-pre-action-hook`;
+const MCP_ACTION_RESULT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp claude-hook`;
+const MCP_SESSION_END_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp claude-session-hook`;
 const CODEX_CONTEXT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp codex-context-hook`;
 const CODEX_PRE_ACTION_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp codex-pre-action-hook`;
 const CODEX_ACTION_RESULT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp codex-hook`;
@@ -757,6 +772,7 @@ function parseArgs(argv, env = process.env) {
       options.doctor = true;
     }
     else if (arg === '--json') options.json = true;
+    else if (arg === '--verbose') options.verbose = true;
     else if (arg === '--no-self-test') {
       explicitOperation = true;
       options.selfTest = false;
@@ -844,6 +860,9 @@ Options:
   --agent-id <id>    Agent/fleet id for self-test headers
   --no-controller    Do not start the local background controller during install/repair
   --no-self-test     Skip API smoke/self-test
+  --verbose          Print the full report instead of the one-line summary and log file
+
+The API key comes from MARROW_API_KEY, or from the owner-only ~/.marrow/env when unset.
 
 Environment:
   MARROW_TOOL_PROFILE  Leave unset for primary (17 tools), or explicitly set primary, core, or full.
@@ -864,8 +883,72 @@ function detectedClient(detection) {
   if (detection.cline) return 'cline';
   if (detection.windsurf) return 'windsurf';
   if (detection.gemini) return 'gemini';
+  if (detection.codexProject) return 'codex';
+  // Home-level harnesses rank below project markers; a shared AGENTS.md is a weaker signal.
+  if (detection.hermes) return 'hermes';
   if (detection.codex) return 'codex';
   return 'custom';
+}
+
+function executableOnPath(name, env = process.env) {
+  const extensions = process.platform === 'win32' ? ['.cmd', '.exe', ''] : [''];
+  for (const directory of String(env.PATH || '').split(path.delimiter).filter(Boolean)) {
+    for (const extension of extensions) {
+      try {
+        const stat = fs.statSync(path.join(directory, `${name}${extension}`));
+        if (stat.isFile() && (process.platform === 'win32' || (stat.mode & 0o111) !== 0)) return true;
+      } catch {
+        // Missing or unreadable PATH entries are not a detection signal.
+      }
+    }
+  }
+  return false;
+}
+
+// Harnesses installed for the user rather than in the project. Each detector is one bounded
+// check; the list is extended one harness at a time. MARROW_CLIENT still overrides detection.
+const HOME_HARNESS_DETECTORS = Object.freeze([
+  Object.freeze({
+    client: 'hermes',
+    detect: ({ home, env }) => exists(hermesPaths(home, env).config) || executableOnPath('hermes', env),
+  }),
+]);
+
+function detectHomeHarnesses(home, env) {
+  return Object.fromEntries(HOME_HARNESS_DETECTORS.map((detector) => {
+    try {
+      return [detector.client, Boolean(detector.detect({ home, env }))];
+    } catch {
+      return [detector.client, false];
+    }
+  }));
+}
+
+// AGENTS.md is shared by many agents, and earlier installers created it with only the Marrow
+// block, which then made every later run treat the project as Codex. Only owner content or a
+// .codex directory holding more than Marrow's own hooks file is a Codex signal.
+function agentsMdHasOwnerContent(filePath) {
+  const raw = safeRead(filePath);
+  if (!raw.trim()) return false;
+  const block = marrowManagedBlockInText(raw);
+  return (block ? raw.replace(block, '') : raw).trim().length > 0;
+}
+
+function codexDirectoryIsOwnerConfigured(directory) {
+  let entries;
+  try {
+    entries = fs.readdirSync(directory);
+  } catch {
+    return false;
+  }
+  // Marrow only ever creates .codex/hooks.json, so any other content, or an empty directory the
+  // owner or Codex created, is an owner signal.
+  if (entries.length === 0 || entries.some((entry) => entry !== 'hooks.json')) return true;
+  const settings = safeJsonObject(path.join(directory, 'hooks.json'));
+  const hooks = settings.hooks && typeof settings.hooks === 'object' ? Object.values(settings.hooks) : [];
+  return hooks.some((entries) => Array.isArray(entries) && entries.some((entry) => (
+    Array.isArray(entry?.hooks) && entry.hooks.some((hook) => !marrowHookSubcommand(hook?.command))
+  )));
 }
 
 function exists(filePath) {
@@ -948,7 +1031,12 @@ function detectEnvironment(cwd = process.cwd(), env = process.env) {
     passiveRuntime: path.join(root, '.marrow', 'passive-runtime.mjs'),
     passiveEnv: path.join(root, '.marrow', 'env.example'),
     openclawJson: findUp(root, ['openclaw.json'], 4) || path.join(home, '.openclaw', 'openclaw.json'),
+    hermesHome: hermesPaths(home, env).home,
+    hermesConfig: hermesPaths(home, env).config,
+    hermesEnv: hermesPaths(home, env).env,
   };
+  const homeHarnesses = detectHomeHarnesses(home, env);
+  const codexProject = codexDirectoryIsOwnerConfigured(path.join(root, '.codex'));
 
   return {
     root,
@@ -962,7 +1050,10 @@ function detectEnvironment(cwd = process.cwd(), env = process.env) {
     windsurf: exists(path.join(root, '.windsurf')),
     gemini: exists(path.join(root, '.gemini')),
     grok: exists(path.join(home, '.grok')) || exists(path.join(root, '.grok')),
-    codex: exists(paths.agentsMd) || exists(path.join(root, '.codex')),
+    codexProject,
+    codex: codexProject || agentsMdHasOwnerContent(paths.agentsMd),
+    hermes: homeHarnesses.hermes === true,
+    hermesConfig: exists(paths.hermesConfig),
     mcpConfig: exists(paths.mcpJson) || exists(paths.cursorMcp) || exists(paths.claudeSettings),
     openclaw: exists(paths.openclawJson) || Boolean(env.OPENCLAW_HOME || env.OPENCLAW_AGENT_ID),
   };
@@ -1024,184 +1115,12 @@ function findLikelyEnvFiles(detection, env = process.env) {
     path.join(detection.root, '.marrow', 'env'),
     path.join(detection.root, '.marrow', 'env.local'),
     path.join(home, '.marrow', 'env'),
-    path.join(home, '.openclaw', 'credentials', 'marrow-mcp.env'),
-    path.join(home, '.openclaw', 'gateway.systemd.env'),
   ];
   return candidates.filter((filePath) => {
     if (!exists(filePath)) return false;
     const raw = safeRead(filePath);
     return /\bMARROW_API_KEY\s*=/.test(raw) || /\bMARROW_KEY(_[A-Z0-9]+)?\s*=/.test(raw);
   });
-}
-
-function stripQuotes(value) {
-  const trimmed = String(value || '').trim();
-  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
-    return trimmed.slice(1, -1);
-  }
-  return trimmed;
-}
-
-function readEnvVar(filePath, name) {
-  if (!exists(filePath)) return '';
-  const raw = safeRead(filePath);
-  const pattern = new RegExp(`^\\s*(?:export\\s+)?${name}\\s*=\\s*([^\\n#]+)`, 'm');
-  const match = raw.match(pattern);
-  return match ? stripQuotes(match[1]) : '';
-}
-
-function readFirstLineSecret(filePath) {
-  if (!exists(filePath)) return '';
-  return safeRead(filePath).split(/\r?\n/).map((line) => line.trim()).find(Boolean) || '';
-}
-
-function readNpmrcToken(filePath) {
-  if (!exists(filePath)) return '';
-  const raw = safeRead(filePath);
-  const match = raw.match(/\/\/registry\.npmjs\.org\/:_authToken\s*=\s*([^\s]+)/);
-  return match ? stripQuotes(match[1]) : '';
-}
-
-function fingerprint(value) {
-  const secret = String(value || '').trim();
-  if (!secret) return null;
-  return crypto.createHash('sha256').update(secret).digest('hex').slice(0, 12);
-}
-
-function npmTokenPaths(env = process.env) {
-  const home = env.HOME || env.USERPROFILE || os.homedir();
-  return {
-    home,
-    openclawEnv: path.join(home, '.openclaw', '.env'),
-    credentialFile: path.join(home, '.openclaw', 'credentials', 'npm-getmarrow-token.txt'),
-    npmrc: path.join(home, '.npmrc'),
-  };
-}
-
-function inspectNpmTokenConfig(env = process.env) {
-  const paths = npmTokenPaths(env);
-  const openclawToken = readEnvVar(paths.openclawEnv, 'NPM_TOKEN');
-  const credentialToken = readFirstLineSecret(paths.credentialFile);
-  let npmrcToken = '';
-  let unsafeNpmrcPath = false;
-  try {
-    assertDirectOwnerFile(paths.home, paths.npmrc, { allowMissing: true });
-    npmrcToken = readNpmrcToken(paths.npmrc);
-  } catch {
-    unsafeNpmrcPath = true;
-  }
-  const sourceToken = openclawToken || credentialToken;
-  const mismatch = Boolean(sourceToken && npmrcToken && fingerprint(sourceToken) !== fingerprint(npmrcToken));
-  const missingNpmrcToken = Boolean(sourceToken && !npmrcToken);
-
-  return {
-    safe: {
-      npm_token: {
-        checked: true,
-        repairable: Boolean(sourceToken && (mismatch || missingNpmrcToken) && !unsafeNpmrcPath),
-        mismatch,
-        missing_npmrc_token: missingNpmrcToken,
-        unsafe_path: unsafeNpmrcPath,
-        sources: {
-          openclaw_env: { path: paths.openclawEnv, present: Boolean(openclawToken), fingerprint: fingerprint(openclawToken) },
-          credential_file: { path: paths.credentialFile, present: Boolean(credentialToken), fingerprint: fingerprint(credentialToken) },
-          npmrc: { path: paths.npmrc, present: Boolean(npmrcToken), fingerprint: fingerprint(npmrcToken) },
-        },
-        recommended_fix: unsafeNpmrcPath
-          ? 'Refusing automatic npm token repair because ~/.npmrc or its home directory is not a direct, regular owner path.'
-          : mismatch || missingNpmrcToken
-          ? 'Run npx @getmarrow/install --repair to sync ~/.npmrc from the active OpenClaw/getmarrow npm token source.'
-          : null,
-      },
-    },
-    raw: { paths, sourceToken, npmrcToken },
-  };
-}
-
-function assertDirectOwnerFile(homePath, filePath, { allowMissing = false } = {}) {
-  const home = path.resolve(homePath);
-  const target = path.resolve(filePath);
-  if (target !== path.join(home, '.npmrc')) throw new Error('npm token repair target must be the direct owner ~/.npmrc');
-  if (!fs.existsSync(home)) throw new Error('npm token repair owner home does not exist');
-  const homeStat = fs.lstatSync(home);
-  if (!homeStat.isDirectory() || homeStat.isSymbolicLink() || fs.realpathSync(home) !== home) {
-    throw new Error('npm token repair owner home must be a direct, non-symbolic directory');
-  }
-  if (!fs.existsSync(target)) {
-    if (allowMissing) return;
-    throw new Error('npm token repair target does not exist');
-  }
-  const targetStat = fs.lstatSync(target);
-  if (targetStat.isSymbolicLink() || !targetStat.isFile()) {
-    throw new Error('npm token repair target must be a regular file, not a symbolic link');
-  }
-}
-
-function atomicWriteOwnerFile(homePath, filePath, contents) {
-  const home = path.resolve(homePath);
-  const target = path.resolve(filePath);
-  const allowMissing = !fs.existsSync(target);
-  assertDirectOwnerFile(home, target, { allowMissing });
-  const tempPath = path.join(home, `.npmrc.marrow-${process.pid}-${crypto.randomBytes(6).toString('hex')}.tmp`);
-  let descriptor;
-  try {
-    descriptor = fs.openSync(tempPath, 'wx', 0o600);
-    fs.writeFileSync(descriptor, contents, { encoding: 'utf8' });
-    fs.fsyncSync(descriptor);
-    fs.closeSync(descriptor);
-    descriptor = undefined;
-    assertDirectOwnerFile(home, target, { allowMissing });
-    fs.renameSync(tempPath, target);
-    fs.chmodSync(target, 0o600);
-  } finally {
-    if (descriptor !== undefined) fs.closeSync(descriptor);
-    if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
-  }
-}
-
-function upsertNpmrcToken(homePath, filePath, token) {
-  assertDirectOwnerFile(homePath, filePath, { allowMissing: true });
-  const before = safeRead(filePath);
-  const tokenLine = `//registry.npmjs.org/:_authToken=${token}`;
-  let after;
-  if (/\/\/registry\.npmjs\.org\/:_authToken\s*=/.test(before)) {
-    after = before.replace(/\/\/registry\.npmjs\.org\/:_authToken\s*=\s*[^\n\r]+/, tokenLine);
-  } else {
-    const separator = before && !before.endsWith('\n') ? '\n' : '';
-    after = `${before}${separator}${tokenLine}\n`;
-  }
-  if (before !== after) {
-    if (before) {
-      const backupPath = `${filePath}.marrow-backup`;
-      if (fs.existsSync(backupPath) && fs.lstatSync(backupPath).isSymbolicLink()) {
-        throw new Error('npm token repair backup must not be a symbolic link');
-      }
-      const backupTemp = path.join(path.resolve(homePath), `.npmrc.marrow-backup-${process.pid}-${crypto.randomBytes(6).toString('hex')}.tmp`);
-      fs.writeFileSync(backupTemp, before, { mode: 0o600, flag: 'wx' });
-      fs.renameSync(backupTemp, backupPath);
-      fs.chmodSync(backupPath, 0o600);
-    }
-    atomicWriteOwnerFile(homePath, filePath, after);
-  }
-  return before !== after;
-}
-
-function repairConfigDiagnostics(diagnostics, env = process.env) {
-  const inspection = inspectNpmTokenConfig(env);
-  const npm = diagnostics.npm_token;
-  const repairs = [];
-  if (npm?.repairable && inspection.raw.sourceToken) {
-    const changed = upsertNpmrcToken(inspection.raw.paths.home, inspection.raw.paths.npmrc, inspection.raw.sourceToken);
-    repairs.push({
-      type: 'npm_token_npmrc_sync',
-      changed,
-      path: inspection.raw.paths.npmrc,
-      message: changed
-        ? 'Synced ~/.npmrc npm token from active OpenClaw/getmarrow token source.'
-        : '~/.npmrc already matched the active OpenClaw/getmarrow token source.',
-    });
-  }
-  return repairs;
 }
 
 function passiveInstructions() {
@@ -1244,7 +1163,7 @@ if (apiKey && !globalThis.__MARROW_PASSIVE_RUNTIME__) {
     const { MarrowClient } = await import('@getmarrow/sdk');
     const marrow = new MarrowClient(apiKey, {
       baseUrl: installedBaseUrl,
-      agentId: process.env.MARROW_FLEET_AGENT_ID || process.env.MARROW_AGENT_ID || installedAgentId,
+      agentId: process.env.MARROW_FLEET_AGENT_ID || process.env.MARROW_AGENT_ID || installedAgentId || undefined,
       sessionId: process.env.MARROW_SESSION_ID,
       mode: process.env.MARROW_ENFORCEMENT_MODE || 'auto',
     });
@@ -1268,12 +1187,15 @@ if (apiKey && !globalThis.__MARROW_PASSIVE_RUNTIME__) {
 }
 
 function envExample(options = {}) {
-  const agentId = String(options.agentId || 'agent-or-fleet-id').trim() || 'agent-or-fleet-id';
+  const agentId = String(options.agentId || '').trim();
   const client = String(options.client || 'custom').trim() || 'custom';
   const baseUrl = String(options.baseUrl || DEFAULT_BASE_URL).trim() || DEFAULT_BASE_URL;
+  const agentLine = agentId
+    ? `MARROW_FLEET_AGENT_ID=${JSON.stringify(agentId)}`
+    : '# MARROW_FLEET_AGENT_ID is optional. Unset, Marrow uses the key\'s bound agent or the plan seat.';
   return `MARROW_API_KEY=mrw_live_replace_me
 MARROW_BASE_URL=${JSON.stringify(baseUrl)}
-MARROW_FLEET_AGENT_ID=${JSON.stringify(agentId)}
+${agentLine}
 MARROW_CLIENT=${JSON.stringify(client)}
 # MARROW_TOOL_PROFILE is intentionally unset: ordinary setup uses primary. Set core or full only as an explicit opt-in.
 MARROW_ENFORCEMENT_MODE=auto
@@ -1371,14 +1293,24 @@ function exactHookDescriptors(settings, eventName, command, matcher) {
 function marrowHookSubcommand(command) {
   if (typeof command !== 'string') return null;
   const match = command.trim().match(
-    /^npx\s+(?:-y\s+)?(?:--package=@getmarrow\/mcp(?:@[^\s]+)?\s+marrow-mcp|@getmarrow\/mcp(?:@[^\s]+)?)\s+(?:(?:claude|codex|cursor|grok)-)?(context-hook|pre-action-hook|hook|session-hook)$/,
+    /^npx\s+(?:-y\s+)?(?:--package=@getmarrow\/mcp(?:@[^\s]+)?\s+marrow-mcp|@getmarrow\/mcp(?:@[^\s]+)?)\s+(?:(?:claude|cline|codex|cursor|gemini|grok|windsurf)-)?(context-hook|pre-action-hook|hook|session-hook)$/,
   );
   return match?.[1] || null;
+}
+
+// Which existing Marrow handler keeps its owner options (such as a timeout) when entries are
+// merged: the exact canonical entry, then a pinned entry with the same matcher (an earlier
+// version or entrypoint spelling of the canonical one), then the first Marrow handler.
+function marrowHandlerRank(hook, command, exactMatcher) {
+  if (hook.command === command && exactMatcher) return 3;
+  if (exactMatcher && /^npx\s+-y\s+--package=@getmarrow\/mcp@[^\s]+\s+marrow-mcp\s+/.test(String(hook.command || '').trim())) return 2;
+  return 1;
 }
 
 function reconcileMarrowCommandHook(settings, eventName, subcommand, command, matcher, handlerOptions = {}) {
   const original = Array.isArray(settings?.hooks?.[eventName]) ? settings.hooks[eventName] : [];
   let preferredHandler = null;
+  let preferredRank = 0;
   const retained = [];
   for (const entry of original) {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry) || !Array.isArray(entry.hooks)) {
@@ -1391,8 +1323,10 @@ function reconcileMarrowCommandHook(settings, eventName, subcommand, command, ma
         && hook.type === 'command' ? marrowHookSubcommand(hook.command) : null;
       if (detected) {
         const exactMatcher = matcher == null ? entry.matcher === undefined : entry.matcher === matcher;
-        if (detected === subcommand && (!preferredHandler || (hook.command === command && exactMatcher))) {
+        const rank = detected === subcommand ? marrowHandlerRank(hook, command, exactMatcher) : 0;
+        if (rank > preferredRank) {
           preferredHandler = hook;
+          preferredRank = rank;
         }
         continue;
       }
@@ -2142,7 +2076,7 @@ function activationProfile(detection, plan, changes, client) {
       ? `${sdkDependency.install_command} && npx @getmarrow/install --repair`
       : sdkDependency.warning
     : capabilityLevel === 'governed_wrapper'
-    ? `npx @getmarrow/install run --agent <agent-id> -- ${client}`
+    ? `npx @getmarrow/install run -- ${client}`
     : client === 'cline' && clineConflicts.length > 0
     ? 'Move or remove the conflicting owner-managed Cline hook file after owner review, then run npx @getmarrow/install --repair. Marrow will never overwrite or compose it.'
     : client === 'gemini' && geminiHooksExplicitlyDisabled(geminiSettings)
@@ -2200,21 +2134,37 @@ function activationProfile(detection, plan, changes, client) {
   };
 }
 
+const MCP_ENV_PLACEHOLDER_RE = /\$\{[^}]*\}/;
+
+// Only a configured, registered agent id is ever written. Earlier installers wrote a derived
+// <client>-<hash> id that bound keys and Free plan seats reject; it is removed on the next
+// write. An owner-set concrete id is kept when none is configured now, and maintenance
+// (preserveIdentity) keeps the owner's base URL instead of resetting it.
 function upsertMcpServerConfig(filePath, options = {}) {
   const agentId = String(options.agentId || '').trim();
-  if (!agentId) throw new Error('Refusing to generate Marrow MCP config without an agent identity');
-  const baseUrl = String(options.baseUrl || DEFAULT_BASE_URL).trim() || DEFAULT_BASE_URL;
+  const derivedAgentIds = new Set(Array.isArray(options.derivedAgentIds) ? options.derivedAgentIds : []);
   const config = parseJsonObject(filePath);
   const servers = config.mcpServers && typeof config.mcpServers === 'object' && !Array.isArray(config.mcpServers)
     ? config.mcpServers
     : {};
+  const existingEnv = servers.marrow?.env && typeof servers.marrow.env === 'object' && !Array.isArray(servers.marrow.env)
+    ? servers.marrow.env
+    : {};
+  const concrete = (value) => {
+    const text = typeof value === 'string' ? value.trim() : '';
+    return text && !MCP_ENV_PLACEHOLDER_RE.test(text) ? text : '';
+  };
+  const existingAgentId = concrete(existingEnv.MARROW_FLEET_AGENT_ID);
+  const existingBaseUrl = concrete(existingEnv.MARROW_BASE_URL);
+  const baseUrl = options.preserveIdentity && existingBaseUrl
+    ? existingBaseUrl
+    : String(options.baseUrl || DEFAULT_BASE_URL).trim() || DEFAULT_BASE_URL;
   const existingProfile = resolveToolProfile(servers.marrow?.env?.MARROW_TOOL_PROFILE).configured_profile;
   const requestedProfile = resolveToolProfile(options.toolProfile).configured_profile;
   const configuredProfile = requestedProfile === 'unset' ? existingProfile : requestedProfile;
-  const env = {
-    MARROW_BASE_URL: baseUrl,
-    MARROW_FLEET_AGENT_ID: agentId,
-  };
+  const env = { MARROW_BASE_URL: baseUrl };
+  const keptAgentId = agentId || (existingAgentId && !derivedAgentIds.has(existingAgentId) ? existingAgentId : '');
+  if (keptAgentId) env.MARROW_FLEET_AGENT_ID = keptAgentId;
   if (configuredProfile !== 'unset') env.MARROW_TOOL_PROFILE = configuredProfile;
   servers.marrow = {
     command: 'npx',
@@ -2452,10 +2402,35 @@ function defaultHarnessInstallMatrix(detection = detectEnvironment(process.cwd()
   });
 }
 
+const HERMES_WRITE_LABEL = 'Hermes MCP server (mcp_servers.marrow)';
+
+function hermesTargetIsSafe(detection) {
+  try {
+    assertContainedManagedTarget(detection.paths.hermesHome, detection.paths.hermesConfig);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function derivedAgentIdsFor(root) {
+  return [...SOURCE_CLIENTS].map((candidate) => stableAgentId(root, candidate));
+}
+
 function buildPlan(detection, options) {
   const client = options.client || detectedClient(detection);
-  const agentId = String(options.agentId || '').trim() || stableAgentId(detection.root, client);
+  // Server-facing configuration carries only a configured agent id. Without one, the MCP
+  // server, SDK and hooks let Marrow resolve the key's bound agent or the plan seat.
+  const agentId = String(options.agentId || '').trim();
+  const derivedAgentIds = derivedAgentIdsFor(detection.root);
   const baseUrl = String(options.baseUrl || DEFAULT_BASE_URL).trim() || DEFAULT_BASE_URL;
+  const mcpConfigOptions = {
+    agentId,
+    baseUrl,
+    toolProfile: options.toolProfile,
+    derivedAgentIds,
+    preserveIdentity: options.preserveIdentity === true,
+  };
   const mcpTargetVersion = executableMcpTarget(options).version;
   const retarget = (value) => retargetMcpPackageSpec(value, mcpTargetVersion);
   const mode = options.mode === 'auto'
@@ -2539,8 +2514,24 @@ function buildPlan(detection, options) {
       type: 'json-transform',
       path: detection.paths.mcpJson,
       label: 'Project MCP server config',
-      transform: (filePath) => retarget(upsertMcpServerConfig(filePath, { agentId, baseUrl, toolProfile: options.toolProfile })),
+      transform: (filePath) => retarget(upsertMcpServerConfig(filePath, mcpConfigOptions)),
     });
+    // The owner's Hermes config changes only on an explicit install or update, never from the
+    // controller's background maintenance pass.
+    if (detection.hermesConfig && options.preserveIdentity !== true && hermesTargetIsSafe(detection)) {
+      writes.push({
+        type: 'yaml-transform',
+        path: detection.paths.hermesConfig,
+        root: detection.paths.hermesHome,
+        label: HERMES_WRITE_LABEL,
+        backup: true,
+        transform: (before) => planHermesMcpConfig(before, {
+          mcpPackageSpec: `@getmarrow/mcp@${mcpTargetVersion}`,
+          keyReference: hermesEnvHasKey(detection.paths.hermesEnv),
+        }),
+        conflict_fix: (reason) => `Marrow left ${detection.paths.hermesConfig} unchanged because it could not be edited safely (${reason}). Add this block under mcp_servers by hand, then restart Hermes:\n${hermesManualBlock({ mcpPackageSpec: `@getmarrow/mcp@${mcpTargetVersion}`, keyReference: hermesEnvHasKey(detection.paths.hermesEnv) })}`,
+      });
+    }
     if (detection.cursor) {
       writes.push({
         type: 'json-transform',
@@ -2552,7 +2543,7 @@ function buildPlan(detection, options) {
         type: 'json-transform',
         path: detection.paths.cursorMcp,
         label: 'Cursor MCP server config',
-        transform: (filePath) => retarget(upsertMcpServerConfig(filePath, { agentId, baseUrl, toolProfile: options.toolProfile })),
+        transform: (filePath) => retarget(upsertMcpServerConfig(filePath, mcpConfigOptions)),
       });
     }
   }
@@ -2634,6 +2625,16 @@ function atomicWriteManagedFile(root, targetPath, contents) {
   }
 }
 
+// A private, timestamped copy taken before an owner file outside the project is changed.
+function backupManagedFile(root, targetPath, contents) {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const backupPath = `${targetPath}.marrow-backup-${stamp}`;
+  assertContainedManagedTarget(root, backupPath);
+  fs.writeFileSync(backupPath, contents, { flag: 'wx', mode: 0o600 });
+  fs.chmodSync(backupPath, 0o600);
+  return backupPath;
+}
+
 function applyPlan(plan, options) {
   if (!Array.isArray(plan?.writes) || plan.writes.length === 0) return [];
   const root = path.resolve(plan.root || path.dirname(plan.writes[0].path));
@@ -2656,6 +2657,8 @@ function applyPlan(plan, options) {
     const automaticRepairSuppressed = aheadUnverifiedVersions.length > 0;
     let after;
     let hookConflict = false;
+    let conflictReason = null;
+    let hostedEntry = false;
     if (automaticRepairSuppressed) {
       after = before;
     } else if (write.type === 'file') {
@@ -2677,6 +2680,16 @@ function applyPlan(plan, options) {
         after = write.transform(write.path);
         if (equivalentManagedJson(before, after)) after = before;
       }
+    } else if (write.type === 'yaml-transform') {
+      const planned = write.transform(before);
+      if (planned.action === 'refuse') {
+        after = before;
+        hookConflict = true;
+        conflictReason = planned.reason;
+      } else {
+        after = planned.action === 'update' ? planned.content : before;
+        hostedEntry = planned.hosted === true;
+      }
     } else if (write.type === 'owned-executable') {
       if (fileExists && before !== write.content) {
         after = before;
@@ -2692,9 +2705,12 @@ function applyPlan(plan, options) {
     const modeChanged = !hookConflict && typeof write.mode === 'number' && beforeMode !== write.mode;
     return {
       write,
+      fileExists,
       before,
       after,
       hookConflict,
+      conflictReason,
+      hostedEntry,
       modeChanged,
       automaticRepairSuppressed,
       aheadUnverifiedVersions,
@@ -2704,9 +2720,12 @@ function applyPlan(plan, options) {
   const changes = [];
   for (const {
     write,
+    fileExists,
     before,
     after,
     hookConflict,
+    conflictReason,
+    hostedEntry,
     modeChanged,
     automaticRepairSuppressed,
     aheadUnverifiedVersions,
@@ -2727,9 +2746,16 @@ function applyPlan(plan, options) {
         ahead_unverified_versions: aheadUnverifiedVersions,
         exact_fix: mcpRegistryVerificationAction(aheadUnverifiedVersions),
       } : {}),
-      ...(hookConflict ? { exact_fix: write.conflict_fix } : {}),
+      ...(hookConflict ? {
+        exact_fix: typeof write.conflict_fix === 'function' ? write.conflict_fix(conflictReason) : write.conflict_fix,
+        ...(conflictReason ? { conflict_reason: conflictReason } : {}),
+      } : {}),
+      ...(hostedEntry ? { hosted_entry_preserved: true } : {}),
     });
     if (contentChanged && writeApplied) {
+      if (write.backup && fileExists) {
+        changes[changes.length - 1].backup_path = backupManagedFile(path.resolve(write.root || root), write.path, before);
+      }
       atomicWriteManagedFile(path.resolve(write.root || root), write.path, after);
     }
     if (modeChanged && writeApplied) {
@@ -2891,6 +2917,59 @@ function runtimeGateVerified(runtime) {
   return ['allow', 'warn', 'review_required', 'block'].includes(decision);
 }
 
+const ACTIVATION_UNBOUND_KEY_FIX = 'This API key is not bound to one agent, so Marrow cannot confirm activation for a specific agent. Bind the key to one agent in the Marrow dashboard, or register the agent with POST /v1/agents and set MARROW_AGENT_ID to its id, then run npx -y @getmarrow/install@latest doctor --self-test.';
+
+// The agent Marrow resolved for this key: its single bound agent or the Free plan seat. An
+// unbound key has no single agent, and a locally derived id is never substituted for it.
+function serverAgentIdentity(status, runtime) {
+  const identity = status?.identity && typeof status.identity === 'object' ? status.identity : {};
+  const safe = (value) => (typeof value === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(value) ? value : '');
+  const bound = Array.isArray(identity.bound_agent_ids) ? identity.bound_agent_ids.map(safe).filter(Boolean) : [];
+  const fromStatus = safe(identity.agent_id) || (bound.length === 1 ? bound[0] : '');
+  if (fromStatus) return { agent_id: fromStatus, source: 'server_status_identity', bound_agent_ids: bound };
+  const fromRuntime = safe(runtime?.agent_id);
+  if (fromRuntime) return { agent_id: fromRuntime, source: 'server_runtime', bound_agent_ids: bound };
+  return { agent_id: null, source: 'unresolved', bound_agent_ids: bound };
+}
+
+// A runtime call that creates a decision leaves it open unless it is closed. The self-test
+// closes its own runtime decision in the same session with the runtime authorization id as
+// gate_receipt_id. A failed close is reported, never retried as a new decision.
+async function closeSelfTestRuntimeDecision(baseUrl, headers, runtime, selfTestKey, options) {
+  const authorization = runtime?.runtime_authorization && typeof runtime.runtime_authorization === 'object'
+    ? runtime.runtime_authorization
+    : {};
+  const decisionId = typeof runtime?.decision_id === 'string' && runtime.decision_id
+    ? runtime.decision_id
+    : typeof authorization.decision_id === 'string' ? authorization.decision_id : '';
+  if (!decisionId || authorization.decision_state === 'not_created') return { created: false, committed: null };
+  const gateReceiptId = String(authorization.id || runtime?.gate_receipt?.id || runtime?.risk_gate?.gate_receipt_id || '');
+  try {
+    const closed = await selfTestWrite(`${baseUrl}/v1/agent/commit`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        decision_id: decisionId,
+        success: true,
+        outcome: 'Marrow installer self-test runtime check responded; no action was executed.',
+        ...(gateReceiptId ? { gate_receipt_id: gateReceiptId } : {}),
+        proof: {
+          checks: ['installer self-test runtime responded'],
+          outcome: 'self-test runtime decision closed',
+        },
+      }),
+    }, {
+      idempotencyKey: `${selfTestKey}:runtime-commit`,
+      complete: (data) => data,
+      retryDelayMs: options.selfTestRetryDelayMs,
+    });
+    if (closed?.failed) return { created: true, decision_id: decisionId, committed: false, error: closed.failed };
+    return { created: true, decision_id: decisionId, committed: closed?.committed === true };
+  } catch (error) {
+    return { created: true, decision_id: decisionId, committed: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 async function runSelfTest(options) {
   const initialProfile = initialToolProfileReport(options.toolProfile);
   if (!options.selfTest) return { skipped: true, reason: 'disabled', mcp_tool_profile: initialProfile };
@@ -2914,7 +2993,10 @@ async function runSelfTest(options) {
     'x-marrow-sdk-version': SDK_ADAPTER_VERSION,
     'x-marrow-mcp-version': executableMcpTarget(options).version,
   };
-  if (options.agentId) headers['x-marrow-agent-id'] = options.agentId;
+  // Only a configured id is sent. Without one, Marrow resolves the key's bound agent or the
+  // plan seat, and the self-test reads that server answer back for activation.
+  const configuredAgentId = String(options.agentId || '').trim();
+  if (configuredAgentId) headers['x-marrow-agent-id'] = configuredAgentId;
 
   const baseUrl = options.baseUrl.replace(/\/+$/, '');
   const selfTestKey = `install-self-test:${crypto.randomUUID()}`;
@@ -2967,7 +3049,7 @@ async function runSelfTest(options) {
     context?.primary_tool_availability,
     Boolean(options.activation),
   );
-  const runtime = await requestJson(`${baseUrl}/v1/agent/runtime`, {
+  const runtime = await selfTestWrite(`${baseUrl}/v1/agent/runtime`, {
     method: 'POST',
     headers,
     body: JSON.stringify({
@@ -2981,13 +3063,24 @@ async function runSelfTest(options) {
         outcome: 'self-test outcome committed',
       },
     }),
+  }, {
+    idempotencyKey: `${selfTestKey}:runtime`,
+    complete: (data) => data,
+    retryDelayMs: options.selfTestRetryDelayMs,
   });
+  if (runtime?.failed) {
+    throw new Error(`self-test runtime did not complete after ${SELF_TEST_WRITE_ATTEMPTS} attempts (last: ${runtime.failed})`);
+  }
+  const runtimeDecisionClosure = await closeSelfTestRuntimeDecision(baseUrl, headers, runtime, selfTestKey, options);
+  const serverIdentity = serverAgentIdentity(status, runtime);
+  const activationAgentId = configuredAgentId || serverIdentity.agent_id || '';
+  const activationIdentityUnresolved = Boolean(options.activation && !activationAgentId);
   const performance = await requestJson(`${baseUrl}/v1/analytics/agent-performance?period=7`, { headers })
     .catch((error) => ({
       ok: false,
       error: error instanceof Error ? error.message : String(error),
     }));
-  const firstValue = await requestJson(`${baseUrl}/v1/agent/first-value`, {
+  const firstValueResult = await selfTestWrite(`${baseUrl}/v1/agent/first-value`, {
     method: 'POST',
     headers,
     body: JSON.stringify({
@@ -3000,14 +3093,23 @@ async function runSelfTest(options) {
         outcome: 'first-value endpoint reached',
       },
       decision_id: decisionId,
-      agent_id: options.agentId,
-      activation: options.activation ? {
+      agent_id: activationAgentId || undefined,
+      activation: options.activation && activationAgentId ? {
         ...options.activation,
+        agent_id: activationAgentId,
         intervention_verified: runtimeGateVerified(runtime),
         closure_verified: true,
       } : undefined,
     }),
+  }, {
+    idempotencyKey: `${selfTestKey}:first-value`,
+    complete: (data) => data,
+    retryDelayMs: options.selfTestRetryDelayMs,
   });
+  if (firstValueResult?.failed) {
+    throw new Error(`self-test first-value did not complete after ${SELF_TEST_WRITE_ATTEMPTS} attempts (last: ${firstValueResult.failed})`);
+  }
+  const firstValue = firstValueResult;
   const valueProof = await requestJson(`${baseUrl}/v1/agent/value/proof?period_days=30`, { headers })
     .catch((error) => ({
       ok: false,
@@ -3019,7 +3121,7 @@ async function runSelfTest(options) {
   let activationReceipt = null;
   let activationVerified = false;
   let activationProfileReceipt = null;
-  if (options.activation) {
+  if (options.activation && !activationIdentityUnresolved) {
     const activationAdapterVersion = options.activation.adapter_version || INSTALLER_ADAPTER_VERSION;
     const activationCapabilityLevel = options.activation.capability_level || 'event_contract';
     const activationExpectedHooks = Array.isArray(options.activation.expected_hooks) ? options.activation.expected_hooks : [];
@@ -3037,7 +3139,7 @@ async function runSelfTest(options) {
       && typeof activationReceipt.id === 'string'
       && activationReceipt.id.length > 0
       && activationReceipt.decision_id === decisionId
-      && activationReceipt.agent_id === options.agentId
+      && activationReceipt.agent_id === activationAgentId
       && activationReceipt.outcome_success === true
       && isCanonicalTimestamp(activationReceipt.outcome_recorded_at)
       && activationReceipt.server_confirmed === true
@@ -3056,7 +3158,7 @@ async function runSelfTest(options) {
           event_id: `activation-${activationConfigFingerprint.slice(0, 32)}`,
           event_type: 'activation_profile_registered',
           harness: options.activation.harness,
-          agent_id: options.agentId,
+          agent_id: activationAgentId,
           session_id: headers['x-marrow-session-id'],
           adapter_version: activationAdapterVersion,
           capability_level: activationCapabilityLevel,
@@ -3112,7 +3214,13 @@ async function runSelfTest(options) {
     runtime_active: runtimeGateVerified(runtime),
     runtime_exact_next_action: runtime.exact_next_action || null,
     runtime_before_you_act: runtime.before_you_act || null,
+    runtime_decision_closure: runtimeDecisionClosure,
+    agent_id: activationAgentId || null,
+    agent_id_source: configuredAgentId ? 'configured' : serverIdentity.source,
+    bound_agent_ids: serverIdentity.bound_agent_ids,
     activation_verified: activationVerified,
+    activation_identity_unresolved: activationIdentityUnresolved,
+    activation_exact_fix: activationIdentityUnresolved ? ACTIVATION_UNBOUND_KEY_FIX : null,
     activation_scope: options.activation ? 'server_self_test_only' : null,
     coverage_verified: false,
     passive_live: false,
@@ -3266,112 +3374,114 @@ function buildFirstValueSignal(status, runtime, performance, firstValue = {}, to
   };
 }
 
-function printReport(report) {
-  process.stdout.write(`Marrow passive installer\n`);
-  process.stdout.write(`Root: ${report.root}\n`);
-  process.stdout.write(`Mode: ${report.mode}\n`);
-  process.stdout.write(`Write mode: ${report.writeMode}\n\n`);
+function printReport(report, sink) {
+  const out = typeof sink === 'function' ? sink : (text) => process.stdout.write(text);
+  out(`Marrow passive installer\n`);
+  out(`Root: ${report.root}\n`);
+  out(`Mode: ${report.mode}\n`);
+  out(`Write mode: ${report.writeMode}\n\n`);
 
   if (report.activation?.requested) {
-    process.stdout.write('Activation:\n');
-    process.stdout.write(`- agent: ${report.activation.agent_id}\n`);
-    process.stdout.write(`- self-test server confirmed: ${report.activation.server_confirmed ? 'yes' : 'no'}\n`);
-    process.stdout.write(`- scope: ${report.activation.activation_scope}\n`);
-    process.stdout.write(`- coverage verified: ${report.activation.coverage_verified ? 'yes' : 'no'}\n`);
-    process.stdout.write(`- passive live in this process: ${report.activation.passive_live ? 'yes' : 'no'}\n`);
-    process.stdout.write(`- reload required: ${report.activation.reload_required ? 'yes' : 'no'}\n`);
-    if (report.activation.next_action) process.stdout.write(`- next action: ${report.activation.next_action}\n`);
-    process.stdout.write('\n');
+    out('Activation:\n');
+    out(`- agent: ${report.activation.agent_id || 'none resolved'}${report.activation.agent_id_source ? ` (${report.activation.agent_id_source})` : ''}\n`);
+    if (report.activation.exact_fix) out(`- exact fix: ${report.activation.exact_fix}\n`);
+    out(`- self-test server confirmed: ${report.activation.server_confirmed ? 'yes' : 'no'}\n`);
+    out(`- scope: ${report.activation.activation_scope}\n`);
+    out(`- coverage verified: ${report.activation.coverage_verified ? 'yes' : 'no'}\n`);
+    out(`- passive live in this process: ${report.activation.passive_live ? 'yes' : 'no'}\n`);
+    out(`- reload required: ${report.activation.reload_required ? 'yes' : 'no'}\n`);
+    if (report.activation.next_action) out(`- next action: ${report.activation.next_action}\n`);
+    out('\n');
   }
 
-  process.stdout.write('Detected:\n');
+  out('Detected:\n');
   for (const [key, value] of Object.entries(report.detected)) {
-    process.stdout.write(`- ${key}: ${value ? 'yes' : 'no'}\n`);
+    out(`- ${key}: ${value ? 'yes' : 'no'}\n`);
   }
 
-  process.stdout.write('\nPlanned changes:\n');
+  out('\nPlanned changes:\n');
   for (const change of report.changes) {
     const marker = change.automatic_repair_suppressed
       ? 'preserved unverified-ahead surface; repair suppressed'
       : change.hook_conflict ? 'preserved unmanaged owner file; review required'
       : change.applied ? 'wrote' : change.changed ? 'would write' : 'unchanged';
-    process.stdout.write(`- ${marker}: ${change.label} (${change.path})\n`);
+    out(`- ${marker}: ${change.label} (${change.path})\n`);
     if (change.automatic_repair_suppressed && change.exact_fix) {
-      process.stdout.write(`  exact verification: ${change.exact_fix}\n`);
+      out(`  exact verification: ${change.exact_fix}\n`);
     }
-    if (change.hook_conflict && change.exact_fix) process.stdout.write(`  exact fix: ${change.exact_fix}\n`);
+    if (change.hook_conflict && change.exact_fix) out(`  exact fix: ${change.exact_fix}\n`);
   }
 
-  process.stdout.write('\nLocal session loop guard:\n');
-  process.stdout.write(`- configured: ${report.loop_guard_configured ? 'yes' : 'no'}\n`);
-  process.stdout.write(`- isolated self-test passed: ${report.loop_guard_self_tested ? 'yes' : 'no'}\n`);
-  process.stdout.write(`- observed in a reloaded host: ${report.loop_guard_observed ? 'yes' : 'no'}\n`);
+  out('\nLocal session loop guard:\n');
+  out(`- configured: ${report.loop_guard_configured ? 'yes' : 'no'}\n`);
+  out(`- isolated self-test passed: ${report.loop_guard_self_tested ? 'yes' : 'no'}\n`);
+  out(`- observed in a reloaded host: ${report.loop_guard_observed ? 'yes' : 'no'}\n`);
   if (!report.loop_guard_observed) {
-    process.stdout.write('- next: restart the host and complete its hook trust/review step before relying on live enforcement\n');
+    out('- next: restart the host and complete its hook trust/review step before relying on live enforcement\n');
   }
 
-  process.stdout.write('\nSelf-test:\n');
+  out('\nSelf-test:\n');
   const toolProfile = report.selfTest.mcp_tool_profile || report.toolProfile;
   if (toolProfile) {
-    process.stdout.write(`- configured tool profile: ${toolProfile.configured_profile}\n`);
-    process.stdout.write(`- effective tool profile: ${toolProfile.effective_profile}\n`);
-    process.stdout.write(`- expected visible tools: ${toolProfile.expected_visible_count == null ? 'complete catalog (awaiting reloaded MCP count)' : toolProfile.expected_visible_count}\n`);
-    process.stdout.write(`- actual visible tools: ${toolProfile.actual_visible_count == null ? 'unavailable until process reload' : toolProfile.actual_visible_count}\n`);
-    process.stdout.write(`- visible tool names: ${toolProfile.visibility_live ? toolProfile.visible_tool_names.join(', ') : 'unavailable until process reload'}\n`);
-    process.stdout.write(`- profile live: ${toolProfile.visibility_live ? 'yes' : 'no'}\n`);
+    out(`- configured tool profile: ${toolProfile.configured_profile}\n`);
+    out(`- effective tool profile: ${toolProfile.effective_profile}\n`);
+    out(`- expected visible tools: ${toolProfile.expected_visible_count == null ? 'complete catalog (awaiting reloaded MCP count)' : toolProfile.expected_visible_count}\n`);
+    out(`- actual visible tools: ${toolProfile.actual_visible_count == null ? 'unavailable until process reload' : toolProfile.actual_visible_count}\n`);
+    out(`- visible tool names: ${toolProfile.visibility_live ? toolProfile.visible_tool_names.join(', ') : 'unavailable until process reload'}\n`);
+    out(`- profile live: ${toolProfile.visibility_live ? 'yes' : 'no'}\n`);
     const projection = toolProfile.backend_entitlement_projection;
     const availability = projection?.primary_tool_availability;
     if (projection?.evidence_state === 'available' && availability?.entitlement_evidence?.state === 'available') {
-      process.stdout.write(`- backend-projected entitled tools: ${availability.counts.entitled}\n`);
-      process.stdout.write(`- backend-projected upgrade-required tools: ${availability.counts.upgrade_required}\n`);
-      process.stdout.write(`- backend projection source: ${projection.source}; authorizes calls: no\n`);
+      out(`- backend-projected entitled tools: ${availability.counts.entitled}\n`);
+      out(`- backend-projected upgrade-required tools: ${availability.counts.upgrade_required}\n`);
+      out(`- backend projection source: ${projection.source}; authorizes calls: no\n`);
     } else {
-      process.stdout.write(`- backend-projected entitlements: unavailable (source: ${projection?.source || 'backend_projection_not_provided'}; non-authorizing)\n`);
+      out(`- backend-projected entitlements: unavailable (source: ${projection?.source || 'backend_projection_not_provided'}; non-authorizing)\n`);
     }
   }
   if (report.selfTest.skipped) {
-    process.stdout.write(`- skipped: ${report.selfTest.reason}\n`);
-    if (report.selfTest.exact_fix) process.stdout.write(`- exact fix: ${report.selfTest.exact_fix}\n`);
+    out(`- skipped: ${report.selfTest.reason}\n`);
+    if (report.selfTest.exact_fix) out(`- exact fix: ${report.selfTest.exact_fix}\n`);
   } else {
-    process.stdout.write(`- active: ${report.selfTest.active ? 'yes' : 'no'}\n`);
-    process.stdout.write(`- decision_id: ${report.selfTest.decision_id}\n`);
-    process.stdout.write(`- health: ${report.selfTest.health || 'unknown'}\n`);
-    process.stdout.write(`- one-call runtime: ${report.selfTest.runtime_active ? 'active' : 'not verified'}\n`);
-    if (report.selfTest.error) process.stdout.write(`- error: ${report.selfTest.error}\n`);
-    if (report.selfTest.next_action) process.stdout.write(`- next action: ${report.selfTest.next_action}\n`);
+    out(`- active: ${report.selfTest.active ? 'yes' : 'no'}\n`);
+    out(`- decision_id: ${report.selfTest.decision_id}\n`);
+    out(`- health: ${report.selfTest.health || 'unknown'}\n`);
+    out(`- one-call runtime: ${report.selfTest.runtime_active ? 'active' : 'not verified'}\n`);
+    if (report.selfTest.error) out(`- error: ${report.selfTest.error}\n`);
+    if (report.selfTest.next_action) out(`- next action: ${report.selfTest.next_action}\n`);
     const update = report.selfTest.client_update;
     const notification = update?.notification_state || update?.notification;
     if (update && (update.update_available === true || update.version_status === 'unknown' || notification === 'unknown' || notification === 'version_unknown' || notification === 'security_required')) {
-      process.stdout.write('\nMarrow client update:\n');
-      process.stdout.write(`- priority: ${notification === 'security_required' ? 'security_required' : notification === 'recommended' ? 'recommended' : update.version_status === 'unknown' || notification === 'unknown' || notification === 'version_unknown' ? 'version_unknown' : update.priority || 'recommended'}\n`);
-      process.stdout.write(`- installed: ${update.installed_version || update.current_version || 'unknown'}\n`);
-      process.stdout.write(`- latest: ${update.latest_version || 'unknown'}\n`);
-      process.stdout.write('- automatic notification: yes\n');
-      process.stdout.write('- automatic local mutation: no; operator policy applies\n');
-      if (update.owner_notice) process.stdout.write(`- tell owner: ${update.owner_notice}\n`);
-      if (update.agent_instruction) process.stdout.write(`- agent instruction: ${update.agent_instruction}\n`);
+      out('\nMarrow client update:\n');
+      out(`- priority: ${notification === 'security_required' ? 'security_required' : notification === 'recommended' ? 'recommended' : update.version_status === 'unknown' || notification === 'unknown' || notification === 'version_unknown' ? 'version_unknown' : update.priority || 'recommended'}\n`);
+      out(`- installed: ${update.installed_version || update.current_version || 'unknown'}\n`);
+      out(`- latest: ${update.latest_version || 'unknown'}\n`);
+      out('- automatic notification: yes\n');
+      out('- automatic local mutation: no; operator policy applies\n');
+      if (update.owner_notice) out(`- tell owner: ${update.owner_notice}\n`);
+      if (update.agent_instruction) out(`- agent instruction: ${update.agent_instruction}\n`);
       if (update.update_command || update.exact_update_command || update.auto_update_command) {
-        process.stdout.write(`- update: ${update.auto_update_command || update.update_command || update.exact_update_command}\n`);
+        out(`- update: ${update.auto_update_command || update.update_command || update.exact_update_command}\n`);
       }
-      if (update.verification_command || update.exact_verification_command) process.stdout.write(`- verify: ${update.verification_command || update.exact_verification_command}\n`);
+      if (update.verification_command || update.exact_verification_command) out(`- verify: ${update.verification_command || update.exact_verification_command}\n`);
     }
     if (report.selfTest.first_value_signal) {
-      process.stdout.write('\nFirst value:\n');
+      out('\nFirst value:\n');
       const valueMoment = report.selfTest.install_value_moment;
       if (valueMoment) {
-        process.stdout.write(`- ${valueMoment.headline}\n`);
-        process.stdout.write('- First proof:\n');
-        for (const proof of valueMoment.proof) process.stdout.write(`  - ${proof}\n`);
-        process.stdout.write(`- ${valueMoment.fleet_signal}\n`);
-        process.stdout.write(`- Try this now: ${valueMoment.try_this_now}\n`);
-        process.stdout.write(`- Expected: ${valueMoment.expected_response}\n`);
+        out(`- ${valueMoment.headline}\n`);
+        out('- First proof:\n');
+        for (const proof of valueMoment.proof) out(`  - ${proof}\n`);
+        out(`- ${valueMoment.fleet_signal}\n`);
+        out(`- Try this now: ${valueMoment.try_this_now}\n`);
+        out(`- Expected: ${valueMoment.expected_response}\n`);
       } else {
-        process.stdout.write(`- ${report.selfTest.first_value_signal.headline}\n`);
-        process.stdout.write(`- First useful lesson: ${report.selfTest.first_value_signal.first_lesson}\n`);
+        out(`- ${report.selfTest.first_value_signal.headline}\n`);
+        out(`- First useful lesson: ${report.selfTest.first_value_signal.first_lesson}\n`);
         if (report.selfTest.first_value_signal.value_proof.length) {
-          process.stdout.write(`- Proof: ${report.selfTest.first_value_signal.value_proof.join('; ')}\n`);
+          out(`- Proof: ${report.selfTest.first_value_signal.value_proof.join('; ')}\n`);
         }
-        process.stdout.write(`- Next: ${report.selfTest.first_value_signal.next_action}\n`);
+        out(`- Next: ${report.selfTest.first_value_signal.next_action}\n`);
       }
     }
     if (report.selfTest.token_value_proof) {
@@ -3379,68 +3489,64 @@ function printReport(report) {
       const observed = proof.observed || {};
       const savings = proof.savings || {};
       const tokens = observed.tokens || {};
-      process.stdout.write('\nToken value proof:\n');
-      process.stdout.write(`- passive capture: ${proof.enabled ? 'on' : 'unknown'}\n`);
-      process.stdout.write(`- model calls observed: ${observed.model_calls || 0}\n`);
-      process.stdout.write(`- tokens observed: ${tokens.total || 0}\n`);
-      process.stdout.write(`- estimated tokens saved: ${savings.estimated_tokens_saved || 0}\n`);
-      if (savings.confidence) process.stdout.write(`- confidence: ${savings.confidence}\n`);
-      if (proof.proof_line) process.stdout.write(`- proof: ${proof.proof_line}\n`);
-      if (proof.exact_next_action) process.stdout.write(`- next: ${proof.exact_next_action}\n`);
+      out('\nToken value proof:\n');
+      out(`- passive capture: ${proof.enabled ? 'on' : 'unknown'}\n`);
+      out(`- model calls observed: ${observed.model_calls || 0}\n`);
+      out(`- tokens observed: ${tokens.total || 0}\n`);
+      out(`- estimated tokens saved: ${savings.estimated_tokens_saved || 0}\n`);
+      if (savings.confidence) out(`- confidence: ${savings.confidence}\n`);
+      if (proof.proof_line) out(`- proof: ${proof.proof_line}\n`);
+      if (proof.exact_next_action) out(`- next: ${proof.exact_next_action}\n`);
     }
   }
 
   if (report.harnessReload && report.writeMode !== 'doctor') {
-    process.stdout.write('\nHarness reload:\n');
-    process.stdout.write(`- required: ${report.harnessReload.required ? 'yes' : 'no'}\n`);
-    process.stdout.write(`- live in this process: ${report.harnessReload.live_in_this_process ? 'yes' : 'no'}\n`);
-    if (report.harnessReload.required && report.harnessReload.instruction) process.stdout.write(`- restart: ${report.harnessReload.instruction}\n`);
-    if (report.harnessReload.required && report.harnessReload.prove_command) process.stdout.write(`- prove after restart: ${report.harnessReload.prove_command}\n`);
+    out('\nHarness reload:\n');
+    out(`- required: ${report.harnessReload.required ? 'yes' : 'no'}\n`);
+    out(`- live in this process: ${report.harnessReload.live_in_this_process ? 'yes' : 'no'}\n`);
+    if (report.harnessReload.required && report.harnessReload.instruction) out(`- restart: ${report.harnessReload.instruction}\n`);
+    if (report.harnessReload.required && report.harnessReload.prove_command) out(`- prove after restart: ${report.harnessReload.prove_command}\n`);
   }
   if (report.firstCapture) {
-    process.stdout.write('\nFirst capture:\n');
-    process.stdout.write(`- client: ${report.firstCapture.client}\n`);
-    process.stdout.write(`- capability: ${report.firstCapture.capability_level}\n`);
-    if (report.firstCapture.command) process.stdout.write(`- command: ${report.firstCapture.command}\n`);
-    process.stdout.write(`- ${report.firstCapture.instruction}\n`);
+    out('\nFirst capture:\n');
+    out(`- client: ${report.firstCapture.client}\n`);
+    out(`- capability: ${report.firstCapture.capability_level}\n`);
+    if (report.firstCapture.command) out(`- command: ${report.firstCapture.command}\n`);
+    out(`- ${report.firstCapture.instruction}\n`);
   }
 
   if (report.remediation) {
-    process.stdout.write('\nRemediation:\n');
-    process.stdout.write(`- attempted: ${report.remediation.attempted ? 'yes' : 'no'}\n`);
-    process.stdout.write(`- fixed config: ${report.remediation.fixedConfig ? 'yes' : 'no'}\n`);
-    process.stdout.write(`- self-test passed: ${report.remediation.selfTestPassed ? 'yes' : 'no'}\n`);
-    if (report.remediation.message) process.stdout.write(`- result: ${report.remediation.message}\n`);
-  }
-
-  if (report.configDiagnostics?.npm_token?.mismatch || report.configDiagnostics?.npm_token?.missing_npmrc_token) {
-    const npm = report.configDiagnostics.npm_token;
-    process.stdout.write('\nConfig diagnostics:\n');
-    process.stdout.write(`- npm token mismatch: ${npm.mismatch ? 'yes' : 'no'}\n`);
-    process.stdout.write(`- npmrc token missing: ${npm.missing_npmrc_token ? 'yes' : 'no'}\n`);
-    process.stdout.write(`- repairable: ${npm.repairable ? 'yes' : 'no'}\n`);
-    if (npm.recommended_fix) process.stdout.write(`- exact fix: ${npm.recommended_fix}\n`);
-  }
-
-  if (report.configRepairs?.length) {
-    process.stdout.write('\nConfig repairs:\n');
-    for (const repair of report.configRepairs) {
-      process.stdout.write(`- ${repair.changed ? 'fixed' : 'checked'}: ${repair.message}\n`);
-    }
+    out('\nRemediation:\n');
+    out(`- attempted: ${report.remediation.attempted ? 'yes' : 'no'}\n`);
+    out(`- fixed config: ${report.remediation.fixedConfig ? 'yes' : 'no'}\n`);
+    out(`- self-test passed: ${report.remediation.selfTestPassed ? 'yes' : 'no'}\n`);
+    if (report.remediation.message) out(`- result: ${report.remediation.message}\n`);
   }
 
   if (report.sdkDependency?.required) {
-    process.stdout.write('\nSDK dependency:\n');
-    process.stdout.write(`- @getmarrow/sdk: ${report.sdkDependency.present ? 'present' : report.sdkDependency.ahead_unverified ? 'newer version requires verification' : 'missing'}\n`);
-    if (report.sdkDependency.install_command) process.stdout.write(`- exact fix: ${report.sdkDependency.install_command}\n`);
-    if (report.sdkDependency.warning) process.stdout.write(`- warning: ${report.sdkDependency.warning}\n`);
+    out('\nSDK dependency:\n');
+    out(`- @getmarrow/sdk: ${report.sdkDependency.present ? 'present' : report.sdkDependency.ahead_unverified ? 'newer version requires verification' : 'missing'}\n`);
+    if (report.sdkDependency.install_command) out(`- exact fix: ${report.sdkDependency.install_command}\n`);
+    if (report.sdkDependency.warning) out(`- warning: ${report.sdkDependency.warning}\n`);
   }
 
-  process.stdout.write('\nAutomatic controller:\n');
-  process.stdout.write(`- state: ${report.controller?.active ? 'active' : report.controller?.state || 'unavailable'}\n`);
-  if (report.controller?.started_at) process.stdout.write(`- started: ${report.controller.started_at}\n`);
-  if (report.controller?.reason) process.stdout.write(`- reason: ${report.controller.reason}\n`);
-  if (report.controller?.exact_fix) process.stdout.write(`- exact fix: ${report.controller.exact_fix}\n`);
+  if (report.hermes?.detected) {
+    out('\nHermes:\n');
+    out(`- MCP server entry: ${report.hermes.state}${report.hermes.config_path ? ` (${report.hermes.config_path})` : ''}\n`);
+    if (report.hermes.backup_path) out(`- backup: ${report.hermes.backup_path}\n`);
+    if (report.hermes.key_source) out(`- API key source for the Hermes MCP server: ${report.hermes.key_source}\n`);
+    if (report.hermes.owner_key_storage) out(`- ~/.marrow/env key storage: ${report.hermes.owner_key_storage.state}\n`);
+    if (report.hermes.restart) out(`- restart: ${report.hermes.restart}\n`);
+    if (report.hermes.exact_fix) out(`- exact fix: ${report.hermes.exact_fix}\n`);
+  }
+
+  out('\nAutomatic controller:\n');
+  out(`- state: ${report.controller?.active ? 'active' : report.controller?.state || 'unavailable'}\n`);
+  if (report.controller?.installer_version) out(`- installer version: ${report.controller.installer_version}\n`);
+  if (report.controller?.restarted) out(`- restarted: ${report.controller.restarted.from_versions.join(', ')} -> ${report.controller.restarted.to_version}\n`);
+  if (report.controller?.started_at) out(`- started: ${report.controller.started_at}\n`);
+  if (report.controller?.reason) out(`- reason: ${report.controller.reason}\n`);
+  if (report.controller?.exact_fix) out(`- exact fix: ${report.controller.exact_fix}\n`);
 
   if (report.writeMode === 'doctor') {
     const liveHere = !report.harnessReload?.required
@@ -3451,50 +3557,112 @@ function printReport(report) {
       : report.doctor.active
         ? 'server confirmed, restart required'
         : 'no';
-    process.stdout.write('\nDoctor:\n');
-    process.stdout.write(`- Marrow active: ${activeLabel}\n`);
-    process.stdout.write(`- missing env: ${report.doctor.missingEnv.length ? report.doctor.missingEnv.join(', ') : 'none'}\n`);
-    if (report.doctor.envHints.length) process.stdout.write(`- possible env files: ${report.doctor.envHints.join(', ')}\n`);
-    process.stdout.write(`- missing hooks/config: ${report.doctor.missingHooks.length ? report.doctor.missingHooks.join('; ') : 'none'}\n`);
-    process.stdout.write(`- loop guard configured: ${report.doctor.loop_guard_configured ? 'yes' : 'no'}\n`);
-    process.stdout.write(`- loop guard isolated self-test: ${report.doctor.loop_guard_self_tested ? 'passed' : 'not passed'}\n`);
-    process.stdout.write(`- loop guard observed after reload/trust: ${report.doctor.loop_guard_observed ? 'yes' : 'no'}\n`);
+    out('\nDoctor:\n');
+    out(`- Marrow active: ${activeLabel}\n`);
+    out(`- missing env: ${report.doctor.missingEnv.length ? report.doctor.missingEnv.join(', ') : 'none'}\n`);
+    if (report.doctor.envHints.length) out(`- possible env files: ${report.doctor.envHints.join(', ')}\n`);
+    out(`- missing hooks/config: ${report.doctor.missingHooks.length ? report.doctor.missingHooks.join('; ') : 'none'}\n`);
+    out(`- loop guard configured: ${report.doctor.loop_guard_configured ? 'yes' : 'no'}\n`);
+    out(`- loop guard isolated self-test: ${report.doctor.loop_guard_self_tested ? 'passed' : 'not passed'}\n`);
+    out(`- loop guard observed after reload/trust: ${report.doctor.loop_guard_observed ? 'yes' : 'no'}\n`);
     if (report.doctor.mcpProcesses?.available) {
       const processes = report.doctor.mcpProcesses;
-      process.stdout.write(`- MCP process versions: ${processes.active_versions.length ? processes.active_versions.join(', ') : processes.active_processes ? 'unknown' : 'none'}\n`);
-      process.stdout.write(`- stale/mixed/version-unknown MCP clients: ${processes.healthy ? 'no' : 'yes'}\n`);
-      if (processes.ahead_unverified_versions.length) process.stdout.write(`- unverified-ahead MCP clients: ${processes.ahead_unverified_versions.join(', ')}\n`);
-      if (processes.automatic_repair_suppressed) process.stdout.write('- automatic MCP process repair: suppressed pending official registry verification\n');
+      out(`- MCP process versions: ${processes.active_versions.length ? processes.active_versions.join(', ') : processes.active_processes ? 'unknown' : 'none'}\n`);
+      out(`- stale/mixed/version-unknown MCP clients: ${processes.healthy ? 'no' : 'yes'}\n`);
+      if (processes.ahead_unverified_versions.length) out(`- unverified-ahead MCP clients: ${processes.ahead_unverified_versions.join(', ')}\n`);
+      if (processes.automatic_repair_suppressed) out('- automatic MCP process repair: suppressed pending official registry verification\n');
     }
     if (report.doctor.mcpConfigurations) {
       const configurations = report.doctor.mcpConfigurations;
-      process.stdout.write(`- configured MCP versions: ${configurations.configured_versions.length ? configurations.configured_versions.join(', ') : 'none pinned'}\n`);
-      process.stdout.write(`- stale/mixed/version-unknown MCP configuration: ${configurations.healthy ? 'no' : 'yes'}\n`);
-      if (configurations.ahead_unverified_versions.length) process.stdout.write(`- unverified-ahead MCP configuration: ${configurations.ahead_unverified_versions.join(', ')}\n`);
-      if (configurations.automatic_repair_suppressed) process.stdout.write('- automatic MCP configuration repair: suppressed pending official registry verification\n');
+      out(`- configured MCP versions: ${configurations.configured_versions.length ? configurations.configured_versions.join(', ') : 'none pinned'}\n`);
+      out(`- stale/mixed/version-unknown MCP configuration: ${configurations.healthy ? 'no' : 'yes'}\n`);
+      if (configurations.ahead_unverified_versions.length) out(`- unverified-ahead MCP configuration: ${configurations.ahead_unverified_versions.join(', ')}\n`);
+      if (configurations.automatic_repair_suppressed) out('- automatic MCP configuration repair: suppressed pending official registry verification\n');
     }
-    if (report.doctor.recommendedFix) process.stdout.write(`- recommended fix: ${report.doctor.recommendedFix}\n`);
+    if (report.doctor.recommendedFix) out(`- recommended fix: ${report.doctor.recommendedFix}\n`);
     if (report.doctor.mcp_update_required) {
-      process.stdout.write(`- restart once after update: ${report.doctor.restart_instruction}\n`);
-      process.stdout.write(`- verify after restart: ${report.doctor.verification_command}\n`);
+      out(`- restart once after update: ${report.doctor.restart_instruction}\n`);
+      out(`- verify after restart: ${report.doctor.verification_command}\n`);
     }
-    process.stdout.write(`- live health: ${report.doctor.healthCommand}\n`);
+    out(`- live health: ${report.doctor.healthCommand}\n`);
   }
 
   if (report.writeMode === 'dry-run') {
-    process.stdout.write('\nRun with --yes to write these changes.\n');
+    out('\nRun with --yes to write these changes.\n');
   }
 
   if (report.warnings.length > 0) {
-    process.stdout.write('\nWarnings:\n');
+    out('\nWarnings:\n');
     for (const warning of report.warnings) {
-      process.stdout.write(`- ${warning}\n`);
+      out(`- ${warning}\n`);
     }
   }
 }
 
+// The local controller directory is keyed by project and this id. It never leaves the machine.
+// Hermes passes only PATH, HOME and locale variables to an MCP server, plus its env block.
+// When neither the entry nor $HERMES_HOME/.env carries the key, the Marrow MCP server reads
+// it from the owner-only ~/.marrow/env, which is written here (mode 600) only if absent.
+function hermesWiringReport(detection, changes, options, planMode) {
+  const paths = detection.paths || {};
+  if (!detection.hermes) return { detected: false, state: 'not_detected' };
+  if (planMode && !['mcp', 'both'].includes(planMode)) return { detected: true, state: 'skipped_for_mode', config_path: paths.hermesConfig };
+  const mcpTargetVersion = options.mcpTargetVersion || MCP_ADAPTER_VERSION;
+  const blockOptions = { mcpPackageSpec: `@getmarrow/mcp@${mcpTargetVersion}`, keyReference: hermesEnvHasKey(paths.hermesEnv) };
+  if (!detection.hermesConfig) {
+    return {
+      detected: true,
+      state: 'config_not_found',
+      config_path: paths.hermesConfig,
+      exact_fix: `Run Hermes once so it creates ${paths.hermesConfig}, then rerun this command, or add this block to it:\n${hermesManualBlock(blockOptions)}`,
+    };
+  }
+  const change = (changes || []).find((entry) => entry.label === HERMES_WRITE_LABEL);
+  if (!change) {
+    return {
+      detected: true,
+      state: 'refused',
+      config_path: paths.hermesConfig,
+      exact_fix: `Marrow left ${paths.hermesConfig} unchanged because its path is not a direct, regular owner file. Add this block under mcp_servers by hand, then restart Hermes:\n${hermesManualBlock(blockOptions)}`,
+    };
+  }
+  if (change.hook_conflict) {
+    return { detected: true, state: 'refused', config_path: change.path, reason: change.conflict_reason || null, exact_fix: change.exact_fix };
+  }
+  if (change.automatic_repair_suppressed) {
+    return { detected: true, state: 'preserved_unverified_ahead', config_path: change.path, exact_fix: change.exact_fix };
+  }
+  if (change.hosted_entry_preserved) {
+    return { detected: true, state: 'hosted_entry_preserved', config_path: change.path };
+  }
+  const state = change.applied ? 'configured' : change.changed ? 'would_configure' : 'already_configured';
+  let keySource = 'owner_env_file';
+  let keyStorage = null;
+  const current = safeRead(change.path);
+  const entryKeys = hermesMarrowEnvKeyNames(current);
+  if (entryKeys.includes('MARROW_API_KEY') || entryKeys.includes('MARROW_KEY')) {
+    keySource = /MARROW_API_KEY:\s*["']?\$\{MARROW_API_KEY\}/.test(current) ? 'hermes_env_reference' : 'hermes_entry';
+  } else if (state !== 'would_configure' && options.yes && !options.dryRun && !options.doctor) {
+    keyStorage = ensureOwnerApiKey(options.home || detection.home, options.apiKey);
+  }
+  return {
+    detected: true,
+    state,
+    config_path: change.path,
+    backup_path: change.backup_path || null,
+    key_source: keySource,
+    ...(keyStorage ? { owner_key_storage: { state: keyStorage.state, path: keyStorage.path } } : {}),
+    restart: state === 'configured' ? 'Restart Hermes so it loads the Marrow MCP server.' : null,
+  };
+}
+
+function localControllerAgentId(root, client, configuredAgentId = '') {
+  return String(configuredAgentId || '').trim() || stableAgentId(root, client);
+}
+
 async function install(options) {
-  // The controller keeps the stable local id for its identity, but only sends a configured id.
+  // Only a configured agent id is sent to Marrow. The controller keeps a local identity for its
+  // state directory, which is never sent.
   const configuredAgentId = String(options.agentId || '').trim();
   if (options.activate && (options.yes !== true || options.dryRun || options.doctor)) {
     throw new Error('activate requires write mode (--yes) because hooks must be installed during this run');
@@ -3519,7 +3687,8 @@ async function install(options) {
   if (options.repair || options.update) assertUpdateTargetsManagedRoot(detection);
   const client = detectedClient(detection);
   options.client = client;
-  options.agentId = String(options.agentId || '').trim() || stableAgentId(detection.root, client);
+  options.agentId = configuredAgentId;
+  const controllerIdentityAgentId = localControllerAgentId(detection.root, client, configuredAgentId);
   const observedMcpProcesses = inspectMcpProcesses({ commands: options.processCommands });
   const observedMcpConfigurations = inspectMcpConfigurations(detection, { paths: options.mcpConfigPaths });
   const registryMetadata = await readMcpRegistryMetadata(options);
@@ -3561,7 +3730,7 @@ async function install(options) {
   };
   options.activation = options.activate ? {
     harness: client,
-    agent_id: options.agentId,
+    agent_id: configuredAgentId || null,
     install_surface: plan.mode,
     mode: options.governanceMode || 'passive',
     hooks_installed: changes
@@ -3582,12 +3751,7 @@ async function install(options) {
     intervention_verified: false,
     closure_verified: false,
   } : null;
-  const configInspection = inspectNpmTokenConfig();
   const sdkDependency = inspectSdkDependency(detection);
-  const configDiagnostics = configInspection.safe;
-  const configRepairs = options.repair && options.yes && !options.dryRun && !options.doctor
-    ? repairConfigDiagnostics(configDiagnostics)
-    : [];
   const envHints = options.apiKey ? [] : findLikelyEnvFiles(detection);
   const mcpProcesses = inspectMcpProcesses({
     commands: options.processCommands,
@@ -3637,9 +3801,12 @@ async function install(options) {
     '',
     registryVerificationAction,
   );
-  if (options.activate && !selfTest.activation_verified) {
+  // An unbound key has no single agent to activate; the self-test still verified the account,
+  // and the report carries the exact fix instead of failing the one-command install.
+  if (options.activate && !selfTest.activation_verified && !selfTest.activation_identity_unresolved) {
     throw new Error('Marrow activation failed: server confirmation was not returned');
   }
+  const hermes = hermesWiringReport(detection, changes, options, plan.mode);
   const plannedHarnessReload = harnessReloadPlan(detection, options.doctor ? [] : changes);
   const updateNeedsRestart = Boolean(options.update
     && !automaticMcpRepairSuppressed
@@ -3684,12 +3851,12 @@ async function install(options) {
       reload_required: true,
     };
   }
-  const changedConfig = changes.some((change) => change.applied) || configRepairs.some((repair) => repair.changed);
+  const changedConfig = changes.some((change) => change.applied);
   const selfTestPassed = Boolean(!selfTest.skipped && selfTest.active && !selfTest.error);
   const controllerPlatform = options.controllerPlatform || process.platform;
   let controller = await controllerStatus({
     root: detection.root,
-    agentId: options.agentId,
+    identityAgentId: controllerIdentityAgentId,
     platform: controllerPlatform,
   });
   const shouldEnsureController = options.controller !== false
@@ -3702,11 +3869,11 @@ async function install(options) {
     && (options.yes || options.activate || options.repair);
   if (shouldEnsureController) {
     try {
-      controller = await ensureGovernanceController({
+      controller = await ensureCurrentGovernanceController({
         apiKey: options.apiKey,
         baseUrl: options.baseUrl,
         agentId: configuredAgentId,
-        identityAgentId: options.agentId,
+        identityAgentId: controllerIdentityAgentId,
         client,
         root: detection.root,
         mode: plan.mode,
@@ -3775,8 +3942,10 @@ async function install(options) {
     },
     activation: {
       requested: options.activate,
-      agent_id: options.agentId,
+      agent_id: selfTest.agent_id || configuredAgentId || null,
+      agent_id_source: configuredAgentId ? 'configured' : selfTest.agent_id_source || 'unresolved',
       server_confirmed: Boolean(selfTest.activation_verified),
+      ...(selfTest.activation_identity_unresolved ? { exact_fix: selfTest.activation_exact_fix } : {}),
       activation_scope: selfTest.activation_scope || null,
       coverage_verified: false,
       passive_live: false,
@@ -3790,7 +3959,8 @@ async function install(options) {
     loop_guard_observed: false,
     loop_guard: loopGuardSelfTest,
     harnessReload,
-    firstCapture: firstCapturePath(detection, options.agentId),
+    firstCapture: firstCapturePath(detection),
+    hermes,
     changes,
     doctor: {
       active: Boolean(!selfTest.skipped && selfTest.active),
@@ -3811,7 +3981,7 @@ async function install(options) {
       loop_guard_observed: false,
       recommendedFix: registryVerificationAction
         || (updateAwaitingRestart ? INSTALLER_RESTART_INSTRUCTION : null)
-        || mcpProcesses.exact_fix || mcpConfigurations.exact_fix || configDiagnostics.npm_token.recommended_fix || (!options.apiKey
+        || mcpProcesses.exact_fix || mcpConfigurations.exact_fix || (!options.apiKey
         ? envHints.length
           ? `MARROW_API_KEY was found in a likely env file at ${envHints[0]}. Load that key from trusted secret storage, export only MARROW_API_KEY, then run npx @getmarrow/install --repair.`
           : 'Set MARROW_API_KEY, then run npx @getmarrow/install --repair.'
@@ -3819,8 +3989,6 @@ async function install(options) {
       healthCommand: 'npx -y --package=@getmarrow/mcp@latest marrow-mcp ping',
     },
     remediation,
-    configDiagnostics,
-    configRepairs,
     sdkDependency,
     controller,
     local_control: localControl,
@@ -3843,18 +4011,137 @@ async function install(options) {
   };
 }
 
+function activationFailureFix(message) {
+  if (/Agent-bound key cannot access another agent|MARROW_AGENT_SCOPE_MISMATCH/i.test(message)) {
+    return `unset MARROW_AGENT_ID and MARROW_FLEET_AGENT_ID so Marrow uses the key's own agent, then rerun ${INSTALLER_UPDATE_COMMAND}`;
+  }
+  return INSTALLER_DOCTOR_COMMAND;
+}
+
+function installCommandFor(options) {
+  return options.update ? INSTALLER_UPDATE_COMMAND : 'npx -y @getmarrow/install@latest';
+}
+
+// One summary for the one-command paths (first install and update). The full report goes to a
+// private log file. Nothing here prints the API key.
+function installSummaryLines(report, options) {
+  const selfTest = report.selfTest || {};
+  const activation = report.activation || {};
+  const lines = [];
+  const selfTestFailed = !selfTest.skipped && (Boolean(selfTest.error) || !selfTest.active);
+  if (selfTest.skipped) {
+    lines.push(`Marrow ${INSTALLER_ADAPTER_VERSION}: configuration updated; self-test skipped (${selfTest.reason}).${selfTest.exact_fix ? ` Fix: ${selfTest.exact_fix}` : ''}`);
+  } else if (selfTestFailed) {
+    const fix = report.doctor?.recommendedFix || INSTALLER_DOCTOR_COMMAND;
+    lines.push(`Marrow ${INSTALLER_ADAPTER_VERSION}: self-test failed: ${selfTest.error || 'Marrow reported this account as inactive'}. Fix: ${fix}`);
+  } else {
+    const agent = activation.agent_id
+      ? `; agent ${activation.agent_id} (${activation.agent_id_source === 'configured' ? 'configured' : 'resolved by Marrow'})`
+      : '; this key is not bound to one agent';
+    lines.push(`Marrow ${INSTALLER_ADAPTER_VERSION}: healthy. Self-test decision ${selfTest.decision_id} committed${agent}.`);
+  }
+  if (activation.exact_fix) lines.push(`Activation: ${activation.exact_fix}`);
+  const controller = report.controller || {};
+  if (controller.restarted) {
+    lines.push(`Controller restarted: ${controller.restarted.from_versions.join(', ')} -> ${controller.restarted.to_version}.`);
+  } else if (controller.active && controller.changed) {
+    lines.push('Controller started.');
+  } else if (report.local_control?.state === 'disabled') {
+    lines.push('Local control is disabled by the owner, so the controller was left stopped.');
+  } else if (options.controller !== false && !controller.active && controller.exact_fix && controller.required !== false) {
+    lines.push(`Controller: ${controller.state}. Fix: ${controller.exact_fix}`);
+  }
+  const hermes = report.hermes || {};
+  if (hermes.state === 'configured') {
+    lines.push(`Hermes: added the Marrow MCP server to ${hermes.config_path}${hermes.backup_path ? ` (backup ${hermes.backup_path})` : ''}. Restart Hermes to load it.`);
+  } else if (hermes.state === 'already_configured') {
+    lines.push('Hermes: the Marrow MCP server is already configured.');
+  } else if (hermes.state === 'refused' || hermes.state === 'config_not_found' || hermes.state === 'preserved_unverified_ahead') {
+    lines.push(`Hermes: ${hermes.config_path || 'config.yaml'} was not changed. The exact block to add is in the full report.`);
+  }
+  if (hermes.owner_key_storage?.state === 'written') {
+    lines.push('Stored your API key in ~/.marrow/env (mode 600) so the Hermes MCP server can read it; Hermes passes no other environment to MCP servers.');
+  } else if (hermes.owner_key_storage?.state === 'different_key_present') {
+    lines.push('Note: ~/.marrow/env already holds a different Marrow key; the Hermes MCP server will use that one.');
+  }
+  const reload = report.harnessReload || {};
+  if (reload.required && reload.instruction && hermes.state !== 'configured') lines.push(`Restart: ${reload.instruction}`);
+  else if (reload.required && reload.clients?.some((entry) => entry.client !== 'hermes')) {
+    lines.push(`Restart: ${reload.clients.filter((entry) => entry.client !== 'hermes').map((entry) => entry.restart).join(' ')}`);
+  }
+  return { lines, selfTestFailed };
+}
+
+function writeInstallLog(home, text) {
+  const directory = path.join(home, '.marrow', 'logs');
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const stat = fs.lstatSync(directory);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('unsafe log directory');
+  fs.chmodSync(directory, 0o700);
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const filePath = path.join(directory, `install-${stamp}-${process.pid}.log`);
+  fs.writeFileSync(filePath, text, { flag: 'wx', mode: 0o600 });
+  return filePath;
+}
+
 async function runCli(argv) {
   const options = parseArgs(argv);
   if (options.help) {
     process.stdout.write(usage());
     return;
   }
-  const report = await install(options);
+  if (!options.apiKey) {
+    const stored = readOwnerApiKey(options.home);
+    if (stored.apiKey) {
+      options.apiKey = stored.apiKey;
+      options.apiKeySource = 'owner_env_file';
+    }
+  }
+  const oneCommand = Boolean((options.activate || options.update) && !options.dryRun && !options.doctor);
+  if (oneCommand && !options.apiKey) {
+    // An update aimed at an unmanaged directory is refused first; it needs no key to answer.
+    if (options.update) {
+      assertUpdateTargetsManagedRoot(detectEnvironment(options.cwd, {
+        ...process.env,
+        HOME: options.home || options.cwd,
+        USERPROFILE: options.home || options.cwd,
+      }));
+    }
+    process.stdout.write(`Marrow needs your API key. Run: MARROW_API_KEY=<your key> ${installCommandFor(options)}  (create a key at https://getmarrow.ai)\n`);
+    process.exitCode = 2;
+    return;
+  }
+  let report;
+  try {
+    report = await install(options);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!oneCommand || options.json || !/^Marrow activation failed/.test(message)) throw error;
+    process.stderr.write(`Marrow ${INSTALLER_ADAPTER_VERSION}: ${message}. Fix: ${activationFailureFix(message)}\n`);
+    process.exitCode = 1;
+    return;
+  }
   if (options.json) {
     process.stdout.write(JSON.stringify(report, null, 2) + '\n');
-  } else {
-    printReport(report);
+    return;
   }
+  if (!oneCommand || options.verbose) {
+    printReport(report);
+    return;
+  }
+  const { lines, selfTestFailed } = installSummaryLines(report, options);
+  let full = '';
+  printReport(report, (text) => { full += text; });
+  let logPath = null;
+  try {
+    logPath = writeInstallLog(options.home, full);
+  } catch {
+    logPath = null;
+  }
+  process.stdout.write(`${lines.join('\n')}\n`);
+  if (logPath) process.stdout.write(`Full report: ${logPath}\n`);
+  else process.stdout.write(`\n${full}`);
+  if (selfTestFailed) process.exitCode = 1;
 }
 
 module.exports = {
@@ -3867,13 +4154,14 @@ module.exports = {
   runLoopGuardSelfTest,
   runCli,
   passiveRuntimeSource,
-  inspectNpmTokenConfig,
   inspectSdkDependency,
   inspectMcpProcesses,
   inspectMcpConfigurations,
   buildInstallValueMoment,
   buildTokenValueProof,
   stableAgentId,
+  detectedClient,
+  localControllerAgentId,
   activationProfile,
   claudeNativeHookFingerprint,
   codexNativeHookFingerprint,
@@ -3891,6 +4179,7 @@ module.exports = {
   CURSOR_NATIVE_HOOK_MATCHER,
   GEMINI_NATIVE_HOOK_MATCHER,
   printReport,
+  installSummaryLines,
   buildMcpToolProfileReport,
   resolveMcpTargetVersion,
   resolveToolProfile,
