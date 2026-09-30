@@ -203,9 +203,12 @@ test('policy: a replayed older bundle is refused after restart; weaker levels ne
     assert.equal(restarted.current().lastError, 'cache_rollback_rejected');
     assert.equal(restarted.current().rollbackDetected, true);
     // A weaker level from a long-lived bundle is not honoured.
-    const long = new PolicyStore({ dir: tempDir('agentd-pol-'), trustedKeys: { k1: publicKey } });
-    long.accept(signEnvelope(policyPayload({ version: 5, expires_at: new Date(Date.now() + 7 * 24 * 3600e3).toISOString(), control: { level: 'off', approval_receipt_id: 'oar_owner0002' } }), privateKey, 'k1'));
-    assert.equal(long.current().control.level, 'enforce');
+    const longDir = tempDir('agentd-pol-');
+    try {
+      const long = new PolicyStore({ dir: longDir, trustedKeys: { k1: publicKey } });
+      long.accept(signEnvelope(policyPayload({ version: 5, expires_at: new Date(Date.now() + 7 * 24 * 3600e3).toISOString(), control: { level: 'off', approval_receipt_id: 'oar_owner0002' } }), privateKey, 'k1'));
+      assert.equal(long.current().control.level, 'enforce');
+    } finally { fs.rmSync(longDir, { recursive: true, force: true }); }
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
