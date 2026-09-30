@@ -777,8 +777,8 @@ test('governed runner attaches stable client attribution from env and CLI', () =
     assert.equal(sourceClient(envParsed.options.client), 'qwen');
     assert.equal(headers(envParsed.options)['X-Marrow-Client'], 'qwen');
     assert.equal(headers(envParsed.options)['X-Marrow-Package'], '@getmarrow/install');
-    assert.equal(headers(envParsed.options)['X-Marrow-Package-Version'], '0.1.65');
-    assert.equal(headers(envParsed.options)['X-Marrow-Install-Version'], '0.1.65');
+    assert.equal(headers(envParsed.options)['X-Marrow-Package-Version'], '0.1.66');
+    assert.equal(headers(envParsed.options)['X-Marrow-Install-Version'], '0.1.66');
     assert.equal(headers(envParsed.options)['X-Marrow-SDK-Version'], '3.7.64');
     assert.equal(headers(envParsed.options)['X-Marrow-MCP-Version'], '3.9.97');
 
@@ -907,7 +907,8 @@ test('integration panels explain capture points and add-on commands', () => {
 
   assert.match(hermesPanel, /Marrow \+ Hermes Agent/);
   assert.match(hermesPanel, /\/goal -> Marrow completion contract/);
-  assert.match(hermesPanel, /npx @getmarrow\/install hermes/);
+  assert.match(hermesPanel, /npx -y @getmarrow\/install@latest update/);
+  assert.doesNotMatch(`${hermesPanel}\n${openclawPanel}`, /--agent\s/);
   assert.match(openclawPanel, /Marrow \+ OpenClaw/);
   assert.match(openclawPanel, /handoff\/result files -> proof packs/);
   assert.match(openclawPanel, /npx @getmarrow\/install openclaw/);
@@ -1355,9 +1356,10 @@ test('protected governed run omits the agent id and echoes the issued permit pro
   }
 });
 
-test('controller CLI keeps its local identity when no agent id is configured', async () => {
+test('controller CLI uses the same local identity as install when no agent id is configured', async () => {
   const { controllerIdentity } = require('../src/controller-manager');
   const { controllerOnly } = require('../src/governed-runner');
+  const installer = require('../src/installer');
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-runner-controller-home-'));
   const priorHome = process.env.HOME;
   const priorStateDirectory = process.env.MARROW_SIDECAR_STATE_DIR;
@@ -1365,7 +1367,11 @@ test('controller CLI keeps its local identity when no agent id is configured', a
   delete process.env.MARROW_SIDECAR_STATE_DIR;
   try {
     await withoutAgentEnv(async () => {
-      const identity = controllerIdentity({ root: process.cwd(), agentId: os.userInfo().username });
+      const detection = installer.detectEnvironment(process.cwd(), process.env);
+      const identity = controllerIdentity({
+        root: detection.root,
+        identityAgentId: installer.localControllerAgentId(detection.root, installer.detectedClient(detection)),
+      });
       const directory = path.join(home, '.marrow', 'controllers', identity);
       fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
       for (const segment of ['.marrow', path.join('.marrow', 'controllers'), path.join('.marrow', 'controllers', identity)]) {

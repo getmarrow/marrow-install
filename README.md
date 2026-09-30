@@ -62,7 +62,7 @@ Required secret:
 export MARROW_API_KEY=mrw_live_...
 ```
 
-The bare command is the default-on path: it detects and byte-idempotently writes managed configuration, runs the authenticated activation self-test, and starts the supported persistent controller. The key stays process-only and is never written to generated configuration or controller state. Use `--dry-run` for a non-writing preview, `doctor` for a read-only health check, or `--no-controller` to install and self-test without starting the controller. The explicit `activate` command remains equivalent and supported.
+The bare command is the default-on path: it detects and byte-idempotently writes managed configuration, runs the authenticated activation self-test, and starts the supported persistent controller. It prints a short summary; the full report is written to `~/.marrow/logs/` (mode 600), and `--verbose` prints it instead. The key is read from `MARROW_API_KEY` or, when that is unset, from the owner-only `~/.marrow/env`. Without a key, the command prints the exact command to run and stops before writing anything. The key is never written to generated configuration, controller state or logs; the one exception is Hermes wiring, described under Trust and Data Boundaries. Use `--dry-run` for a non-writing preview, `doctor` for a read-only health check, or `--no-controller` to install and self-test without starting the controller. The explicit `activate` command remains equivalent and supported.
 
 ### MCP tool profiles
 
@@ -75,7 +75,8 @@ Tool visibility is not authorization. Every visible call still reaches Marrow's 
 Marrow's hosted API, website, and dashboard update automatically; local SDK dependencies, generated runtime files, MCP hooks/configuration, and pinned package versions do not silently rewrite themselves. Keeping them current delivers new client-side features, compatibility improvements, and any published security fixes. Supported clients report their package version during authenticated status/runtime activity, and Marrow returns a `client_update` notice with the exact action when the version is behind or unknown.
 
 ```bash
-# When doctor reports stale or mixed MCP configuration
+# One command: refreshes managed configuration, restarts an outdated controller,
+# wires detected Hermes, and runs the self-test
 npx -y @getmarrow/install@latest update
 
 # Restart the detected owning harnesses once, then verify
@@ -85,7 +86,7 @@ npx -y @getmarrow/install@latest doctor --self-test
 npx -y --package=@getmarrow/mcp@latest marrow-mcp ping
 ```
 
-`update` resolves official npm metadata once, selects one exact verified MCP target, and synchronizes every Marrow-managed surface in the detected owning workspace while retaining unrelated user hooks and configuration. Restart the detected owning harnesses once after it completes; running processes do not change before that restart. Run the doctor verification once after restart. Do not run separate `marrow-mcp setup` and restart cycles for the same detected workspace.
+`update` resolves official npm metadata once, selects one exact verified MCP target, and synchronizes every Marrow-managed surface in the detected owning workspace while retaining unrelated user hooks and configuration. It also restarts a controller that a different installer version started, and runs the self-test with a one-line summary. Restart the detected owning harnesses once after it completes; running processes do not change before that restart. Run the doctor verification once after restart. Do not run separate `marrow-mcp setup` and restart cycles for the same detected workspace.
 
 `update` and `--repair` only refresh an existing install. Run from a directory with no Marrow-managed files while your home directory is managed, they stop without writing and print the exact `update --cwd <home>` command; to add Marrow to that project, run the install command there instead. Managed JSON that differs only in key order or formatting, for example after a harness re-saves its settings, counts as present and is not rewritten.
 
@@ -101,11 +102,52 @@ npx @getmarrow/install controller ensure
 npx @getmarrow/install controller stop
 ```
 
+Install and update restart a controller that a different installer version started, including one left under an earlier identity directory for the same project, and report the restart in one line. The replaced controller is identified by its private state and authenticated endpoint before it is stopped. Controllers for other projects are not touched, and the owner's local control setting is not changed. `controller stop` stops every Marrow controller for the current project.
+
 Persistent controller lifecycle is currently Linux-only. On macOS or Windows, activation still writes supported configuration and verifies one server-side install self-test without certifying that hooks continuously ran; run `npx @getmarrow/install sidecar` under an owner-managed service and pass `--no-controller`. The controller does not silently upgrade packages, change governance policy, rotate credentials, or modify unrelated project configuration.
 
 The controller is not a boot service. After a host restart, or any exit that skips its shutdown handler, doctor reports it as `stale` until the next install, update, or `controller ensure`. While local control is disabled, the controller is not started, and doctor reports a stopped or stale controller as not required instead of recommending `controller ensure`; unsafe controller state or an unverified or unresponsive controller process keeps its exact fix.
 
-## What's New in v0.1.65
+## What's New in v0.1.66
+
+v0.1.66 keeps MCP `3.9.97` (source `be607e1dffd4d9e6a3c40f01151e509c115fba3f`, packed integrity `sha512-wab1kvgec8WhDDrpkajauLu2QdADXudIxkic0BAgzV96FZVHY0ME45hrOyQmqfkI+OtKriYdgIFp90peWGh2mA==`) and SDK `3.7.64` unchanged. It fixes the governed runner's gate and permit path, makes updating one command, and removes internal publishing tooling from the public package.
+
+### Update: one command
+
+```bash
+MARROW_API_KEY=mrw_live_... npx -y @getmarrow/install@latest update
+```
+
+First install is the same command without `update`. On its own, the command now:
+
+- restarts a running controller that a different installer version started, so `controller stop` and `controller ensure` are no longer separate steps. Local control stays enabled or disabled as the owner left it;
+- detects Hermes from `~/.hermes/config.yaml` (or `$HERMES_HOME`) or `hermes` on `PATH`, and adds or refreshes `mcp_servers.marrow` with the pinned MCP server and `MARROW_CLIENT: hermes`. The rest of the file, comments included, is kept, and a timestamped backup (mode 600) is taken first. If the file cannot be edited safely, it is left untouched and the exact block to add is printed;
+- needs no `MARROW_AGENT_ID`: Marrow uses the API key's bound agent or the plan's agent seat. `MARROW_AGENT_ID` still overrides;
+- runs the self-test and prints a short summary (healthy with the decision id, or the failure and one fix command). The full report goes to `~/.marrow/logs/` (mode 600); `--verbose` prints it instead;
+- reads the key from `MARROW_API_KEY`, or from the owner-only `~/.marrow/env`. With no key it prints the command to run and stops before writing anything.
+
+Restart the owning harness afterwards so new hooks and MCP configuration load; restart Hermes if its config changed.
+
+### Fixes
+
+- **Governed runner gate and permits.** `gate`, `run` and `permit` read Marrow's real gate decision. Previously the runtime's default package response lacked the fields the runner read, so `gate` printed `unknown`, and every protected `run` sent an empty gate receipt, got HTTP 400 and exited 13.
+  - `gate` now prints the decision with its mode (enforced or advisory), and exits 12 when an enforced gate blocks or needs owner approval. It used to exit 0.
+  - A protected `run` passes the gate receipt to permit issue and closes the runtime's own decision instead of opening a second one.
+- **Advisory plans.** Where the plan's gate is advisory (`enforced: false`), a protected `run` shows the warning, runs the command and records the outcome; it no longer asks for a permit the plan cannot issue. Enforced plans keep the permit requirement.
+- **Retries.** The runner's runtime, think and commit calls, and the self-test's runtime and first-value calls, retry HTTP 429/502/503/504 and pending answers up to three times with the same `Idempotency-Key`. Client errors are not retried.
+- **Self-test cleanup.** The self-test closes the decision its runtime check creates, instead of leaving it open.
+- **Claude Code hook identity.** Claude Code hooks use the Claude-specific entrypoints (`claude-pre-action-hook`, `claude-hook`, `claude-context-hook`, `claude-session-hook`), the same spelling `marrow-mcp setup` writes. Hook activity is labelled `claude-code` instead of the generic `mcp-client`, and the installer and MCP setup no longer rewrite each other's entries. Existing entries are migrated in place without duplicates.
+- **Agent identity.** No generated `<client>-<hash>` agent id is sent or written to MCP configuration or the SDK preload; one written by an earlier version is removed from `.mcp.json`. With an unbound key, activation reports that no single agent can be confirmed and how to bind one, instead of failing the install.
+- **`run -- -- <command>`.** The documented form now runs the command; one `--` is enough.
+- **Codex detection.** An `AGENTS.md` that holds only the Marrow block no longer marks a project as Codex.
+- **Controller maintenance.** The five-minute maintenance pass keeps the controller's agent id and base URL, and owner-set values in MCP configuration.
+- **`proof`.** `proof --decision-id` works again: the shared option parser had rejected it. It exits non-zero unless Marrow returns `committed: true`, and accepts `--gate-receipt` and `--session` for decisions created by `gate`.
+- **Controller commands.** `controller ensure|stop|status` act on the controller that install and update started.
+- **Removed.** `--repair` and `update` no longer read an npm token from `~/.openclaw` or write `~/.npmrc`; that was internal publishing tooling. Two internal credential-file hints were removed with it. Installer output no longer suggests invented agent ids such as `--agent hermes-prod`.
+
+Plan semantics are unchanged: where a plan's gate is advisory, it stays advisory.
+
+### Previous release: v0.1.65
 
 v0.1.65 pins MCP `3.9.97` (source `be607e1dffd4d9e6a3c40f01151e509c115fba3f`, packed integrity `sha512-wab1kvgec8WhDDrpkajauLu2QdADXudIxkic0BAgzV96FZVHY0ME45hrOyQmqfkI+OtKriYdgIFp90peWGh2mA==`) while keeping SDK `3.7.64` unchanged. Changes:
 
@@ -118,15 +160,15 @@ v0.1.65 pins MCP `3.9.97` (source `be607e1dffd4d9e6a3c40f01151e509c115fba3f`, pa
 - Permit verification sends `protocol_version`.
 - The test suite is isolated from the real HOME and Marrow credentials.
 
-Restart the owning harness, review hook trust and run `doctor --self-test` after updating. Package publication and registry integrity verification must precede claiming these candidate pins are publicly available.
+Restart the owning harness, review hook trust and run `doctor --self-test` after updating.
 
 ### Previous release: v0.1.64
 
-v0.1.64 pins MCP `3.9.96` (source `031c944936271fd6e8768ad2619ee0430b68e2c7`, packed integrity `sha512-kuBpuWaWAvusS+FbXXFw1fOEGja4T8ahj/vkmXTd/CWjz0t6teT6g9c1HfJhAK6KLzesZtcvUdZLn6pBErKP9Q==`) while keeping SDK `3.7.64` unchanged. The embedded MCP pin requires this installer patch to deliver the native pre-action hook permit fix: protected actions are no longer denied after an allowing runtime gate, and unprotected actions stop at the gate without creating a decision or permit. Policy decisions, proof requirements and fail-closed behavior are unchanged. `activate` and `doctor --self-test` now resend the identical self-test decision and commit with a stable `Idempotency-Key` after a transient 429/502/503/504 or a durable pending acknowledgement (at most three attempts, about one second apart), instead of failing with "self-test did not return decision_id"; client errors still fail immediately, and a final failure names the last state. Restart the owning harness, review hook trust and run `doctor --self-test` after updating. Package publication and registry integrity verification must precede claiming these candidate pins are publicly available.
+v0.1.64 pins MCP `3.9.96` (source `031c944936271fd6e8768ad2619ee0430b68e2c7`, packed integrity `sha512-kuBpuWaWAvusS+FbXXFw1fOEGja4T8ahj/vkmXTd/CWjz0t6teT6g9c1HfJhAK6KLzesZtcvUdZLn6pBErKP9Q==`) while keeping SDK `3.7.64` unchanged. The embedded MCP pin requires this installer patch to deliver the native pre-action hook permit fix: protected actions are no longer denied after an allowing runtime gate, and unprotected actions stop at the gate without creating a decision or permit. Policy decisions, proof requirements and fail-closed behavior are unchanged. `activate` and `doctor --self-test` now resend the identical self-test decision and commit with a stable `Idempotency-Key` after a transient 429/502/503/504 or a durable pending acknowledgement (at most three attempts, about one second apart), instead of failing with "self-test did not return decision_id"; client errors still fail immediately, and a final failure names the last state. Restart the owning harness, review hook trust and run `doctor --self-test` after updating.
 
 ### Previous release: v0.1.63
 
-v0.1.63 pins MCP `3.9.95` (source `967b17735b26534b7dc0536ec93c481a5dc07297`, packed integrity `sha512-Sw8RIyxHkjxllwwh+9za5ItoM9X0NwN4R8+Qdd7nvOuU6qAm9LotIC09GOJDim3o9jc9m8yTqxKciroRTS12EQ==`) while keeping SDK `3.7.64` unchanged. The embedded MCP pin requires this installer patch to deliver the stdin usage-loss correction and safe bounded native Codex capture. Supported transcript schema is Codex `0.157.1`; capture covers only the latest proven model-call delta. Unknown versions, missing model/turn or billing metadata, unsafe paths and unproven subagent bindings remain incomplete or unpriced. Capture does not prove a baseline, complete overhead or savings. Restart the owning harness and run `doctor --self-test` after updating. Package publication and registry integrity verification must precede claiming these candidate pins are publicly available.
+v0.1.63 pins MCP `3.9.95` (source `967b17735b26534b7dc0536ec93c481a5dc07297`, packed integrity `sha512-Sw8RIyxHkjxllwwh+9za5ItoM9X0NwN4R8+Qdd7nvOuU6qAm9LotIC09GOJDim3o9jc9m8yTqxKciroRTS12EQ==`) while keeping SDK `3.7.64` unchanged. The embedded MCP pin requires this installer patch to deliver the stdin usage-loss correction and safe bounded native Codex capture. Supported transcript schema is Codex `0.157.1`; capture covers only the latest proven model-call delta. Unknown versions, missing model/turn or billing metadata, unsafe paths and unproven subagent bindings remain incomplete or unpriced. Capture does not prove a baseline, complete overhead or savings. Restart the owning harness and run `doctor --self-test` after updating.
 
 ### Previous release: v0.1.62
 
@@ -327,7 +369,7 @@ npx @getmarrow/install activate
 
 The installer detects supported configuration and project signals for:
 
-- Codex, Claude Code, Cursor, Cursor Composer, Windsurf, Cline, OpenCode, Hermes, and OpenClaw;
+- Codex, Claude Code, Cursor, Cursor Composer, Windsurf, Cline, OpenCode, Hermes, and OpenClaw. Hermes is detected from `~/.hermes/config.yaml` (or `$HERMES_HOME`) or `hermes` on `PATH`; an `AGENTS.md` holding only the Marrow block is not a Codex signal. `MARROW_CLIENT` overrides detection;
 - Gemini, Grok, DeepSeek, Qwen, Kimi, MiniMax, and GLM command-line or custom harness paths;
 - MCP client configuration;
 - Node.js and Python projects;
@@ -374,30 +416,36 @@ Place Marrow around an existing command without replacing the agent harness:
 
 ```bash
 npx @getmarrow/install run \
-  --agent deploy-agent \
   --type deploy \
   --profile production \
   --policy enforce \
   -- wrangler deploy
 ```
 
+The agent is the one Marrow resolves for the API key (its bound agent or the plan seat). Set `MARROW_AGENT_ID`, or pass `--agent <id>`, only for an agent already registered with Marrow. One `--` separates the command; `run -- -- <command>` also works.
+
 The runner:
 
-1. requests the Marrow runtime gate;
-2. records the governed decision against that exact gate;
-3. requests and verifies a single-use permit bound to the exact action, target, and canonical action surfaces;
-4. blocks protected work if policy or permit verification fails;
+1. requests the Marrow runtime gate and reads its decision, mode (enforced or advisory) and gate receipt;
+2. uses the decision the runtime created, or records one against that exact gate;
+3. where the plan enforces the gate, requests and verifies a single-use permit bound to the exact action, target, canonical action surfaces and gate receipt;
+4. blocks protected work if an enforced gate, policy or permit verification fails. Where the gate is advisory, it shows the warning and runs the command;
 5. runs the original command with the scoped permit, not the Marrow API key;
-6. records success or failure, supplies every exact server-required proof field through a redacted proof pack, and closes the permit.
+6. records success or failure with the gate receipt, supplies every exact server-required proof field through a redacted proof pack, and closes the permit. It reports an outcome that Marrow did not commit as trusted instead of skipping it.
+
+Runtime, think and commit calls retry HTTP 429/502/503/504 and pending answers up to three times with the same `Idempotency-Key`.
+
+`gate` exits 0 when the action may proceed, 12 when an enforced gate blocks it or needs owner approval, and 13 when no gate decision is available, so `gate ... && deploy` stops on a block. When the gate creates a decision, it prints the exact `proof` command, with `--session` and `--gate-receipt`, that records the outcome afterwards. `proof` exits non-zero unless Marrow returns `committed: true`.
 
 Useful commands:
 
 ```bash
-npx @getmarrow/install gate --agent deploy-agent --type deploy --action "deploy production"
-npx @getmarrow/install permit --agent deploy-agent --type deploy --action "deploy production"
-MARROW_ACTION_PERMIT=... npx @getmarrow/install verify-permit --agent deploy-agent --type deploy --action "deploy production"
-npx @getmarrow/install coverage --agent deploy-agent
-npx @getmarrow/install sidecar --agent deploy-agent
+npx @getmarrow/install gate --type deploy --action "deploy production"
+npx @getmarrow/install permit --type deploy --action "deploy production"
+MARROW_ACTION_PERMIT=... npx @getmarrow/install verify-permit --type deploy --action "deploy production"
+npx @getmarrow/install proof --session <session> --decision-id <id> --gate-receipt <receipt> --success --summary "smoke passed"
+npx @getmarrow/install coverage
+npx @getmarrow/install sidecar
 npx @getmarrow/install controller status
 npx @getmarrow/install status
 npx @getmarrow/install doctor
@@ -436,7 +484,8 @@ Run `npx @getmarrow/install integrations --json` for the machine-readable matrix
 | Windsurf | MCP-routed only | MCP-routed; explicit or governed proof | Owner-only MCP cache | MCP config and durable spool | MCP lifecycle evidence | Managed config after activation |
 | Codex, Gemini, Grok | Native hooks plus MCP on demand | Native pre-action/result/turn closeout; Grok Stop never blocks or retries | Owner-only MCP cache | Hook/MCP config and durable spool | Client-self-reported lifecycle evidence | Restart and host hook review required |
 | OpenCode, DeepSeek, Qwen, Kimi, MiniMax, GLM | Automatic only inside governed runner | Automatic when result is known; proof is evaluated and is advisory or enforced according to plan policy | Runner/runtime cache | Activated controller and durable buffer | Command, test, deployment, or owner evidence | Managed config after activation |
-| Hermes, OpenClaw, custom harnesses | Lifecycle adapter required | Adapter or governed runner required | Adapter dependent | Adapter dependent | Adapter supplied | Adapter owned |
+| Hermes | MCP tools on demand after install or update adds `mcp_servers.marrow` to its config; no native pre-action hook | Explicit `marrow_commit`, or the governed runner for CLI commands | Owner-only MCP cache | Hermes config and durable spool | MCP lifecycle evidence | Install or update only; the controller does not edit the Hermes config |
+| OpenClaw, custom harnesses | Lifecycle adapter required | Adapter or governed runner required | Adapter dependent | Adapter dependent | Adapter supplied | Adapter owned |
 
 For native hooks, a successful tool exit is not treated as a successful business outcome when proof is missing. MCP coverage includes only actions routed through that MCP client. Governed-runner coverage includes only commands launched through the runner. Event-contract integrations must emit the documented lifecycle themselves.
 
@@ -460,6 +509,8 @@ After meaningful work, supported runtime and commit responses can return observe
 - Agent-bound keys can be restricted to an allowed identity and permission set.
 - Sanitized aggregate contribution is optional and never means sharing raw prompts, code, secrets, proof packs, account identifiers, agent identifiers, or customer identities.
 - The installer diagnoses key locations without printing secret values.
+- The installer never reads, reports or writes npm or other publishing tokens.
+- Hermes passes only `PATH`, `HOME` and locale variables to MCP servers. When the Hermes entry and `$HERMES_HOME/.env` carry no Marrow key, install or update stores the key in the owner-only `~/.marrow/env` (mode 600) for the Marrow MCP server to read, and says so. A different key already stored there is left unchanged. Before editing `config.yaml`, the installer keeps a timestamped copy with mode 600.
 - Marrow returns guidance and policy data. Agents must not execute returned text as shell input.
 
 See the [Trust Center](https://getmarrow.ai/trust/) for implemented controls, current limits, and roadmap status.
@@ -470,9 +521,11 @@ See the [Trust Center](https://getmarrow.ai/trust/) for implemented controls, cu
 | --- | --- | --- |
 | `MARROW_API_KEY` | Yes for live verification | Account or agent-bound API key |
 | `MARROW_BASE_URL` | No | API base override |
-| `MARROW_FLEET_AGENT_ID` | No | Default agent identity |
+| `MARROW_FLEET_AGENT_ID`, `MARROW_AGENT_ID` | No | A registered agent id. Unset, Marrow uses the key's bound agent or the plan seat |
+| `MARROW_CLIENT` | No | Harness label; overrides detection |
+| `HERMES_HOME` | No | Hermes home, when not `~/.hermes` |
 
-Install and repair resolve one stable, non-secret agent identity before writing configuration. The managed MCP entry and owned-process SDK preload use that same identity and API base as doctor/self-test. The installer never copies `MARROW_API_KEY` into MCP configuration or generated runtime source; the owning harness must inherit the key from trusted environment or secret-manager configuration. Pass `--agent-id <id>` when an operator-approved identity must override the stable generated value.
+The installer never generates, sends or writes an agent id of its own. Only a configured id (`MARROW_FLEET_AGENT_ID`, `MARROW_AGENT_ID` or `--agent-id`) goes into the managed MCP entry and SDK preload; without one, Marrow resolves the API key's bound agent or the plan's agent seat, and the self-test reports that server-resolved id. A key bound to no single agent still passes the self-test; activation then reports how to bind one. The installer never copies `MARROW_API_KEY` into MCP configuration or generated runtime source; the owning harness must inherit the key from trusted environment or secret-manager configuration, or from the owner-only `~/.marrow/env`.
 
 Use the host's secret manager first. The shared resolver can also check documented Marrow and project env files for owned development environments. Run `doctor` when a key or hook cannot be found.
 

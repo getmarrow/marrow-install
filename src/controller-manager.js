@@ -4,6 +4,8 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 
+const { version: INSTALLER_VERSION } = require('../package.json');
+
 const START_TIMEOUT_MS = 5_000;
 const STOP_TIMEOUT_MS = 3_000;
 const HEALTH_TIMEOUT_MS = 1_000;
@@ -16,9 +18,14 @@ function controllerIdentity(options = {}) {
   return crypto.createHash('sha256').update(`${root}\0${agentId}`).digest('hex').slice(0, 24);
 }
 
+function controllersRoot() {
+  return path.join(os.homedir(), '.marrow', 'controllers');
+}
+
 function controllerDirectory(options = {}) {
-  return process.env.MARROW_SIDECAR_STATE_DIR
-    || path.join(os.homedir(), '.marrow', 'controllers', controllerIdentity(options));
+  return options.stateDirectory
+    || process.env.MARROW_SIDECAR_STATE_DIR
+    || path.join(controllersRoot(), controllerIdentity(options));
 }
 
 function stateFile(options = {}) {
@@ -71,7 +78,10 @@ function ensurePrivateDirectory(options = {}) {
 }
 
 function readState(options = {}) {
-  const filePath = stateFile(options);
+  return readStateFile(stateFile(options));
+}
+
+function readStateFile(filePath) {
   if (!fs.existsSync(filePath)) return null;
   const stat = assertPrivatePath(filePath, 'state file');
   if (stat.size > MAX_STATE_BYTES) throw new Error('Controller state file is oversized.');
@@ -99,15 +109,53 @@ function controllerSupportedPlatform(platform = process.platform) {
   return platform === 'linux';
 }
 
+// The bin of an @getmarrow/install package: <package>/bin/marrow-install.js with a
+// package.json named @getmarrow/install. Returns the package version, or null.
+function installerPackageVersionForBin(binPath) {
+  try {
+    const resolved = fs.realpathSync(binPath);
+    if (path.basename(resolved) !== 'marrow-install.js' || path.basename(path.dirname(resolved)) !== 'bin') return null;
+    const manifest = JSON.parse(fs.readFileSync(path.join(path.dirname(path.dirname(resolved)), 'package.json'), 'utf8'));
+    return manifest?.name === '@getmarrow/install' && typeof manifest.version === 'string' ? manifest.version : null;
+  } catch {
+    return null;
+  }
+}
+
+function controllerProcessBin(pid) {
+  const args = fs.readFileSync(`/proc/${pid}/cmdline`).toString('utf8').split('\0').filter(Boolean);
+  return args.length >= 3 && args[2] === 'sidecar' ? args[1] : null;
+}
+
+// A controller started by any @getmarrow/install version, including one from another npx
+// cache directory, is recognized. Its identity is still proven by the private state file and
+// the authenticated /health check before Marrow ever signals it.
 function isExpectedControllerProcess(pid, platform = process.platform) {
   if (!controllerSupportedPlatform(platform) || !Number.isInteger(pid) || pid <= 1) return false;
   try {
-    const args = fs.readFileSync(`/proc/${pid}/cmdline`).toString('utf8').split('\0').filter(Boolean);
-    if (args.length < 3 || args[2] !== 'sidecar') return false;
-    return fs.realpathSync(args[1]) === fs.realpathSync(require.resolve('../bin/marrow-install.js'));
+    const binPath = controllerProcessBin(pid);
+    if (!binPath) return false;
+    return fs.realpathSync(binPath) === fs.realpathSync(require.resolve('../bin/marrow-install.js'))
+      || installerPackageVersionForBin(binPath) !== null;
   } catch {
     return false;
   }
+}
+
+// The version a running controller loaded. Controllers from 0.1.66 on report it in /health;
+// an older one does not, so its bin package version is reported with a legacy marker.
+function runningControllerVersion(pid, healthBody) {
+  if (typeof healthBody?.installer_version === 'string' && healthBody.installer_version) {
+    return { version: healthBody.installer_version, reported: true };
+  }
+  let binVersion = null;
+  try {
+    const binPath = controllerProcessBin(pid);
+    binVersion = binPath ? installerPackageVersionForBin(binPath) : null;
+  } catch {
+    binVersion = null;
+  }
+  return { version: binVersion, reported: false };
 }
 
 async function controllerStatus(options = {}) {
@@ -204,11 +252,14 @@ async function controllerStatus(options = {}) {
     const heartbeat = body.heartbeat && typeof body.heartbeat === 'object'
       ? body.heartbeat
       : null;
+    const running = runningControllerVersion(state.pid, body);
     return {
       active: true,
       state: 'active',
       started_at: state.started_at,
       instance_id: state.instance_id,
+      installer_version: running.version,
+      installer_version_reported: running.reported,
       maintenance,
       heartbeat,
       exact_fix: maintenance?.exact_fix || heartbeat?.exact_fix || null,
@@ -443,13 +494,104 @@ async function ensureGovernanceController(options) {
   return current.active ? { ...current, changed: false } : startGovernanceController(options);
 }
 
+function controllerProjectRoot(pid, state) {
+  if (typeof state?.project_root === 'string' && state.project_root) return path.resolve(state.project_root);
+  // Controllers before 0.1.66 do not record their project in state. Their environment holds it;
+  // only that one variable is read, in memory, and nothing else from it is kept or printed.
+  try {
+    const entry = fs.readFileSync(`/proc/${pid}/environ`).toString('utf8').split('\0')
+      .find((value) => value.startsWith('MARROW_CONTROLLER_PROJECT_ROOT='));
+    return entry ? path.resolve(entry.slice('MARROW_CONTROLLER_PROJECT_ROOT='.length)) : null;
+  } catch {
+    return null;
+  }
+}
+
+// Live controllers owned by this user for one project, whatever identity directory they use.
+// Identity directories changed across installer versions, so a controller can outlive the
+// directory a newer installer computes for the same project.
+async function projectControllers(options = {}) {
+  if (!controllerSupportedPlatform(options.platform)) return [];
+  const root = path.resolve(options.root || process.cwd());
+  const directories = process.env.MARROW_SIDECAR_STATE_DIR && !options.scanAll
+    ? [process.env.MARROW_SIDECAR_STATE_DIR]
+    : (() => {
+      try {
+        const base = controllersRoot();
+        const baseStat = fs.lstatSync(base);
+        if (!baseStat.isDirectory() || baseStat.isSymbolicLink()) return [];
+        return fs.readdirSync(base).filter((name) => /^[a-f0-9]{24}$/.test(name)).map((name) => path.join(base, name));
+      } catch {
+        return [];
+      }
+    })();
+  const found = [];
+  for (const directory of directories) {
+    let state;
+    try {
+      assertPrivatePath(directory, 'directory');
+      state = readStateFile(path.join(directory, 'active.json'));
+    } catch {
+      continue;
+    }
+    if (!state || !pidAlive(state.pid) || !isExpectedControllerProcess(state.pid, options.platform)) continue;
+    if (controllerProjectRoot(state.pid, state) !== root) continue;
+    const status = await controllerStatus({ ...options, stateDirectory: directory });
+    found.push({ directory, state, status });
+  }
+  return found;
+}
+
+// Keeps exactly one current controller for the project. A controller from another installer
+// version, or one left in a superseded identity directory, is stopped through its verified
+// endpoint and replaced. Local control state is not read or changed here; callers only ensure
+// a controller while the owner has control enabled.
+async function ensureCurrentGovernanceController(options) {
+  const currentDirectory = path.resolve(controllerDirectory(options));
+  const superseded = [];
+  for (const entry of await projectControllers(options)) {
+    const sameDirectory = path.resolve(entry.directory) === currentDirectory;
+    const current = entry.status.active && entry.status.installer_version === INSTALLER_VERSION
+      && entry.status.installer_version_reported === true;
+    if (sameDirectory && current) continue;
+    if (!entry.status.active && entry.status.state !== 'unreachable') continue;
+    await stopGovernanceController({ ...options, stateDirectory: entry.directory });
+    superseded.push(entry.status.installer_version
+      ? `${entry.status.installer_version}${entry.status.installer_version_reported ? '' : ' (legacy)'}`
+      : 'unknown');
+  }
+  const result = await ensureGovernanceController(options);
+  return {
+    ...result,
+    restarted: superseded.length > 0
+      ? { from_versions: superseded, to_version: INSTALLER_VERSION, stopped: superseded.length }
+      : null,
+  };
+}
+
+async function stopProjectControllers(options) {
+  const stopped = [];
+  for (const entry of await projectControllers(options)) {
+    await stopGovernanceController({ ...options, stateDirectory: entry.directory });
+    stopped.push(entry.status.installer_version || 'unknown');
+  }
+  const current = await stopGovernanceController(options);
+  return { ...current, changed: current.changed || stopped.length > 0, stopped: stopped.length };
+}
+
 module.exports = {
+  INSTALLER_VERSION,
   controllerDirectory,
   controllerIdentity,
   controllerSupportedPlatform,
   controllerStatus,
+  ensureCurrentGovernanceController,
   ensureGovernanceController,
+  installerPackageVersionForBin,
+  isExpectedControllerProcess,
+  projectControllers,
   readState,
   startGovernanceController,
   stopGovernanceController,
+  stopProjectControllers,
 };

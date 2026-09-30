@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
+const { version: INSTALLER_VERSION } = require('../package.json');
 
 const MAX_BODY_BYTES = 64 * 1024;
 const HEARTBEAT_INTERVAL_MS = 30_000;
@@ -240,6 +241,7 @@ async function startGovernanceSidecar(options, handlers) {
           instance_id: instanceId,
           pid: process.pid,
           started_at: startedAt,
+          installer_version: INSTALLER_VERSION,
           maintenance: latestMaintenance,
           heartbeat: latestHeartbeat,
         });
@@ -277,6 +279,10 @@ async function startGovernanceSidecar(options, handlers) {
       port: boundPort,
       token: authToken,
       started_at: startedAt,
+      installer_version: INSTALLER_VERSION,
+      ...(process.env.MARROW_CONTROLLER_PROJECT_ROOT
+        ? { project_root: path.resolve(process.env.MARROW_CONTROLLER_PROJECT_ROOT) }
+        : {}),
     });
   } catch (error) {
     await new Promise((resolve) => server.close(resolve));

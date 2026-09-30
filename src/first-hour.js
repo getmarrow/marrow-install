@@ -49,6 +49,12 @@ function harnessReloadPlan(detection = {}, changes = []) {
       restart: 'Start a new Codex session, then review the repository hooks with /hooks before treating them as trusted or live.',
     });
   }
+  if (detection.hermes && (changes || []).some((change) => change?.applied && /Hermes/.test(String(change.label || '')))) {
+    clients.push({
+      client: 'hermes',
+      restart: 'Restart Hermes (the CLI session or `hermes gateway restart`) so it loads the Marrow MCP server from config.yaml.',
+    });
+  }
   if (clients.length === 0) {
     clients.push({
       client: 'mcp',
@@ -65,8 +71,7 @@ function harnessReloadPlan(detection = {}, changes = []) {
   };
 }
 
-function firstCapturePath(detection = {}, agentId) {
-  const id = String(agentId || '').trim() || '<agent-id>';
+function firstCapturePath(detection = {}) {
   if (detection.claudeCode) {
     return {
       client: 'claude-code',
@@ -123,10 +128,19 @@ function firstCapturePath(detection = {}, agentId) {
       instruction: 'After restart and /hooks inspection, Grok uses global native pre-action, result, failure-result, and one nonblocking Stop closeout hook. Hooks remain user-toggleable, MCP tools stay on demand, and configuration does not verify observed runtime coverage. The governed runner remains an explicit bounded fallback.',
     };
   }
+  if (detection.hermes) {
+    return {
+      client: 'hermes',
+      capability_level: 'mcp',
+      command: null,
+      instruction: 'After restarting Hermes, Marrow MCP tools are available on demand: call marrow_agent_runtime before deploy, merge or publish work, then marrow_commit with the returned decision and runtime authorization. Hermes has no native pre-action hook, so wrap CLI deploys with npx @getmarrow/install run -- <command>.',
+    };
+  }
   return {
     client: 'governed_wrapper',
     capability_level: 'governed_wrapper',
-    command: `npx @getmarrow/install run --agent ${id} -- -- <command>`,
+    // One separator: npx forwards it to the runner, and the runner drops a doubled one.
+    command: 'npx @getmarrow/install run -- <command>',
     instruction: 'Wrap the next deploy, merge, or publish with the governed runner for hosts without a native gate. Before the session ends, call marrow_session_end or marrow_commit. Do not invent token counts.',
   };
 }

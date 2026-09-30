@@ -37,7 +37,7 @@ const {
 const NATIVE_HOOK_MATCHER = 'Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|functions\\.(?!mcp__marrow__marrow_).*|mcp__(?!marrow__marrow_).*';
 const CODEX_NATIVE_HOOK_MATCHER = 'Bash|apply_patch|Edit|Write|MultiEdit|mcp__(?!marrow__marrow_).*|functions\\.(?!marrow_).*';
 const CURSOR_NATIVE_HOOK_MATCHER = 'Shell|Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|MCP:(?!marrow(?:_.*|:marrow_.*)$).*';
-const MCP_ACTION_RESULT_HOOK_COMMAND = 'npx -y --package=@getmarrow/mcp@3.9.97 marrow-mcp hook';
+const MCP_ACTION_RESULT_HOOK_COMMAND = 'npx -y --package=@getmarrow/mcp@3.9.97 marrow-mcp claude-hook';
 const WINDSURF_EVENTS = [
   'pre_write_code', 'pre_run_command', 'pre_mcp_tool_use',
   'post_write_code', 'post_run_command', 'post_mcp_tool_use',
@@ -926,18 +926,18 @@ test('Claude native-hook configuration records local completeness without provin
         session_end: true,
       },
       descriptors: {
-        prompt: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.97 marrow-mcp context-hook', timeout: null }],
-        pre_action: [{ matcher: 'Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|functions\\.(?!mcp__marrow__marrow_).*|mcp__(?!marrow__marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.97 marrow-mcp pre-action-hook', timeout: null }],
-        action_result_success: [{ matcher: 'Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|functions\\.(?!mcp__marrow__marrow_).*|mcp__(?!marrow__marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.97 marrow-mcp hook', timeout: null }],
-        action_result_failure: [{ matcher: 'Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|functions\\.(?!mcp__marrow__marrow_).*|mcp__(?!marrow__marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.97 marrow-mcp hook', timeout: null }],
-        session_end: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.97 marrow-mcp session-hook', timeout: null }],
+        prompt: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.97 marrow-mcp claude-context-hook', timeout: null }],
+        pre_action: [{ matcher: 'Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|functions\\.(?!mcp__marrow__marrow_).*|mcp__(?!marrow__marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.97 marrow-mcp claude-pre-action-hook', timeout: null }],
+        action_result_success: [{ matcher: 'Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|functions\\.(?!mcp__marrow__marrow_).*|mcp__(?!marrow__marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.97 marrow-mcp claude-hook', timeout: null }],
+        action_result_failure: [{ matcher: 'Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|functions\\.(?!mcp__marrow__marrow_).*|mcp__(?!marrow__marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.97 marrow-mcp claude-hook', timeout: null }],
+        session_end: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.97 marrow-mcp claude-session-hook', timeout: null }],
       },
       active_marrow_handlers: {
-        prompt: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.97 marrow-mcp context-hook', timeout: null }],
-        pre_action: [{ matcher: 'Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|functions\\.(?!mcp__marrow__marrow_).*|mcp__(?!marrow__marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.97 marrow-mcp pre-action-hook', timeout: null }],
-        action_result_success: [{ matcher: 'Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|functions\\.(?!mcp__marrow__marrow_).*|mcp__(?!marrow__marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.97 marrow-mcp hook', timeout: null }],
-        action_result_failure: [{ matcher: 'Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|functions\\.(?!mcp__marrow__marrow_).*|mcp__(?!marrow__marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.97 marrow-mcp hook', timeout: null }],
-        session_end: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.97 marrow-mcp session-hook', timeout: null }],
+        prompt: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.97 marrow-mcp claude-context-hook', timeout: null }],
+        pre_action: [{ matcher: 'Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|functions\\.(?!mcp__marrow__marrow_).*|mcp__(?!marrow__marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.97 marrow-mcp claude-pre-action-hook', timeout: null }],
+        action_result_success: [{ matcher: 'Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|functions\\.(?!mcp__marrow__marrow_).*|mcp__(?!marrow__marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.97 marrow-mcp claude-hook', timeout: null }],
+        action_result_failure: [{ matcher: 'Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|functions\\.(?!mcp__marrow__marrow_).*|mcp__(?!marrow__marrow_).*', command: 'npx -y --package=@getmarrow/mcp@3.9.97 marrow-mcp claude-hook', timeout: null }],
+        session_end: [{ matcher: null, command: 'npx -y --package=@getmarrow/mcp@3.9.97 marrow-mcp claude-session-hook', timeout: null }],
       },
     })).digest('hex');
     assert.equal(profile.config_fingerprint, canonicalFingerprint);
@@ -946,7 +946,7 @@ test('Claude native-hook configuration records local completeness without provin
     assert.match(settings, /pre-action-hook/);
     assert.match(settings, /PostToolUseFailure/);
     assert.match(settings, /session-hook/);
-    assert.match(settings, /getmarrow\/mcp@3\.9\.97.*marrow-mcp hook/);
+    assert.match(settings, /getmarrow\/mcp@3\.9\.97.*marrow-mcp claude-hook/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

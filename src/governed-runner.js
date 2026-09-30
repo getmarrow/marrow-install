@@ -16,9 +16,9 @@ const {
 const { startGovernanceSidecar } = require('./governance-sidecar');
 const {
   controllerStatus,
-  ensureGovernanceController,
+  ensureCurrentGovernanceController,
   startGovernanceController,
-  stopGovernanceController,
+  stopProjectControllers,
 } = require('./controller-manager');
 const {
   ADAPTER_PROVENANCE,
@@ -26,6 +26,8 @@ const {
   applyPlan,
   buildPlan,
   detectEnvironment,
+  detectedClient,
+  localControllerAgentId,
 } = require('./installer');
 const { createHostUsageCapture } = require('./usage-telemetry');
 const { readLocalControlState, recordGovernedBypass } = require('./control-state');
@@ -91,10 +93,10 @@ const GOVERN_TUI_ROW_COUNT = 7;
 const FLEET_TUI_ROW_COUNT = 12;
 function usage() {
   return `Usage:
-  npx @getmarrow/install run --agent deploy-agent -- npm test
-  npx @getmarrow/install run --agent deploy-agent --type deploy --policy enforce -- wrangler deploy
+  npx @getmarrow/install run -- npm test
+  npx @getmarrow/install run --type deploy --policy enforce -- wrangler deploy
   npx @getmarrow/install gate "deploy production worker"
-  npx @getmarrow/install proof --decision-id <id> --success --summary "smoke passed"
+  npx @getmarrow/install proof --decision-id <id> --gate-receipt <id> --success --summary "smoke passed"
   npx @getmarrow/install status
   npx @getmarrow/install permit --action "deploy production" --type deploy
   MARROW_ACTION_PERMIT=... npx @getmarrow/install verify-permit --action "deploy production" --type deploy
@@ -125,7 +127,8 @@ Commands:
   openclaw  Show and verify the Marrow add-on path for OpenClaw
 
 Options:
-  --agent <id>            Agent identity. Defaults to MARROW_FLEET_AGENT_ID, MARROW_AGENT_ID, or local user
+  --agent <id>            Registered agent id. Defaults to MARROW_FLEET_AGENT_ID or MARROW_AGENT_ID.
+                          When unset, Marrow uses the API key's bound agent or the plan's agent seat.
   --session <id>          Session id. Defaults to marrow-run-<timestamp>
   --type <type>           Action type. Inferred from action/command when omitted
   --action <text>         Human-readable action. Defaults to the redacted command
@@ -138,6 +141,7 @@ Options:
   --target <text>         Protected target binding, such as repository/environment
   --sidecar-port <port>   Loopback sidecar port. Default: ephemeral
   --proof-file <path>     JSON proof to include on outcome commit
+  --gate-receipt <id>     proof only: the gate receipt printed by gate, for decisions the gate created
   --client <label>        Harness/client label. Defaults to MARROW_CLIENT, MARROW_HARNESS, or MARROW_AGENT_CLIENT
   --base-url <url>        Marrow API base URL
   --key <key>             Marrow API key. Prefer MARROW_API_KEY
@@ -392,7 +396,10 @@ function parseBaseOptions(argv, startIndex = 0) {
     else if (arg === '--target') options.target = argv[++i] || options.target;
     else if (arg === '--sidecar-port') options.sidecarPort = argv[++i] || options.sidecarPort;
     else if (arg === '--proof-file') options.proofFile = argv[++i] || options.proofFile;
-    else if (arg === '--client' || arg === '--harness') options.client = sourceClient(argv[++i] || options.client);
+    else if (arg === '--client' || arg === '--harness') {
+      options.client = sourceClient(argv[++i] || options.client);
+      options.clientExplicit = true;
+    }
     else if (arg === '--base-url') options.baseUrl = argv[++i] || options.baseUrl;
     else if (arg === '--key') {
       options.apiKey = argv[++i] || options.apiKey;
@@ -418,7 +425,10 @@ function parseArgs(argv) {
   if (command === 'run') {
     const parsed = parseBaseOptions(argv, 1);
     const separator = argv[parsed.index] === '--' ? parsed.index + 1 : parsed.index;
-    const childCommand = argv.slice(separator);
+    let childCommand = argv.slice(separator);
+    // npx forwards both separators of the documented `run -- -- <command>` form. No real
+    // command is named `--`, so one extra leading separator is dropped instead of spawned.
+    if (childCommand[0] === '--') childCommand = childCommand.slice(1);
     if (parsed.options.help) return { command: 'help' };
     if (childCommand.length === 0) throw new Error('marrow run requires a command after --');
     return { command, options: parsed.options, childCommand };
@@ -444,18 +454,24 @@ function parseArgs(argv) {
   }
 
   if (command === 'proof') {
-    const parsed = parseBaseOptions(argv, 1);
-    const options = { ...parsed.options, decisionId: '', success: true, summary: '', outcome: '' };
-    for (let i = parsed.index; i < argv.length; i += 1) {
+    // Proof flags are taken out first; the shared parser rejects options it does not know,
+    // which made every documented `proof --decision-id ...` call fail before 0.1.66.
+    const proofOptions = { decisionId: '', gateReceiptId: '', success: true, summary: '', outcome: '' };
+    const baseArgv = [command];
+    for (let i = 1; i < argv.length; i += 1) {
       const arg = argv[i];
-      if (arg === '--decision-id') options.decisionId = argv[++i] || '';
-      else if (arg === '--success') options.success = true;
-      else if (arg === '--failure' || arg === '--failed') options.success = false;
-      else if (arg === '--summary') options.summary = argv[++i] || '';
-      else if (arg === '--outcome') options.outcome = argv[++i] || '';
-      else if (arg === '--help' || arg === '-h') return { command: 'help' };
-      else throw new Error(`Unknown proof option: ${arg}`);
+      if (arg === '--decision-id') proofOptions.decisionId = argv[++i] || '';
+      else if (arg === '--gate-receipt' || arg === '--gate-receipt-id') proofOptions.gateReceiptId = argv[++i] || '';
+      else if (arg === '--success') proofOptions.success = true;
+      else if (arg === '--failure' || arg === '--failed') proofOptions.success = false;
+      else if (arg === '--summary') proofOptions.summary = argv[++i] || '';
+      else if (arg === '--outcome') proofOptions.outcome = argv[++i] || '';
+      else baseArgv.push(arg);
     }
+    const parsed = parseBaseOptions(baseArgv, 1);
+    if (parsed.options.help) return { command: 'help' };
+    if (parsed.index < baseArgv.length) throw new Error(`Unknown proof option: ${baseArgv[parsed.index]}`);
+    const options = { ...parsed.options, ...proofOptions };
     if (!options.decisionId) throw new Error('marrow proof requires --decision-id');
     return { command, options };
   }
@@ -516,7 +532,7 @@ function dataOf(json) {
   return json && typeof json === 'object' && json.data && typeof json.data === 'object' ? json.data : json;
 }
 
-async function requestJson(options, method, route, body, extraHeaders = {}, { timeoutMs } = {}) {
+async function rawRequest(options, method, route, body, extraHeaders = {}, { timeoutMs } = {}) {
   if (!options.apiKey) throw new Error('MARROW_API_KEY is required. Use --fail-open only for non-production local commands.');
   const response = await fetch(new URL(route, options.baseUrl.replace(/\/$/, '/')), {
     method,
@@ -527,13 +543,79 @@ async function requestJson(options, method, route, body, extraHeaders = {}, { ti
   const text = await response.text();
   let json = {};
   try { json = text ? JSON.parse(text) : {}; } catch { json = { error: text.slice(0, 500) }; }
-  if (!response.ok) {
-    const error = new Error(json.error || json.message || `Marrow ${route} returned HTTP ${response.status}`);
-    error.status = response.status;
-    error.details = json.details || json;
-    throw error;
-  }
+  return { response, json };
+}
+
+function responseError(route, response, json) {
+  const error = new Error(json.error || json.message || `Marrow ${route} returned HTTP ${response.status}`);
+  error.status = response.status;
+  error.details = json.details || json;
+  return error;
+}
+
+async function requestJson(options, method, route, body, extraHeaders = {}, requestOptions = {}) {
+  const { response, json } = await rawRequest(options, method, route, body, extraHeaders, requestOptions);
+  if (!response.ok) throw responseError(route, response, json);
   return dataOf(json);
+}
+
+const DURABLE_WRITE_ATTEMPTS = 3;
+const DURABLE_RETRY_DELAY_MS = 1_000;
+const DURABLE_MAX_RETRY_DELAY_MS = 2_000;
+const DURABLE_TRANSIENT_STATUSES = new Set([429, 502, 503, 504]);
+
+function durableIdempotencyKey(options, route, parts) {
+  const digest = crypto.createHash('sha256')
+    .update([options.sessionId, route, ...parts].map((part) => String(part ?? '')).join('\u0000'))
+    .digest('hex');
+  return `marrow-run-${route.split('/').pop()}-${digest.slice(0, 48)}`;
+}
+
+function durableRetryDelayMs(response, data, options) {
+  if (Number.isFinite(options.retryDelayMs) && options.retryDelayMs >= 0) return options.retryDelayMs;
+  const hinted = Number(data?.retry_after_ms);
+  const header = Number(response?.headers?.get?.('retry-after')) * 1000;
+  const delay = hinted > 0 ? hinted : header > 0 ? header : DURABLE_RETRY_DELAY_MS;
+  return Math.min(delay, DURABLE_MAX_RETRY_DELAY_MS);
+}
+
+// Runtime, think and commit are durable Marrow writes. A transient 429/502/503/504 or a
+// pending acknowledgement (retryable:true, committed:false) is resent unchanged with the
+// same Idempotency-Key, at most three attempts, so a retry can never create a second record.
+// A pending acknowledgement that names a created decision pins that id; the final answer
+// must carry the same one. Client errors and network failures are not retried.
+async function durableRequestJson(options, route, body, idempotencyKey) {
+  let lastState = 'no response';
+  let pinnedDecisionId = null;
+  for (let attempt = 1; attempt <= DURABLE_WRITE_ATTEMPTS; attempt += 1) {
+    const { response, json } = await rawRequest(options, 'POST', route, body, { 'Idempotency-Key': idempotencyKey });
+    const data = dataOf(json);
+    if (response.ok) {
+      const decisionId = typeof data?.decision_id === 'string' && data.decision_id ? data.decision_id : null;
+      if (pinnedDecisionId && decisionId && decisionId !== pinnedDecisionId) {
+        throw new Error(`Marrow ${route} returned a different decision id than its pending acknowledgement.`);
+      }
+      if (data?.retryable !== true || data?.committed !== false) return data;
+      if (decisionId && data.decision_state === 'created') pinnedDecisionId = decisionId;
+      lastState = `pending${data.reconciliation_state ? ` (${String(data.reconciliation_state).slice(0, 80)})` : ''}`;
+    } else if (DURABLE_TRANSIENT_STATUSES.has(response.status)) {
+      const reason = String(json.error || json.message || '').slice(0, 200);
+      lastState = reason ? `HTTP ${response.status}: ${reason}` : `HTTP ${response.status}`;
+      if (attempt === DURABLE_WRITE_ATTEMPTS) {
+        const error = responseError(route, response, json);
+        error.message = `Marrow ${route} did not complete after ${DURABLE_WRITE_ATTEMPTS} attempts (last: ${lastState}).`;
+        throw error;
+      }
+    } else {
+      throw responseError(route, response, json);
+    }
+    if (attempt < DURABLE_WRITE_ATTEMPTS) {
+      await new Promise((resolve) => setTimeout(resolve, durableRetryDelayMs(response, data, options)));
+    }
+  }
+  const error = new Error(`Marrow ${route} did not complete after ${DURABLE_WRITE_ATTEMPTS} attempts (last: ${lastState}).`);
+  error.status = 202;
+  throw error;
 }
 
 function proofFromFile(filePath) {
@@ -577,11 +659,14 @@ async function preflightRuntime(options, action, type, commandText) {
   const surfaces = inferSurfaces(commandText || action);
   const meta = sourceMeta(options, 'runtime', { action, command: commandText, action_type: type });
   const project = detectProjectSignals(options.root || process.cwd());
-  return requestJson(options, 'POST', '/v1/agent/runtime', {
+  const body = {
     action,
     type,
     target,
     surfaces,
+    // Package clients get the slim runtime shape unless they ask for expanded. The runner reads
+    // risk_gate, gate_receipt and runtime_authorization, as the install self-test does.
+    response_mode: 'expanded',
     harness: sourceClient(options.client),
     project: { ...project, harness: sourceClient(options.client) },
     source_meta: meta,
@@ -593,7 +678,9 @@ async function preflightRuntime(options, action, type, commandText) {
       governed: true,
       source_meta: meta,
     },
-  });
+  };
+  return durableRequestJson(options, '/v1/agent/runtime', body,
+    durableIdempotencyKey(options, '/v1/agent/runtime', [JSON.stringify(body)]));
 }
 
 async function recommendGovernanceMode(options, project = detectProjectSignals()) {
@@ -643,33 +730,93 @@ async function recordGovernanceModeSelection(options, state) {
   });
 }
 
+function recordOf(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function lowerText(value) {
+  return typeof value === 'string' && value.trim() ? value.trim().toLowerCase() : '';
+}
+
+// The runtime answers in two shapes. Expanded responses carry risk_gate, gate_receipt and
+// runtime_authorization. Slim responses, the default for package clients, carry top-level
+// decision, enforcement_decision, risk_gate_enforced, gate_receipt_id and gate_required.
+// Both normalize to one gate, so the runner never reads a real answer as "unknown".
 function gateDecision(runtime) {
-  const gate = runtime?.risk_gate || {};
-  const receipt = runtime?.gate_receipt || {};
+  const value = recordOf(runtime);
+  const gate = recordOf(value.risk_gate);
+  const receipt = recordOf(value.gate_receipt);
+  const authorization = recordOf(value.runtime_authorization);
+  const completion = recordOf(value.completion_contract);
+  const enforced = typeof gate.enforced === 'boolean'
+    ? gate.enforced
+    : typeof value.risk_gate_enforced === 'boolean'
+    ? value.risk_gate_enforced
+    : null;
+  const enforcementDecision = lowerText(gate.enforcement_decision) || lowerText(value.enforcement_decision);
+  const enforcementAsDecision = enforcementDecision === 'owner_approval_required'
+    ? 'review_required'
+    : enforcementDecision === 'advisory' ? '' : enforcementDecision;
+  const decision = lowerText(gate.decision) || lowerText(value.decision) || lowerText(receipt.decision)
+    || enforcementAsDecision;
+  const recognized = Boolean(decision || enforcementDecision || enforced !== null);
+  const decisionState = lowerText(authorization.decision_state) || lowerText(completion.decision_state);
+  const createdDecisionId = String(value.decision_id || authorization.decision_id || completion.decision_id || '');
   return {
-    decision: gate.enforcement_decision || receipt.decision || gate.decision || 'unknown',
-    allow: gate.allow !== false,
-    riskLevel: String(gate.risk_level || receipt.risk_level || runtime?.risk_level || '').trim().toLowerCase(),
-    required: Boolean(receipt.required || gate.gate_required),
-    ownerApprovalRequired: Boolean(receipt.owner_approval_required || gate.owner_approval_required),
-    receiptId: receipt.id || gate.gate_receipt_id || '',
-    exactNextAction: runtime?.exact_next_action || receipt.exact_fix || gate.policy?.exact_fix || '',
-    beforeYouAct: runtime?.before_you_act_injection?.message || runtime?.before_you_act || '',
-    proofPack: runtime?.proof_pack || null,
+    recognized,
+    decision: recognized ? decision || 'proceed' : 'none',
+    enforcementDecision,
+    enforced,
+    allow: typeof gate.allow === 'boolean'
+      ? gate.allow
+      : typeof value.allow === 'boolean' ? value.allow : decision !== 'block',
+    riskLevel: lowerText(gate.risk_level) || lowerText(receipt.risk_level) || lowerText(value.risk_level),
+    required: Boolean(receipt.required || gate.gate_required || value.gate_required || completion.gate_receipt_required),
+    ownerApprovalRequired: Boolean(receipt.owner_approval_required || gate.owner_approval_required
+      || completion.owner_approval_required === true || enforcementDecision === 'owner_approval_required'),
+    receiptId: String(receipt.id || gate.gate_receipt_id || value.gate_receipt_id || authorization.id
+      || completion.gate_receipt_id || ''),
+    // A runtime that already created the decision is closed with that id and its receipt;
+    // think is called only when the runtime says decision creation is still required.
+    runtimeDecisionId: decisionState === 'not_created' ? '' : createdDecisionId,
+    exactNextAction: value.exact_next_action || receipt.exact_fix || recordOf(gate.policy).exact_fix
+      || completion.exact_next_action || '',
+    beforeYouAct: recordOf(value.before_you_act_injection).message || value.before_you_act || '',
+    proofPack: value.proof_pack || (value.proof_required ? {
+      required: true,
+      required_fields: Array.isArray(completion.required_proof_fields) ? completion.required_proof_fields : [],
+      missing: Array.isArray(completion.missing_proof_fields) ? completion.missing_proof_fields : [],
+    } : null),
   };
 }
 
 function shouldBlock(decision, options) {
   if (options.policy === 'audit') return false;
+  // An advisory plan (enforced:false) never blocks locally; the runner shows the warning.
+  if (decision.enforced === false) return false;
   if (decision.decision === 'block' || decision.allow === false) return true;
   if (options.policy === 'warn') return false;
-  if (decision.ownerApprovalRequired && !options.ownerApproval) return true;
-  if (decision.decision === 'owner_approval_required' && !options.ownerApproval) return true;
-  return false;
+  const approvalRequired = decision.ownerApprovalRequired
+    || decision.decision === 'review_required'
+    || decision.decision === 'owner_approval_required'
+    || decision.enforcementDecision === 'owner_approval_required';
+  return Boolean(approvalRequired && !options.ownerApproval);
+}
+
+function gateModeText(decision) {
+  const parts = [decision.enforced === true
+    ? 'enforced'
+    : decision.enforced === false
+    ? 'advisory, not enforced on this plan'
+    : 'enforcement not reported'];
+  if (decision.riskLevel) parts.push(`risk ${decision.riskLevel}`);
+  if (decision.required) parts.push('receipt required');
+  if (decision.ownerApprovalRequired) parts.push('owner approval required');
+  return parts.join('; ');
 }
 
 function printGate(decision, runtime, stream = process.stdout) {
-  stream.write(`Marrow gate: ${decision.decision}${decision.required ? ' (required)' : ''}\n`);
+  stream.write(`Marrow gate: ${decision.decision} (${gateModeText(decision)})\n`);
   if (decision.beforeYouAct) stream.write(`Before you act: ${decision.beforeYouAct}\n`);
   if (decision.exactNextAction) stream.write(`Next: ${decision.exactNextAction}\n`);
   if (decision.proofPack?.required) {
@@ -741,7 +888,7 @@ function scopedExecutionEnv(permit) {
 
 async function createDecision(options, action, type, target, surfaces) {
   const meta = sourceMeta(options, 'think', { action, action_type: type });
-  return requestJson(options, 'POST', '/v1/agent/think', {
+  const body = {
     action,
     type,
     target,
@@ -753,7 +900,15 @@ async function createDecision(options, action, type, target, surfaces) {
       governed: true,
       source_meta: meta,
     },
-  });
+  };
+  return durableRequestJson(options, '/v1/agent/think', body,
+    durableIdempotencyKey(options, '/v1/agent/think', [JSON.stringify(body)]));
+}
+
+function commitIdempotencyKey(options, decisionId) {
+  return `marrow-run-${crypto.createHash('sha256')
+    .update(`${options.agentId}\u0000${options.sessionId}\u0000${decisionId}`)
+    .digest('hex')}`;
 }
 
 async function commitOutcome(options, decisionId, success, outcome, proof, gateReceiptId, modelUsage = null) {
@@ -766,12 +921,14 @@ async function commitOutcome(options, decisionId, success, outcome, proof, gateR
   };
   if (gateReceiptId) body.gate_receipt_id = gateReceiptId;
   if (modelUsage) body.model_usage = modelUsage;
-  const commitHeaders = modelUsage
-    ? { 'Idempotency-Key': `marrow-run-${crypto.createHash('sha256')
-      .update(`${options.agentId}\u0000${options.sessionId}\u0000${decisionId}`)
-      .digest('hex')}` }
-    : {};
-  return requestJson(options, 'POST', '/v1/agent/commit', body, commitHeaders);
+  return durableRequestJson(options, '/v1/agent/commit', body, commitIdempotencyKey(options, decisionId));
+}
+
+async function decisionForAction(options, decision, action, type, target, surfaces) {
+  if (decision?.runtimeDecisionId) return { decisionId: decision.runtimeDecisionId, source: 'runtime' };
+  const think = await createDecision(options, action, type, target, surfaces);
+  const decisionId = think.decision_id || think.id || think.decision?.id || '';
+  return { decisionId, source: decisionId ? 'think' : null };
 }
 
 async function runGoverned(parsed, execution = {}) {
@@ -784,9 +941,11 @@ async function runGoverned(parsed, execution = {}) {
   let runtime = null;
   let decision = null;
   let decisionId = '';
+  let decisionSource = null;
   let actionPermit = null;
   let permitVerified = false;
   let degraded = false;
+  let advisory = false;
   let protectedAction = risky;
   const surfaces = inferSurfaces(commandText || action);
 
@@ -806,10 +965,15 @@ async function runGoverned(parsed, execution = {}) {
     runtime = await preflightRuntime(options, action, type, commandText);
     decision = gateDecision(runtime);
     protectedAction = risky
-      || decision?.required === true
-      || decision?.riskLevel === 'high'
-      || decision?.riskLevel === 'critical';
-    printGate(decision, runtime);
+      || decision.required === true
+      || decision.riskLevel === 'high'
+      || decision.riskLevel === 'critical';
+    if (!decision.recognized) {
+      if (protectedAction) throw new Error('Marrow runtime returned no gate decision, so this protected action cannot be checked.');
+      process.stderr.write('Marrow gate: no decision returned; continuing because this action is not protected.\n');
+    } else {
+      printGate(decision, runtime);
+    }
     if (shouldBlock(decision, options)) {
       return {
         ok: false,
@@ -823,18 +987,25 @@ async function runGoverned(parsed, execution = {}) {
       };
     }
     const target = options.target || commandText;
-    const think = await createDecision(options, action, type, target, surfaces);
-    decisionId = think.decision_id || think.id || think.decision?.id || '';
-    if (protectedAction) {
+    ({ decisionId, source: decisionSource } = await decisionForAction(options, decision, action, type, target, surfaces));
+    // Permits exist only where the plan enforces the gate. An advisory plan shows its warning,
+    // runs the command and still records the outcome; it never asks for a permit it cannot get.
+    const permitRequired = protectedAction && decision.enforced !== false;
+    if (protectedAction && !permitRequired) {
+      advisory = true;
+      process.stderr.write(`Marrow advisory: this ${type} action is not enforced on this plan (gate ${decision.decision}). Running it and recording the outcome.\n`);
+    }
+    if (permitRequired) {
+      if (!decision.receiptId) throw new Error('Marrow runtime returned no gate receipt, so no action permit can be issued.');
       actionPermit = await issueActionPermit(requestJson, options, {
         action,
         type,
         target,
         surfaces,
         decisionId,
-        gateReceiptId: decision?.receiptId || '',
+        gateReceiptId: decision.receiptId,
         ownerApproval: options.ownerApproval,
-        proofRequirements: decision?.proofPack?.required_fields || decision?.proofPack?.missing || [],
+        proofRequirements: decision.proofPack?.required_fields || decision.proofPack?.missing || [],
       });
       if (!actionPermit?.permit || !actionPermit?.permit_id) {
         throw new Error('Marrow did not issue a valid action permit.');
@@ -857,7 +1028,7 @@ async function runGoverned(parsed, execution = {}) {
       actionPermit = null;
       permitVerified = false;
       degraded = true;
-      process.stderr.write(`Marrow degraded: ${error.message}. Continuing because fail-open/non-risky policy allows it.\n`);
+      process.stderr.write(`Marrow degraded: ${error.message}. Continuing because this action is not protected${decisionId ? '' : '; its outcome will not be recorded'}.\n`);
     } else {
       return {
         ok: false,
@@ -881,6 +1052,7 @@ async function runGoverned(parsed, execution = {}) {
     : `Marrow governed command failed with exit code ${child.exitCode}.`;
 
   let commit = null;
+  let commitState = decisionId ? 'failed' : 'not_recorded';
   if (decisionId) {
     try {
       commit = await commitOutcome(
@@ -892,9 +1064,15 @@ async function runGoverned(parsed, execution = {}) {
         decision?.receiptId || '',
         child.modelUsage,
       );
+      commitState = commit?.committed === true ? 'committed' : 'not_committed';
+      if (commitState === 'not_committed') {
+        process.stderr.write(`Marrow recorded this outcome without trusted closure (committed:${String(commit?.committed ?? 'missing')}).\n`);
+      }
     } catch (error) {
       process.stderr.write(`Marrow outcome commit failed: ${error.message}\n`);
     }
+  } else if (!degraded) {
+    process.stderr.write('Marrow outcome not recorded: no decision id was returned before the command ran.\n');
   }
 
   let permitClosed = null;
@@ -921,9 +1099,13 @@ async function runGoverned(parsed, execution = {}) {
     type,
     risky,
     degraded,
+    advisory,
     decision,
     decision_id: decisionId,
-    outcome_committed: Boolean(commit),
+    decision_source: decisionSource,
+    gate_receipt_id: decision?.receiptId || null,
+    outcome_committed: commitState === 'committed',
+    outcome_commit_state: commitState,
     permit_id: actionPermit?.permit_id || null,
     permit_verified: permitVerified,
     permit_closed: Boolean(permitClosed),
@@ -948,11 +1130,28 @@ async function permitOnly(parsed) {
   const surfaces = inferSurfaces(target);
   const runtime = await preflightRuntime(options, action, type, target);
   const decision = gateDecision(runtime);
-  if (shouldBlock(decision, options)) {
-    return { ok: false, blocked: true, exitCode: 12, decision, message: decision.exactNextAction };
+  if (!decision.recognized) {
+    return { ok: false, blocked: true, exitCode: 13, decision, message: 'Marrow runtime returned no gate decision, so no permit was issued.' };
   }
-  const think = await createDecision(options, action, type, target, surfaces);
-  const decisionId = think.decision_id || think.id || think.decision?.id || '';
+  if (shouldBlock(decision, options)) {
+    return { ok: false, blocked: true, exitCode: 12, decision, message: decision.exactNextAction || 'Marrow blocked this action before a permit could be issued.' };
+  }
+  const { decisionId } = await decisionForAction(options, decision, action, type, target, surfaces);
+  if (decision.enforced === false) {
+    return {
+      ok: true,
+      advisory: true,
+      decision,
+      decision_id: decisionId,
+      gate_receipt_id: decision.receiptId || null,
+      permit: null,
+      permit_id: null,
+      message: `This plan runs Marrow gates in advisory mode (gate ${decision.decision}), so no action permit is issued. Record the outcome with proof after the action.`,
+    };
+  }
+  if (!decision.receiptId) {
+    return { ok: false, blocked: true, exitCode: 13, decision, message: 'Marrow runtime returned no gate receipt, so no permit was issued.' };
+  }
   const result = await issueActionPermit(requestJson, options, {
     action,
     type,
@@ -961,9 +1160,9 @@ async function permitOnly(parsed) {
     decisionId,
     gateReceiptId: decision.receiptId,
     ownerApproval: options.ownerApproval,
-    proofRequirements: decision?.proofPack?.required_fields || decision?.proofPack?.missing || [],
+    proofRequirements: decision.proofPack?.required_fields || decision.proofPack?.missing || [],
   });
-  return { ok: true, decision_id: decisionId, ...result };
+  return { ok: true, decision_id: decisionId, gate_receipt_id: decision.receiptId, ...result };
 }
 
 async function verifyPermitOnly(parsed) {
@@ -995,7 +1194,15 @@ async function sidecarOnly(parsed) {
   const maintain = async () => {
     if (lastMaintenance && Date.now() - lastMaintenanceAt < 5 * 60_000) return lastMaintenance;
     const detection = detectEnvironment(root, process.env);
-    const plan = buildPlan(detection, { mode: managedMode });
+    // Maintenance re-applies the controller's own configured identity and endpoint. It never
+    // substitutes a derived agent id or the default base URL, and it keeps owner-set values.
+    const plan = buildPlan(detection, {
+      mode: managedMode,
+      agentId: options.agentId,
+      baseUrl: options.baseUrl,
+      client: options.client,
+      preserveIdentity: true,
+    });
     const changes = applyPlan(plan, { yes: true, dryRun: false, doctor: false });
     const repaired = changes.filter((change) => change.applied).map((change) => change.label);
     const remaining = changes.filter((change) => change.changed && !change.applied).map((change) => change.label);
@@ -1022,16 +1229,23 @@ async function sidecarOnly(parsed) {
 }
 
 async function controllerOnly(parsed) {
-  // Keep the local controller identity stable; only the server-facing agent id changed.
-  const identityAgentId = parsed.options.agentId || os.userInfo().username || 'agent';
-  const options = { ...parsed.options, identityAgentId, root: process.cwd(), mode: 'auto' };
+  // The controller CLI uses the same project root and local identity as install and update, so
+  // `controller ensure|stop|status` act on the controller those commands started. The local
+  // identity is never sent to Marrow.
+  const detection = detectEnvironment(process.cwd(), process.env);
+  const envClient = process.env.MARROW_CLIENT || process.env.MARROW_HARNESS || process.env.MARROW_AGENT_CLIENT;
+  const client = parsed.options.clientExplicit || envClient ? parsed.options.client : detectedClient(detection);
+  const identityAgentId = localControllerAgentId(detection.root, client, parsed.options.agentId);
+  const options = { ...parsed.options, client, identityAgentId, root: detection.root, mode: 'auto' };
   let result;
-  if (parsed.action === 'ensure') result = await ensureGovernanceController(options);
+  if (parsed.action === 'ensure') result = await ensureCurrentGovernanceController(options);
   else if (parsed.action === 'start') result = await startGovernanceController(options);
-  else if (parsed.action === 'stop') result = await stopGovernanceController(options);
+  else if (parsed.action === 'stop') result = await stopProjectControllers(options);
   else result = await controllerStatus(options);
   if (!options.json) {
     process.stdout.write(`Marrow controller: ${result.active ? 'active' : result.state}.\n`);
+    if (result.installer_version) process.stdout.write(`Installer version: ${result.installer_version}\n`);
+    if (result.restarted) process.stdout.write(`Restarted: ${result.restarted.from_versions.join(', ')} -> ${result.restarted.to_version}\n`);
     if (result.started_at) process.stdout.write(`Started: ${result.started_at}\n`);
     if (result.exact_fix) process.stdout.write(`Next: ${result.exact_fix}\n`);
   }
@@ -1054,8 +1268,38 @@ async function gateOnly(parsed) {
   }
   const runtime = await preflightRuntime(options, action, type, action);
   const decision = gateDecision(runtime);
+  if (!decision.recognized) {
+    return {
+      ok: false,
+      allowed: false,
+      blocked: true,
+      exitCode: 13,
+      action,
+      type,
+      decision,
+      message: 'Marrow runtime returned no gate decision. Run npx -y @getmarrow/install@latest update, then retry.',
+    };
+  }
   printGate(decision, runtime);
-  return { ok: !shouldBlock(decision, options), action, type, decision };
+  if (decision.runtimeDecisionId) {
+    const receipt = decision.receiptId ? ` --gate-receipt ${shellQuote(decision.receiptId)}` : '';
+    process.stdout.write(`Decision: ${decision.runtimeDecisionId}. After the action, record its outcome: npx @getmarrow/install proof --session ${shellQuote(options.sessionId)} --decision-id ${shellQuote(decision.runtimeDecisionId)}${receipt} --success|--failure --summary "<what happened>"\n`);
+  }
+  // A gate used as `gate ... && deploy` must fail the shell chain when Marrow blocks.
+  const blocked = shouldBlock(decision, options);
+  return {
+    ok: !blocked,
+    allowed: !blocked,
+    blocked,
+    exitCode: blocked ? 12 : 0,
+    action,
+    type,
+    decision,
+    decision_id: decision.runtimeDecisionId || null,
+    gate_receipt_id: decision.receiptId || null,
+    session_id: options.sessionId,
+    ...(blocked ? { message: decision.exactNextAction || `Marrow gate ${decision.decision}: this action needs owner approval or a policy change before it runs.` } : {}),
+  };
 }
 
 async function proofOnly(parsed) {
@@ -1073,9 +1317,20 @@ async function proofOnly(parsed) {
     options.success,
     options.outcome || options.summary || (options.success ? 'Manual proof closeout succeeded.' : 'Manual proof closeout failed.'),
     proof,
-    '',
+    options.gateReceiptId || '',
   );
-  return { ok: true, decision_id: options.decisionId, committed: true, result };
+  // Only committed:true is trusted closure; an accepted observation is reported, not claimed.
+  const committed = result?.committed === true;
+  return {
+    ok: committed,
+    decision_id: options.decisionId,
+    committed,
+    exitCode: committed ? 0 : 1,
+    result,
+    ...(committed ? {} : {
+      message: `Marrow did not commit this outcome as trusted closure (committed:${String(result?.committed ?? 'missing')}). Runtime-created decisions need --gate-receipt and the --session printed by gate.`,
+    }),
+  };
 }
 
 async function statusOnly(parsed) {
@@ -1479,17 +1734,19 @@ function fleetPanel(snapshot) {
   ].filter(Boolean).join('\n');
 }
 
-const GENERIC_GOVERNED_COMMAND = 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --agent <agent-id> --profile production --policy warn -- <harness-command>';
+// Governed commands never name an invented agent id. MARROW_AGENT_ID, when set, is a registered
+// agent; otherwise Marrow resolves the key's bound agent or the plan seat.
+const GENERIC_GOVERNED_COMMAND = 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --profile production --policy warn -- <harness-command>';
 
 function localSupportedHarnesses() {
   const harnesses = [
-    { display_name: 'OpenAI Codex', client_label: 'codex', category: 'agent_harness', support_level: 'governed_runner', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --agent codex-prod -- codex' },
+    { display_name: 'OpenAI Codex', client_label: 'codex', category: 'agent_harness', support_level: 'governed_runner', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run -- codex' },
     { display_name: 'Claude Code', client_label: 'claude-code', category: 'agent_harness', support_level: 'native_mcp_or_sdk', install_command: `MARROW_API_KEY=mrw_live_xxx ${MCP_SETUP_COMMAND}` },
     { display_name: 'Cursor', client_label: 'cursor', category: 'ide_agent', support_level: 'native_mcp_or_sdk', install_command: `MARROW_API_KEY=mrw_live_xxx ${MCP_SETUP_COMMAND}` },
     { display_name: 'Cursor Composer', client_label: 'composer', category: 'ide_agent', support_level: 'native_mcp_or_sdk', install_command: `MARROW_API_KEY=mrw_live_xxx ${MCP_SETUP_COMMAND}` },
     { display_name: 'Windsurf', client_label: 'windsurf', category: 'ide_agent', support_level: 'native_mcp_or_sdk', install_command: `MARROW_API_KEY=mrw_live_xxx ${MCP_SETUP_COMMAND}` },
     { display_name: 'Cline', client_label: 'cline', category: 'ide_agent', support_level: 'native_mcp_or_sdk', install_command: `MARROW_API_KEY=mrw_live_xxx ${MCP_SETUP_COMMAND}` },
-    { display_name: 'OpenCode', client_label: 'opencode', category: 'agent_harness', support_level: 'governed_runner', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --agent opencode-prod -- opencode' },
+    { display_name: 'OpenCode', client_label: 'opencode', category: 'agent_harness', support_level: 'governed_runner', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run -- opencode' },
     { display_name: 'Hermes Agent', client_label: 'hermes', category: 'agent_harness', support_level: 'first_class_addon', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install hermes' },
     { display_name: 'OpenClaw', client_label: 'openclaw', category: 'agent_harness', support_level: 'first_class_addon', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install openclaw' },
     { display_name: 'Gemini CLI', client_label: 'gemini', category: 'model_cli', support_level: 'governed_runner', install_command: GENERIC_GOVERNED_COMMAND },
@@ -1500,7 +1757,7 @@ function localSupportedHarnesses() {
     { display_name: 'MiniMax', client_label: 'minimax', category: 'model_cli', support_level: 'governed_runner', install_command: GENERIC_GOVERNED_COMMAND },
     { display_name: 'GLM', client_label: 'glm', category: 'model_cli', support_level: 'governed_runner', install_command: GENERIC_GOVERNED_COMMAND },
     { display_name: 'MCP-compatible clients', client_label: 'mcp', category: 'mcp_client', support_level: 'native_mcp_or_sdk', install_command: `MARROW_API_KEY=mrw_live_xxx ${MCP_SETUP_COMMAND}` },
-    { display_name: 'CI scripts and deploy runners', client_label: 'ci', category: 'ci_runner', support_level: 'governed_runner', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --agent ci-release --profile production --policy enforce -- <ci-or-deploy-command>' },
+    { display_name: 'CI scripts and deploy runners', client_label: 'ci', category: 'ci_runner', support_level: 'governed_runner', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --profile production --policy enforce -- <ci-or-deploy-command>' },
     { display_name: 'Custom shell/API harness', client_label: 'custom', category: 'custom_runner', support_level: 'event_contract', install_command: 'POST /v1/agent/integrations/events with harness, event_type, agent_id, and action' },
   ];
   return harnesses.map((harness) => {
@@ -1613,8 +1870,9 @@ function localIntegrationManifest(name) {
       title: 'Marrow + Hermes Agent',
       client_label: 'hermes',
       command: 'hermes',
-      install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install hermes',
-      governed_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --agent hermes-prod --profile production --policy enforce -- hermes',
+      install_command: 'MARROW_API_KEY=mrw_live_xxx npx -y @getmarrow/install@latest update',
+      governed_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --profile production --policy enforce -- hermes',
+      agent_identity: 'Leave MARROW_AGENT_ID unset: Marrow uses the API key\'s bound agent or the Free plan seat. On paid plans, register the agent with POST /v1/agents or bind the key to exactly one agent before setting MARROW_AGENT_ID.',
       capture_points: [
         '/goal -> Marrow completion contract',
         'verification evidence -> Marrow proof pack',
@@ -1622,7 +1880,7 @@ function localIntegrationManifest(name) {
         '/journey -> governance timeline',
         'background subagents -> agent_id + source_meta.client=hermes',
       ],
-      exact_next_action: 'Run the Hermes add-on, then call Marrow runtime before deploy, merge, publish, migration, credential, or customer-facing work.',
+      exact_next_action: 'Run the one-line update: it adds the pinned Marrow MCP server to ~/.hermes/config.yaml and runs the self-test. Restart Hermes, then call marrow_agent_runtime before deploy, merge, publish, migration, credential, or customer-facing work.',
     };
   }
   if (key === 'openclaw' || key === 'open-claw') {
@@ -1632,7 +1890,7 @@ function localIntegrationManifest(name) {
       client_label: 'openclaw',
       command: 'openclaw agent',
       install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install openclaw',
-      governed_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --agent openclaw-release --profile production --policy enforce -- openclaw agent',
+      governed_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --profile production --policy enforce -- openclaw agent',
       capture_points: [
         'agent sessions -> workflow sessions',
         'handoff/result files -> proof packs',
@@ -1778,7 +2036,7 @@ function governPanel(options) {
     '',
     'Recommended first commands:',
     `  npx @getmarrow/install run ${options.agentId ? `--agent ${shellQuoteDisplay(options.agentId)} ` : ''}--profile production --policy enforce -- codex`,
-    `  npx @getmarrow/install run --agent deploy-agent --type deploy --policy enforce -- wrangler deploy`,
+    `  npx @getmarrow/install run --type deploy --policy enforce -- wrangler deploy`,
     `  npx @getmarrow/install gate "deploy production worker after tests pass"`,
     '',
     'Protected by default: deploy, merge, publish, migrations, secrets, keys, production actions.',
@@ -2388,12 +2646,15 @@ async function runCli(argv) {
     result = await integrationsOnly(parsed);
   }
 
+  const exitCodeCommands = ['run', 'verify-permit', 'gate', 'permit', 'proof'];
   if (parsed.options?.json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   else if (result?.blocked) process.stderr.write(`BLOCKED: ${result.message || 'Marrow blocked this action.'}\n`);
+  else if (result?.ok === false && result?.message && exitCodeCommands.includes(parsed.command)) process.stderr.write(`Marrow: ${result.message}\n`);
   else if (parsed.command === 'status') process.stdout.write(`${statusPanel(result)}\n`);
+  else if (result?.advisory && result?.message) process.stdout.write(`${result.message}\n`);
   else if (!['run', 'fleet', 'hermes', 'openclaw', 'integrations'].includes(parsed.command)) process.stdout.write('Marrow command completed.\n');
 
-  if (parsed.command === 'run' || parsed.command === 'verify-permit' || result?.blocked) {
+  if (exitCodeCommands.includes(parsed.command) || result?.blocked) {
     process.exitCode = result?.exitCode ?? (result?.ok === false ? 1 : 0);
   }
 }
