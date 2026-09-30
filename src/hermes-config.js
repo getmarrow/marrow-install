@@ -314,13 +314,19 @@ function redactArgs(items) {
 }
 
 // Undo lines keep structure only: every env value except MARROW_CLIENT is redacted, and so is
-// every argument after a key- or token-like flag.
+// every argument after a key- or token-like flag. Comments can hold anything, so trailing
+// comments are dropped and comment-only lines are replaced with a marker.
 function redactUndoLines(lines, startInEnv = false) {
   let envIndent = startInEnv ? -1 : null;
   let argsIndent = null;
   let argItems = [];
   const out = [];
-  for (const line of lines) {
+  for (const raw of lines) {
+    if (/^\s*#/.test(raw)) {
+      out.push(`${' '.repeat(indentOf(raw))}# [comment redacted]`);
+      continue;
+    }
+    const line = stripComment(raw);
     const indent = indentOf(line);
     if (envIndent !== null && indent <= envIndent && !isBlankOrComment(line)) envIndent = null;
     if (argsIndent !== null && !/^ *-(?:\s|$)/.test(line) && (indent <= argsIndent && !isBlankOrComment(line))) argsIndent = null;
@@ -358,7 +364,9 @@ function redactUndoLines(lines, startInEnv = false) {
         out.push(line);
         continue;
       }
-      out.push(['command', 'type', 'timeout', 'enabled'].includes(parsed.key) ? line : `${' '.repeat(parsed.indent)}${parsed.key}: ${REDACTED}`);
+      out.push(['command', 'type', 'timeout', 'enabled'].includes(parsed.key) || ['{}', 'null', '~'].includes(inline)
+        ? line
+        : `${' '.repeat(parsed.indent)}${parsed.key}: ${REDACTED}`);
       continue;
     }
     out.push(line);
@@ -432,7 +440,7 @@ function planHermesMcpConfig(text, options) {
   const { servers } = analysis;
   if (servers.emptyInline) {
     const added = ['mcp_servers:', ...renderEntry(detectedUnit, detectedUnit, options)];
-    undo.push({ change: 'replaced', replaced: [lines[servers.line]], lines: redactUndoLines(added) });
+    undo.push({ change: 'replaced', replaced: redactUndoLines([lines[servers.line]]), lines: redactUndoLines(added) });
     const next = [...lines];
     next.splice(servers.line, 1, ...added);
     return finish(next);
