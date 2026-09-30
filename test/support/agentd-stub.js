@@ -101,6 +101,7 @@ function createStub({ name = 'stub' } = {}) {
           decision_id: `dec_${crypto.randomBytes(8).toString('hex')}`,
           lease_ms: decided.lease_ms || 0,
           approval_url: decided.approval_url || null,
+          ...(decided.harness_prompt_allowed ? { harness_prompt_allowed: true } : {}),
           issued_at: new Date().toISOString(),
         };
         const signer = state.gateMode === 'badsig' ? state.otherKey : privateKey;

@@ -15,7 +15,8 @@ function normalizeOrigin(url) {
 }
 
 class ApiClient {
-  constructor({ baseUrl, allowedBaseUrls, credentials, fetchImpl = globalThis.fetch, installId = null }) {
+  constructor({ baseUrl, allowedBaseUrls, credentials, fetchImpl = globalThis.fetch, installId = null, scrub = (text) => text }) {
+    this.scrub = scrub;
     this.credentials = credentials;
     this.fetchImpl = fetchImpl;
     this.installId = installId;
@@ -58,7 +59,7 @@ class ApiClient {
     if (idempotencyKey) requestHeaders['idempotency-key'] = idempotencyKey;
     let payload;
     if (body !== undefined) {
-      const json = Buffer.from(JSON.stringify(body), 'utf8');
+      const json = Buffer.from(this.scrub(JSON.stringify(body)), 'utf8');
       requestHeaders['content-type'] = 'application/json';
       if (gzip) {
         payload = zlib.gzipSync(json);

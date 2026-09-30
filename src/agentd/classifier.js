@@ -10,7 +10,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { parseShell } = require('./shell-parse');
-const { redactArgv, redactText } = require('./redact');
+const { redactArgv, redactText, safeToken } = require('./redact');
 
 const RANK = { routine: 0, unknown: 1, risky: 2 };
 const MAX_DEPTH = 3;
@@ -19,6 +19,16 @@ const SCRIPT_MAX_BYTES = 64 * 1024;
 const PACKAGE_JSON_MAX_BYTES = 256 * 1024;
 const SYSTEM_BIN = /^\/(?:usr\/(?:local\/)?)?s?bin\/|^\/opt\/homebrew\/bin\/|^\/snap\/bin\//;
 const OUTPUT_REDIRECTS = new Set(['>', '>>', '>|', '&>', '&>>', '<>']);
+const MAX_TRACKED_COMMANDS = 32;
+const INSTALL_SUBS = new Set(['install', 'i', 'ci', 'add', 'rebuild', 'install-test', 'it', 'cit', 'clean-install', 'update', 'up', 'upgrade', 'import', 'pack']);
+const INSTALL_LIFECYCLE = ['preinstall', 'install', 'postinstall', 'prepublish', 'preprepare', 'prepare', 'postprepare', 'dependencies'];
+const PACK_LIFECYCLE = ['prepack', 'prepare', 'postpack'];
+const MAX_COMMAND_CHARS = 1000;
+const MAX_PATH_CHARS = 4096;
+// Environment names that change what a later program runs or loads (PATH hijack, preload,
+// interpreter options, npm/git config, Marrow's own settings).
+const SENSITIVE_ENV = /^(?:PATH|IFS|ENV|BASH_ENV|SHELLOPTS|BASHOPTS|PS4|PROMPT_COMMAND|CDPATH|HOME|ZDOTDIR|LD_[A-Z_]*|DYLD_[A-Z_]*|NODE_[A-Z_]*|NPM_CONFIG_[A-Z_]*|npm_config_[A-Za-z_]*|YARN_[A-Z_]*|PNPM_[A-Z_]*|PYTHON[A-Z_]*|PIP_[A-Z_]*|RUBY[A-Z_]*|GEM_[A-Z_]*|BUNDLE_[A-Z_]*|PERL[A-Z0-9_]*|GIT_[A-Z_]*|SSH_[A-Z_]*|PAGER|EDITOR|VISUAL|BROWSER|XDG_[A-Z_]*|SSL_[A-Z_]*|CURL_[A-Z_]*|HTTPS?_PROXY|https?_proxy|ALL_PROXY|MARROW_[A-Z_]*)$/;
+const INTERNAL_HOST = /^(?:localhost|.*\.localhost|.*\.internal|metadata|metadata\.google\.internal|127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+|169\.254\.\d+\.\d+|0\.0\.0\.0|\[?::1\]?|\[?f[cd][0-9a-f]{2}:.*|\[?fe80:.*)$/i;
 const DEVICE_TARGETS = new Set(['/dev/null', '/dev/stdout', '/dev/stderr', '/dev/tty', '/dev/fd/1', '/dev/fd/2']);
 
 function globToRegex(pattern, home) {
@@ -62,10 +72,16 @@ class Result {
     this.paths = [];
     this.hosts = [];
     this.commands = [];
+    // True when the action had more than the tracked commands/arguments/characters. A truncated
+    // action is never covered by a server lease (the server did not see all of it).
+    this.truncated = false;
   }
   raise(cls, reason) {
     if (RANK[cls] > RANK[this.class]) this.class = cls;
-    if (reason && cls !== 'routine' && !this.reasons.includes(reason) && this.reasons.length < 24) this.reasons.push(reason);
+    if (reason && cls !== 'routine') {
+      const token = safeToken(reason, 80);
+      if (!this.reasons.includes(token) && this.reasons.length < 24) this.reasons.push(token);
+    }
     return this;
   }
   merge(other) {
@@ -73,12 +89,19 @@ class Result {
     this.raise(other.class);
     for (const reason of other.reasons) if (!this.reasons.includes(reason) && this.reasons.length < 24) this.reasons.push(reason);
     for (const key of ['programs', 'paths', 'hosts', 'commands']) {
-      for (const value of other[key]) if (this[key].length < 32 && !this[key].includes(value)) this[key].push(value);
+      for (const value of other[key]) this.add(key, value);
     }
+    if (other.truncated) this.truncated = true;
     return this;
   }
+  add(key, value) {
+    if (!value || this[key].includes(value)) return;
+    if (this[key].length >= MAX_TRACKED_COMMANDS) { this.truncated = true; return; }
+    this[key].push(value);
+  }
   note(key, value) {
-    if (value && this[key].length < 32 && !this[key].includes(value)) this[key].push(value);
+    if (!value) return;
+    this.add(key, key === 'programs' || key === 'hosts' ? safeToken(value, 64) : value);
   }
 }
 
@@ -117,7 +140,9 @@ function createClassifier(policy, options = {}) {
   // ---------- context helpers ----------
   function newContext(cwd) {
     const resolved = typeof cwd === 'string' && path.isAbsolute(cwd) ? path.normalize(cwd) : null;
-    return { cwd: resolved, cwdUnknown: !resolved, vars: new Map([['HOME', home]]), depth: 0 };
+    // `written` is shared by every copy of the context for one action: a script or package.json
+    // written earlier in the same command line is never classified by its current contents.
+    return { cwd: resolved, cwdUnknown: !resolved, vars: new Map([['HOME', home]]), depth: 0, written: new Set() };
   }
 
   // Returns every literal value a word can take (a loop variable has several), or null when a
@@ -163,7 +188,17 @@ function createClassifier(policy, options = {}) {
     if (!abs) return false;
     const roots = [...tmpRoots];
     if (ctx.cwd && !ctx.cwdUnknown && ctx.cwd !== '/' && ctx.cwd !== home) roots.push(ctx.cwd);
+    for (const root of [...roots]) { const real = realOf(root); if (real !== root && real !== '/' && real !== home) roots.push(real); }
     return roots.some((root) => abs === root || abs.startsWith(`${root}/`));
+  }
+
+  // A target whose subtree includes the home directory, the filesystem root or the workspace
+  // itself (for example `~`, `/`, `.`, `..`, `./*`).
+  function isBroadTarget(raw, ctx) {
+    const abs = absPath(raw, ctx);
+    const globDir = /[*?[]/.test(raw) ? absPath(path.dirname(raw), ctx) : null;
+    const covers = (dir) => dir && (dir === '/' || dir === home || home.startsWith(`${dir}/`) || (ctx.cwd && (dir === ctx.cwd || ctx.cwd.startsWith(`${dir}/`))));
+    return ['/', '~', '*', '.', '..', './', '../', '/*', '~/*', './*', '../*'].includes(raw) || covers(abs) || covers(globDir);
   }
 
   function relLabel(abs, ctx) {
@@ -173,22 +208,47 @@ function createClassifier(policy, options = {}) {
     return redactText(abs, 120);
   }
 
+  // The real location behind symlinks, for the path itself or its nearest existing ancestor. A
+  // workspace file that is a symlink to ~/.bashrc is judged as ~/.bashrc.
+  function realOf(abs) {
+    let current = abs;
+    const rest = [];
+    for (let level = 0; level < 64; level += 1) {
+      try {
+        return path.join(fs.realpathSync(current), ...rest.reverse());
+      } catch {
+        const parent = path.dirname(current);
+        if (parent === current) return abs;
+        rest.push(path.basename(current));
+        current = parent;
+      }
+    }
+    return abs;
+  }
+
   function checkReadPath(text, ctx, result, reason = 'secret_read') {
+    if (text.length > MAX_PATH_CHARS) { result.raise('unknown', 'oversize_path'); return; }
     const abs = absPath(text, ctx);
     if (!abs) return;
-    if (isSecret(abs)) { result.raise('risky', reason); result.note('paths', relLabel(abs, ctx)); }
+    if (/^\/dev\/(?:tcp|udp)\//.test(abs)) { result.raise('unknown', 'dev_tcp_network'); return; }
+    const real = realOf(abs);
+    if (isSecret(abs) || isSecret(real)) { result.raise('risky', reason); result.note('paths', relLabel(abs, ctx)); }
   }
 
   function checkWritePath(text, ctx, result, { recursiveDelete = false } = {}) {
     if (text == null) { result.raise('unknown', 'dynamic_write_target'); return; }
     if (DEVICE_TARGETS.has(text)) return;
+    if (text.length > MAX_PATH_CHARS) { result.raise('unknown', 'oversize_path'); return; }
     const abs = absPath(text, ctx);
     if (!abs) { result.raise('unknown', 'write_target_cwd_unknown'); return; }
+    if (/^\/dev\/(?:tcp|udp)\//.test(abs)) { result.raise('unknown', 'dev_tcp_network'); return; }
+    const real = realOf(abs);
+    if (ctx.written) { ctx.written.add(abs); ctx.written.add(real); }
     result.note('paths', relLabel(abs, ctx));
-    if (isProtected(abs)) { result.raise('risky', 'protected_path_write'); return; }
-    if (isSecret(abs)) { result.raise('risky', 'secret_path_write'); return; }
-    if (isReview(abs)) { result.raise('unknown', 'review_path_write'); return; }
-    if (!inWorkspace(abs, ctx)) result.raise(recursiveDelete ? 'risky' : 'unknown', 'write_outside_workspace');
+    if (isProtected(abs) || isProtected(real)) { result.raise('risky', real !== abs && !isProtected(abs) ? 'symlink_to_protected_path' : 'protected_path_write'); return; }
+    if (isSecret(abs) || isSecret(real)) { result.raise('risky', 'secret_path_write'); return; }
+    if (isReview(abs) || isReview(real)) { result.raise('unknown', 'review_path_write'); return; }
+    if (!inWorkspace(abs, ctx) || !inWorkspace(real, ctx)) result.raise(recursiveDelete ? 'risky' : 'unknown', 'write_outside_workspace');
   }
 
   // ---------- tools ----------
@@ -218,7 +278,11 @@ function createClassifier(policy, options = {}) {
     let parsed = null;
     try { parsed = new URL(url); } catch { parsed = null; }
     if (parsed) result.note('hosts', parsed.host.toLowerCase());
-    const target = parsed ? `${parsed.pathname}${parsed.search}` : String(url);
+    if (!parsed) { result.raise('unknown', 'unparseable_url'); return; }
+    // Loopback, private and link-local hosts include cloud metadata endpoints that hand out
+    // credentials; a GET there is not routine.
+    if (INTERNAL_HOST.test(parsed.hostname) || /^\d+$/.test(parsed.hostname)) result.raise('unknown', 'internal_host');
+    const target = `${parsed.pathname}${parsed.search}`;
     if (urlMutation.test(target)) result.raise('unknown', 'url_mutation_hint');
   }
 
@@ -323,9 +387,7 @@ function createClassifier(policy, options = {}) {
           if (value === null) ctx.vars.delete(name);
           else ctx.vars.set(name, value);
         }
-        if (/^(?:PATH|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|NODE_OPTIONS|BASH_ENV|ENV|PROMPT_COMMAND|GIT_SSH_COMMAND|GIT_DIR|MARROW_[A-Z_]*)$/.test(name)) {
-          result.raise('unknown', 'sensitive_env_assignment');
-        }
+        if (SENSITIVE_ENV.test(name)) result.raise('unknown', 'sensitive_env_assignment');
       }
       result.merge(classifySimple(command, ctx, depth));
     }
@@ -382,6 +444,7 @@ function createClassifier(policy, options = {}) {
       if (wrappers.has(base)) {
         result.note('programs', base);
         if (base === 'env' && args.slice(i + 1).some((a) => a.text === '-S' || (a.text || '').startsWith('--split-string'))) return result.raise('unknown', 'env_split_string');
+        if (base === 'env' && args.slice(i + 1).some((a) => a.text === null || (/^[A-Za-z_][A-Za-z0-9_]*=/.test(a.text) && SENSITIVE_ENV.test(a.text.slice(0, a.text.indexOf('=')))))) result.raise('unknown', 'sensitive_env_assignment');
         if (base === 'watch') {
           const rest = args.slice(skipWrapperOptions(base, args, i + 1));
           if (rest.some((a) => a.text === null)) return result.raise('unknown', 'dynamic_watch');
@@ -396,7 +459,9 @@ function createClassifier(policy, options = {}) {
         continue;
       }
       result.note('programs', base);
-      result.commands.push(redactArgv(args.slice(i).map((a) => (a.text === null ? '[dynamic]' : a.text))).join(' ').slice(0, 240));
+      const argvTexts = args.slice(i).map((a) => (a.text === null ? '[dynamic]' : a.text));
+      if (argvTexts.length > 32 || argvTexts.reduce((n, t) => n + t.length + 1, 0) > MAX_COMMAND_CHARS) result.truncated = true;
+      result.add('commands', redactArgv(argvTexts, { maxArgs: 32, maxLength: 400 }).join(' ').slice(0, MAX_COMMAND_CHARS));
       if (program.includes('/') && !SYSTEM_BIN.test(program)) {
         return result.merge(classifyScriptExecution(program, args.slice(i + 1), command, ctx, depth));
       }
@@ -501,6 +566,14 @@ function createClassifier(policy, options = {}) {
   }
 
   function classifyReadProgram(base, args, ctx, result) {
+    // A recursive read rooted at the home directory or above reads every credential file in it.
+    const recursive = (['grep', 'egrep', 'fgrep'].includes(base) && hasFlag(args, '-r', '-R', '--recursive', '--dereference-recursive'))
+      || (['rg', 'ag', 'ack'].includes(base) && hasFlag(args, '--hidden', '-u', '-uu', '-uuu', '--no-ignore'))
+      || (base === 'zip' && hasFlag(args, '-r', '--recurse-paths'));
+    if (recursive) {
+      const targets = args.filter((a) => a.text !== null && !a.text.startsWith('-'));
+      if (targets.some((a) => isBroadTarget(a.text, ctx) && absPath(a.text, ctx) !== ctx.cwd) || (ctx.cwd === home)) result.raise('unknown', 'recursive_read_of_home');
+    }
     const patternFirst = ['grep', 'egrep', 'fgrep', 'rg', 'ag', 'ack', 'jq', 'yq'].includes(base)
       && !hasFlag(args, '-e', '-f', '--regexp', '--file');
     let skippedPattern = !patternFirst;
@@ -551,6 +624,7 @@ function createClassifier(policy, options = {}) {
 
   function classifyScriptFile(abs, ctx, depth) {
     const result = new Result();
+    if (ctx.written && (ctx.written.has(abs) || ctx.written.has(realOf(abs)))) return result.raise('unknown', 'script_written_in_same_command');
     if (isProtected(abs) && !abs.startsWith(`${home}/.marrow/agentd/`)) result.raise('unknown', 'protected_path_exec');
     const content = readSmallFile(abs, SCRIPT_MAX_BYTES);
     if (content === null) return result.raise('unknown', 'script_unreadable');
@@ -629,6 +703,37 @@ function createClassifier(policy, options = {}) {
 
   // ---------- program handlers ----------
   const HANDLERS = {
+    export(base, args) {
+      const result = new Result();
+      for (const arg of args) {
+        if (arg.text === null) { result.raise('unknown', 'dynamic_export'); continue; }
+        if (/^-[a-zA-Z]*f/.test(arg.text)) result.raise('unknown', 'export_function');
+        const name = arg.text.split('=')[0].replace(/\+$/, '');
+        if (SENSITIVE_ENV.test(name)) result.raise('unknown', 'sensitive_env_assignment');
+      }
+      return result;
+    },
+    pip(base, args, command, ctx) {
+      const result = new Result();
+      const pos = positionals(args, ['-r', '--requirement', '-c', '--constraint', '-i', '--index-url', '--extra-index-url', '-t', '--target', '--prefix', '--root']);
+      const sub = pos[0] ? pos[0].text : undefined;
+      if (sub === undefined || ['list', 'show', 'freeze', 'check', 'help', '--version'].includes(sub)) return result;
+      if (sub === null) return result.raise('unknown', 'dynamic_pip_arg');
+      if (sub !== 'install') return result.raise('unknown', `pip:${String(sub).slice(0, 24)}`);
+      // Installing a local path, an editable project, a VCS URL or a requirements file can run
+      // code the agent wrote (setup.py, build backends).
+      if (hasFlag(args, '-e', '--editable', '--index-url', '-i', '--extra-index-url')) return result.raise('unknown', 'pip_install_local_or_index');
+      for (let i = 0; i < args.length; i += 1) {
+        const text = args[i].text;
+        if (text !== '-r' && text !== '--requirement' && !(text || '').startsWith('--requirement=')) continue;
+        const file = text.startsWith('--requirement=') ? text.slice(14) : (args[i + 1] ? args[i + 1].text : null);
+        if (!requirementsArePlain(file, ctx)) return result.raise('unknown', 'pip_requirements_not_plain');
+      }
+      for (const arg of pos.slice(1)) {
+        if (arg.text === null || /[/\\]|^\.|^(?:git|hg|svn|bzr)\+|\.(?:whl|zip|tar\.gz|tgz)$|@/.test(arg.text)) return result.raise('unknown', 'pip_install_local_or_url');
+      }
+      return result;
+    },
     cd(base, args, command, ctx) {
       const result = new Result();
       const target = positionals(args)[0];
@@ -702,6 +807,8 @@ function createClassifier(policy, options = {}) {
       for (const script of scripts) {
         if (script === null) { result.raise('unknown', 'dynamic_sed_script'); continue; }
         if (/(^|[;}\n])\s*[0-9,$/!]*\s*e\b|\bw\s+\S|\bW\s+\S/.test(script)) result.raise('unknown', 'sed_exec_or_write');
+        // GNU sed's `e` flag on s/// executes the pattern space as a command.
+        if (/[/|#,:@!_]\s*[gpIiMm0-9]*e[gpIiMm0-9]*\s*(?:$|[;}\n])/.test(script)) result.raise('unknown', 'sed_exec_flag');
       }
       for (const file of files) {
         if (inPlace) checkWritePath(file.text, ctx, result);
@@ -720,12 +827,9 @@ function createClassifier(policy, options = {}) {
         if (target.text === null) { result.raise(recursive ? 'risky' : 'unknown', 'rm_dynamic_target'); continue; }
         const raw = target.text;
         const abs = absPath(raw, ctx);
-        const globDir = /[*?[]/.test(raw) ? absPath(path.dirname(raw), ctx) : null;
-        const broad = ['/', '~', '*', '.', '..', './', '../', '/*', '~/*', './*', '../*'].includes(raw)
-          || (abs && (abs === '/' || abs === home || abs === path.dirname(home)))
-          || (abs && ctx.cwd && (abs === ctx.cwd || ctx.cwd.startsWith(`${abs}/`)))
-          || (globDir && ctx.cwd && (globDir === ctx.cwd || ctx.cwd.startsWith(`${globDir}/`) || globDir === home || globDir === '/'));
-        if (broad) { result.raise('risky', 'rm_broad_target'); result.note('paths', relLabel(abs, ctx)); continue; }
+        if (isBroadTarget(raw, ctx)) { result.raise('risky', 'rm_broad_target'); result.note('paths', relLabel(abs, ctx)); continue; }
+        // Deleting a repository's .git loses every unpushed commit.
+        if (abs && (path.basename(abs) === '.git' || abs.includes('/.git/'))) { result.raise('risky', 'rm_git_dir'); continue; }
         checkWritePath(raw, ctx, result, { recursiveDelete: recursive });
       }
       return result;
@@ -734,7 +838,10 @@ function createClassifier(policy, options = {}) {
       const result = new Result();
       const recursive = hasFlag(args, '-R', '--recursive');
       const pos = positionals(args, ['--reference']);
-      for (const target of pos.slice(1)) checkWritePath(target.text, ctx, result, { recursiveDelete: recursive });
+      for (const target of pos.slice(1)) {
+        if (recursive && target.text !== null && isBroadTarget(target.text, ctx)) { result.raise('risky', `${base}_recursive_broad`); continue; }
+        checkWritePath(target.text, ctx, result, { recursiveDelete: recursive });
+      }
       return result;
     },
     archive(base, args, command, ctx) {
@@ -867,6 +974,9 @@ function createClassifier(policy, options = {}) {
         if (name === null) return result.raise('unknown', 'dynamic_script_name');
         return result.merge(classifyPackageScript(name, ctx, depth));
       }
+      // Installing, packing or rebuilding runs the ROOT package's lifecycle scripts (for example
+      // "postinstall"), which the agent can write; classify them by content.
+      if (INSTALL_SUBS.has(sub)) return result.merge(classifyLifecycleScripts(ctx, depth, sub === 'pack' ? PACK_LIFECYCLE : INSTALL_LIFECYCLE));
       if (routineSubs.has(sub)) return result;
       if (base === 'yarn' || base === 'pnpm') return result.merge(classifyPackageScript(sub, ctx, depth));
       return result.raise('unknown', `${base}:${String(sub).slice(0, 24)}`);
@@ -877,7 +987,8 @@ function createClassifier(policy, options = {}) {
       if (pos.length === 0) return result;
       const sub = pos[0].text;
       if (sub === null) return result.raise('unknown', 'dynamic_bun_arg');
-      if (['install', 'i', 'add', 'remove', 'update', 'outdated', 'pm', 'test', 'build'].includes(sub)) return result;
+      if (['install', 'i', 'add', 'update'].includes(sub)) return result.merge(classifyLifecycleScripts(ctx, depth, INSTALL_LIFECYCLE));
+      if (['remove', 'outdated', 'pm', 'test', 'build'].includes(sub)) return result;
       if (sub === 'publish') return result.raise('risky', 'bun:publish');
       if (sub === 'x') return result.merge(HANDLERS.npx('bunx', args.slice(1), command, ctx, depth));
       if (sub === 'run') {
@@ -1078,10 +1189,62 @@ function createClassifier(policy, options = {}) {
     return null;
   }
 
+  function findPackageJson(ctx) {
+    let dir = ctx.cwd;
+    for (let level = 0; level < 12; level += 1) {
+      if (ctx.written && ctx.written.has(path.join(dir, 'package.json'))) return { error: 'package_json_written_in_same_command' };
+      const raw = readSmallFile(path.join(dir, 'package.json'), PACKAGE_JSON_MAX_BYTES);
+      if (raw !== null) {
+        try { return { pkg: JSON.parse(raw), dir }; } catch { return { error: 'package_json_invalid' }; }
+      }
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+    return { pkg: null, dir: null };
+  }
+
+  // A requirements file is routine only if every line is a plain package spec from the index
+  // (no -e, local paths, URLs, nested -r or index overrides).
+  function requirementsArePlain(file, ctx) {
+    if (file === null || file === undefined) return false;
+    const abs = absPath(file, ctx);
+    if (!abs || (ctx.written && ctx.written.has(abs))) return false;
+    const content = readSmallFile(abs, SCRIPT_MAX_BYTES);
+    if (content === null) return false;
+    const spec = /^[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[A-Za-z0-9,._-]+\])?\s*(?:(?:===|==|>=|<=|~=|!=|<|>)\s*[A-Za-z0-9.*+!_-]+\s*,?\s*)*(?:;[^#]*)?(?:\s+--hash=[a-z0-9]+:[a-f0-9]+)*$/;
+    return content.split(/\r?\n/).every((line) => {
+      const trimmed = line.replace(/(^|\s)#.*$/, '').trim();
+      return trimmed === '' || spec.test(trimmed);
+    });
+  }
+
+  function classifyLifecycleScripts(ctx, depth, names) {
+    const result = new Result();
+    if (!ctx.cwd || ctx.cwdUnknown) return result.raise('unknown', 'package_script_cwd_unknown');
+    if (depth >= (tables.routine_package_scripts_depth || 3)) return result.raise('unknown', 'package_script_depth');
+    const found = findPackageJson(ctx);
+    if (found.error) return result.raise('unknown', found.error);
+    if (!found.pkg || !found.pkg.scripts || typeof found.pkg.scripts !== 'object') return result;
+    for (const name of names) {
+      if (typeof found.pkg.scripts[name] !== 'string') continue;
+      const inner = classifyShellSource(found.pkg.scripts[name], { ...ctx, cwd: found.dir, cwdUnknown: false, vars: new Map(ctx.vars) }, depth + 1);
+      result.merge(inner);
+      if (inner.class !== 'routine') result.raise(inner.class, `lifecycle_script:${name}`);
+    }
+    return result;
+  }
+
   function classifyPackageScript(name, ctx, depth) {
     const result = new Result();
     if (depth >= (tables.routine_package_scripts_depth || 3)) return result.raise('unknown', 'package_script_depth');
     if (!ctx.cwd || ctx.cwdUnknown) return result.raise('unknown', 'package_script_cwd_unknown');
+    for (let d = ctx.cwd, k = 0; k < 12; k += 1) {
+      if (ctx.written && ctx.written.has(path.join(d, 'package.json'))) return result.raise('unknown', 'package_json_written_in_same_command');
+      const parent = path.dirname(d);
+      if (parent === d) break;
+      d = parent;
+    }
     let dir = ctx.cwd;
     let pkg = null;
     let pkgDir = null;
@@ -1118,7 +1281,8 @@ function createClassifier(policy, options = {}) {
       programs: result.programs,
       paths: result.paths,
       hosts: result.hosts,
-      commands: result.commands.slice(0, 8),
+      commands: result.commands,
+      truncated: result.truncated,
     };
   }
 

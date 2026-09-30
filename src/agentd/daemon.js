@@ -27,6 +27,30 @@ const { TelemetryUploader } = require('./telemetry');
 
 const CONFIG_SCHEMA = 'marrow.agentd.config.v1';
 const BYPASS_PASS_LIMIT = 5000;
+const PRE_SEEN_LIMIT = 10000;
+
+// Only these fields of a fallback bypass record are uploaded, with type checks: the agent runs as
+// the same user and could write a forged file into bypass/.
+function sanitizeBypass(record) {
+  const str = (value, max) => (typeof value === 'string' ? redactText(value, max) : null);
+  const out = {
+    v: 1,
+    ts: str(record.ts, 40),
+    harness: str(record.harness, 32),
+    session_id: str(record.session_id, 128),
+    tool_use_id: str(record.tool_use_id, 128),
+    tool_kind: str(record.tool_kind, 16),
+    tool_name: str(record.tool_name, 96),
+    class: ['routine', 'unknown', 'risky'].includes(record.class) ? record.class : 'unknown',
+    decision: ['allow', 'deny'].includes(record.decision) ? record.decision : 'unknown',
+    reasons: Array.isArray(record.reasons) ? record.reasons.slice(0, 6).map((r) => str(r, 80)) : [],
+    policy_version: Number.isInteger(record.policy_version) ? record.policy_version : null,
+    error_code: str(record.error_code, 32),
+    source: 'shim_fallback',
+    evidence: 'client_observed',
+  };
+  return out;
+}
 
 function defaultConfig() {
   return { schema: CONFIG_SCHEMA, install_id: null, base_url: PRODUCTION_BASE_URL, agents: {}, hook_timeouts_ms: { ...HARNESS_HOOK_TIMEOUT_MS }, hooks: [], shim: null };
@@ -82,6 +106,9 @@ function createDaemon(options = {}) {
     peerRejections: 0,
     protocolErrors: 0,
     fallbackIngested: 0,
+    preSeen: new Set(),
+    coverageGaps: 0,
+    tlsEnvAltered: false,
   };
   let server = null;
   let credentials;
@@ -95,6 +122,8 @@ function createDaemon(options = {}) {
   function runIntegrity() {
     const result = checkIntegrity({ root: paths.root, configPath: paths.config, startConfig: state.config, configDigest: state.configDigest, api, home });
     if (state.configError) result.violations.unshift({ code: state.configError });
+    if (state.tlsEnvAltered) result.violations.push({ code: 'tls_trust_env_altered' });
+    if (policyStore && policyStore.current().rollbackDetected) result.violations.push({ code: 'policy_cache_rollback' });
     result.ok = result.violations.length === 0;
     const key = JSON.stringify(result.violations);
     if (key !== state.integrityKey) {
@@ -123,7 +152,7 @@ function createDaemon(options = {}) {
       try {
         const record = JSON.parse(readPrivateFile(file, 8192));
         fs.unlinkSync(file);
-        queue.append({ ...record, type: 'fallback_decision', ingested_at: new Date(now()).toISOString() }, 'high');
+        queue.append({ ...sanitizeBypass(record), type: 'fallback_decision', ingested_at: new Date(now()).toISOString() }, 'high');
         count += 1;
       } catch {
         try { fs.unlinkSync(file); } catch { /* raced */ }
@@ -182,6 +211,7 @@ function createDaemon(options = {}) {
       decisions: engine.stats,
       connections: { active: state.connections, total: state.connectionsTotal, peer_rejections: state.peerRejections, protocol_errors: state.protocolErrors },
       fallback_ingested: state.fallbackIngested,
+      coverage_gaps: state.coverageGaps,
       // Honest capability statement (verify-claims principle): what this process can and cannot
       // guarantee on this host.
       capabilities: {
@@ -245,6 +275,12 @@ function createDaemon(options = {}) {
   }
 
   function observe(event) {
+    if (event.kind === 'post' && event.tool_use_id && !state.preSeen.has(event.tool_use_id)) {
+      // A tool ran without a pre-action check reaching Marrow (hook removed, matcher narrowed or
+      // hooks disabled for this project). Counted and reported; never silent.
+      state.coverageGaps += 1;
+      uploader.observe(`coverage_gap|${event.harness}`);
+    }
     if (event.kind === 'post') uploader.observe(`post|${event.harness}|${String(event.tool_name || 'unknown').toLowerCase().slice(0, 48)}|${event.success === false ? 'failed' : 'ok'}`);
     else if (event.kind === 'prompt') uploader.observe(`prompt|${event.harness}`);
     else if (event.kind === 'stop') uploader.observe(`stop|${event.harness}`);
@@ -288,7 +324,13 @@ function createDaemon(options = {}) {
     }
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return renderUnreadable(adapter, eventArg, 'Marrow could not read the hook input, so it blocked this action.');
     const event = adapter.normalize(eventArg, payload);
-    if (event.kind === 'pre') return decidePre(adapter, event);
+    if (event.kind === 'pre') {
+      if (event.tool_use_id) {
+        if (state.preSeen.size >= PRE_SEEN_LIMIT) state.preSeen.delete(state.preSeen.values().next().value);
+        state.preSeen.add(event.tool_use_id);
+      }
+      return decidePre(adapter, event);
+    }
     observe(event);
     return adapter.render(event, { decision: 'allow' });
   }
@@ -341,7 +383,17 @@ function createDaemon(options = {}) {
     fs.chmodSync(socketPath, 0o600);
   }
 
+  // The daemon never sends its key anywhere but the Authorization header; any outbound or stored
+  // string that contains it (tool input quoting a key, for example) has it replaced.
+  function scrub(text) {
+    return credentials && credentials.key && text.includes(credentials.key) ? text.split(credentials.key).join('[redacted]') : text;
+  }
+
   async function start() {
+    // Unsigned verdicts (phase 1, no pinned keys) rely on TLS alone, so the process trust store
+    // must be the system default.
+    if (process.env.NODE_TLS_REJECT_UNAUTHORIZED !== undefined) delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+    state.tlsEnvAltered = Boolean(process.env.NODE_EXTRA_CA_CERTS);
     ensurePrivateDir(paths.root);
     ensurePrivateDir(path.dirname(socketPath));
     ensurePrivateDir(paths.bypassDir);
@@ -353,7 +405,7 @@ function createDaemon(options = {}) {
     credentials.refresh();
     policyStore = new PolicyStore({ dir: paths.policyDir, trustedKeys, now, staleGraceMs: settings.policyStaleGraceMs });
     policyStore.load();
-    queue = new TelemetryQueue({ dir: paths.queueDir, segmentMaxRecords: settings.segmentMaxRecords, laneMaxSegments: settings.laneMaxSegments }).open();
+    queue = new TelemetryQueue({ dir: paths.queueDir, segmentMaxRecords: settings.segmentMaxRecords, laneMaxSegments: settings.laneMaxSegments, scrub }).open();
     const installId = state.config.install_id || 'inst_unregistered';
     api = new ApiClient({
       baseUrl: state.config.base_url,
@@ -361,6 +413,7 @@ function createDaemon(options = {}) {
       credentials,
       fetchImpl: options.fetchImpl,
       installId,
+      scrub,
     });
     // A config base URL outside the pinned origins is refused; the first pinned origin (the
     // production API) stays in use and the refusal is reported as an integrity violation.
@@ -371,6 +424,7 @@ function createDaemon(options = {}) {
       integrity: () => state.integrity,
       gateBudgetCapMs: settings.gateBudgetCapMs,
       gateBudgetMarginMs: settings.gateBudgetMarginMs,
+      tlsTrusted: () => !state.tlsEnvAltered,
     });
     uploader = new TelemetryUploader({
       queue, api, installId, now,

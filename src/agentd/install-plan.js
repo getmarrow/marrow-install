@@ -19,9 +19,16 @@ const path = require('node:path');
 const { AGENTD_VERSION, HARNESS_HOOK_TIMEOUT_MS, PRODUCTION_BASE_URL } = require('./constants');
 const { CONFIG_SCHEMA } = require('./daemon');
 const { ensurePrivateDir, sha256File, writeFileAtomic } = require('./fsutil');
+const { manifestDigest } = require('./integrity');
 const { agentdPaths } = require('./paths');
 
-const MARROW_HOOK_COMMAND = /marrow-mcp|@getmarrow\/mcp|marrow-hook|marrow-agentd|hook-entry\.js/;
+// Marrow-owned hook commands: the npx forms the MCP package and installer <=0.1.66 wrote, and
+// this install's exact shim path. A user hook that merely mentions "marrow-hook" is kept.
+const NPX_MARROW_HOOK = /^npx\s+(?:-y\s+)?(?:--package=@getmarrow\/mcp(?:@\S+)?\s+marrow-mcp|@getmarrow\/mcp(?:@\S+)?)\s+\S*hook\S*$/;
+function isMarrowHookCommand(command, shimPath) {
+  const text = String(command || '').trim();
+  return NPX_MARROW_HOOK.test(text) || (Boolean(shimPath) && (text === shimPath || text.startsWith(`${shimPath} `) || text.startsWith(`${shellQuote(shimPath)} `)));
+}
 const PACKAGE_SRC = path.resolve(__dirname, '..');
 
 const HOOK_EVENTS = {
@@ -119,7 +126,8 @@ function systemdServiceUnit({ nodePath, daemonMain, home }) {
     'LimitNOFILE=4096',
     'MemoryMax=256M',
     // The service environment is fixed here; the daemon reads no MARROW_* variable anyway.
-    'UnsetEnvironment=MARROW_API_KEY MARROW_KEY MARROW_BASE_URL NODE_OPTIONS',
+    'Environment=PATH=/usr/bin:/bin LANG=C',
+    'UnsetEnvironment=MARROW_API_KEY MARROW_KEY MARROW_BASE_URL NODE_OPTIONS NODE_PATH NODE_EXTRA_CA_CERTS NODE_TLS_REJECT_UNAUTHORIZED SSL_CERT_FILE SSL_CERT_DIR LD_PRELOAD LD_LIBRARY_PATH',
     '',
     '[Install]',
     'WantedBy=default.target',
@@ -183,7 +191,7 @@ function buildShim(plan, { compile = true } = {}) {
 }
 
 // Replaces Marrow-owned entries for each event and keeps every other hook untouched.
-function mergeHookDocument(doc, harness, entries) {
+function mergeHookDocument(doc, harness, entries, shimPath = entries[0] && entries[0].command.split(' ')[0]) {
   const out = doc && typeof doc === 'object' && !Array.isArray(doc) ? { ...doc } : {};
   const hooks = out.hooks && typeof out.hooks === 'object' && !Array.isArray(out.hooks) ? { ...out.hooks } : {};
   const timeoutSeconds = Math.round((HARNESS_HOOK_TIMEOUT_MS[harness] || 5000) / 1000);
@@ -192,7 +200,7 @@ function mergeHookDocument(doc, harness, entries) {
     const kept = [];
     for (const group of existing) {
       if (!group || typeof group !== 'object' || !Array.isArray(group.hooks)) { kept.push(group); continue; }
-      const others = group.hooks.filter((hook) => !(hook && typeof hook.command === 'string' && MARROW_HOOK_COMMAND.test(hook.command)));
+      const others = group.hooks.filter((hook) => !(hook && typeof hook.command === 'string' && isMarrowHookCommand(hook.command, shimPath)));
       if (others.length) kept.push({ ...group, hooks: others });
     }
     const handler = { type: 'command', command: entry.command, timeout: timeoutSeconds };
@@ -213,8 +221,17 @@ function stripInlineKeys(doc) {
     if (!servers || typeof servers !== 'object') return;
     for (const entry of Object.values(servers)) {
       if (!entry || typeof entry !== 'object') continue;
-      const text = `${entry.command || ''} ${(Array.isArray(entry.args) ? entry.args : []).join(' ')}`;
+      const text = `${entry.command || ''} ${(Array.isArray(entry.args) ? entry.args : []).join(' ')} ${entry.url || ''}`;
       if (!/marrow/i.test(text)) continue;
+      // Remote (HTTP/SSE) MCP entries can carry the key in a header.
+      if (entry.headers && typeof entry.headers === 'object') {
+        for (const name of Object.keys(entry.headers)) {
+          if (!/^(?:authorization|x-api-key|x-marrow-key|x-marrow-api-key)$/i.test(name)) continue;
+          const value = String(entry.headers[name] || '').replace(/^Bearer\s+/i, '');
+          if (value && !/^\$\{[A-Z_][A-Z0-9_]*\}$/.test(value)) removed.push(value);
+          delete entry.headers[name];
+        }
+      }
       // `--key <value>` / `--key=<value>` on argv (advertised by marrow-mcp) is removed too.
       if (Array.isArray(entry.args)) {
         const args = [];
@@ -244,7 +261,10 @@ function stripInlineKeys(doc) {
 }
 
 function readJsonFile(file) {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (error) { if (error.code === 'ENOENT') return {}; throw error; }
+  let raw;
+  try { raw = fs.readFileSync(file, 'utf8'); } catch (error) { if (error.code === 'ENOENT') return {}; throw error; }
+  if (!raw.trim()) return {};
+  return JSON.parse(raw);
 }
 
 function writeJsonPreservingMode(file, doc) {
@@ -258,13 +278,25 @@ function applyPlan(plan, { compile = true, mcpConfigFiles = [], dryRun = false }
   const report = { dry_run: dryRun, written: [], shim: null, keys_removed: 0, key_file: 'unchanged', hooks: plan.hooks.map((h) => ({ harness: h.harness, event: h.event, file: h.file })) };
   if (dryRun) return { ...report, plan: { lib_dir: plan.libDir, shim: plan.paths.shim, units: Object.keys(plan.units), unit_dir: plan.unitDir } };
   const { paths } = plan;
+  // Parse every file this plan edits BEFORE writing anything, so an unparseable file (a TOML
+  // Codex config, a hand-broken settings.json) never leaves a half-applied install.
+  const hookDocs = new Map();
+  for (const hook of plan.hooks) {
+    if (hookDocs.has(hook.file)) continue;
+    try { hookDocs.set(hook.file, readJsonFile(hook.file)); } catch { throw new Error(`cannot parse ${hook.file} as JSON; nothing was changed`); }
+  }
+  const mcpDocs = [];
+  report.unparseable = [];
+  for (const file of mcpConfigFiles) {
+    if (!fs.existsSync(file)) continue;
+    try { mcpDocs.push({ file, doc: readJsonFile(file) }); } catch { report.unparseable.push(file); }
+  }
   for (const dir of [paths.root, paths.binDir, paths.libDir, paths.runDir, paths.policyDir, paths.queueDir, paths.bypassDir]) ensurePrivateDir(dir);
 
-  const manifest = [];
-  copyTree(path.join(PACKAGE_SRC, 'agentd'), path.join(plan.libDir, 'src', 'agentd'), manifest, plan.libDir);
+  copyTree(path.join(PACKAGE_SRC, 'agentd'), path.join(plan.libDir, 'src', 'agentd'), [], plan.libDir);
   fs.copyFileSync(path.join(PACKAGE_SRC, 'owner-env.js'), path.join(plan.libDir, 'src', 'owner-env.js'));
+  fs.chmodSync(path.join(plan.libDir, 'src', 'owner-env.js'), 0o600);
   report.written.push(plan.libDir);
-  const manifestDigest = crypto.createHash('sha256').update(manifest.join('\n')).digest('hex');
 
   report.shim = buildShim(plan, { compile });
   report.written.push(paths.shim);
@@ -277,7 +309,7 @@ function applyPlan(plan, { compile = true, mcpConfigFiles = [], dryRun = false }
     agents: plan.agents,
     hook_timeouts_ms: { ...HARNESS_HOOK_TIMEOUT_MS },
     shim: { path: paths.shim, sha256: report.shim.sha256, mode: report.shim.mode },
-    lib: { dir: plan.libDir, manifest_sha256: manifestDigest },
+    lib: { dir: plan.libDir, manifest_sha256: manifestDigest(plan.libDir) },
     hooks: plan.hooks.map(({ harness, file, event, command }) => ({ harness, file, event, command })),
     created_at: new Date().toISOString(),
   };
@@ -296,14 +328,13 @@ function applyPlan(plan, { compile = true, mcpConfigFiles = [], dryRun = false }
     byFile.get(hook.file).entries.push(hook);
   }
   for (const [file, { harness, entries }] of byFile) {
-    writeJsonPreservingMode(file, mergeHookDocument(readJsonFile(file), harness, entries));
+    writeJsonPreservingMode(file, mergeHookDocument(hookDocs.get(file), harness, entries, plan.paths.shim));
     report.written.push(file);
   }
 
   let firstKey = null;
-  for (const file of mcpConfigFiles) {
-    if (!fs.existsSync(file)) continue;
-    const { doc, removedCount, removed } = stripInlineKeys(readJsonFile(file));
+  for (const { file, doc: original } of mcpDocs) {
+    const { doc, removedCount, removed } = stripInlineKeys(original);
     if (removedCount === 0) continue;
     if (!firstKey) firstKey = removed[0];
     writeJsonPreservingMode(file, doc);
@@ -318,4 +349,4 @@ function applyPlan(plan, { compile = true, mcpConfigFiles = [], dryRun = false }
   return report;
 }
 
-module.exports = { buildPlan, applyPlan, mergeHookDocument, stripInlineKeys, systemdServiceUnit, systemdSocketUnit, hookCommand, HOOK_EVENTS, MARROW_HOOK_COMMAND };
+module.exports = { buildPlan, applyPlan, mergeHookDocument, stripInlineKeys, systemdServiceUnit, systemdSocketUnit, hookCommand, HOOK_EVENTS, isMarrowHookCommand };

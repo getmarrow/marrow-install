@@ -15,6 +15,10 @@ const { ensurePrivateDir, readPrivateFile, writeFileAtomic } = require('./fsutil
 const POLICY_SCHEMA = 'marrow.policy.v1';
 const VERDICT_SCHEMA = 'marrow.gate.v1';
 const MAX_ENVELOPE_BYTES = 512 * 1024;
+const OWNER_RECEIPT = /^oar_[A-Za-z0-9_-]{8,128}$/;
+// A weaker-than-enforce level is honoured only from a bundle issued in the last 24 h whose own
+// validity is at most 24 h, so an old "off" bundle kept by an agent cannot come back later.
+const WEAKER_CONTROL_MAX_MS = 24 * 60 * 60 * 1000;
 
 function b64url(buffer) {
   return Buffer.from(buffer).toString('base64url');
@@ -80,7 +84,7 @@ function validatePolicy(policy, now) {
   if (!Number.isFinite(issued) || !Number.isFinite(expires) || expires <= issued) return 'bad_validity';
   if (issued > now + 5 * 60 * 1000) return 'issued_in_future';
   if (!policy.control || !CONTROL_LEVELS.includes(policy.control.level)) return 'bad_control';
-  if (policy.control.level !== 'enforce' && typeof policy.control.approval_receipt_id !== 'string') return 'weaker_control_without_owner_receipt';
+  if (policy.control.level !== 'enforce' && !OWNER_RECEIPT.test(String(policy.control.approval_receipt_id || ''))) return 'weaker_control_without_owner_receipt';
   if (policy.classifier && policy.classifier.contract !== 'marrow.classifier.v1') return 'bad_classifier_contract';
   if (policy.allowed_base_urls && (!Array.isArray(policy.allowed_base_urls) || !policy.allowed_base_urls.every(isAllowedOrigin))) return 'bad_base_urls';
   return null;
@@ -90,6 +94,8 @@ class PolicyStore {
   constructor({ dir, trustedKeys = {}, now = () => Date.now(), staleGraceMs = DEFAULTS.policyStaleGraceMs }) {
     this.dir = dir;
     this.file = path.join(dir, 'current.json');
+    this.highwaterFile = path.join(dir, 'highwater.json');
+    this.highwater = 0;
     this.trustedKeys = trustedKeys;
     this.now = now;
     this.staleGraceMs = staleGraceMs;
@@ -99,6 +105,10 @@ class PolicyStore {
   }
 
   load() {
+    try {
+      const saved = JSON.parse(readPrivateFile(this.highwaterFile, 4096));
+      if (Number.isInteger(saved.version) && saved.version > this.highwater) this.highwater = saved.version;
+    } catch { /* first run or removed: the in-memory value still guards this process */ }
     let raw = null;
     try {
       raw = readPrivateFile(this.file, MAX_ENVELOPE_BYTES + 4096);
@@ -110,6 +120,7 @@ class PolicyStore {
     try { envelope = JSON.parse(raw); } catch { this.lastError = 'cache_invalid_json'; return this.current(); }
     const checked = this.check(envelope, { allowExpired: true });
     if (!checked.ok) { this.lastError = `cache_${checked.error}`; return this.current(); }
+    if (checked.payload.version < this.highwater) { this.lastError = 'cache_rollback_rejected'; this.rollbackDetected = true; return this.current(); }
     this.setActive(checked.payload, envelope);
     return this.current();
   }
@@ -127,11 +138,13 @@ class PolicyStore {
   accept(envelope) {
     const checked = this.check(envelope);
     if (!checked.ok) { this.lastError = checked.error; return { accepted: false, reason: checked.error }; }
-    const current = this.active ? this.active.version : 0;
+    const current = Math.max(this.active ? this.active.version : 0, this.highwater);
     if (checked.payload.version < current) { this.lastError = 'rollback_rejected'; return { accepted: false, reason: 'rollback_rejected' }; }
     if (checked.payload.version === current) return { accepted: false, reason: 'unchanged' };
     ensurePrivateDir(this.dir);
     writeFileAtomic(this.file, `${JSON.stringify(envelope)}\n`);
+    this.highwater = checked.payload.version;
+    writeFileAtomic(this.highwaterFile, `${JSON.stringify({ version: this.highwater })}\n`);
     this.setActive(checked.payload, envelope);
     this.lastError = null;
     return { accepted: true, reason: 'newer_version' };
@@ -166,12 +179,19 @@ class PolicyStore {
   current() {
     const freshness = this.freshness();
     const usable = freshness === 'fresh' || freshness === 'stale';
-    const control = usable && this.active.control ? this.active.control : { level: 'enforce' };
+    let control = usable && this.active.control ? this.active.control : { level: 'enforce' };
+    if (control.level !== 'enforce') {
+      const issued = Date.parse(this.active.issued_at);
+      const expires = Date.parse(this.active.expires_at);
+      if (!(this.now() - issued <= WEAKER_CONTROL_MAX_MS && expires - issued <= WEAKER_CONTROL_MAX_MS)) control = { level: 'enforce' };
+    }
+    // Only a fresh bundle may relax outage handling; a stale one keeps its tables but denies.
+    const tables = !usable ? BASELINE_POLICY : freshness === 'fresh' ? this.tables : { ...this.tables, outage: { ...this.tables.outage, unknown: 'deny', risky: 'deny' } };
     return {
       source: usable ? 'signed_policy' : 'builtin_baseline',
       version: usable ? this.active.version : 0,
       freshness,
-      tables: usable ? this.tables : BASELINE_POLICY,
+      tables,
       control: {
         level: freshness === 'fresh' ? control.level : 'enforce',
         approval_receipt_id: freshness === 'fresh' ? control.approval_receipt_id || null : null,
@@ -181,6 +201,7 @@ class PolicyStore {
       telemetry: usable && this.active.telemetry ? this.active.telemetry : {},
       expiresAt: this.active ? this.active.expires_at : null,
       lastError: this.lastError,
+      rollbackDetected: Boolean(this.rollbackDetected),
     };
   }
 }
