@@ -38,7 +38,9 @@ const HARNESS_HOOK_TIMEOUT_MS = Object.freeze({
 
 const DEFAULTS = Object.freeze({
   gateBudgetCapMs: 4000,
-  gateBudgetMarginMs: 1500,
+  // Gate budget = min(cap, host timeout - margin): codex 5 s -> 2.5 s, claude-code 15 s -> 4 s.
+  // Always below the shim's daemon phase (codex 3 s, claude-code 11 s) so the daemon answers first.
+  gateBudgetMarginMs: 2500,
   policyRefreshMs: 60 * 1000,
   policyRefreshFastMs: 5 * 1000,
   policyStaleGraceMs: 24 * 60 * 60 * 1000,

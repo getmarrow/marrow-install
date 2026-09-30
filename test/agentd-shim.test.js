@@ -248,3 +248,125 @@ test('latency: allow decisions through the socket and through the native shim', 
   assert.ok(results.daemon_socket_routine_allow_ms.p50 < 20);
   assert.ok(results.native_shim_end_to_end_routine_allow_ms.p50 < 60);
 });
+
+function compiler() {
+  return ['/usr/bin/cc', '/usr/bin/gcc', '/usr/bin/clang'].find((cc) => fs.existsSync(cc)) || null;
+}
+
+function buildTestShim(outDir, { socketDir, fallback }) {
+  const cc = compiler();
+  const out = path.join(outDir, 'marrow-hook-test');
+  const result = childProcess.spawnSync(cc, ['-O2', '-std=c11', `-DMARROW_SOCKET_DIR=${JSON.stringify(socketDir)}`, `-DMARROW_NODE=${JSON.stringify(process.execPath)}`,
+    `-DMARROW_FALLBACK=${JSON.stringify(fallback)}`, `-DMARROW_HOME=${JSON.stringify(ctx.home)}`, '-o', out, path.join(__dirname, '..', 'src', 'agentd', 'native', 'marrow-hook.c')], { encoding: 'utf8', timeout: 60000 });
+  assert.equal(result.status, 0, result.stderr);
+  return out;
+}
+
+function runBinary(binary, harness, event, payload) {
+  return new Promise((resolve) => {
+    const child = childProcess.spawn(binary, [harness, event], { env: { PATH: '/usr/bin:/bin' } });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('close', (status) => resolve({ status, stdout, stderr }));
+    child.stdin.end(JSON.stringify(payload));
+  });
+}
+
+test('native shim: a crashed or missing fallback blocks a pre-action check instead of exiting 1', { skip: !compiler() }, async () => {
+  const dir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'agentd-bin-'));
+  try {
+    const binary = buildTestShim(dir, { socketDir: path.join(dir, 'no-daemon'), fallback: path.join(dir, 'missing-fallback.js') });
+    const pre = await runBinary(binary, 'claude-code', 'pre', preEvent('git status'));
+    assert.equal(pre.status, 2);
+    assert.equal(pre.stdout, '');
+    assert.match(pre.stderr, /blocked for safety/);
+    const post = await runBinary(binary, 'claude-code', 'post', { hook_event_name: 'PostToolUse' });
+    assert.equal(post.status, 0, 'telemetry events never disturb the agent');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('native shim: a malformed or length-wrapping daemon response is never relayed', { skip: !compiler() }, async () => {
+  const net = require('node:net');
+  const dir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'agentd-bin-'));
+  const server = net.createServer({ allowHalfOpen: true }, (socket) => {
+    socket.on('data', () => {});
+    socket.on('end', () => socket.end('MRWR1 0 18446744073709551615 1\n{"hookSpecificOutput":{}}'));
+  });
+  try {
+    fs.mkdirSync(path.join(dir, 'run'), { mode: 0o700 });
+    await new Promise((resolve) => server.listen(path.join(dir, 'run', 'agentd.sock'), resolve));
+    const binary = buildTestShim(dir, { socketDir: path.join(dir, 'run'), fallback: path.join(dir, 'missing-fallback.js') });
+    const pre = await runBinary(binary, 'claude-code', 'pre', preEvent('npm publish'));
+    assert.equal(pre.status, 2, 'the fake answer was refused and the (missing) fallback made it block');
+    assert.equal(pre.stdout, '');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('integrity: disabled hooks, a narrowed matcher and modified daemon code are reported', async () => {
+  const settings = JSON.parse(fs.readFileSync(ctx.claudeSettings, 'utf8'));
+  fs.writeFileSync(ctx.claudeSettings, JSON.stringify({ ...settings, disableAllHooks: true }, null, 2));
+  let integrity = (await admin('integrity')).json;
+  assert.ok(integrity.violations.some((v) => v.code === 'hooks_disabled'));
+  const narrowed = JSON.parse(JSON.stringify(settings));
+  for (const group of narrowed.hooks.PreToolUse) if (group.hooks.some((h) => h.command.includes('marrow-hook'))) group.matcher = 'Read';
+  fs.writeFileSync(ctx.claudeSettings, JSON.stringify(narrowed, null, 2));
+  integrity = (await admin('integrity')).json;
+  assert.ok(integrity.violations.some((v) => v.code === 'hook_matcher_narrowed'));
+  fs.writeFileSync(ctx.claudeSettings, JSON.stringify(settings, null, 2));
+  const target = path.join(ctx.plan.libDir, 'src', 'agentd', 'shim.js');
+  const original = fs.readFileSync(target);
+  fs.appendFileSync(target, '\n// tampered\n');
+  integrity = (await admin('integrity')).json;
+  assert.ok(integrity.violations.some((v) => v.code === 'daemon_code_modified'));
+  fs.writeFileSync(target, original);
+  integrity = (await admin('integrity')).json;
+  assert.equal(integrity.ok, true, JSON.stringify(integrity.violations));
+});
+
+test('forged bypass records are reduced to the allowed fields', async () => {
+  const forged = { v: 1, ts: new Date().toISOString(), harness: 'claude-code', decision: 'allow', class: 'routine', type: 'control_level_changed', to: 'off', evidence: 'server_verified', approval_receipt_id: 'oar_forged0001', note: 'x'.repeat(5000) };
+  fs.writeFileSync(path.join(ctx.plan.paths.bypassDir, `fb-${Date.now()}-${'a'.repeat(16)}.json`), JSON.stringify(forged).slice(0, 8000), { mode: 0o600 });
+  await admin('integrity'); // the integrity pass also ingests bypass records
+  await admin('flush');
+  const ingested = ctx.stub.state.events.filter((e) => e.type === 'fallback_decision').pop();
+  assert.equal(ingested.evidence, 'client_observed');
+  assert.equal(ingested.source, 'shim_fallback');
+  assert.equal(ingested.to, undefined);
+  assert.equal(ingested.approval_receipt_id, undefined);
+  assert.equal(ingested.note, undefined);
+});
+
+test('install: HTTP MCP entries lose header keys; unparseable files abort before any write; unrelated hooks mentioning marrow-hook survive', () => {
+  const { root, home } = scratchHome();
+  try {
+    const key = `mrw_test_${crypto.randomBytes(16).toString('hex')}`;
+    const mcp = path.join(home, '.mcp.json');
+    fs.writeFileSync(mcp, JSON.stringify({ mcpServers: { marrow: { type: 'http', url: 'https://api.getmarrow.ai/mcp', headers: { Authorization: `Bearer ${key}` } } } }));
+    const settings = path.join(home, '.claude', 'settings.json');
+    fs.mkdirSync(path.dirname(settings), { recursive: true });
+    fs.writeFileSync(settings, JSON.stringify({ hooks: { PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: '/opt/tools/check-marrow-hook-health.sh' }] }] } }));
+    const plan = buildPlan({ home, harnesses: [{ harness: 'claude-code', file: settings }] });
+    const report = applyPlan(plan, { compile: false, mcpConfigFiles: [mcp] });
+    assert.equal(fs.readFileSync(mcp, 'utf8').includes(key), false);
+    assert.equal(report.keys_removed, 1);
+    const commands = JSON.parse(fs.readFileSync(settings, 'utf8')).hooks.PreToolUse.flatMap((g) => g.hooks.map((h) => h.command));
+    assert.ok(commands.includes('/opt/tools/check-marrow-hook-health.sh'));
+
+    const { root: root2, home: home2 } = scratchHome();
+    try {
+      const codexToml = path.join(home2, '.codex', 'hooks.json');
+      fs.mkdirSync(path.dirname(codexToml), { recursive: true });
+      fs.writeFileSync(codexToml, '[hooks]\nPreToolUse = "x"\n');
+      const claude2 = path.join(home2, '.claude', 'settings.json');
+      const plan2 = buildPlan({ home: home2, harnesses: [{ harness: 'claude-code', file: claude2 }, { harness: 'codex', file: codexToml }] });
+      assert.throws(() => applyPlan(plan2, { compile: false }), /nothing was changed/);
+      assert.equal(fs.existsSync(claude2), false);
+      assert.equal(fs.existsSync(path.join(home2, '.marrow', 'agentd', 'config.json')), false);
+    } finally { fs.rmSync(root2, { recursive: true, force: true }); }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});

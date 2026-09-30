@@ -6,19 +6,44 @@
 // REPORTED to the server as an owner-visible event, and that none of them weakens a decision:
 // the daemon keeps its start-time config, pinned origins and last verified policy.
 
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { checkPrivateDir, sha256File } = require('./fsutil');
+
+const FULL_MATCHERS = new Set([undefined, '', '*', '.*']);
 
 function readJson(file) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
 }
 
-function hookFilePresent(entry) {
+// Digest over every file under the installed lib directory (relative path + sha256, sorted).
+// The installer records it at install time; the daemon recomputes it on every integrity pass.
+function manifestDigest(libDir) {
+  const lines = [];
+  const walk = (dir) => {
+    for (const name of fs.readdirSync(dir).sort()) {
+      const full = path.join(dir, name);
+      const stat = fs.lstatSync(full);
+      if (stat.isSymbolicLink()) { lines.push(`${path.relative(libDir, full)} symlink`); continue; }
+      if (stat.isDirectory()) walk(full);
+      else lines.push(`${path.relative(libDir, full)} ${sha256File(full)}`);
+    }
+  };
+  walk(libDir);
+  return crypto.createHash('sha256').update(lines.join('\n')).digest('hex');
+}
+
+// Returns null when the hook entry is intact, otherwise a violation code.
+function hookEntryProblem(entry) {
   const doc = readJson(entry.file);
-  if (!doc) return false;
-  const text = JSON.stringify(doc);
-  return typeof entry.command === 'string' && text.includes(JSON.stringify(entry.command).slice(1, -1));
+  if (!doc) return 'hook_file_missing';
+  if (doc.disableAllHooks === true) return 'hooks_disabled';
+  const groups = doc.hooks && Array.isArray(doc.hooks[entry.event]) ? doc.hooks[entry.event] : [];
+  const group = groups.find((g) => g && Array.isArray(g.hooks) && g.hooks.some((h) => h && h.command === entry.command));
+  if (!group) return 'hook_missing';
+  if (['PreToolUse', 'PostToolUse', 'PostToolUseFailure'].includes(entry.event) && !FULL_MATCHERS.has(group.matcher)) return 'hook_matcher_narrowed';
+  return null;
 }
 
 // `startConfig` is the config the daemon loaded at start; `configDigest` its sha256.
@@ -49,8 +74,15 @@ function checkIntegrity({ root, configPath, startConfig, configDigest, api, home
       if (sha256File(shim.path) !== shim.sha256) add('shim_modified');
     } catch { add('shim_missing'); }
   }
+  const lib = startConfig && startConfig.lib;
+  if (lib && lib.dir && lib.manifest_sha256) {
+    try {
+      if (manifestDigest(lib.dir) !== lib.manifest_sha256) add('daemon_code_modified');
+    } catch { add('daemon_code_missing'); }
+  }
   for (const entry of (startConfig && Array.isArray(startConfig.hooks) ? startConfig.hooks : [])) {
-    if (!hookFilePresent(entry)) add('hook_missing', `${entry.harness}:${entry.event || 'pre'}`);
+    const problem = hookEntryProblem(entry);
+    if (problem) add(problem, `${entry.harness}:${entry.event || 'PreToolUse'}`);
   }
   // The 0.1.6x installer's control.json is not an authority any more; a local "disabled" there
   // changes nothing, but it is reported so the owner can see an attempt.
@@ -64,4 +96,4 @@ function safeOrigin(url) {
   try { const parsed = new URL(url); return `${parsed.protocol}//${parsed.host}`; } catch { return null; }
 }
 
-module.exports = { checkIntegrity };
+module.exports = { checkIntegrity, manifestDigest, hookEntryProblem };

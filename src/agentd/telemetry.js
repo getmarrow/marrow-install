@@ -138,12 +138,13 @@ class TelemetryUploader {
       this.state = 'shrinking_batch';
       return 'retry';
     }
-    if (error.class === 'client') {
-      // The whole batch was refused as malformed: count it, ack it, never retry it forever.
+    if ((response.status === 400 || response.status === 422) && records.length > 0) {
+      // The server refused the batch as malformed: count its records as rejected and ack them so
+      // one bad record cannot wedge the queue (R-25). The drop report was NOT delivered, so it
+      // stays unreported and goes with the next batch.
       this.queue.recordDrop('rejected', 'high', records.length);
       this.stats.rejected += records.length;
       this.queue.ack(cursor);
-      if (unreported > 0) this.queue.markDropsReported(dropsSnapshot.total);
       this.queue.flushState();
       this.state = 'batch_rejected';
       return 'rejected';

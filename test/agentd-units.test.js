@@ -82,7 +82,7 @@ test('policy: an owner "off" lapses back to enforce when the bundle goes stale',
     const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
     let now = Date.now();
     const store = new PolicyStore({ dir, trustedKeys: { k1: publicKey }, now: () => now, staleGraceMs: 60e3 });
-    store.accept(signEnvelope(policyPayload({ issued_at: new Date(now - 1000).toISOString(), expires_at: new Date(now + 10e3).toISOString(), control: { level: 'off', approval_receipt_id: 'oar_1' } }), privateKey, 'k1'));
+    store.accept(signEnvelope(policyPayload({ issued_at: new Date(now - 1000).toISOString(), expires_at: new Date(now + 10e3).toISOString(), control: { level: 'off', approval_receipt_id: 'oar_test00001' } }), privateKey, 'k1'));
     assert.equal(store.current().control.level, 'off');
     now += 20e3; // expired but inside the stale grace: tables still usable, control back to enforce
     assert.equal(store.current().freshness, 'stale');
@@ -182,4 +182,115 @@ test('credentials: only ~/.marrow/env is read, never env.local, and only when ow
     fs.writeFileSync(path.join(home, '.marrow', 'env'), `MARROW_API_KEY=${key}x\n`, { mode: 0o600 });
     assert.equal(store.refresh().changed, true);
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test('policy: a replayed older bundle is refused after restart; weaker levels need a real receipt and are time-capped', () => {
+  const dir = tempDir('agentd-pol-');
+  try {
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+    const store = new PolicyStore({ dir, trustedKeys: { k1: publicKey } });
+    store.load();
+    assert.equal(store.accept(signEnvelope(policyPayload({ version: 1, control: { level: 'off', approval_receipt_id: '' } }), privateKey, 'k1')).reason, 'weaker_control_without_owner_receipt');
+    const v1 = signEnvelope(policyPayload({ version: 1, control: { level: 'off', approval_receipt_id: 'oar_owner0001' } }), privateKey, 'k1');
+    assert.equal(store.accept(v1).accepted, true);
+    assert.equal(store.current().control.level, 'off');
+    assert.equal(store.accept(signEnvelope(policyPayload({ version: 2 }), privateKey, 'k1')).accepted, true);
+    // The agent kept v1 and writes it back into the cache, then the daemon restarts.
+    fs.writeFileSync(path.join(dir, 'current.json'), JSON.stringify(v1), { mode: 0o600 });
+    const restarted = new PolicyStore({ dir, trustedKeys: { k1: publicKey } });
+    restarted.load();
+    assert.equal(restarted.current().control.level, 'enforce');
+    assert.equal(restarted.current().lastError, 'cache_rollback_rejected');
+    assert.equal(restarted.current().rollbackDetected, true);
+    // A weaker level from a long-lived bundle is not honoured.
+    const long = new PolicyStore({ dir: tempDir('agentd-pol-'), trustedKeys: { k1: publicKey } });
+    long.accept(signEnvelope(policyPayload({ version: 5, expires_at: new Date(Date.now() + 7 * 24 * 3600e3).toISOString(), control: { level: 'off', approval_receipt_id: 'oar_owner0002' } }), privateKey, 'k1'));
+    assert.equal(long.current().control.level, 'enforce');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('policy: only a fresh bundle may allow unknown actions during an outage', () => {
+  const dir = tempDir('agentd-pol-');
+  try {
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+    let now = Date.now();
+    const store = new PolicyStore({ dir, trustedKeys: { k1: publicKey }, now: () => now, staleGraceMs: 3600e3 });
+    store.accept(signEnvelope(policyPayload({ issued_at: new Date(now - 1000).toISOString(), expires_at: new Date(now + 10e3).toISOString(), outage: { unknown: 'allow' } }), privateKey, 'k1'));
+    assert.equal(store.current().tables.outage.unknown, 'allow');
+    now += 20e3;
+    assert.equal(store.current().freshness, 'stale');
+    assert.equal(store.current().tables.outage.unknown, 'deny');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('queue: lost lines and failed writes are counted as drops, never silent', () => {
+  const dir = tempDir('agentd-q-');
+  try {
+    const queue = new TelemetryQueue({ dir, segmentMaxRecords: 10 }).open();
+    for (let i = 0; i < 5; i += 1) queue.append({ i }, 'normal');
+    const segment = path.join(dir, 'normal', fs.readdirSync(path.join(dir, 'normal'))[0]);
+    const lines = fs.readFileSync(segment, 'utf8').split('\n');
+    fs.writeFileSync(segment, `${lines.slice(0, 2).join('\n')}\n`); // external truncation
+    const { records, cursor } = queue.peekBatch(100);
+    queue.ack(cursor);
+    assert.equal(records.length, 2);
+    assert.equal(queue.stats().drops.by_reason.missing, 3);
+    // A failed write (the lane directory is replaced by a file) is counted and does not throw.
+    fs.rmSync(path.join(dir, 'high'), { recursive: true, force: true });
+    fs.writeFileSync(path.join(dir, 'high'), 'not a directory');
+    assert.equal(queue.append({ type: 'receipt' }, 'high'), null);
+    assert.equal(queue.stats().drops.by_reason.write_failed, 1);
+    const s = queue.stats();
+    // Every appended record is consumed (delivered, or counted missing/rejected), evicted as
+    // overflow, or still pending; a failed append is counted on its own.
+    assert.equal(s.appended, s.acked + (s.drops.by_reason.overflow || 0) + s.pending);
+    assert.equal(s.acked - records.length, s.drops.by_reason.missing);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('telemetry: a 404/409 keeps the batch and the drop report; only 400/422 rejects records', async () => {
+  const { TelemetryUploader } = require('../src/agentd/telemetry');
+  const dir = tempDir('agentd-q-');
+  try {
+    const queue = new TelemetryQueue({ dir, segmentMaxRecords: 2, laneMaxSegments: { high: 1, normal: 1 } }).open();
+    for (let i = 0; i < 5; i += 1) queue.append({ i }, 'high'); // overflow -> drops
+    const dropsBefore = queue.stats().drops.total;
+    assert.ok(dropsBefore > 0);
+    let status = 404;
+    const api = { request: async () => ({ ok: false, status, error: { class: 'client', code: `http_${status}` } }) };
+    const uploader = new TelemetryUploader({ queue, api, installId: 'inst_t', backoffMinMs: 1, backoffMaxMs: 2 });
+    await uploader.flush({ force: true });
+    assert.equal(queue.stats().drops.unreported, dropsBefore, 'drop report not marked delivered');
+    assert.ok(queue.stats().pending > 0, 'records kept');
+    status = 409;
+    await uploader.flush({ force: true });
+    assert.ok(queue.stats().pending > 0);
+    status = 400;
+    const pending = queue.stats().pending;
+    await uploader.flush({ force: true });
+    assert.equal(queue.stats().pending, 0);
+    assert.equal(queue.stats().drops.by_reason.rejected, pending);
+    assert.ok(queue.stats().drops.unreported > 0, 'the drop report is still owed to the server');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('redaction is linear on huge inputs and knows the Marrow key format', () => {
+  const huge = 'a.'.repeat(24 * 1024);
+  let started = Date.now();
+  redactText(huge, 120);
+  redactArgv([huge, huge]);
+  assert.ok(Date.now() - started < 200, `redaction took ${Date.now() - started} ms`);
+  const key = `mrw_live_${crypto.randomBytes(12).toString('hex')}`; // 33 chars: below the generic catch-all
+  assert.equal(redactText(`npx ${key}`).includes(key.slice(0, 16)), false);
+  const { createClassifier } = require('../src/agentd/classifier');
+  const { BASELINE_POLICY } = require('../src/agentd/policy-baseline');
+  const classifier = createClassifier(BASELINE_POLICY, { home: '/home/u' });
+  for (const command of [`npx ${key}`, `${key} --x`, `git ${key}`, `python3 -m ${key}`]) {
+    const result = classifier.classify({ tool_name: 'Bash', tool_input: { command }, cwd: '/home/u/p' });
+    assert.equal(JSON.stringify(result).includes(key.slice(9, 25)), false, command.split(' ')[0]);
+  }
+  started = Date.now();
+  const big = classifier.classify({ tool_name: 'Write', tool_input: { file_path: `/home/u/p/${'a.'.repeat(24 * 1024)}`, content: 'x' }, cwd: '/home/u/p' });
+  assert.equal(big.class, 'unknown');
+  assert.ok(Date.now() - started < 500, `classification took ${Date.now() - started} ms`);
 });

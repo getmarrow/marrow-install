@@ -21,7 +21,8 @@ const MAX_RECORD_BYTES = 16 * 1024;
 const SEGMENT_PATTERN = /^seg-(\d{16})\.jsonl$/;
 
 class TelemetryQueue {
-  constructor({ dir, segmentMaxRecords = 256, laneMaxSegments = { high: 200, normal: 200 } }) {
+  constructor({ dir, segmentMaxRecords = 256, laneMaxSegments = { high: 200, normal: 200 }, scrub = (text) => text }) {
+    this.scrub = scrub;
     this.dir = dir;
     this.segmentMaxRecords = segmentMaxRecords;
     this.laneMaxSegments = { high: 200, normal: 200, ...laneMaxSegments };
@@ -68,21 +69,29 @@ class TelemetryQueue {
   append(event, lane = 'normal') {
     if (!LANES.includes(lane)) lane = 'normal';
     const record = { event_id: event.event_id || `evt_${crypto.randomUUID()}`, ...event };
-    let line = `${JSON.stringify(record)}\n`;
+    let line = `${this.scrub(JSON.stringify(record))}\n`;
     if (Buffer.byteLength(line) > MAX_RECORD_BYTES) {
       this.recordDrop('oversize', lane, 1);
       return null;
     }
     const state = this.lanes[lane];
     let tail = state.segments[state.segments.length - 1];
-    if (!tail || tail.count >= this.segmentMaxRecords) {
+    if (!tail || tail.count >= this.segmentMaxRecords || tail.sealed) {
       const id = this.state.next_segment;
       this.state.next_segment += 1;
       tail = { id, file: path.join(state.dir, `seg-${String(id).padStart(16, '0')}.jsonl`), count: 0 };
       state.segments.push(tail);
       if (state.segments.length === 1) state.headIndex = 0;
     }
-    fs.appendFileSync(tail.file, line, { mode: 0o600 });
+    try {
+      appendLine(state.dir, tail.file, line);
+    } catch {
+      // Disk full, directory removed, permission change: the record is lost, so count it, and
+      // seal the segment so a partial line can never merge with the next record.
+      tail.sealed = true;
+      this.recordDrop('write_failed', lane, 1);
+      return null;
+    }
     tail.count += 1;
     this.state.appended += 1;
     line = null;
@@ -137,7 +146,7 @@ class TelemetryQueue {
           const line = lines[index];
           index += 1;
           taken += 1;
-          if (line === undefined) continue;
+          if (line === undefined) { this.recordDrop('missing', lane, 1); continue; }
           try { records.push(JSON.parse(line)); } catch { this.recordDrop('corrupt', lane, 1); }
         }
       }
@@ -219,11 +228,23 @@ class TelemetryQueue {
   }
 }
 
+function appendLine(dir, file, line) {
+  try {
+    fs.appendFileSync(file, line, { mode: 0o600 });
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    ensurePrivateDir(dir);
+    fs.appendFileSync(file, line, { mode: 0o600 });
+  }
+}
+
+// Every complete record ends with a newline; an unterminated fragment (a torn write) is not a
+// record and is ignored here - its loss was counted when the write failed.
 function readLines(file) {
   try {
     const text = fs.readFileSync(file, 'utf8');
     const lines = text.split('\n');
-    if (lines[lines.length - 1] === '') lines.pop();
+    lines.pop();
     return lines;
   } catch {
     return [];

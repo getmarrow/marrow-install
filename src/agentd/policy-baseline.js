@@ -61,7 +61,9 @@ const BASELINE_POLICY = Object.freeze({
     '**/.mcp.json', '~/.cursor/**', '**/.cursor/mcp.json', '**/.cursor/hooks.json', '~/.codex/**', '**/.codex/**',
     '~/.gemini/**', '**/.gemini/settings.json', '**/.windsurf/**', '~/.codeium/**', '**/.clinerules/hooks/**',
     '~/.grok/**', '**/.grok/**', '~/.hermes/**', '~/.openclaw/**',
-    '~/.config/systemd/user/**', '~/Library/LaunchAgents/**',
+    '~/.config/systemd/user/**', '~/Library/LaunchAgents/**', '**/.config/environment.d/**', '**/.pam_environment',
+    // Directories on PATH: an executable written here shadows a routine program later.
+    '~/.local/bin/**', '~/bin/**', '/usr/local/bin/**', '/opt/homebrew/bin/**', '**/node_modules/.bin/**',
     '**/.bashrc', '**/.bash_profile', '**/.bash_login', '**/.profile', '**/.zshrc', '**/.zshenv', '**/.zprofile', '**/.config/fish/**',
     '**/.claude.json', '**/.config/systemd/user/**',
     '/etc/**', '/usr/**', '/bin/**', '/sbin/**', '/boot/**', '/lib/**', '/var/lib/**', '/System/**',
@@ -71,7 +73,7 @@ const BASELINE_POLICY = Object.freeze({
   // Reading these is risky (credential exposure).
   secret_paths: [
     // Home-agnostic on purpose: another user's or root's credential files are just as secret.
-    '**/.env', '**/.env.*', '**/.aws/**', '**/.ssh/**', '**/.npmrc', '**/.git-credentials', '**/.netrc', '**/.config/gh/hosts.yml',
+    '**/.env', '**/.env.*', '**/.aws/**', '**/.ssh/**', '**/.npmrc', '**/.git-credentials', '**/.netrc', '**/.config/gh/**',
     '**/.docker/config.json', '**/.kube/config', '**/.marrow/env', '**/.marrow/env.local', '**/.claude.json', '**/*.pem', '**/*.key',
     '**/id_rsa', '**/id_rsa.*', '**/id_ed25519', '**/id_ed25519.*', '**/id_ecdsa', '**/credentials.json', '**/.dev.vars',
     '**/.config/gcloud/**', '**/.azure/**', '**/.pypirc', '**/.gem/credentials', '**/.cargo/credentials*', '/etc/shadow',
@@ -79,7 +81,7 @@ const BASELINE_POLICY = Object.freeze({
   ],
   secret_path_exceptions: ['**/.env.example', '**/.env.sample', '**/.env.template', '**/.env.dist'],
   // Edits here are not blocked locally but go to the server gate.
-  review_paths: ['**/.github/workflows/**', '**/Dockerfile', '**/wrangler.toml', '**/wrangler.json', '**/terraform/**', '**/*.tf', '**/k8s/**', '**/helm/**'],
+  review_paths: ['**/.husky/**', '**/.githooks/**', '**/lefthook.yml', '**/.pre-commit-config.yaml', '**/.github/workflows/**', '**/Dockerfile', '**/wrangler.toml', '**/wrangler.json', '**/terraform/**', '**/*.tf', '**/k8s/**', '**/helm/**'],
 
   url_mutation_pattern: '(delete|wipe|drop|destroy|purge|truncate|refund|charge|payout|transfer|dispatch|deploy|publish|admin|_method=|confirm=|execute|reset)',
   interpreter_danger_pattern: '(rmtree|rmSync|rmdirSync|unlink|os\\.remove|os\\.system|subprocess|child_process|execSync|spawnSync|exec\\(|system\\(|File\\.delete|FileUtils\\.rm|shutil|\\.aws|\\.ssh|\\.env|credentials|id_rsa|id_ed25519|wrangler|deploy|publish|DROP |TRUNCATE|DELETE FROM|/dev/sd|mkfs|dd if=)',
@@ -99,8 +101,9 @@ const BASELINE_POLICY = Object.freeze({
     ':': 'routine', test: 'routine', '[': 'routine', '[[': 'routine', which: 'routine', type: 'routine', whereis: 'routine', whoami: 'routine',
     id: 'routine', uname: 'routine', hostname: 'routine', date: 'routine', uptime: 'routine', sleep: 'routine', seq: 'routine',
     basename: 'routine', dirname: 'routine', realpath: 'routine', readlink: 'routine', cd: { handler: 'cd' }, pushd: 'routine', popd: 'routine',
-    export: 'routine', unset: 'routine', set: 'routine', shopt: 'routine', trap: 'routine', wait: 'routine', jobs: 'routine', read: 'routine',
-    exit: 'routine', return: 'routine', local: 'routine', declare: 'routine', typeset: 'routine', history: 'routine', help: 'routine',
+    export: { handler: 'export' }, unset: 'routine', set: 'routine', shopt: 'unknown', trap: 'unknown', wait: 'routine', jobs: 'routine', read: 'routine',
+    exit: 'routine', return: 'routine', local: { handler: 'export' }, declare: { handler: 'export' }, typeset: { handler: 'export' }, readonly: { handler: 'export' }, history: 'routine', help: 'routine',
+    hash: 'unknown', enable: 'unknown',
     ps: 'routine', top: 'routine', htop: 'routine', free: 'routine', df: 'routine', du: { read: true }, lsof: 'routine', nproc: 'routine',
     cat: { read: true }, head: { read: true }, tail: { read: true }, less: { read: true }, more: { read: true }, wc: { read: true },
     grep: { read: true }, egrep: { read: true }, fgrep: { read: true }, rg: { handler: 'rg' }, ag: { read: true }, ack: { read: true },
@@ -115,7 +118,7 @@ const BASELINE_POLICY = Object.freeze({
     mkdir: { write: true }, touch: { write: true }, cp: { write: true }, mv: { write: true }, ln: { write: true }, tee: { write: true },
     install: { write: true }, truncate: { write: true }, rmdir: { write: true }, rm: { handler: 'rm' }, unlink: { write: true },
     chmod: { handler: 'chmod' }, chown: { handler: 'chmod' }, chgrp: { handler: 'chmod' },
-    tar: { handler: 'archive' }, zip: 'routine', unzip: { handler: 'archive' }, gzip: 'routine', gunzip: 'routine', xz: 'routine', unxz: 'routine', bzip2: 'routine',
+    tar: { handler: 'archive' }, zip: { read: true }, unzip: { handler: 'archive' }, gzip: { read: true }, gunzip: { read: true }, xz: { read: true }, unxz: { read: true }, bzip2: { read: true }, zstd: { read: true }, '7z': 'unknown',
     patch: 'routine',
     // Developer tools.
     git: { handler: 'git' },
@@ -129,8 +132,7 @@ const BASELINE_POLICY = Object.freeze({
     node: { handler: 'interpreter' }, nodejs: { handler: 'interpreter' },
     cargo: { sub: { build: 'routine', test: 'routine', check: 'routine', clippy: 'routine', fmt: 'routine', doc: 'routine', tree: 'routine', metadata: 'routine', bench: 'routine', add: 'routine', update: 'routine', search: 'routine', publish: 'risky', yank: 'risky', owner: 'risky', login: 'risky', logout: 'risky' }, default: 'unknown' },
     go: { sub: { build: 'routine', test: 'routine', vet: 'routine', fmt: 'routine', mod: 'routine', list: 'routine', version: 'routine', env: 'routine', doc: 'routine', get: 'routine' }, default: 'unknown' },
-    pip: { sub: { install: 'routine', list: 'routine', show: 'routine', freeze: 'routine', check: 'routine', download: 'routine', wheel: 'routine' }, default: 'unknown' },
-    pip3: { sub: { install: 'routine', list: 'routine', show: 'routine', freeze: 'routine', check: 'routine', download: 'routine', wheel: 'routine' }, default: 'unknown' },
+    pip: { handler: 'pip' }, pip3: { handler: 'pip' },
     uv: { sub: { pip: 'routine', sync: 'routine', lock: 'routine', add: 'routine', venv: 'routine', tree: 'routine', publish: 'risky' }, default: 'unknown' },
     poetry: { sub: { install: 'routine', show: 'routine', lock: 'routine', check: 'routine', add: 'routine', build: 'routine', publish: 'risky' }, default: 'unknown' },
     twine: { sub: { check: 'routine', upload: 'risky' }, default: 'unknown' },

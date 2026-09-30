@@ -49,12 +49,15 @@ test('routine actions are allowed locally with no server round trip; risky ones 
   });
 });
 
-test('review_required asks the owner in Claude Code and denies with the approval link in Codex', async () => {
+test('review_required: deny with the approval link unless the server allows an in-harness prompt', async () => {
   await withAgentd({}, async ({ stub, agentd }) => {
     stub.state.gateHandler = () => ({ verdict: 'review_required', reason: 'production deploy', approval_url: 'https://getmarrow.ai/account/approvals/apr_1' });
+    const denied = decisionOf(await agentd.hook('claude-code', 'pre', preEvent('wrangler deploy')));
+    assert.equal(denied.decision, 'deny', 'owner approval cannot be satisfied at the terminal by default');
+    assert.match(denied.reason, /getmarrow\.ai\/account\/approvals\/apr_1/);
+    stub.state.gateHandler = () => ({ verdict: 'review_required', reason: 'production deploy', approval_url: 'https://getmarrow.ai/account/approvals/apr_1', harness_prompt_allowed: true });
     const claude = decisionOf(await agentd.hook('claude-code', 'pre', preEvent('wrangler deploy')));
     assert.equal(claude.decision, 'ask');
-    assert.match(claude.reason, /getmarrow\.ai\/account\/approvals\/apr_1/);
     const bypassMode = decisionOf(await agentd.hook('claude-code', 'pre', preEvent('wrangler deploy', { permission_mode: 'bypassPermissions' })));
     assert.equal(bypassMode.decision, 'deny', 'no prompt is shown in bypassPermissions mode, so review cannot become an allow');
     const codex = decisionOf(await agentd.hook('codex', 'pre', { hook_event_name: 'PreToolUse', session_id: 's', tool_use_id: 't', tool_name: 'shell', tool_input: { command: ['bash', '-lc', 'wrangler deploy'] }, cwd: '/tmp' }));
@@ -248,4 +251,90 @@ test('config missing or unsafe: the daemon still runs on the pinned origin and r
     } finally { await again.stop(); }
   } finally { await stub.stop(); agentd.cleanup(); }
   assert.ok(writeConfig);
+});
+
+test('outage allow for unknown actions covers availability failures only, never 4xx or unverifiable verdicts', async () => {
+  await withAgentd({ settings: { gateBudgetCapMs: 600 } }, async ({ stub, agentd }) => {
+    stub.publishPolicy({ outage: { unknown: 'allow' } });
+    await agentd.admin('refresh-policy');
+    const unknown = () => agentd.hook('claude-code', 'pre', preEvent('make release'));
+    stub.state.gateMode = '503';
+    assert.equal(decisionOf(await unknown()).decision, 'allow', 'availability failure: owner outage policy applies');
+    assert.equal(decisionOf(await agentd.hook('claude-code', 'pre', preEvent('npm publish'))).decision, 'deny', 'never for risky');
+    stub.state.gateMode = 'badsig';
+    assert.equal(decisionOf(await unknown()).decision, 'deny', 'unverifiable verdict');
+    stub.state.gateMode = 'normal';
+    stub.state.gateHandler = () => ({ verdict: 'allow', tamperActionHash: true });
+    assert.equal(decisionOf(await unknown()).decision, 'deny', 'mismatched binding');
+    stub.state.expectedAuthorization = 'Bearer something-else';
+    assert.equal(decisionOf(await unknown()).decision, 'deny', '401/403 is not an outage');
+  });
+});
+
+test('leases bind to the full tool input; a truncated action never gets a lease', async () => {
+  await withAgentd({}, async ({ stub, agentd }) => {
+    stub.state.gateHandler = () => ({ verdict: 'allow', lease_ms: 600000 });
+    const nine = (tail) => preEvent(`ls; pwd; date; id; uname; whoami; hostname; uptime; ${tail}`);
+    await agentd.hook('claude-code', 'pre', nine('mytool one'));
+    await agentd.hook('claude-code', 'pre', nine('othertool two'));
+    assert.equal(stub.count('/v1/agent/gate'), 2, 'a different 9th command is a different action');
+    const hashes = new Set(stub.state.gateBodies.map((b) => b.action_hash));
+    assert.equal(hashes.size, 2);
+    assert.ok(stub.state.gateBodies[1].action.commands.some((c) => c.startsWith('othertool')));
+    const long = (last) => preEvent(`${Array.from({ length: 40 }, (_, i) => `ls d${i}`).join('; ')}; ${last}`);
+    await agentd.hook('claude-code', 'pre', long('mytool x'));
+    await agentd.hook('claude-code', 'pre', long('mytool x'));
+    assert.equal(stub.count('/v1/agent/gate'), 4, 'no lease for a truncated action, even for an identical retry');
+    assert.equal(stub.state.gateBodies[3].action.truncated, true);
+  });
+});
+
+test('code written by the agent makes later test runs in that workspace go to the gate', async () => {
+  const { scratchHome } = require('./support/agentd-harness');
+  const { root, home } = scratchHome();
+  const proj = path.join(home, 'proj');
+  fs.mkdirSync(proj, { recursive: true });
+  fs.writeFileSync(path.join(proj, 'package.json'), JSON.stringify({ scripts: { test: 'node --test' } }));
+  try {
+    await withAgentd({}, async ({ stub, agentd }) => {
+      stub.state.gateHandler = () => ({ verdict: 'deny', reason: 'reviewing new process-spawning code' });
+      assert.equal(decisionOf(await agentd.hook('claude-code', 'pre', preEvent('npm test', { cwd: proj }))).decision, 'allow');
+      const write = { ...preEvent('x', { cwd: proj }), tool_name: 'Write', tool_input: { file_path: path.join(proj, 'test', 'a.test.js'), content: "require('child_process').execSync('npm publish')" } };
+      assert.equal(decisionOf(await agentd.hook('claude-code', 'pre', write)).decision, 'allow', 'writing the file is routine');
+      const run = decisionOf(await agentd.hook('claude-code', 'pre', preEvent('npm test', { cwd: proj })));
+      assert.equal(run.decision, 'deny');
+      assert.match(run.reason, /reviewing new process-spawning code/);
+      assert.ok(stub.state.gateBodies[0].action.local_reasons.includes('runs_agent_written_code'));
+      assert.equal(decisionOf(await agentd.hook('claude-code', 'pre', preEvent('git status', { cwd: proj }))).decision, 'allow', 'non-runners stay local');
+    });
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a tool that ran without a pre-action check is counted as a coverage gap', async () => {
+  await withAgentd({}, async ({ stub, agentd }) => {
+    const covered = preEvent('git status');
+    await agentd.hook('claude-code', 'pre', covered);
+    await agentd.hook('claude-code', 'post', { ...covered, hook_event_name: 'PostToolUse' });
+    await agentd.hook('claude-code', 'post', { ...preEvent('rm -rf build'), hook_event_name: 'PostToolUse' });
+    assert.equal((await agentd.admin('status')).json.coverage_gaps, 1);
+    await agentd.admin('flush');
+    const rollup = stub.state.events.find((e) => e.type === 'activity_rollup');
+    assert.equal(rollup.counts['coverage_gap|claude-code'], 1);
+  });
+});
+
+test('the loaded key is scrubbed from everything sent or stored, even when the agent quotes it', async () => {
+  await withAgentd({}, async ({ stub, agentd }) => {
+    stub.state.gateHandler = () => ({ verdict: 'deny', reason: 'no' });
+    await agentd.hook('claude-code', 'pre', preEvent(`npx ${agentd.key}`));
+    await agentd.hook('claude-code', 'pre', preEvent(`curl -H "x-key: ${agentd.key}" https://example.com/api`));
+    await agentd.hook('claude-code', 'pre', preEvent(`echo ${agentd.key.slice(0, 30)} | mytool`));
+    const queued = allFilesUnder(path.join(agentd.home, '.marrow', 'agentd', 'queue')).map((f) => fs.readFileSync(f, 'utf8')).join('\n');
+    await agentd.admin('flush');
+    const sent = JSON.stringify(stub.state.gateBodies) + JSON.stringify(stub.state.events);
+    for (const text of [queued, sent]) {
+      assert.equal(text.includes(agentd.key), false);
+      assert.equal(text.includes(agentd.key.slice(9, 29)), false);
+    }
+  });
 });

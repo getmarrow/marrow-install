@@ -16,15 +16,17 @@ const path = require('node:path');
 const { ADAPTERS, renderUnreadable } = require('./adapters');
 const { callDaemon } = require('./client');
 const { createClassifier } = require('./classifier');
-const { HARNESS_HOOK_TIMEOUT_MS, TRUSTED_POLICY_KEYS } = require('./constants');
+const { TRUSTED_POLICY_KEYS } = require('./constants');
 const { ensurePrivateDir } = require('./fsutil');
 const { agentdPaths } = require('./paths');
 const { PolicyStore } = require('./policy');
 
 const BYPASS_CAP = 5000;
 
+// Same daemon-phase budgets as the native shim, leaving time for the fallback inside the host
+// hook timeout (codex 5 s: 3 s + fallback; claude-code 15 s: 11 s + fallback).
 function shimDeadline(harness) {
-  return Math.max(500, (HARNESS_HOOK_TIMEOUT_MS[harness] || 5000) - 1000);
+  return harness === 'claude-code' ? 11000 : 3000;
 }
 
 function writeBypassRecord(paths, record) {
