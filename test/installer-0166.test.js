@@ -1,5 +1,6 @@
 require('./support/isolated-environment');
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const http = require('node:http');
 const os = require('node:os');
@@ -394,6 +395,25 @@ test('Hermes undo notes redact every value that could be a credential', () => {
   assert.ok(lines.includes('    args: ["-y", "--api-key", "[redacted]", "--token=[redacted]", "marrow-mcp"]'));
   assert.ok(lines.includes('      MARROW_API_KEY: [redacted]'));
   assert.deepEqual(redactUndoLines(['      MARROW_CLIENT: custom', '      TOKEN: fixture-x'], true), ['      MARROW_CLIENT: custom', '      TOKEN: [redacted]']);
+});
+
+test('Hermes undo notes never copy YAML comments, which may hold credentials (L-1)', () => {
+  const dummy = `fixture-${crypto.randomBytes(8).toString('hex')}`;
+  const cases = {
+    commentInArgsBlock: `mcp_servers:\n  marrow:\n    command: npx\n    args:\n    - -y\n    # old key ${dummy}\n    - "@getmarrow/mcp@3.9.90"\n`,
+    commentOnClientLine: `mcp_servers:\n  marrow:\n    command: npx\n    args: ["-y", "--package=@getmarrow/mcp@3.9.97", "marrow-mcp"]\n    env:\n      MARROW_CLIENT: claude # ${dummy}\n`,
+    commentOnEmptyServers: `mcp_servers: {}  # ${dummy}\nmodel: x\n`,
+  };
+  for (const [name, text] of Object.entries(cases)) {
+    const plan = planHermesMcpConfig(text, { mcpPackageSpec: MCP_PIN });
+    assert.equal(plan.action, 'update', name);
+    assert.equal(JSON.stringify(plan.undo).includes(dummy), false, name);
+  }
+  assert.deepEqual(planHermesMcpConfig(cases.commentInArgsBlock, { mcpPackageSpec: MCP_PIN }).undo[0].replaced, [
+    '    args:', '    - "-y"', '    # [comment redacted]', '    - "@getmarrow/mcp@3.9.90"',
+  ]);
+  assert.deepEqual(planHermesMcpConfig(cases.commentOnClientLine, { mcpPackageSpec: MCP_PIN }).undo[0].replaced, ['      MARROW_CLIENT: claude']);
+  assert.deepEqual(planHermesMcpConfig(cases.commentOnEmptyServers, { mcpPackageSpec: MCP_PIN }).undo[0].replaced, ['mcp_servers: {}']);
 });
 
 test('Hermes wiring keeps an existing entry\'s own env keys and prefers a Hermes .env reference', async () => {
