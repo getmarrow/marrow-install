@@ -293,6 +293,10 @@ function cleanControllerEnv(options) {
     env.MARROW_AGENT_ID = options.agentId;
   }
   env.MARROW_CLIENT = options.client;
+  // The owner's identity allowlist travels with the controller so maintenance honors it.
+  for (const name of ['MARROW_ALLOWED_BASE_URLS', 'MARROW_ALLOWED_AGENT_IDS']) {
+    if (process.env[name]) env[name] = process.env[name];
+  }
   env.MARROW_GOVERN_PROFILE = options.profile;
   env.MARROW_GOVERN_POLICY = options.policy;
   env.MARROW_CONTROLLER_PROJECT_ROOT = path.resolve(options.root || process.cwd());

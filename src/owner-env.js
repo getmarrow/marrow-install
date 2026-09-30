@@ -55,26 +55,31 @@ function parseKeyLines(raw) {
   return values;
 }
 
-// Returns the stored key only from a private, owner-owned file, as the MCP trusted reader does.
+function fingerprintMatches(left, right) {
+  const digest = (value) => crypto.createHash('sha256').update(String(value)).digest();
+  return crypto.timingSafeEqual(digest(left), digest(right));
+}
+
+// Returns the stored key only from a private, owner-owned file, as the MCP trusted reader does:
+// env.local first, then env. `conflict` is true when both hold a key and they differ; the keys
+// are compared in memory only and never returned for display.
 function readOwnerApiKey(home) {
   const directory = path.join(home, '.marrow');
+  const found = [];
   for (const name of OWNER_ENV_FILES) {
     const filePath = path.join(directory, name);
     if (!fs.existsSync(filePath) || !isPrivateOwnerFile(filePath, home)) continue;
     try {
       const values = parseKeyLines(fs.readFileSync(filePath, 'utf8'));
       const apiKey = values.MARROW_API_KEY || values.MARROW_KEY || '';
-      if (apiKey) return { apiKey, source: filePath };
+      if (apiKey) found.push({ apiKey, source: filePath });
     } catch {
       // An unreadable owner file is treated as absent.
     }
   }
-  return { apiKey: '', source: null };
-}
-
-function fingerprintMatches(left, right) {
-  const digest = (value) => crypto.createHash('sha256').update(String(value)).digest();
-  return crypto.timingSafeEqual(digest(left), digest(right));
+  if (found.length === 0) return { apiKey: '', source: null, conflict: false };
+  const conflict = found.length > 1 && !fingerprintMatches(found[0].apiKey, found[1].apiKey);
+  return { apiKey: found[0].apiKey, source: found[0].source, conflict };
 }
 
 // Stores the key only when no owner key file exists yet. An existing different key is left

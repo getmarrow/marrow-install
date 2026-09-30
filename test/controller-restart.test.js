@@ -84,7 +84,7 @@ test('update restarts a controller from another installer version and keeps loca
   delete process.env.MARROW_SIDECAR_STATE_DIR;
   const options = {
     apiKey: 'test-controller-api-key',
-    baseUrl: 'https://api.example.test',
+    baseUrl: 'http://127.0.0.1:9',
     agentId: '',
     identityAgentId: 'restart-fixture-identity',
     client: 'hermes',
@@ -133,5 +133,55 @@ test('update restarts a controller from another installer version and keeps loca
     fs.rmSync(legacy.packageRoot, { recursive: true, force: true });
     fs.rmSync(project, { recursive: true, force: true });
     fs.rmSync(controllers, { recursive: true, force: true });
+  }
+});
+
+test('controller maintenance resets a redirected MCP identity and reports it as needing attention', { skip: process.platform !== 'linux' }, async () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-maintain-identity-'));
+  fs.writeFileSync(path.join(project, 'package.json'), '{}\n');
+  fs.writeFileSync(path.join(project, '.mcp.json'), JSON.stringify({ mcpServers: { marrow: {
+    command: 'npx',
+    args: [],
+    env: { MARROW_BASE_URL: 'https://fixture-user:fixture-pass@redirect.example.test:8443/api', MARROW_FLEET_AGENT_ID: 'someone-elses-agent' },
+  } } }));
+  const stateDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-maintain-state-'));
+  const priorStateDirectory = process.env.MARROW_SIDECAR_STATE_DIR;
+  process.env.MARROW_SIDECAR_STATE_DIR = stateDirectory;
+  const options = {
+    apiKey: 'test-controller-api-key',
+    baseUrl: 'http://127.0.0.1:9',
+    agentId: '',
+    identityAgentId: 'maintain-fixture-identity',
+    client: 'custom',
+    root: project,
+    mode: 'mcp',
+    profile: 'default',
+    policy: 'warn',
+  };
+  try {
+    await ensureCurrentGovernanceController(options);
+    let maintenance = null;
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      maintenance = (await controllerStatus(options)).maintenance;
+      if (maintenance) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(maintenance.state, 'attention_required');
+    assert.deepEqual(maintenance.identity_divergence.map((entry) => [entry.field, entry.replaced, entry.applied]), [
+      ['MARROW_BASE_URL', 'https://redirect.example.test:8443', 'http://127.0.0.1:9'],
+      ['MARROW_FLEET_AGENT_ID', 'someone-elses-agent', 'unset (resolved by Marrow)'],
+    ]);
+    assert.match(maintenance.exact_fix, /MARROW_ALLOWED_BASE_URLS or MARROW_ALLOWED_AGENT_IDS/);
+    assert.doesNotMatch(JSON.stringify(maintenance), /fixture-pass|fixture-user/);
+    const env = JSON.parse(fs.readFileSync(path.join(project, '.mcp.json'), 'utf8')).mcpServers.marrow.env;
+    assert.equal(env.MARROW_BASE_URL, 'http://127.0.0.1:9');
+    assert.equal(Object.hasOwn(env, 'MARROW_FLEET_AGENT_ID'), false);
+  } finally {
+    await stopProjectControllers(options).catch(() => {});
+    if (priorStateDirectory === undefined) delete process.env.MARROW_SIDECAR_STATE_DIR;
+    else process.env.MARROW_SIDECAR_STATE_DIR = priorStateDirectory;
+    fs.rmSync(project, { recursive: true, force: true });
+    fs.rmSync(stateDirectory, { recursive: true, force: true });
   }
 });

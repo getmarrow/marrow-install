@@ -374,6 +374,10 @@ function parseBaseOptions(argv, startIndex = 0) {
     permit: process.env.MARROW_ACTION_PERMIT || '',
     target: process.env.MARROW_ACTION_TARGET || '',
     sidecarPort: process.env.MARROW_SIDECAR_PORT || '0',
+    // One random nonce per CLI invocation. Retries inside this invocation reuse it, so a retry
+    // replays only its own request; a later run, gate or permit in the same session gets new
+    // keys and is never answered with an earlier invocation's stored response.
+    invocationNonce: crypto.randomBytes(16).toString('hex'),
   };
   let i = startIndex;
   for (; i < argv.length; i += 1) {
@@ -562,11 +566,13 @@ async function requestJson(options, method, route, body, extraHeaders = {}, requ
 const DURABLE_WRITE_ATTEMPTS = 3;
 const DURABLE_RETRY_DELAY_MS = 1_000;
 const DURABLE_MAX_RETRY_DELAY_MS = 2_000;
+const DURABLE_ATTEMPT_TIMEOUT_MS = 10_000;
+const DURABLE_TOTAL_TIMEOUT_MS = 25_000;
 const DURABLE_TRANSIENT_STATUSES = new Set([429, 502, 503, 504]);
 
 function durableIdempotencyKey(options, route, parts) {
   const digest = crypto.createHash('sha256')
-    .update([options.sessionId, route, ...parts].map((part) => String(part ?? '')).join('\u0000'))
+    .update([options.invocationNonce, options.sessionId, route, ...parts].map((part) => String(part ?? '')).join('\u0000'))
     .digest('hex');
   return `marrow-run-${route.split('/').pop()}-${digest.slice(0, 48)}`;
 }
@@ -579,16 +585,45 @@ function durableRetryDelayMs(response, data, options) {
   return Math.min(delay, DURABLE_MAX_RETRY_DELAY_MS);
 }
 
-// Runtime, think and commit are durable Marrow writes. A transient 429/502/503/504 or a
-// pending acknowledgement (retryable:true, committed:false) is resent unchanged with the
-// same Idempotency-Key, at most three attempts, so a retry can never create a second record.
-// A pending acknowledgement that names a created decision pins that id; the final answer
-// must carry the same one. Client errors and network failures are not retried.
+function isTimeout(error) {
+  return error?.name === 'TimeoutError' || error?.name === 'AbortError';
+}
+
+// Runtime, think and commit are durable Marrow writes. A transient 429/502/503/504, a timed-out
+// attempt, or a pending acknowledgement (retryable:true, committed:false) is resent unchanged
+// with the same Idempotency-Key, at most three attempts within one overall deadline, so a retry
+// can never create a second record and a hung service never holds the command forever. A
+// pending acknowledgement that names a created decision pins that id; the final answer must
+// carry the same one. Client errors and connection failures are not retried.
 async function durableRequestJson(options, route, body, idempotencyKey) {
+  const attemptTimeoutMs = Number.isFinite(options.requestTimeoutMs) ? options.requestTimeoutMs : DURABLE_ATTEMPT_TIMEOUT_MS;
+  const deadline = Date.now() + (Number.isFinite(options.requestDeadlineMs) ? options.requestDeadlineMs : DURABLE_TOTAL_TIMEOUT_MS);
   let lastState = 'no response';
   let pinnedDecisionId = null;
+  const exhausted = (status) => {
+    const error = new Error(`Marrow ${route} did not complete after ${DURABLE_WRITE_ATTEMPTS} attempts (last: ${lastState}).`);
+    error.status = status;
+    return error;
+  };
   for (let attempt = 1; attempt <= DURABLE_WRITE_ATTEMPTS; attempt += 1) {
-    const { response, json } = await rawRequest(options, 'POST', route, body, { 'Idempotency-Key': idempotencyKey });
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      const error = new Error(`Marrow ${route} did not complete before its deadline (last: ${lastState}).`);
+      error.status = 504;
+      throw error;
+    }
+    let response;
+    let json;
+    try {
+      ({ response, json } = await rawRequest(options, 'POST', route, body, { 'Idempotency-Key': idempotencyKey }, {
+        timeoutMs: Math.max(1, Math.min(attemptTimeoutMs, remaining)),
+      }));
+    } catch (error) {
+      if (!isTimeout(error)) throw error;
+      lastState = 'timed out';
+      if (attempt === DURABLE_WRITE_ATTEMPTS) throw exhausted(504);
+      continue;
+    }
     const data = dataOf(json);
     if (response.ok) {
       const decisionId = typeof data?.decision_id === 'string' && data.decision_id ? data.decision_id : null;
@@ -610,12 +645,11 @@ async function durableRequestJson(options, route, body, idempotencyKey) {
       throw responseError(route, response, json);
     }
     if (attempt < DURABLE_WRITE_ATTEMPTS) {
-      await new Promise((resolve) => setTimeout(resolve, durableRetryDelayMs(response, data, options)));
+      const wait = Math.min(durableRetryDelayMs(response, data, options), Math.max(0, deadline - Date.now()));
+      await new Promise((resolve) => setTimeout(resolve, wait));
     }
   }
-  const error = new Error(`Marrow ${route} did not complete after ${DURABLE_WRITE_ATTEMPTS} attempts (last: ${lastState}).`);
-  error.status = 202;
-  throw error;
+  throw exhausted(202);
 }
 
 function proofFromFile(filePath) {
@@ -760,6 +794,10 @@ function gateDecision(runtime) {
   const decision = lowerText(gate.decision) || lowerText(value.decision) || lowerText(receipt.decision)
     || enforcementAsDecision;
   const recognized = Boolean(decision || enforcementDecision || enforced !== null);
+  // An observation-only answer records outcomes but never authorizes execution.
+  const observationOnly = [decision, enforcementDecision, lowerText(authorization.kind), lowerText(receipt.kind),
+    lowerText(authorization.decision_state)].includes('outcome_observation_only');
+  const authorizationWithheld = gate.authorization_granted === false || receipt.authorization_granted === false;
   const decisionState = lowerText(authorization.decision_state) || lowerText(completion.decision_state);
   const createdDecisionId = String(value.decision_id || authorization.decision_id || completion.decision_id || '');
   return {
@@ -767,7 +805,8 @@ function gateDecision(runtime) {
     decision: recognized ? decision || 'proceed' : 'none',
     enforcementDecision,
     enforced,
-    allow: typeof gate.allow === 'boolean'
+    observationOnly,
+    allow: authorizationWithheld || observationOnly ? false : typeof gate.allow === 'boolean'
       ? gate.allow
       : typeof value.allow === 'boolean' ? value.allow : decision !== 'block',
     riskLevel: lowerText(gate.risk_level) || lowerText(receipt.risk_level) || lowerText(value.risk_level),
@@ -791,16 +830,24 @@ function gateDecision(runtime) {
 }
 
 function shouldBlock(decision, options) {
+  // Marrow withheld authorization (allow:false, or an observation-only answer): blocked under
+  // every plan mode and local policy.
+  if (decision.observationOnly || decision.allow === false) return true;
   if (options.policy === 'audit') return false;
   // An advisory plan (enforced:false) never blocks locally; the runner shows the warning.
   if (decision.enforced === false) return false;
-  if (decision.decision === 'block' || decision.allow === false) return true;
+  if (decision.decision === 'block') return true;
   if (options.policy === 'warn') return false;
   const approvalRequired = decision.ownerApprovalRequired
     || decision.decision === 'review_required'
     || decision.decision === 'owner_approval_required'
     || decision.enforcementDecision === 'owner_approval_required';
   return Boolean(approvalRequired && !options.ownerApproval);
+}
+
+function blockMessage(decision) {
+  if (decision.observationOnly) return 'Marrow answered in observation-only mode, which cannot authorize this action. Retry for a fresh gate.';
+  return decision.exactNextAction || 'Marrow blocked this action before execution.';
 }
 
 function gateModeText(decision) {
@@ -905,13 +952,14 @@ async function createDecision(options, action, type, target, surfaces) {
     durableIdempotencyKey(options, '/v1/agent/think', [JSON.stringify(body)]));
 }
 
-function commitIdempotencyKey(options, decisionId) {
-  return `marrow-run-${crypto.createHash('sha256')
-    .update(`${options.agentId}\u0000${options.sessionId}\u0000${decisionId}`)
-    .digest('hex')}`;
+// `run` folds its invocation nonce into the commit key. `proof` keeps a stable key per
+// decision, so repeating the same proof command replays instead of recording twice.
+function commitIdempotencyKey(options, decisionId, { perInvocation = true } = {}) {
+  const parts = [options.agentId, options.sessionId, decisionId, ...(perInvocation ? [options.invocationNonce] : [])];
+  return `marrow-run-${crypto.createHash('sha256').update(parts.join('\u0000')).digest('hex')}`;
 }
 
-async function commitOutcome(options, decisionId, success, outcome, proof, gateReceiptId, modelUsage = null) {
+async function commitOutcome(options, decisionId, success, outcome, proof, gateReceiptId, modelUsage = null, { perInvocation = true } = {}) {
   const body = {
     decision_id: decisionId,
     success,
@@ -921,7 +969,7 @@ async function commitOutcome(options, decisionId, success, outcome, proof, gateR
   };
   if (gateReceiptId) body.gate_receipt_id = gateReceiptId;
   if (modelUsage) body.model_usage = modelUsage;
-  return durableRequestJson(options, '/v1/agent/commit', body, commitIdempotencyKey(options, decisionId));
+  return durableRequestJson(options, '/v1/agent/commit', body, commitIdempotencyKey(options, decisionId, { perInvocation }));
 }
 
 async function decisionForAction(options, decision, action, type, target, surfaces) {
@@ -983,7 +1031,7 @@ async function runGoverned(parsed, execution = {}) {
         type,
         risky,
         decision,
-        message: decision.exactNextAction || 'Marrow blocked this action before execution.',
+        message: blockMessage(decision),
       };
     }
     const target = options.target || commandText;
@@ -1134,7 +1182,7 @@ async function permitOnly(parsed) {
     return { ok: false, blocked: true, exitCode: 13, decision, message: 'Marrow runtime returned no gate decision, so no permit was issued.' };
   }
   if (shouldBlock(decision, options)) {
-    return { ok: false, blocked: true, exitCode: 12, decision, message: decision.exactNextAction || 'Marrow blocked this action before a permit could be issued.' };
+    return { ok: false, blocked: true, exitCode: 12, decision, message: blockMessage(decision) };
   }
   const { decisionId } = await decisionForAction(options, decision, action, type, target, surfaces);
   if (decision.enforced === false) {
@@ -1194,24 +1242,32 @@ async function sidecarOnly(parsed) {
   const maintain = async () => {
     if (lastMaintenance && Date.now() - lastMaintenanceAt < 5 * 60_000) return lastMaintenance;
     const detection = detectEnvironment(root, process.env);
-    // Maintenance re-applies the controller's own configured identity and endpoint. It never
-    // substitutes a derived agent id or the default base URL, and it keeps owner-set values.
+    // Maintenance re-applies the controller's own configured agent id and base URL. A different
+    // value found in managed MCP config is replaced unless the owner allowlisted it, and the
+    // divergence is reported. It never edits the owner's Hermes config.
     const plan = buildPlan(detection, {
       mode: managedMode,
       agentId: options.agentId,
       baseUrl: options.baseUrl,
       client: options.client,
-      preserveIdentity: true,
+      maintenance: true,
     });
     const changes = applyPlan(plan, { yes: true, dryRun: false, doctor: false });
     const repaired = changes.filter((change) => change.applied).map((change) => change.label);
     const remaining = changes.filter((change) => change.changed && !change.applied).map((change) => change.label);
+    const identityDivergence = changes.flatMap((change) => (change.identity_divergence || [])
+      .map((divergence) => ({ ...divergence, path: change.path })));
     lastMaintenanceAt = Date.now();
     lastMaintenance = {
-      state: remaining.length > 0 ? 'attention_required' : repaired.length > 0 ? 'repaired' : 'clear',
+      state: remaining.length > 0 || identityDivergence.length > 0 ? 'attention_required' : repaired.length > 0 ? 'repaired' : 'clear',
       checked_at: new Date(lastMaintenanceAt).toISOString(),
       repaired,
-      exact_fix: remaining.length > 0 ? 'Run npx @getmarrow/install --repair in the managed project.' : null,
+      ...(identityDivergence.length ? { identity_divergence: identityDivergence } : {}),
+      exact_fix: remaining.length > 0
+        ? 'Run npx @getmarrow/install --repair in the managed project.'
+        : identityDivergence.length > 0
+        ? `Marrow reset ${identityDivergence.map((divergence) => divergence.field).join(', ')} in managed MCP config to the controller's configured values. If the previous value was intended, add it to MARROW_ALLOWED_BASE_URLS or MARROW_ALLOWED_AGENT_IDS and rerun npx -y @getmarrow/install@latest update.`
+        : null,
     };
     return lastMaintenance;
   };
@@ -1298,7 +1354,11 @@ async function gateOnly(parsed) {
     decision_id: decision.runtimeDecisionId || null,
     gate_receipt_id: decision.receiptId || null,
     session_id: options.sessionId,
-    ...(blocked ? { message: decision.exactNextAction || `Marrow gate ${decision.decision}: this action needs owner approval or a policy change before it runs.` } : {}),
+    ...(blocked ? {
+      message: decision.observationOnly
+        ? blockMessage(decision)
+        : decision.exactNextAction || `Marrow gate ${decision.decision}: this action needs owner approval or a policy change before it runs.`,
+    } : {}),
   };
 }
 
@@ -1318,6 +1378,8 @@ async function proofOnly(parsed) {
     options.outcome || options.summary || (options.success ? 'Manual proof closeout succeeded.' : 'Manual proof closeout failed.'),
     proof,
     options.gateReceiptId || '',
+    null,
+    { perInvocation: false },
   );
   // Only committed:true is trusted closure; an accepted observation is reported, not claimed.
   const committed = result?.committed === true;
