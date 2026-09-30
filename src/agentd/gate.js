@@ -32,7 +32,8 @@ const AVAILABILITY_FAILURES = new Set(['transport', 'timeout', 'server', 'rate_l
 // test runner). Narrower than the interpreter pattern so ordinary docs do not match.
 const RISKY_CODE = /child_process|execSync|execFileSync|spawnSync|\bspawn\(|subprocess|os\.system|os\.popen|shutil\.rmtree|rmSync\(|rimraf|Runtime\.getRuntime|ProcessBuilder|\bpopen\(|\bsystem\(|npm\s+publish|wrangler\s+(?:deploy|publish)|terraform\s+(?:apply|destroy)|kubectl\s+(?:apply|delete)|git\s+push\s+(?:-f|--force)|\.aws\/credentials|id_rsa|id_ed25519|\.ssh\/|process\.env\.[A-Z_]*(?:KEY|TOKEN|SECRET)/;
 // Programs that execute workspace code even when the classifier calls them routine.
-const CODE_RUNNERS = new Set(['npm', 'pnpm', 'yarn', 'bun', 'node', 'nodejs', 'npx', 'pnpx', 'bunx', 'python', 'python3', 'pytest', 'jest', 'vitest', 'mocha', 'cargo', 'go', 'deno', 'tsx', 'ts-node', 'ruby', 'rspec', 'dotnet', 'mvn', 'gradle', 'bash', 'sh', 'zsh']);
+const CODE_RUNNERS = new Set(['npm', 'pnpm', 'yarn', 'bun', 'node', 'nodejs', 'npx', 'pnpx', 'bunx', 'python', 'python3', 'pytest', 'jest', 'vitest', 'mocha', 'cargo', 'go', 'deno', 'tsx', 'ts-node', 'ruby', 'rspec', 'dotnet', 'mvn', 'gradle', 'bash', 'sh', 'zsh',
+  'husky', 'vite', 'next', 'webpack', 'webpack-cli', 'rollup', 'esbuild', 'tsup', 'parcel', 'astro', 'nuxi', 'nuxt', 'storybook', 'gatsby', 'remix']);
 
 function stableStringify(value) {
   if (value === null || typeof value !== 'object') return JSON.stringify(value === undefined ? null : value);
@@ -120,9 +121,18 @@ class DecisionEngine {
     const kind = classification.tool && classification.tool.kind;
     if (kind !== 'edit' && !(kind === 'shell' && classification.paths.length > 0)) return;
     if (!RISKY_CODE.test(editedText(event))) return;
-    if (this.taints.size >= MAX_TAINTS) this.taints.delete(this.taints.keys().next().value);
-    if (!this.taints.has(event.cwd)) this.stats.tainted_workspaces += 1;
-    this.taints.set(path.normalize(event.cwd), this.now() + TAINT_TTL_MS);
+    // Taint the session's working directory and the directory of every file written, so a test
+    // run started later from wherever that code lives also goes to the gate.
+    const input = event.tool_input || {};
+    const roots = new Set([path.normalize(event.cwd)]);
+    for (const key of ['file_path', 'notebook_path', 'path']) {
+      if (typeof input[key] === 'string') roots.add(path.dirname(path.resolve(event.cwd, input[key])));
+    }
+    for (const root of roots) {
+      if (this.taints.size >= MAX_TAINTS) this.taints.delete(this.taints.keys().next().value);
+      if (!this.taints.has(root)) this.stats.tainted_workspaces += 1;
+      this.taints.set(root, this.now() + TAINT_TTL_MS);
+    }
   }
 
   isTainted(cwd) {

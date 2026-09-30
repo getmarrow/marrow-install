@@ -27,7 +27,22 @@ const MAX_COMMAND_CHARS = 1000;
 const MAX_PATH_CHARS = 4096;
 // Environment names that change what a later program runs or loads (PATH hijack, preload,
 // interpreter options, npm/git config, Marrow's own settings).
-const SENSITIVE_ENV = /^(?:PATH|IFS|ENV|BASH_ENV|SHELLOPTS|BASHOPTS|PS4|PROMPT_COMMAND|CDPATH|HOME|ZDOTDIR|LD_[A-Z_]*|DYLD_[A-Z_]*|NODE_[A-Z_]*|NPM_CONFIG_[A-Z_]*|npm_config_[A-Za-z_]*|YARN_[A-Z_]*|PNPM_[A-Z_]*|PYTHON[A-Z_]*|PIP_[A-Z_]*|RUBY[A-Z_]*|GEM_[A-Z_]*|BUNDLE_[A-Z_]*|PERL[A-Z0-9_]*|GIT_[A-Z_]*|SSH_[A-Z_]*|PAGER|EDITOR|VISUAL|BROWSER|XDG_[A-Z_]*|SSL_[A-Z_]*|CURL_[A-Z_]*|HTTPS?_PROXY|https?_proxy|ALL_PROXY|MARROW_[A-Z_]*)$/;
+// Only the variables that change which code runs or which server/trust store is used. Ordinary
+// settings (NODE_ENV, CI, DEBUG, GIT_AUTHOR_NAME, PYTHONUNBUFFERED, RUST_LOG, TZ...) stay routine.
+const SENSITIVE_ENV = new RegExp('^(?:' + [
+  'PATH', 'IFS', 'ENV', 'BASH_ENV', 'SHELLOPTS', 'BASHOPTS', 'PS4', 'PROMPT_COMMAND', 'CDPATH', 'HOME', 'ZDOTDIR', 'SHELL',
+  'LD_[A-Z_]*', 'DYLD_[A-Z_]*',
+  'NODE_OPTIONS', 'NODE_PATH', 'NODE_EXTRA_CA_CERTS', 'NODE_TLS_REJECT_UNAUTHORIZED', 'NODE_REPL_EXTERNAL_MODULE',
+  'NPM_CONFIG_[A-Z_]*', 'npm_config_[A-Za-z_]*', 'YARN_[A-Z_]*', 'PNPM_[A-Z_]*', 'BUN_[A-Z_]*',
+  'PYTHONPATH', 'PYTHONSTARTUP', 'PYTHONHOME', 'PYTHONBREAKPOINT', 'PYTHONUSERBASE', 'PYTHONEXECUTABLE',
+  'PIP_INDEX_URL', 'PIP_EXTRA_INDEX_URL', 'PIP_TRUSTED_HOST', 'PIP_CONFIG_FILE', 'UV_INDEX_URL', 'UV_EXTRA_INDEX_URL',
+  'RUBYOPT', 'RUBYLIB', 'GEM_HOME', 'GEM_PATH', 'BUNDLE_GEMFILE', 'PERL5OPT', 'PERL5LIB', 'PERLLIB', 'PERL5DB',
+  'GIT_SSH', 'GIT_SSH_COMMAND', 'GIT_EXEC_PATH', 'GIT_CONFIG[A-Z_]*', 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_ASKPASS', 'GIT_EDITOR',
+  'GIT_SEQUENCE_EDITOR', 'GIT_PAGER', 'GIT_TEMPLATE_DIR', 'GIT_EXTERNAL_DIFF', 'GIT_PROXY_COMMAND', 'GIT_ALLOW_PROTOCOL',
+  'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_NAMESPACE',
+  'SSH_[A-Z_]*', 'PAGER', 'EDITOR', 'VISUAL', 'BROWSER', 'XDG_[A-Z_]*', 'SSL_[A-Z_]*', 'CURL_[A-Z_]*',
+  'REQUESTS_CA_BUNDLE', 'HTTPS?_PROXY', 'https?_proxy', 'ALL_PROXY', 'all_proxy', 'NO_PROXY', 'no_proxy', 'MARROW_[A-Z_]*',
+].join('|') + ')$');
 const INTERNAL_HOST = /^(?:localhost|.*\.localhost|.*\.internal|metadata|metadata\.google\.internal|127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+|169\.254\.\d+\.\d+|0\.0\.0\.0|\[?::1\]?|\[?f[cd][0-9a-f]{2}:.*|\[?fe80:.*)$/i;
 const DEVICE_TARGETS = new Set(['/dev/null', '/dev/stdout', '/dev/stderr', '/dev/tty', '/dev/fd/1', '/dev/fd/2']);
 
@@ -194,11 +209,24 @@ function createClassifier(policy, options = {}) {
 
   // A target whose subtree includes the home directory, the filesystem root or the workspace
   // itself (for example `~`, `/`, `.`, `..`, `./*`).
+  // A glob is broad only when it matches every entry of a directory that covers the home
+  // directory, the root or the workspace (`*`, `./*`, `~/*`, `.*`, `/tmp/*` with the workspace in
+  // /tmp). A glob with a literal part (`*.log`, `build-*`) deletes only matching entries and is
+  // judged like any other path.
   function isBroadTarget(raw, ctx) {
     const abs = absPath(raw, ctx);
-    const globDir = /[*?[]/.test(raw) ? absPath(path.dirname(raw), ctx) : null;
     const covers = (dir) => dir && (dir === '/' || dir === home || home.startsWith(`${dir}/`) || (ctx.cwd && (dir === ctx.cwd || ctx.cwd.startsWith(`${dir}/`))));
-    return ['/', '~', '*', '.', '..', './', '../', '/*', '~/*', './*', '../*'].includes(raw) || covers(abs) || covers(globDir);
+    if (['/', '~', '*', '.', '..', './', '../', '/*', '~/*', './*', '../*', '.*', './.*'].includes(raw)) return true;
+    if (/[*?[]/.test(raw)) {
+      const name = path.basename(raw);
+      const matchesAll = name.replace(/\[[^\]]*\]|[*?.{},]/g, '') === '';
+      if (!matchesAll) return false; // `*.log`, `*/build`: only matching entries
+      const parts = raw.split('/');
+      const firstGlob = parts.findIndex((part) => /[*?[]/.test(part));
+      const fixed = parts.slice(0, firstGlob).join('/') || (raw.startsWith('/') ? '/' : '.');
+      return covers(absPath(fixed, ctx));
+    }
+    return covers(abs);
   }
 
   function relLabel(abs, ctx) {
@@ -246,9 +274,23 @@ function createClassifier(policy, options = {}) {
     if (ctx.written) { ctx.written.add(abs); ctx.written.add(real); }
     result.note('paths', relLabel(abs, ctx));
     if (isProtected(abs) || isProtected(real)) { result.raise('risky', real !== abs && !isProtected(abs) ? 'symlink_to_protected_path' : 'protected_path_write'); return; }
-    if (isSecret(abs) || isSecret(real)) { result.raise('risky', 'secret_path_write'); return; }
+    // Writing a credential store in the home directory (~/.aws, ~/.ssh...) is risky; creating or
+    // editing a project .env file inside the workspace goes to the server gate instead.
+    if (isSecret(abs) || isSecret(real)) { result.raise(inWorkspace(abs, ctx) && inWorkspace(real, ctx) ? 'unknown' : 'risky', 'secret_path_write'); return; }
     if (isReview(abs) || isReview(real)) { result.raise('unknown', 'review_path_write'); return; }
-    if (!inWorkspace(abs, ctx) || !inWorkspace(real, ctx)) result.raise(recursiveDelete ? 'risky' : 'unknown', 'write_outside_workspace');
+    if (inWorkspace(abs, ctx) && inWorkspace(real, ctx)) return;
+    // Outside the workspace: a non-recursive write to an ordinary (non-dot) path under the home
+    // directory, such as ~/agents/<role>/results/report.md, is routine. Dotfiles and dot-dirs,
+    // ~/Library, ~/Applications, ~/bin and ~/snap hold configuration or executables and stay
+    // gated; recursive deletes outside the workspace stay risky.
+    if (!recursiveDelete && isHomeDataPath(abs) && isHomeDataPath(real)) return;
+    result.raise(recursiveDelete ? 'risky' : 'unknown', 'write_outside_workspace');
+  }
+
+  function isHomeDataPath(abs) {
+    if (!abs || !abs.startsWith(`${home}/`)) return false;
+    const top = abs.slice(home.length + 1).split('/')[0];
+    return Boolean(top) && !top.startsWith('.') && !['Library', 'Applications', 'bin', 'snap'].includes(top);
   }
 
   // ---------- tools ----------
@@ -281,7 +323,11 @@ function createClassifier(policy, options = {}) {
     if (!parsed) { result.raise('unknown', 'unparseable_url'); return; }
     // Loopback, private and link-local hosts include cloud metadata endpoints that hand out
     // credentials; a GET there is not routine.
-    if (INTERNAL_HOST.test(parsed.hostname) || /^\d+$/.test(parsed.hostname)) result.raise('unknown', 'internal_host');
+    // A plain request to the local dev server (localhost / 127.0.0.1 / ::1) is routine; cloud
+    // metadata, link-local and private-network hosts are not (write methods and bodies are judged
+    // separately by the http handler).
+    const loopback = /^(?:localhost|127\.\d+\.\d+\.\d+|\[?::1\]?)$/i.test(parsed.hostname);
+    if (!loopback && (INTERNAL_HOST.test(parsed.hostname) || /^\d+$/.test(parsed.hostname))) result.raise('unknown', 'internal_host');
     const target = `${parsed.pathname}${parsed.search}`;
     if (urlMutation.test(target)) result.raise('unknown', 'url_mutation_hint');
   }
@@ -552,10 +598,14 @@ function createClassifier(policy, options = {}) {
     if (rule === 'risky') return result.raise('risky', `risky_program:${base}`);
     if (rule.read) return classifyReadProgram(base, args, ctx, result);
     if (rule.write) {
-      for (const arg of positionals(args)) {
-        if (arg.text !== null) checkReadPath(arg.text, ctx, result);
+      const pos = positionals(args, ['-m', '--mode', '-o', '--owner', '-g', '--group', '-t', '--target-directory', '-S', '--suffix']);
+      // cp/mv/ln/install read their sources and write the last argument; the rest (mkdir, touch,
+      // tee...) only write. A secret file copied anywhere is a secret read.
+      const copies = ['cp', 'mv', 'ln', 'install'].includes(base);
+      pos.forEach((arg, index) => {
+        if (copies && index < pos.length - 1 && arg.text !== null) checkReadPath(arg.text, ctx, result);
         checkWritePath(arg.text, ctx, result);
-      }
+      });
       if (extraDynamic) result.raise('unknown', 'xargs_targets');
       return result;
     }
@@ -565,7 +615,20 @@ function createClassifier(policy, options = {}) {
     return result.merge(handler(base, args, command, ctx, depth, extraDynamic));
   }
 
+  // `grep -c NAME ~/.marrow/env` (count, list or quiet output; the pattern a plain variable name)
+  // reveals only whether a name is present - the owner's own rule for checking credentials. Any
+  // other pattern could probe the value one character at a time, so it stays a secret read.
+  function isNameOnlyGrep(base, args) {
+    if (!['grep', 'egrep', 'fgrep'].includes(base)) return false;
+    const flags = args.filter((a) => a.text !== null && a.text.startsWith('-')).map((a) => a.text);
+    if (flags.some((f) => !/^-(?:[cqlLsFwx]+|-count|-quiet|-silent|-files-with-matches|-files-without-match|-fixed-strings|-word-regexp|-no-messages)$/.test(f))) return false;
+    if (!flags.some((f) => /^-[a-zA-Z]*[cqlL]|^--(?:count|quiet|silent|files-with-matches|files-without-match)$/.test(f))) return false;
+    const positional = args.filter((a) => a.text === null || !a.text.startsWith('-'));
+    return positional.length >= 2 && positional[0].text !== null && /^\^?[A-Za-z_][A-Za-z0-9_]*=?$/.test(positional[0].text);
+  }
+
   function classifyReadProgram(base, args, ctx, result) {
+    if (isNameOnlyGrep(base, args)) return result;
     // A recursive read rooted at the home directory or above reads every credential file in it.
     const recursive = (['grep', 'egrep', 'fgrep'].includes(base) && hasFlag(args, '-r', '-R', '--recursive', '--dereference-recursive'))
       || (['rg', 'ag', 'ack'].includes(base) && hasFlag(args, '--hidden', '-u', '-uu', '-uuu', '--no-ignore'))
@@ -901,7 +964,8 @@ function createClassifier(policy, options = {}) {
           if (/^(?:core\.(?:hookspath|sshcommand|fsmonitor)|alias\.|credential\.|url\.)/.test(key)) return result.raise('risky', 'git_config_sensitive');
           return result.raise('unknown', 'git_config_set');
         }
-        case 'worktree': return pos[0] && ['remove', 'move'].includes(pos[0].text) ? result.raise('unknown', 'git_worktree_remove') : result;
+        // Without --force git refuses to remove a worktree with changes, so plain remove is safe.
+        case 'worktree': return pos[0] && ((pos[0].text === 'remove' && has('-f', '--force')) || pos[0].text === 'move') ? result.raise('unknown', 'git_worktree_remove') : result;
         case 'submodule': return pos[0] && pos[0].text === 'foreach' ? result.raise('unknown', 'git_submodule_foreach') : result;
         case 'filter-branch': case 'filter-repo': return result.raise('risky', 'git_history_rewrite');
         case 'gc': case 'prune': case 'repack': case 'update-ref': case 'replace': case 'notes': case 'lfs': case 'send-email': case 'daemon': case 'svn': case 'p4':

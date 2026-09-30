@@ -92,7 +92,8 @@ const BASELINE_POLICY = Object.freeze({
   shells: ['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'ash', 'busybox'],
   interpreters: ['python', 'python2', 'python3', 'node', 'nodejs', 'ruby', 'perl', 'php', 'deno', 'bun', 'lua', 'rscript', 'osascript', 'pwsh', 'powershell', 'tclsh', 'jshell', 'groovy', 'scala', 'swift', 'irb', 'ipython'],
   routine_python_modules: ['pytest', 'unittest', 'mypy', 'black', 'ruff', 'flake8', 'pylint', 'pip', 'venv', 'json.tool', 'doctest', 'compileall', 'py_compile', 'coverage', 'isort'],
-  routine_npx: ['tsc', 'eslint', 'prettier', 'vitest', 'jest', 'mocha', 'biome', 'c8', 'nyc', 'typescript', 'markdownlint', 'markdownlint-cli2', 'cspell', 'depcheck', 'knip', 'lint-staged', 'playwright'],
+  routine_npx: ['tsc', 'eslint', 'prettier', 'vitest', 'jest', 'mocha', 'biome', 'c8', 'nyc', 'typescript', 'markdownlint', 'markdownlint-cli2', 'cspell', 'depcheck', 'knip', 'lint-staged', 'playwright',
+    'husky', 'vite', 'next', 'webpack', 'webpack-cli', 'rollup', 'esbuild', 'tsup', 'parcel', 'astro', 'nuxi', 'storybook'],
   routine_package_scripts_depth: 3,
 
   programs: {
@@ -126,6 +127,10 @@ const BASELINE_POLICY = Object.freeze({
     npm: { handler: 'pkg' }, pnpm: { handler: 'pkg' }, yarn: { handler: 'pkg' }, bun: { handler: 'bun' },
     npx: { handler: 'npx' }, pnpx: { handler: 'npx' }, bunx: { handler: 'npx' },
     tsc: 'routine', eslint: 'routine', prettier: 'routine', biome: 'routine', jest: 'routine', vitest: 'routine', mocha: 'routine',
+    // Dev servers, bundlers and git-hook installers: they run project config the agent may have
+    // written, so agentd's workspace taint escalates them after process-spawning code is written.
+    husky: 'routine', vite: 'routine', next: 'routine', webpack: 'routine', 'webpack-cli': 'routine', rollup: 'routine', esbuild: 'routine',
+    tsup: 'routine', parcel: 'routine', astro: 'routine', nuxi: 'routine', nuxt: 'routine', storybook: 'routine', gatsby: 'routine', remix: 'routine',
     pytest: 'routine', ruff: 'routine', black: 'routine', mypy: 'routine', flake8: 'routine', pylint: 'routine', isort: 'routine',
     shellcheck: 'routine', actionlint: 'routine', yamllint: 'routine', hadolint: 'routine', golangci_lint: 'routine', 'golangci-lint': 'routine',
     gofmt: 'routine', rustfmt: 'routine', clang_format: 'routine', 'clang-format': 'routine', cloc: 'routine', tokei: 'routine',

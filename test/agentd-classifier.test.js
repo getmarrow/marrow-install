@@ -42,18 +42,28 @@ const ROUTINE_COMMANDS = [
   'which node', 'env | grep PATH', 'printf "%s\\n" a b', 'bash ./safe.sh', 'git -C . status', 'marrow-agentd status',
 ];
 
-test('ADV-06 corpus: no adversarial form is routine (every one reaches the server gate)', () => {
+// Maps the corpus's /home/u/proj/ paths into the test workspace for EVERY entry (bash and tool
+// inputs alike), so writes land inside the workspace as they would for a real agent.
+function corpusEvent(item, ws) {
+  const fix = (value) => (typeof value === 'string' ? value.replaceAll('/home/u/proj/', `${ws.proj}/`) : value);
+  if (item.kind === 'bash') return { tool_name: 'Bash', tool_input: { command: fix(item.cmd) }, cwd: ws.proj };
+  return { tool_name: item.tool, tool_input: JSON.parse(JSON.stringify(item.input), (k, v) => fix(v)), cwd: ws.proj };
+}
+
+test('ADV-06 corpus: 75 of 76 forms reach the gate; the one routine form is a plain in-workspace file write whose execution is gated', () => {
   const ws = workspace();
   try {
     const routine = [];
     for (const item of CORPUS) {
-      const event = item.kind === 'bash'
-        ? { tool_name: 'Bash', tool_input: { command: item.cmd.replace('/home/u/proj/', `${ws.proj}/`) }, cwd: ws.proj }
-        : { tool_name: item.tool, tool_input: item.input, cwd: ws.proj };
-      const result = ws.classifier.classify(event);
-      if (result.class === 'routine') routine.push(item.id);
+      if (ws.classifier.classify(corpusEvent(item, ws)).class === 'routine') routine.push(item.id);
     }
-    assert.deepEqual(routine, [], `routine (would skip the server gate): ${routine.join(', ')}`);
+    // h9-writesh is step 1 of the "write a script, then run it" laundering form: writing a file
+    // inside the workspace is routine work by design. Step 2 - running it - is what the gate
+    // must see, and every execution form of that file is classified by its content (risky).
+    assert.deepEqual(routine, ['h9-writesh']);
+    for (const id of ['h9-runsh', 'h9-runsh2', 'h9-chmod-run', 'h9-src', 'h10-timeout', 'h10-nice']) {
+      assert.equal(ws.classifier.classify(corpusEvent(CORPUS.find((c) => c.id === id), ws)).class, 'risky', id);
+    }
   } finally { fs.rmSync(ws.root, { recursive: true, force: true }); }
 });
 
@@ -64,11 +74,7 @@ test('ADV-06 corpus: the reproduced evasion classes are risky, not just unknown'
       'h5-pyexf1', 'h5-xxd', 'h6-npmrun1', 'h6-npmrun2', 'h6-pnpm', 'h7-ssh1', 'h7-dcompose', 'h9-runsh', 'h9-src', 'cfg-settings', 'cfg-mcp',
       'cfg-envrm', 'mcp-readverb1', 'mcp-readverb2', 'mcp-readverb3', 'mcp-noprefix1', 'h10-timeout', 'h10-xargs0', 'h10-binrm', 'ctl-rm', 'ctl-pub'];
     for (const id of expectRisky) {
-      const item = CORPUS.find((c) => c.id === id);
-      const event = item.kind === 'bash'
-        ? { tool_name: 'Bash', tool_input: { command: item.cmd.replace('/home/u/proj/', `${ws.proj}/`) }, cwd: ws.proj }
-        : { tool_name: item.tool, tool_input: item.input, cwd: ws.proj };
-      assert.equal(ws.classifier.classify(event).class, 'risky', id);
+      assert.equal(ws.classifier.classify(corpusEvent(CORPUS.find((c) => c.id === id), ws)).class, 'risky', id);
     }
   } finally { fs.rmSync(ws.root, { recursive: true, force: true }); }
 });
@@ -275,4 +281,55 @@ test('second-pass bypass forms: PATH directories, /dev/tcp, broad recursive chmo
   assert.notEqual(cls('grep -r token ~'), 'routine');
   assert.equal(cls('grep -rn TODO src'), 'routine');
   assert.notEqual(cls('rm -rf ${HOME}/x'), 'routine');
+});
+
+test('audit F2: ordinary environment settings and targeted globs stay routine; dangerous ones do not', () => {
+  const classifier = createClassifier(BASELINE_POLICY, { home: '/home/probeuser' });
+  const cls = (command) => classifier.classify({ tool_name: 'Bash', tool_input: { command }, cwd: '/srv/work/proj' }).class;
+  for (const command of ['export NODE_ENV=test', 'GIT_AUTHOR_NAME=x git commit -m y', 'PYTHONUNBUFFERED=1 python3 -m pytest', 'rm -f *.log', 'rm *.tmp', 'rm -rf */build', 'rm -rf src/*', 'rm -f build/*.o']) {
+    assert.equal(cls(command), 'routine', command);
+  }
+  for (const command of ['export NODE_OPTIONS=--require=./x.js', 'NODE_PATH=./evil node --test', 'GIT_SSH_COMMAND=./x git fetch', 'export PYTHONPATH=./evil', 'npm_config_script_shell=./x npm test']) {
+    assert.notEqual(cls(command), 'routine', command);
+  }
+  for (const command of ['rm -rf *', 'rm -rf ./*', 'rm -rf .*', 'rm -rf ~/*', 'rm -rf */', 'rm -rf ../*', 'rm -rf /*', 'rm -rf /srv/*']) {
+    assert.equal(cls(command), 'risky', command);
+  }
+});
+
+test('home data writes, plain worktree removal and name-only credential checks are routine; their dangerous neighbours are not', () => {
+  const classifier = createClassifier(BASELINE_POLICY, { home: '/home/probeuser' });
+  const cls = (command) => classifier.classify({ tool_name: 'Bash', tool_input: { command }, cwd: '/srv/work/proj' }).class;
+  const write = (file) => classifier.classify({ tool_name: 'Write', tool_input: { file_path: file, content: 'x' }, cwd: '/srv/work/proj' }).class;
+  assert.equal(write('/home/probeuser/agents/bob/results/report.md'), 'routine');
+  assert.equal(write('/home/probeuser/notes.md'), 'routine');
+  assert.notEqual(write('/home/probeuser/.config/autostart/x.desktop'), 'routine');
+  assert.notEqual(write('/home/probeuser/.vimrc'), 'routine');
+  assert.notEqual(write('/home/probeuser/Library/Application Support/Code/User/settings.json'), 'routine');
+  assert.equal(write('/home/probeuser/bin/ls'), 'risky');
+  assert.notEqual(write('/opt/tools/x'), 'routine');
+  assert.equal(cls('rm -rf ~/projects'), 'risky');
+  assert.notEqual(cls("echo 'npm publish' > ~/agents/x.sh && bash ~/agents/x.sh"), 'routine');
+  assert.equal(cls('git worktree remove ../wt-old'), 'routine');
+  assert.notEqual(cls('git worktree remove --force ../wt-old'), 'routine');
+  assert.equal(cls('grep -c MARROW_API_KEY ~/.marrow/env'), 'routine');
+  assert.equal(cls("grep -q '^MARROW_API_KEY=' ~/.marrow/env"), 'routine');
+  assert.equal(cls("grep -c 'MARROW_API_KEY=mrw_live_a' ~/.marrow/env"), 'risky', 'a value prefix probe is a secret read');
+  assert.equal(cls('grep -c MARROW.API ~/.marrow/env'), 'risky');
+  assert.equal(cls('grep -o MARROW_API_KEY ~/.marrow/env'), 'risky');
+  assert.equal(cls('grep MARROW_API_KEY ~/.marrow/env'), 'risky', 'without -c/-q/-l the matching line (and value) is printed');
+});
+
+test('friction refinements stay fail-safe: dev tools, cp destinations, workspace .env files, loopback GETs', () => {
+  const classifier = createClassifier(BASELINE_POLICY, { home: '/home/probeuser' });
+  const cls = (command) => classifier.classify({ tool_name: 'Bash', tool_input: { command }, cwd: '/srv/work/proj' }).class;
+  for (const command of ['npx vite build', 'npx next build', 'husky', 'npx tsup src/index.ts', 'curl -s http://localhost:3000/health', 'curl -s http://127.0.0.1:8787/api/status']) {
+    assert.equal(cls(command), 'routine', command);
+  }
+  assert.equal(cls('cp .env.example .env.test'), 'unknown', 'creating a project .env goes to the gate, it is not a secret read');
+  assert.equal(cls('cp .env .env.backup'), 'risky', 'copying a real .env is a secret read');
+  assert.equal(cls('cp notes.txt ~/.aws/credentials'), 'risky');
+  assert.notEqual(cls('curl -s http://169.254.169.254/latest/meta-data/'), 'routine');
+  assert.notEqual(cls('curl -s http://10.0.0.5/admin'), 'routine');
+  assert.notEqual(cls('curl -X POST http://localhost:3000/api/reset'), 'routine');
 });
