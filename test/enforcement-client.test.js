@@ -54,5 +54,5 @@ test('enforcement requests omit agent_id so the server resolves the key-bound or
   assert.equal(Object.hasOwn(calls[0].body, 'protocol_version'), false);
   assert.equal(Object.hasOwn(calls[3].body, 'protocol_version'), false);
   assert.equal(HEARTBEAT_REQUEST_TIMEOUT_MS, 15_000);
-  assert.deepEqual(calls.map((call) => call.requestOptions), [undefined, undefined, undefined, { timeoutMs: 15_000 }]);
+  assert.deepEqual(calls.map((call) => call.requestOptions), [{ timeoutMs: 15_000 }, { timeoutMs: 15_000 }, { timeoutMs: 15_000 }, { timeoutMs: 15_000 }]);
 });

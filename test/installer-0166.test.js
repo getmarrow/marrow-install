@@ -14,10 +14,12 @@ const {
   detectedClient,
   install,
   installSummaryLines,
+  printReport,
   runSelfTest,
   stableAgentId,
 } = require('../src/installer');
-const { planHermesMcpConfig } = require('../src/hermes-config');
+const { planHermesMcpConfig, redactUndoLines } = require('../src/hermes-config');
+const { readOwnerApiKey } = require('../src/owner-env');
 
 const BIN = path.join(__dirname, '..', 'bin', 'marrow-install.js');
 const MCP_PIN = '@getmarrow/mcp@3.9.97';
@@ -27,6 +29,19 @@ const command = (entrypoint) => `npx -y --package=${MCP_PIN} marrow-mcp ${entryp
 
 function tempDir(prefix = 'marrow-0166-') {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+}
+
+function filesContaining(root, needle) {
+  const found = [];
+  const walk = (directory) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const full = path.join(directory, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.isFile() && fs.readFileSync(full, 'utf8').includes(needle)) found.push(path.relative(root, full));
+    }
+  };
+  walk(root);
+  return found.sort();
 }
 
 // The Claude hook reconciliation that `marrow-mcp setup` performs in MCP 3.9.97 (be607e1d,
@@ -280,6 +295,7 @@ function hermesInstall(project, home, extra = {}) {
   });
 }
 
+const OTHER_SERVER_SECRET = 'fixture-other-server-credential';
 const HERMES_CONFIG = [
   '# Hermes settings',
   'model:',
@@ -289,13 +305,15 @@ const HERMES_CONFIG = [
   '    command: gh',
   '    args:',
   '    - mcp',
+  '    env:',
+  `      GITHUB_TOKEN: ${OTHER_SERVER_SECRET}`,
   '# after servers',
   'toolsets:',
   '- web',
   '',
 ].join('\n');
 
-test('Hermes MCP wiring is added once, preserves the file, backs it up privately and is idempotent', async () => {
+test('Hermes MCP wiring is added once, keeps the file, makes no copy of it and leaves redacted undo steps', async () => {
   const project = tempDir();
   const home = hermesHome(HERMES_CONFIG);
   const configPath = path.join(home, '.hermes', 'config.yaml');
@@ -308,9 +326,24 @@ test('Hermes MCP wiring is added once, preserves the file, backs it up privately
     assert.match(after, /\n {2}marrow:\n {4}command: npx\n {4}args: \["-y", "--package=@getmarrow\/mcp@3\.9\.97", "marrow-mcp"\]\n {4}env:\n {6}MARROW_CLIENT: hermes\n# after servers/);
     assert.doesNotMatch(after, /MARROW_API_KEY|mrw_fixture/);
     assert.equal(fs.statSync(configPath).mode & 0o777, 0o600);
-    assert.ok(first.hermes.backup_path);
-    assert.equal(fs.readFileSync(first.hermes.backup_path, 'utf8'), HERMES_CONFIG);
-    assert.equal(fs.statSync(first.hermes.backup_path).mode & 0o777, 0o600);
+    // The owner rule: no copy of a file that holds credentials, anywhere.
+    assert.deepEqual(fs.readdirSync(path.join(home, '.hermes')), ['config.yaml']);
+    assert.deepEqual(filesContaining(home, OTHER_SERVER_SECRET), ['.hermes/config.yaml']);
+    assert.deepEqual(filesContaining(project, OTHER_SERVER_SECRET), []);
+    assert.equal(Object.hasOwn(first.hermes, 'backup_path'), false);
+    // Undo steps name only the marrow lines, with every env value but MARROW_CLIENT redacted.
+    assert.deepEqual(first.hermes.undo, [{ change: 'added', lines: [
+      '  marrow:',
+      '    command: npx',
+      '    args: ["-y", "--package=@getmarrow/mcp@3.9.97", "marrow-mcp"]',
+      '    env:',
+      '      MARROW_CLIENT: hermes',
+    ] }]);
+    let log = '';
+    printReport(first, (text) => { log += text; });
+    assert.match(log, /no backup is kept because the file holds other servers' credentials/);
+    assert.match(log, /remove these added lines:\n {4}  marrow:/);
+    assert.doesNotMatch(log, new RegExp(`${OTHER_SERVER_SECRET}|mrw_fixture`));
     // Hermes passes only HOME/PATH to MCP servers, so the key goes to the owner-only store.
     assert.equal(first.hermes.key_source, 'owner_env_file');
     assert.equal(first.hermes.owner_key_storage.state, 'written');
@@ -318,15 +351,15 @@ test('Hermes MCP wiring is added once, preserves the file, backs it up privately
     assert.equal(fs.statSync(ownerEnv).mode & 0o777, 0o600);
     assert.equal(fs.statSync(path.dirname(ownerEnv)).mode & 0o777, 0o700);
     assert.match(fs.readFileSync(ownerEnv, 'utf8'), /^MARROW_API_KEY=mrw_fixture_hermes_key\n$/);
-    assert.doesNotMatch(JSON.stringify(first), /mrw_fixture_hermes_key/);
+    assert.doesNotMatch(JSON.stringify(first), new RegExp(`mrw_fixture_hermes_key|${OTHER_SERVER_SECRET}`));
     assert.ok(first.harnessReload.clients.some((entry) => entry.client === 'hermes'));
 
-    const backups = () => fs.readdirSync(path.join(home, '.hermes')).filter((name) => name.includes('marrow-backup'));
     const second = await hermesInstall(project, home);
     assert.equal(second.hermes.state, 'already_configured');
+    assert.equal(second.hermes.undo, null);
     assert.equal(second.hermes.owner_key_storage.state, 'present');
     assert.equal(fs.readFileSync(configPath, 'utf8'), after);
-    assert.equal(backups().length, 1);
+    assert.deepEqual(fs.readdirSync(path.join(home, '.hermes')), ['config.yaml']);
 
     const dryHome = hermesHome(HERMES_CONFIG);
     try {
@@ -341,6 +374,26 @@ test('Hermes MCP wiring is added once, preserves the file, backs it up privately
     fs.rmSync(project, { recursive: true, force: true });
     fs.rmSync(home, { recursive: true, force: true });
   }
+});
+
+test('Hermes undo notes redact every value that could be a credential', () => {
+  const lines = redactUndoLines([
+    '  marrow:',
+    '    command: npx',
+    '    args: ["-y", "--api-key", "fixture-arg-secret", "--token=fixture-inline-secret", "marrow-mcp"]',
+    '    env:',
+    '      MARROW_CLIENT: hermes',
+    '      MARROW_API_KEY: fixture-env-secret',
+    '      OTHER: "${OTHER}"',
+    '    other_args:',
+    '    - --auth',
+    '    - fixture-seq-secret',
+  ]);
+  assert.doesNotMatch(lines.join('\n'), /fixture-(?:arg|inline|env|seq)-secret|\$\{OTHER\}/);
+  assert.ok(lines.includes('      MARROW_CLIENT: hermes'));
+  assert.ok(lines.includes('    args: ["-y", "--api-key", "[redacted]", "--token=[redacted]", "marrow-mcp"]'));
+  assert.ok(lines.includes('      MARROW_API_KEY: [redacted]'));
+  assert.deepEqual(redactUndoLines(['      MARROW_CLIENT: custom', '      TOKEN: fixture-x'], true), ['      MARROW_CLIENT: custom', '      TOKEN: [redacted]']);
 });
 
 test('Hermes wiring keeps an existing entry\'s own env keys and prefers a Hermes .env reference', async () => {
@@ -388,6 +441,12 @@ test('Hermes wiring refuses a config it cannot edit safely and prints the exact 
     flow: 'mcp_servers: {github: {command: gh}}\n',
     duplicate: 'mcp_servers:\n  a:\n    command: x\nmcp_servers:\n  b:\n    command: y\n',
     blockScalar: 'mcp_servers:\n  marrow:\n    command: |\n      npx\n',
+    byteOrderMark: '\ufeffmcp_servers:\n  other:\n    command: o\n',
+    complexKey: '? mcp_servers\n: other:\n    command: o\n',
+    indentedRoot: '  model: x\n  mcp_servers:\n    other:\n      command: o\n',
+    quotedAcrossLines: 'note: "hello\nmcp_servers:\n  x: y"\nmodel: x\n',
+    customArgs: 'mcp_servers:\n  marrow:\n    command: npx\n    args:\n    - -y\n    - "@getmarrow/mcp@3.9.90"\n    - --api-key\n    - fixture-arg-value\n',
+    customCommand: 'mcp_servers:\n  marrow:\n    command: /opt/example/wrapper.sh\n',
   };
   try {
     fs.writeFileSync(path.join(project, 'package.json'), '{}\n');
@@ -400,11 +459,18 @@ test('Hermes wiring refuses a config it cannot edit safely and prints the exact 
         assert.deepEqual(fs.readdirSync(path.join(home, '.hermes')).filter((entry) => entry.includes('backup')), [], name);
         assert.match(report.hermes.exact_fix, /mcp_servers:\n {2}marrow:\n {4}command: npx/);
         assert.match(report.hermes.exact_fix, /@getmarrow\/mcp@3\.9\.97/);
+        assert.doesNotMatch(JSON.stringify(report), /fixture-arg-value/);
       } finally {
         fs.rmSync(home, { recursive: true, force: true });
       }
     }
     assert.equal(planHermesMcpConfig('mcp_servers:\n  marrow:\n    url: https://mcp.example\n', { mcpPackageSpec: MCP_PIN }).action, 'unchanged');
+    // A key-looking line inside a nested multi-line string is content, never a second mcp_servers.
+    const nested = 'agent:\n  prompt: "line one\nmcp_servers:\n    fake: 1"\nmcp_servers:\n  other:\n    command: o\n';
+    const planned = planHermesMcpConfig(nested, { mcpPackageSpec: MCP_PIN });
+    assert.equal(planned.action, 'update');
+    assert.ok(planned.content.startsWith('agent:\n  prompt: "line one\nmcp_servers:\n    fake: 1"\nmcp_servers:\n  other:\n    command: o\n  marrow:\n'));
+    assert.equal(planHermesMcpConfig(planned.content, { mcpPackageSpec: MCP_PIN }).action, 'unchanged');
   } finally {
     fs.rmSync(project, { recursive: true, force: true });
   }
@@ -481,6 +547,7 @@ test('the self-test never sends a derived id and activates the server-resolved s
   assert.equal(seat.result.agent_id, 'free-seat-gdj');
   assert.equal(seat.result.agent_id_source, 'server_status_identity');
   assert.equal(seat.result.activation_verified, true);
+  assert.equal(seat.result.decision_committed, true);
   const firstValue = seat.calls.find((call) => call.href.endsWith('/v1/agent/first-value')).body;
   assert.equal(firstValue.agent_id, 'free-seat-gdj');
   const event = seat.calls.find((call) => call.href.endsWith('/v1/agent/integrations/events')).body;
@@ -552,28 +619,111 @@ test('the self-test retries transient runtime and first-value answers with a sta
   );
 });
 
-test('maintenance keeps owner identity and removes a derived agent id from MCP config (R-19, F-C)', () => {
+test('managed MCP config carries the configured identity; other values are reset and reported unless allowlisted (R-19, ADV-05)', () => {
   const root = tempDir();
   try {
     fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
     const mcpPath = path.join(root, '.mcp.json');
     const write = (env) => fs.writeFileSync(mcpPath, JSON.stringify({ mcpServers: { marrow: { command: 'npx', args: [], env } } }));
-    const plan = (options) => {
-      applyPlan(buildPlan(detectEnvironment(root, { HOME: root, PATH: process.env.PATH }), { mode: 'mcp', ...options }), { yes: true, dryRun: false, doctor: false });
-      return JSON.parse(fs.readFileSync(mcpPath, 'utf8')).mcpServers.marrow.env;
+    const run = (options) => {
+      const change = applyPlan(buildPlan(detectEnvironment(root, { HOME: root, PATH: process.env.PATH }), { mode: 'mcp', ...options }), { yes: true, dryRun: false, doctor: false })
+        .find((entry) => entry.label === 'Project MCP server config');
+      return { change, env: JSON.parse(fs.readFileSync(mcpPath, 'utf8')).mcpServers.marrow.env };
     };
+    // A planted redirect and a foreign agent id are replaced by the controller's own values.
+    write({ MARROW_BASE_URL: 'https://fixture-user:fixture-pass@redirect.example.test:8443/api', MARROW_FLEET_AGENT_ID: 'someone-elses-agent' });
+    const maintained = run({ maintenance: true, baseUrl: 'https://api.getmarrow.ai', agentId: '', identityAllowlist: { baseUrls: new Set(), agentIds: new Set() } });
+    assert.equal(maintained.env.MARROW_BASE_URL, 'https://api.getmarrow.ai');
+    assert.equal(Object.hasOwn(maintained.env, 'MARROW_FLEET_AGENT_ID'), false);
+    assert.deepEqual(maintained.change.identity_divergence, [
+      { field: 'MARROW_BASE_URL', replaced: 'https://redirect.example.test:8443', applied: 'https://api.getmarrow.ai' },
+      { field: 'MARROW_FLEET_AGENT_ID', replaced: 'someone-elses-agent', applied: 'unset (resolved by Marrow)' },
+    ]);
+    assert.doesNotMatch(JSON.stringify(maintained.change), /fixture-pass|fixture-user/);
+
+    // Owner-allowlisted values are kept, and nothing is reported.
     write({ MARROW_BASE_URL: 'https://staging.example.test', MARROW_FLEET_AGENT_ID: 'owner-registered-agent' });
-    const maintained = plan({ preserveIdentity: true, baseUrl: 'https://api.getmarrow.ai', agentId: '' });
-    assert.equal(maintained.MARROW_BASE_URL, 'https://staging.example.test');
-    assert.equal(maintained.MARROW_FLEET_AGENT_ID, 'owner-registered-agent');
+    const allowed = run({
+      maintenance: true,
+      baseUrl: 'https://api.getmarrow.ai',
+      agentId: '',
+      identityAllowlist: { baseUrls: new Set(['https://staging.example.test']), agentIds: new Set(['owner-registered-agent']) },
+    });
+    assert.equal(allowed.env.MARROW_BASE_URL, 'https://staging.example.test');
+    assert.equal(allowed.env.MARROW_FLEET_AGENT_ID, 'owner-registered-agent');
+    assert.equal(allowed.change?.identity_divergence, undefined);
 
+    // An id generated by an earlier installer is removed without a report; a configured id wins.
     write({ MARROW_BASE_URL: 'https://api.getmarrow.ai', MARROW_FLEET_AGENT_ID: stableAgentId(root, 'custom') });
-    assert.equal(Object.hasOwn(plan({ agentId: '' }), 'MARROW_FLEET_AGENT_ID'), false);
+    const migrated = run({ agentId: '' });
+    assert.equal(Object.hasOwn(migrated.env, 'MARROW_FLEET_AGENT_ID'), false);
+    assert.equal(migrated.change.identity_divergence, undefined);
+    assert.equal(run({ agentId: 'configured-agent' }).env.MARROW_FLEET_AGENT_ID, 'configured-agent');
 
-    assert.equal(plan({ agentId: 'configured-agent' }).MARROW_FLEET_AGENT_ID, 'configured-agent');
+    const summary = installSummaryLines({
+      selfTest: { skipped: false, active: true, decision_id: 'dec_x', decision_committed: true },
+      activation: { agent_id: 'a', agent_id_source: 'server_status_identity' },
+      changes: [maintained.change],
+    }, {}).lines;
+    assert.ok(summary.some((line) => line.startsWith('MCP config identity reset: MARROW_BASE_URL in ')));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('the summary reports an untrusted self-test commit, the key file used, and disagreeing key files', () => {
+  const untrusted = installSummaryLines({ selfTest: { skipped: false, active: true, decision_id: 'dec_u', decision_committed: false } }, {});
+  assert.equal(untrusted.selfTestFailed, true);
+  assert.match(untrusted.lines[0], /self-test decision dec_u was recorded without trusted closure \(committed was not true\)\. Fix: /);
+
+  const home = tempDir('marrow-0166-keys-');
+  try {
+    fs.mkdirSync(path.join(home, '.marrow'), { mode: 0o700 });
+    fs.writeFileSync(path.join(home, '.marrow', 'env'), 'MARROW_API_KEY=fixture-key-one\n', { mode: 0o600 });
+    assert.deepEqual(readOwnerApiKey(home), { apiKey: 'fixture-key-one', source: path.join(home, '.marrow', 'env'), conflict: false });
+    fs.writeFileSync(path.join(home, '.marrow', 'env.local'), 'MARROW_API_KEY=fixture-key-two\n', { mode: 0o600 });
+    const stored = readOwnerApiKey(home);
+    assert.equal(stored.source, path.join(home, '.marrow', 'env.local'));
+    assert.equal(stored.conflict, true);
+    const lines = installSummaryLines({
+      selfTest: { skipped: false, active: true, decision_id: 'dec_k', decision_committed: true },
+      activation: {},
+      api_key: { source: 'owner_env_file', path: stored.source, owner_files_disagree: true },
+    }, {}).lines;
+    assert.ok(lines.includes(`API key: read from ${stored.source}.`));
+    assert.ok(lines.some((line) => line.startsWith('Warning: ~/.marrow/env.local and ~/.marrow/env hold different Marrow keys.')));
+    assert.doesNotMatch(lines.join('\n'), /fixture-key-(?:one|two)/);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('self-test writes stop at their time limits instead of hanging the install', async () => {
+  const originalFetch = global.fetch;
+  let attempts = 0;
+  global.fetch = (url, request = {}) => new Promise((resolve, reject) => {
+    attempts += 1;
+    request.signal?.addEventListener('abort', () => reject(Object.assign(new Error('timed out'), { name: 'TimeoutError' })));
+  });
+  const started = Date.now();
+  // The request timers are unref'd, as a real socket would keep the process alive instead.
+  const keepAlive = setInterval(() => {}, 1_000);
+  try {
+    await assert.rejects(runSelfTest({
+      selfTest: true,
+      apiKey: 'mrw_fixture_timeout',
+      baseUrl: 'https://api.example.test',
+      agentId: '',
+      selfTestRetryDelayMs: 0,
+      selfTestAttemptTimeoutMs: 40,
+      selfTestDeadlineMs: 2_000,
+    }), /self-test did not return decision_id after 3 attempts \(last: timed out\)/);
+  } finally {
+    clearInterval(keepAlive);
+    global.fetch = originalFetch;
+  }
+  assert.equal(attempts, 3);
+  assert.ok(Date.now() - started < 2_000);
 });
 
 function runBin(args, { cwd, env, input } = {}) {
@@ -707,10 +857,10 @@ test('first install runs the self-test and prints one summary line with the full
     assert.equal(failed.selfTestFailed, true);
     assert.equal(failed.lines[0], `Marrow ${INSTALLER_VERSION}: self-test failed: HTTP 503: store timeout. Fix: npx -y @getmarrow/install@latest doctor --self-test`);
     const restarted = installSummaryLines({
-      selfTest: { skipped: false, active: true, decision_id: 'dec_restart' },
+      selfTest: { skipped: false, active: true, decision_id: 'dec_restart', decision_committed: true },
       activation: { agent_id: 'free-seat-summary', agent_id_source: 'server_status_identity' },
       controller: { active: true, changed: true, restarted: { from_versions: ['0.1.63 (legacy)'], to_version: INSTALLER_VERSION } },
-      hermes: { state: 'configured', config_path: '/home/example/.hermes/config.yaml', backup_path: '/home/example/.hermes/config.yaml.marrow-backup-x', owner_key_storage: { state: 'written' } },
+      hermes: { state: 'configured', config_path: '/home/example/.hermes/config.yaml', undo: [], owner_key_storage: { state: 'written' } },
     }, {}).lines;
     assert.ok(restarted.includes(`Controller restarted: 0.1.63 (legacy) -> ${INSTALLER_VERSION}.`));
     assert.ok(restarted.some((line) => line.startsWith('Hermes: added the Marrow MCP server to /home/example/.hermes/config.yaml')));

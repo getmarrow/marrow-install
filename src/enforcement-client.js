@@ -2,6 +2,8 @@ const crypto = require('node:crypto');
 
 // A background heartbeat must never hang on a stalled API response.
 const HEARTBEAT_REQUEST_TIMEOUT_MS = 15_000;
+// Nor may a permit call hold a protected command open indefinitely; it fails closed instead.
+const PERMIT_REQUEST_TIMEOUT_MS = 15_000;
 
 function sha256(value) {
   return crypto.createHash('sha256').update(String(value || '')).digest('hex');
@@ -51,7 +53,7 @@ async function issueActionPermit(requestJson, options, input) {
     owner_approval_receipt_id: input.ownerApproval || null,
     surfaces: Array.isArray(input.surfaces) ? input.surfaces : [],
     proof_requirements: Array.isArray(input.proofRequirements) ? input.proofRequirements : [],
-  });
+  }, { timeoutMs: PERMIT_REQUEST_TIMEOUT_MS });
 }
 
 async function verifyActionPermit(requestJson, options, input) {
@@ -64,7 +66,7 @@ async function verifyActionPermit(requestJson, options, input) {
     session_id: options.sessionId,
     agent_id: configuredAgentId(options),
     harness: options.client,
-  });
+  }, { timeoutMs: PERMIT_REQUEST_TIMEOUT_MS });
 }
 
 async function closeActionPermit(requestJson, options, input) {
@@ -77,7 +79,7 @@ async function closeActionPermit(requestJson, options, input) {
     success: Boolean(input.success),
     evidence: input.evidence || {},
     protocol_version: permitProtocolVersion(input),
-  });
+  }, { timeoutMs: PERMIT_REQUEST_TIMEOUT_MS });
 }
 
 async function recordEnforcementHeartbeat(requestJson, options, input = {}) {
@@ -100,6 +102,7 @@ async function readEnforcementCoverage(requestJson, options) {
 
 module.exports = {
   HEARTBEAT_REQUEST_TIMEOUT_MS,
+  PERMIT_REQUEST_TIMEOUT_MS,
   actionBinding,
   sha256,
   permitProtocolVersion,

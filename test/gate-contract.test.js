@@ -446,3 +446,99 @@ test('installer output never suggests an invented agent id (F-F)', async () => {
     assert.doesNotMatch(text, /hermes-prod|hermes-agent-name|codex-prod|ci-release|openclaw-release|deploy-agent/);
   }
 });
+
+test('each run, gate and permit uses fresh Idempotency-Keys even in the same session; proof keeps its own', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-gate-nonce-'));
+  const api = stubApi({
+    '/v1/agent/runtime': { ...SHAPES.slimAdvisory, decision_id: undefined, runtime_authorization: { id: 'gr_nonce', decision_state: 'not_created' }, gate_receipt_id: 'gr_nonce', risk_level: 'low', decision: 'proceed' },
+    '/v1/agent/think': { decision_id: 'dec_nonce' },
+    '/v1/agent/commit': { committed: true },
+  });
+  const stdout = captureStdout();
+  try {
+    for (const run of [1, 2]) {
+      const marker = path.join(directory, `ran-${run}`);
+      await runGoverned(parseArgs(['run', '--key', 'test-key', '--session', 'shared-session', '--type', 'general', '--action', 'same action', '--', ...markerCommand(marker)]));
+    }
+    await gateOnly(parseArgs(['gate', '--key', 'test-key', '--session', 'shared-session', 'same action']));
+    await gateOnly(parseArgs(['gate', '--key', 'test-key', '--session', 'shared-session', 'same action']));
+    for (let proof = 0; proof < 2; proof += 1) {
+      await proofOnly(parseArgs(['proof', '--key', 'test-key', '--session', 'shared-session', '--decision-id', 'dec_nonce', '--success']));
+    }
+  } finally {
+    stdout.restore();
+    api.restore();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+  const keys = (route) => api.calls.filter((call) => call.pathname === route).map((call) => call.headers['idempotency-key']);
+  const runtimeKeys = keys('/v1/agent/runtime');
+  assert.equal(runtimeKeys.length, 4);
+  assert.equal(new Set(runtimeKeys).size, 4);
+  assert.equal(new Set(keys('/v1/agent/think')).size, 2);
+  const commitKeys = keys('/v1/agent/commit');
+  assert.equal(commitKeys.length, 4);
+  assert.notEqual(commitKeys[0], commitKeys[1]);
+  assert.equal(commitKeys[2], commitKeys[3]);
+});
+
+test('an answer that withholds authorization blocks under every plan and policy', async () => {
+  const observation = {
+    ok: true,
+    decision_id: 'rtdec_observation',
+    runtime_authorization: { id: 'outcome_observation_only_0123456789abcdef0123456789abcdef', kind: 'outcome_observation_only', decision_state: 'outcome_observation_only' },
+    risk_gate: { allow: false, enforced: false, decision: 'outcome_observation_only', enforcement_decision: 'outcome_observation_only', authorization_granted: false },
+    enforcement_decision: 'outcome_observation_only',
+    risk_gate_enforced: false,
+  };
+  const slimObservation = { decision: 'outcome_observation_only', enforcement_decision: 'outcome_observation_only', risk_gate_enforced: false };
+  for (const policy of ['enforce', 'warn', 'audit']) {
+    for (const shape of [observation, slimObservation, { ...SHAPES.expandedAdvisory, risk_gate: { ...SHAPES.expandedAdvisory.risk_gate, allow: false } }]) {
+      assert.equal(shouldBlock(gateDecision(shape), { policy, ownerApproval: 'owner-approval-ref' }), true, `${policy} ${JSON.stringify(shape).slice(0, 60)}`);
+    }
+  }
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-gate-observation-'));
+  const marker = path.join(directory, 'ran');
+  const api = stubApi({ '/v1/agent/runtime': observation, '/v1/agent/commit': { committed: true } });
+  const stdout = captureStdout();
+  let result;
+  try {
+    result = await runGoverned(parseArgs(['run', '--key', 'test-key', '--policy', 'audit', '--type', 'general', '--', ...markerCommand(marker)]));
+  } finally {
+    stdout.restore();
+    api.restore();
+  }
+  assert.equal(result.blocked, true);
+  assert.equal(result.exitCode, 12);
+  assert.match(result.message, /observation-only mode, which cannot authorize this action/);
+  assert.equal(fs.existsSync(marker), false);
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test('a hung Marrow write times out and a protected command fails closed within its deadline', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-gate-timeout-'));
+  const marker = path.join(directory, 'ran');
+  const originalFetch = globalThis.fetch;
+  let attempts = 0;
+  globalThis.fetch = (url, init = {}) => new Promise((resolve, reject) => {
+    attempts += 1;
+    init.signal?.addEventListener('abort', () => reject(Object.assign(new Error('timed out'), { name: 'TimeoutError' })));
+  });
+  const keepAlive = setInterval(() => {}, 1_000);
+  const started = Date.now();
+  let result;
+  try {
+    const parsed = parseArgs(['run', '--key', 'test-key', '--type', 'deploy', '--action', 'deploy production', '--', ...markerCommand(marker)]);
+    Object.assign(parsed.options, { retryDelayMs: 0, requestTimeoutMs: 40, requestDeadlineMs: 2_000 });
+    result = await runGoverned(parsed);
+  } finally {
+    clearInterval(keepAlive);
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(result.blocked, true);
+  assert.equal(result.exitCode, 13);
+  assert.match(result.message, /did not complete after 3 attempts \(last: timed out\)/);
+  assert.equal(attempts, 3);
+  assert.equal(fs.existsSync(marker), false);
+  assert.ok(Date.now() - started < 2_000);
+  fs.rmSync(directory, { recursive: true, force: true });
+});

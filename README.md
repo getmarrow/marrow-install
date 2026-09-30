@@ -121,10 +121,10 @@ MARROW_API_KEY=mrw_live_... npx -y @getmarrow/install@latest update
 First install is the same command without `update`. On its own, the command now:
 
 - restarts a running controller that a different installer version started, so `controller stop` and `controller ensure` are no longer separate steps. Local control stays enabled or disabled as the owner left it;
-- detects Hermes from `~/.hermes/config.yaml` (or `$HERMES_HOME`) or `hermes` on `PATH`, and adds or refreshes `mcp_servers.marrow` with the pinned MCP server and `MARROW_CLIENT: hermes`. The rest of the file, comments included, is kept, and a timestamped backup (mode 600) is taken first. If the file cannot be edited safely, it is left untouched and the exact block to add is printed;
+- detects Hermes from `~/.hermes/config.yaml` (or `$HERMES_HOME`) or `hermes` on `PATH`, and adds or refreshes `mcp_servers.marrow` with the pinned MCP server and `MARROW_CLIENT: hermes`. The rest of the file, comments included, is kept. No copy of the file is made, because it holds other servers' credentials; the private log lists only the `mcp_servers.marrow` lines added or replaced, with values redacted, as undo steps. The edit is verified before it is written. If the file cannot be edited safely, or the existing `marrow` entry has a custom command or custom arguments, it is left untouched and the exact block to add is printed;
 - needs no `MARROW_AGENT_ID`: Marrow uses the API key's bound agent or the plan's agent seat. `MARROW_AGENT_ID` still overrides;
-- runs the self-test and prints a short summary (healthy with the decision id, or the failure and one fix command). The full report goes to `~/.marrow/logs/` (mode 600); `--verbose` prints it instead;
-- reads the key from `MARROW_API_KEY`, or from the owner-only `~/.marrow/env`. With no key it prints the command to run and stops before writing anything.
+- runs the self-test and prints a short summary: healthy with the committed decision id, or the failure (including a decision recorded without trusted closure) and one fix command, with a non-zero exit. The full report goes to `~/.marrow/logs/` (mode 600); `--verbose` prints it instead;
+- reads the key from `MARROW_API_KEY`, or from the owner-only `~/.marrow/env.local` or `~/.marrow/env`, and names the file it used. It warns when those two files hold different keys. With no key it prints the command to run and stops before writing anything.
 
 Restart the owning harness afterwards so new hooks and MCP configuration load; restart Hermes if its config changed.
 
@@ -134,13 +134,13 @@ Restart the owning harness afterwards so new hooks and MCP configuration load; r
   - `gate` now prints the decision with its mode (enforced or advisory), and exits 12 when an enforced gate blocks or needs owner approval. It used to exit 0.
   - A protected `run` passes the gate receipt to permit issue and closes the runtime's own decision instead of opening a second one.
 - **Advisory plans.** Where the plan's gate is advisory (`enforced: false`), a protected `run` shows the warning, runs the command and records the outcome; it no longer asks for a permit the plan cannot issue. Enforced plans keep the permit requirement.
-- **Retries.** The runner's runtime, think and commit calls, and the self-test's runtime and first-value calls, retry HTTP 429/502/503/504 and pending answers up to three times with the same `Idempotency-Key`. Client errors are not retried.
+- **Retries and time limits.** The runner's runtime, think and commit calls, and the self-test's runtime and first-value calls, retry HTTP 429/502/503/504, timed-out attempts and pending answers up to three times with the same `Idempotency-Key`. Each attempt has a 10-second limit, and all attempts share a 25-second deadline. Every `run`, `gate` and `permit` uses fresh keys, so a later command in the same session is never answered with an earlier command's stored result. Client errors are not retried.
 - **Self-test cleanup.** The self-test closes the decision its runtime check creates, instead of leaving it open.
 - **Claude Code hook identity.** Claude Code hooks use the Claude-specific entrypoints (`claude-pre-action-hook`, `claude-hook`, `claude-context-hook`, `claude-session-hook`), the same spelling `marrow-mcp setup` writes. Hook activity is labelled `claude-code` instead of the generic `mcp-client`, and the installer and MCP setup no longer rewrite each other's entries. Existing entries are migrated in place without duplicates.
 - **Agent identity.** No generated `<client>-<hash>` agent id is sent or written to MCP configuration or the SDK preload; one written by an earlier version is removed from `.mcp.json`. With an unbound key, activation reports that no single agent can be confirmed and how to bind one, instead of failing the install.
 - **`run -- -- <command>`.** The documented form now runs the command; one `--` is enough.
 - **Codex detection.** An `AGENTS.md` that holds only the Marrow block no longer marks a project as Codex.
-- **Controller maintenance.** The five-minute maintenance pass keeps the controller's agent id and base URL, and owner-set values in MCP configuration.
+- **Controller maintenance.** The five-minute maintenance pass re-applies the controller's own agent id and base URL instead of the generated id and default URL. A different value found in managed MCP configuration is reset and reported as needing attention, unless the owner allowlisted it.
 - **`proof`.** `proof --decision-id` works again: the shared option parser had rejected it. It exits non-zero unless Marrow returns `committed: true`, and accepts `--gate-receipt` and `--session` for decisions created by `gate`.
 - **Controller commands.** `controller ensure|stop|status` act on the controller that install and update started.
 - **Removed.** `--repair` and `update` no longer read an npm token from `~/.openclaw` or write `~/.npmrc`; that was internal publishing tooling. Two internal credential-file hints were removed with it. Installer output no longer suggests invented agent ids such as `--agent hermes-prod`.
@@ -433,7 +433,7 @@ The runner:
 5. runs the original command with the scoped permit, not the Marrow API key;
 6. records success or failure with the gate receipt, supplies every exact server-required proof field through a redacted proof pack, and closes the permit. It reports an outcome that Marrow did not commit as trusted instead of skipping it.
 
-Runtime, think and commit calls retry HTTP 429/502/503/504 and pending answers up to three times with the same `Idempotency-Key`.
+Runtime, think and commit calls retry HTTP 429/502/503/504, timed-out attempts and pending answers up to three times with the same `Idempotency-Key`, within a 25-second deadline. Each `run`, `gate` and `permit` uses its own keys. An answer in which Marrow withholds authorization (`allow: false` or observation-only) blocks the command under every plan and policy.
 
 `gate` exits 0 when the action may proceed, 12 when an enforced gate blocks it or needs owner approval, and 13 when no gate decision is available, so `gate ... && deploy` stops on a block. When the gate creates a decision, it prints the exact `proof` command, with `--session` and `--gate-receipt`, that records the outcome afterwards. `proof` exits non-zero unless Marrow returns `committed: true`.
 
@@ -510,7 +510,8 @@ After meaningful work, supported runtime and commit responses can return observe
 - Sanitized aggregate contribution is optional and never means sharing raw prompts, code, secrets, proof packs, account identifiers, agent identifiers, or customer identities.
 - The installer diagnoses key locations without printing secret values.
 - The installer never reads, reports or writes npm or other publishing tokens.
-- Hermes passes only `PATH`, `HOME` and locale variables to MCP servers. When the Hermes entry and `$HERMES_HOME/.env` carry no Marrow key, install or update stores the key in the owner-only `~/.marrow/env` (mode 600) for the Marrow MCP server to read, and says so. A different key already stored there is left unchanged. Before editing `config.yaml`, the installer keeps a timestamped copy with mode 600.
+- Hermes passes only `PATH`, `HOME` and locale variables to MCP servers. When the Hermes entry and `$HERMES_HOME/.env` carry no Marrow key, install or update stores the key in the owner-only `~/.marrow/env` (mode 600) for the Marrow MCP server to read, and says so. A different key already stored there is left unchanged. The installer makes no copy of `config.yaml` or any other file that holds credentials; its undo notes contain only redacted lines.
+- Managed MCP configuration always carries the configured API base and agent id. A different value found there is replaced and reported, unless the owner lists it in `MARROW_ALLOWED_BASE_URLS` or `MARROW_ALLOWED_AGENT_IDS`. Reports show only a URL's origin.
 - Marrow returns guidance and policy data. Agents must not execute returned text as shell input.
 
 See the [Trust Center](https://getmarrow.ai/trust/) for implemented controls, current limits, and roadmap status.
@@ -524,6 +525,7 @@ See the [Trust Center](https://getmarrow.ai/trust/) for implemented controls, cu
 | `MARROW_FLEET_AGENT_ID`, `MARROW_AGENT_ID` | No | A registered agent id. Unset, Marrow uses the key's bound agent or the plan seat |
 | `MARROW_CLIENT` | No | Harness label; overrides detection |
 | `HERMES_HOME` | No | Hermes home, when not `~/.hermes` |
+| `MARROW_ALLOWED_BASE_URLS`, `MARROW_ALLOWED_AGENT_IDS` | No | Comma-separated values that install, update and controller maintenance keep in managed MCP configuration instead of resetting them |
 
 The installer never generates, sends or writes an agent id of its own. Only a configured id (`MARROW_FLEET_AGENT_ID`, `MARROW_AGENT_ID` or `--agent-id`) goes into the managed MCP entry and SDK preload; without one, Marrow resolves the API key's bound agent or the plan's agent seat, and the self-test reports that server-resolved id. A key bound to no single agent still passes the self-test; activation then reports how to bind one. The installer never copies `MARROW_API_KEY` into MCP configuration or generated runtime source; the owning harness must inherit the key from trusted environment or secret-manager configuration, or from the owner-only `~/.marrow/env`.
 

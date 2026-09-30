@@ -2135,14 +2135,40 @@ function activationProfile(detection, plan, changes, client) {
 }
 
 const MCP_ENV_PLACEHOLDER_RE = /\$\{[^}]*\}/;
+const AGENT_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 
-// Only a configured, registered agent id is ever written. Earlier installers wrote a derived
-// <client>-<hash> id that bound keys and Free plan seats reject; it is removed on the next
-// write. An owner-set concrete id is kept when none is configured now, and maintenance
-// (preserveIdentity) keeps the owner's base URL instead of resetting it.
+// Values in reports are identity labels, never secrets: a URL is reduced to its origin, so
+// credentials embedded in it are never printed.
+function safeIdentityValue(field, value) {
+  if (field === 'MARROW_BASE_URL') {
+    try {
+      const url = new URL(value);
+      return `${url.protocol}//${url.host}`;
+    } catch {
+      return '[unparseable URL]';
+    }
+  }
+  return AGENT_ID_RE.test(value) ? value : '[invalid agent id]';
+}
+
+function identityAllowlist(env = process.env) {
+  const list = (value) => new Set(String(value || '').split(',').map((entry) => entry.trim()).filter(Boolean));
+  return {
+    baseUrls: list(env.MARROW_ALLOWED_BASE_URLS),
+    agentIds: list(env.MARROW_ALLOWED_AGENT_IDS),
+  };
+}
+
+// The managed MCP entry always carries the configured identity: the base URL and agent id the
+// installer or controller runs with. An existing concrete value is kept only when it is equal
+// or on the owner's allowlist (MARROW_ALLOWED_BASE_URLS, MARROW_ALLOWED_AGENT_IDS); otherwise
+// it is replaced and the divergence is reported. A <client>-<hash> id written by an earlier
+// installer is removed without a report.
 function upsertMcpServerConfig(filePath, options = {}) {
   const agentId = String(options.agentId || '').trim();
   const derivedAgentIds = new Set(Array.isArray(options.derivedAgentIds) ? options.derivedAgentIds : []);
+  const allowlist = options.allowlist || identityAllowlist();
+  const report = typeof options.onDivergence === 'function' ? options.onDivergence : () => {};
   const config = parseJsonObject(filePath);
   const servers = config.mcpServers && typeof config.mcpServers === 'object' && !Array.isArray(config.mcpServers)
     ? config.mcpServers
@@ -2154,16 +2180,35 @@ function upsertMcpServerConfig(filePath, options = {}) {
     const text = typeof value === 'string' ? value.trim() : '';
     return text && !MCP_ENV_PLACEHOLDER_RE.test(text) ? text : '';
   };
-  const existingAgentId = concrete(existingEnv.MARROW_FLEET_AGENT_ID);
+  const configuredBaseUrl = String(options.baseUrl || DEFAULT_BASE_URL).trim() || DEFAULT_BASE_URL;
   const existingBaseUrl = concrete(existingEnv.MARROW_BASE_URL);
-  const baseUrl = options.preserveIdentity && existingBaseUrl
-    ? existingBaseUrl
-    : String(options.baseUrl || DEFAULT_BASE_URL).trim() || DEFAULT_BASE_URL;
+  let baseUrl = configuredBaseUrl;
+  if (existingBaseUrl && existingBaseUrl !== configuredBaseUrl) {
+    if (allowlist.baseUrls.has(existingBaseUrl)) baseUrl = existingBaseUrl;
+    else {
+      report({
+        field: 'MARROW_BASE_URL',
+        replaced: safeIdentityValue('MARROW_BASE_URL', existingBaseUrl),
+        applied: safeIdentityValue('MARROW_BASE_URL', configuredBaseUrl),
+      });
+    }
+  }
+  const existingAgentId = concrete(existingEnv.MARROW_FLEET_AGENT_ID);
+  let keptAgentId = agentId;
+  if (existingAgentId && existingAgentId !== agentId && !derivedAgentIds.has(existingAgentId)) {
+    if (allowlist.agentIds.has(existingAgentId)) keptAgentId = existingAgentId;
+    else {
+      report({
+        field: 'MARROW_FLEET_AGENT_ID',
+        replaced: safeIdentityValue('MARROW_FLEET_AGENT_ID', existingAgentId),
+        applied: agentId ? safeIdentityValue('MARROW_FLEET_AGENT_ID', agentId) : 'unset (resolved by Marrow)',
+      });
+    }
+  }
   const existingProfile = resolveToolProfile(servers.marrow?.env?.MARROW_TOOL_PROFILE).configured_profile;
   const requestedProfile = resolveToolProfile(options.toolProfile).configured_profile;
   const configuredProfile = requestedProfile === 'unset' ? existingProfile : requestedProfile;
   const env = { MARROW_BASE_URL: baseUrl };
-  const keptAgentId = agentId || (existingAgentId && !derivedAgentIds.has(existingAgentId) ? existingAgentId : '');
   if (keptAgentId) env.MARROW_FLEET_AGENT_ID = keptAgentId;
   if (configuredProfile !== 'unset') env.MARROW_TOOL_PROFILE = configuredProfile;
   servers.marrow = {
@@ -2429,7 +2474,18 @@ function buildPlan(detection, options) {
     baseUrl,
     toolProfile: options.toolProfile,
     derivedAgentIds,
-    preserveIdentity: options.preserveIdentity === true,
+    allowlist: options.identityAllowlist || identityAllowlist(),
+  };
+  const mcpConfigWrite = (filePath, label) => {
+    const write = { type: 'json-transform', path: filePath, label, identityDivergence: [] };
+    write.transform = (target) => {
+      write.identityDivergence = [];
+      return retarget(upsertMcpServerConfig(target, {
+        ...mcpConfigOptions,
+        onDivergence: (divergence) => write.identityDivergence.push(divergence),
+      }));
+    };
+    return write;
   };
   const mcpTargetVersion = executableMcpTarget(options).version;
   const retarget = (value) => retargetMcpPackageSpec(value, mcpTargetVersion);
@@ -2510,21 +2566,15 @@ function buildPlan(detection, options) {
         transform: (filePath) => retarget(upsertGrokHooks(filePath)),
       });
     }
-    writes.push({
-      type: 'json-transform',
-      path: detection.paths.mcpJson,
-      label: 'Project MCP server config',
-      transform: (filePath) => retarget(upsertMcpServerConfig(filePath, mcpConfigOptions)),
-    });
+    writes.push(mcpConfigWrite(detection.paths.mcpJson, 'Project MCP server config'));
     // The owner's Hermes config changes only on an explicit install or update, never from the
     // controller's background maintenance pass.
-    if (detection.hermesConfig && options.preserveIdentity !== true && hermesTargetIsSafe(detection)) {
+    if (detection.hermesConfig && options.maintenance !== true && hermesTargetIsSafe(detection)) {
       writes.push({
         type: 'yaml-transform',
         path: detection.paths.hermesConfig,
         root: detection.paths.hermesHome,
         label: HERMES_WRITE_LABEL,
-        backup: true,
         transform: (before) => planHermesMcpConfig(before, {
           mcpPackageSpec: `@getmarrow/mcp@${mcpTargetVersion}`,
           keyReference: hermesEnvHasKey(detection.paths.hermesEnv),
@@ -2539,12 +2589,7 @@ function buildPlan(detection, options) {
         label: 'Cursor native hooks',
         transform: (filePath) => retarget(upsertCursorHooks(filePath)),
       });
-      writes.push({
-        type: 'json-transform',
-        path: detection.paths.cursorMcp,
-        label: 'Cursor MCP server config',
-        transform: (filePath) => retarget(upsertMcpServerConfig(filePath, mcpConfigOptions)),
-      });
+      writes.push(mcpConfigWrite(detection.paths.cursorMcp, 'Cursor MCP server config'));
     }
   }
 
@@ -2625,16 +2670,6 @@ function atomicWriteManagedFile(root, targetPath, contents) {
   }
 }
 
-// A private, timestamped copy taken before an owner file outside the project is changed.
-function backupManagedFile(root, targetPath, contents) {
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const backupPath = `${targetPath}.marrow-backup-${stamp}`;
-  assertContainedManagedTarget(root, backupPath);
-  fs.writeFileSync(backupPath, contents, { flag: 'wx', mode: 0o600 });
-  fs.chmodSync(backupPath, 0o600);
-  return backupPath;
-}
-
 function applyPlan(plan, options) {
   if (!Array.isArray(plan?.writes) || plan.writes.length === 0) return [];
   const root = path.resolve(plan.root || path.dirname(plan.writes[0].path));
@@ -2659,6 +2694,7 @@ function applyPlan(plan, options) {
     let hookConflict = false;
     let conflictReason = null;
     let hostedEntry = false;
+    let undo = null;
     if (automaticRepairSuppressed) {
       after = before;
     } else if (write.type === 'file') {
@@ -2689,6 +2725,7 @@ function applyPlan(plan, options) {
       } else {
         after = planned.action === 'update' ? planned.content : before;
         hostedEntry = planned.hosted === true;
+        undo = planned.action === 'update' ? planned.undo || [] : null;
       }
     } else if (write.type === 'owned-executable') {
       if (fileExists && before !== write.content) {
@@ -2705,12 +2742,12 @@ function applyPlan(plan, options) {
     const modeChanged = !hookConflict && typeof write.mode === 'number' && beforeMode !== write.mode;
     return {
       write,
-      fileExists,
       before,
       after,
       hookConflict,
       conflictReason,
       hostedEntry,
+      undo,
       modeChanged,
       automaticRepairSuppressed,
       aheadUnverifiedVersions,
@@ -2720,12 +2757,12 @@ function applyPlan(plan, options) {
   const changes = [];
   for (const {
     write,
-    fileExists,
     before,
     after,
     hookConflict,
     conflictReason,
     hostedEntry,
+    undo,
     modeChanged,
     automaticRepairSuppressed,
     aheadUnverifiedVersions,
@@ -2751,11 +2788,11 @@ function applyPlan(plan, options) {
         ...(conflictReason ? { conflict_reason: conflictReason } : {}),
       } : {}),
       ...(hostedEntry ? { hosted_entry_preserved: true } : {}),
+      // Redacted marrow-entry lines only; the file itself is never copied.
+      ...(undo && contentChanged ? { undo } : {}),
+      ...(write.identityDivergence?.length && changed ? { identity_divergence: write.identityDivergence } : {}),
     });
     if (contentChanged && writeApplied) {
-      if (write.backup && fileExists) {
-        changes[changes.length - 1].backup_path = backupManagedFile(path.resolve(write.root || root), write.path, before);
-      }
       atomicWriteManagedFile(path.resolve(write.root || root), write.path, after);
     }
     if (modeChanged && writeApplied) {
@@ -2766,8 +2803,10 @@ function applyPlan(plan, options) {
   return changes;
 }
 
+const SELF_TEST_READ_TIMEOUT_MS = 15_000;
+
 async function requestJson(url, options) {
-  const res = await fetch(url, options);
+  const res = await fetch(url, { signal: AbortSignal.timeout(SELF_TEST_READ_TIMEOUT_MS), ...options });
   const text = await res.text();
   let json = {};
   try {
@@ -2786,6 +2825,8 @@ const SELF_TEST_WRITE_ATTEMPTS = 3;
 const SELF_TEST_RETRY_DELAY_MS = 1_000;
 const SELF_TEST_MAX_RETRY_DELAY_MS = 2_000;
 const SELF_TEST_TRANSIENT_STATUSES = new Set([429, 502, 503, 504]);
+const SELF_TEST_ATTEMPT_TIMEOUT_MS = 10_000;
+const SELF_TEST_TOTAL_TIMEOUT_MS = 25_000;
 
 function selfTestRetryDelayMs(response, data, override) {
   if (Number.isFinite(override) && override >= 0) return override;
@@ -2800,11 +2841,28 @@ function selfTestRetryDelayMs(response, data, override) {
 // so a retry can never create a second record. As in the MCP client, a pending
 // acknowledgement is never complete, even when it names a created decision: that id
 // is pinned and the final response must carry the same one.
-async function selfTestWrite(url, options, { idempotencyKey, complete, retryDelayMs }) {
+async function selfTestWrite(url, options, { idempotencyKey, complete, retryDelayMs, attemptTimeoutMs, deadlineMs }) {
   let lastState = 'no response';
   let pinnedDecisionId = null;
+  const perAttempt = Number.isFinite(attemptTimeoutMs) ? attemptTimeoutMs : SELF_TEST_ATTEMPT_TIMEOUT_MS;
+  const deadline = Date.now() + (Number.isFinite(deadlineMs) ? deadlineMs : SELF_TEST_TOTAL_TIMEOUT_MS);
   for (let attempt = 1; attempt <= SELF_TEST_WRITE_ATTEMPTS; attempt += 1) {
-    const res = await fetch(url, { ...options, headers: { ...options.headers, 'idempotency-key': idempotencyKey } });
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return { failed: `deadline reached (last: ${lastState})` };
+    let res;
+    try {
+      // Each attempt is bounded, and all attempts share one deadline, so a stalled service
+      // can never hold the install open.
+      res = await fetch(url, {
+        ...options,
+        headers: { ...options.headers, 'idempotency-key': idempotencyKey },
+        signal: AbortSignal.timeout(Math.max(1, Math.min(perAttempt, remaining))),
+      });
+    } catch (error) {
+      if (error?.name !== 'TimeoutError' && error?.name !== 'AbortError') throw error;
+      lastState = 'timed out';
+      continue;
+    }
     const text = await res.text();
     let json = {};
     try {
@@ -2834,7 +2892,8 @@ async function selfTestWrite(url, options, { idempotencyKey, complete, retryDela
       throw new Error(String(json.error || json.message || `HTTP ${res.status}`));
     }
     if (attempt < SELF_TEST_WRITE_ATTEMPTS) {
-      await new Promise((resolve) => setTimeout(resolve, selfTestRetryDelayMs(res, data, retryDelayMs)));
+      const wait = Math.min(selfTestRetryDelayMs(res, data, retryDelayMs), Math.max(0, deadline - Date.now()));
+      await new Promise((resolve) => setTimeout(resolve, wait));
     }
   }
   return { failed: lastState };
@@ -2962,6 +3021,8 @@ async function closeSelfTestRuntimeDecision(baseUrl, headers, runtime, selfTestK
       idempotencyKey: `${selfTestKey}:runtime-commit`,
       complete: (data) => data,
       retryDelayMs: options.selfTestRetryDelayMs,
+    attemptTimeoutMs: options.selfTestAttemptTimeoutMs,
+    deadlineMs: options.selfTestDeadlineMs,
     });
     if (closed?.failed) return { created: true, decision_id: decisionId, committed: false, error: closed.failed };
     return { created: true, decision_id: decisionId, committed: closed?.committed === true };
@@ -3016,6 +3077,8 @@ async function runSelfTest(options) {
     idempotencyKey: `${selfTestKey}:think`,
     complete: (data) => selfTestDecisionId(data),
     retryDelayMs: options.selfTestRetryDelayMs,
+    attemptTimeoutMs: options.selfTestAttemptTimeoutMs,
+    deadlineMs: options.selfTestDeadlineMs,
   });
 
   const decisionId = typeof think === 'string' ? think : undefined;
@@ -3035,6 +3098,8 @@ async function runSelfTest(options) {
     idempotencyKey: `${selfTestKey}:commit`,
     complete: (data) => data,
     retryDelayMs: options.selfTestRetryDelayMs,
+    attemptTimeoutMs: options.selfTestAttemptTimeoutMs,
+    deadlineMs: options.selfTestDeadlineMs,
   });
   if (commit?.failed) {
     throw new Error(`self-test commit did not complete after ${SELF_TEST_WRITE_ATTEMPTS} attempts (last: ${commit.failed})`);
@@ -3067,6 +3132,8 @@ async function runSelfTest(options) {
     idempotencyKey: `${selfTestKey}:runtime`,
     complete: (data) => data,
     retryDelayMs: options.selfTestRetryDelayMs,
+    attemptTimeoutMs: options.selfTestAttemptTimeoutMs,
+    deadlineMs: options.selfTestDeadlineMs,
   });
   if (runtime?.failed) {
     throw new Error(`self-test runtime did not complete after ${SELF_TEST_WRITE_ATTEMPTS} attempts (last: ${runtime.failed})`);
@@ -3105,6 +3172,8 @@ async function runSelfTest(options) {
     idempotencyKey: `${selfTestKey}:first-value`,
     complete: (data) => data,
     retryDelayMs: options.selfTestRetryDelayMs,
+    attemptTimeoutMs: options.selfTestAttemptTimeoutMs,
+    deadlineMs: options.selfTestDeadlineMs,
   });
   if (firstValueResult?.failed) {
     throw new Error(`self-test first-value did not complete after ${SELF_TEST_WRITE_ATTEMPTS} attempts (last: ${firstValueResult.failed})`);
@@ -3205,6 +3274,8 @@ async function runSelfTest(options) {
     skipped: false,
     mcp_tool_profile: toolProfile,
     decision_id: decisionId,
+    // Only committed:true is trusted closure; anything else is reported as such.
+    decision_committed: commit?.committed === true,
     active: Boolean(status.enabled ?? status.ok),
     health: status.health || null,
     last_event_at: status.last_event_at || null,
@@ -3410,6 +3481,9 @@ function printReport(report, sink) {
       out(`  exact verification: ${change.exact_fix}\n`);
     }
     if (change.hook_conflict && change.exact_fix) out(`  exact fix: ${change.exact_fix}\n`);
+    for (const divergence of change.identity_divergence || []) {
+      out(`  identity reset: ${divergence.field} ${divergence.replaced} -> ${divergence.applied}. If the previous value was intended, add it to ${divergence.field === 'MARROW_BASE_URL' ? 'MARROW_ALLOWED_BASE_URLS' : 'MARROW_ALLOWED_AGENT_IDS'} and rerun.\n`);
+    }
   }
 
   out('\nLocal session loop guard:\n');
@@ -3445,6 +3519,7 @@ function printReport(report, sink) {
   } else {
     out(`- active: ${report.selfTest.active ? 'yes' : 'no'}\n`);
     out(`- decision_id: ${report.selfTest.decision_id}\n`);
+    out(`- decision committed (trusted closure): ${report.selfTest.decision_committed ? 'yes' : 'no'}\n`);
     out(`- health: ${report.selfTest.health || 'unknown'}\n`);
     out(`- one-call runtime: ${report.selfTest.runtime_active ? 'active' : 'not verified'}\n`);
     if (report.selfTest.error) out(`- error: ${report.selfTest.error}\n`);
@@ -3533,7 +3608,20 @@ function printReport(report, sink) {
   if (report.hermes?.detected) {
     out('\nHermes:\n');
     out(`- MCP server entry: ${report.hermes.state}${report.hermes.config_path ? ` (${report.hermes.config_path})` : ''}\n`);
-    if (report.hermes.backup_path) out(`- backup: ${report.hermes.backup_path}\n`);
+    if (report.hermes.undo?.length) {
+      out(`- undo (no backup is kept because the file holds other servers' credentials; values redacted): in ${report.hermes.config_path} under mcp_servers.marrow\n`);
+      for (const step of report.hermes.undo) {
+        if (step.change === 'replaced') {
+          out('  replace these lines:\n');
+          for (const line of step.lines) out(`    ${line}\n`);
+          out('  with the original lines:\n');
+          for (const line of step.replaced) out(`    ${line}\n`);
+        } else {
+          out('  remove these added lines:\n');
+          for (const line of step.lines) out(`    ${line}\n`);
+        }
+      }
+    }
     if (report.hermes.key_source) out(`- API key source for the Hermes MCP server: ${report.hermes.key_source}\n`);
     if (report.hermes.owner_key_storage) out(`- ~/.marrow/env key storage: ${report.hermes.owner_key_storage.state}\n`);
     if (report.hermes.restart) out(`- restart: ${report.hermes.restart}\n`);
@@ -3649,7 +3737,7 @@ function hermesWiringReport(detection, changes, options, planMode) {
     detected: true,
     state,
     config_path: change.path,
-    backup_path: change.backup_path || null,
+    undo: state === 'configured' ? change.undo || [] : null,
     key_source: keySource,
     ...(keyStorage ? { owner_key_storage: { state: keyStorage.state, path: keyStorage.path } } : {}),
     restart: state === 'configured' ? 'Restart Hermes so it loads the Marrow MCP server.' : null,
@@ -4028,9 +4116,12 @@ function installSummaryLines(report, options) {
   const selfTest = report.selfTest || {};
   const activation = report.activation || {};
   const lines = [];
-  const selfTestFailed = !selfTest.skipped && (Boolean(selfTest.error) || !selfTest.active);
+  const untrusted = !selfTest.skipped && !selfTest.error && selfTest.active && selfTest.decision_committed !== true;
+  const selfTestFailed = !selfTest.skipped && (Boolean(selfTest.error) || !selfTest.active || untrusted);
   if (selfTest.skipped) {
     lines.push(`Marrow ${INSTALLER_ADAPTER_VERSION}: configuration updated; self-test skipped (${selfTest.reason}).${selfTest.exact_fix ? ` Fix: ${selfTest.exact_fix}` : ''}`);
+  } else if (untrusted) {
+    lines.push(`Marrow ${INSTALLER_ADAPTER_VERSION}: self-test decision ${selfTest.decision_id} was recorded without trusted closure (committed was not true). Fix: ${INSTALLER_DOCTOR_COMMAND}`);
   } else if (selfTestFailed) {
     const fix = report.doctor?.recommendedFix || INSTALLER_DOCTOR_COMMAND;
     lines.push(`Marrow ${INSTALLER_ADAPTER_VERSION}: self-test failed: ${selfTest.error || 'Marrow reported this account as inactive'}. Fix: ${fix}`);
@@ -4041,6 +4132,11 @@ function installSummaryLines(report, options) {
     lines.push(`Marrow ${INSTALLER_ADAPTER_VERSION}: healthy. Self-test decision ${selfTest.decision_id} committed${agent}.`);
   }
   if (activation.exact_fix) lines.push(`Activation: ${activation.exact_fix}`);
+  const apiKey = report.api_key || {};
+  if (apiKey.source === 'owner_env_file' && apiKey.path) lines.push(`API key: read from ${apiKey.path}.`);
+  if (apiKey.owner_files_disagree) {
+    lines.push('Warning: ~/.marrow/env.local and ~/.marrow/env hold different Marrow keys. env.local takes precedence for the installer, hooks and the MCP server; keep only the intended key.');
+  }
   const controller = report.controller || {};
   if (controller.restarted) {
     lines.push(`Controller restarted: ${controller.restarted.from_versions.join(', ')} -> ${controller.restarted.to_version}.`);
@@ -4053,7 +4149,7 @@ function installSummaryLines(report, options) {
   }
   const hermes = report.hermes || {};
   if (hermes.state === 'configured') {
-    lines.push(`Hermes: added the Marrow MCP server to ${hermes.config_path}${hermes.backup_path ? ` (backup ${hermes.backup_path})` : ''}. Restart Hermes to load it.`);
+    lines.push(`Hermes: added the Marrow MCP server to ${hermes.config_path}; the undo steps are in the full report. Restart Hermes to load it.`);
   } else if (hermes.state === 'already_configured') {
     lines.push('Hermes: the Marrow MCP server is already configured.');
   } else if (hermes.state === 'refused' || hermes.state === 'config_not_found' || hermes.state === 'preserved_unverified_ahead') {
@@ -4063,6 +4159,10 @@ function installSummaryLines(report, options) {
     lines.push('Stored your API key in ~/.marrow/env (mode 600) so the Hermes MCP server can read it; Hermes passes no other environment to MCP servers.');
   } else if (hermes.owner_key_storage?.state === 'different_key_present') {
     lines.push('Note: ~/.marrow/env already holds a different Marrow key; the Hermes MCP server will use that one.');
+  }
+  const divergences = (report.changes || []).flatMap((change) => (change.identity_divergence || []).map((divergence) => ({ ...divergence, path: change.path })));
+  if (divergences.length) {
+    lines.push(`MCP config identity reset: ${divergences.map((divergence) => `${divergence.field} in ${divergence.path}`).join('; ')}. Details and the allowlist fix are in the full report.`);
   }
   const reload = report.harnessReload || {};
   if (reload.required && reload.instruction && hermes.state !== 'configured') lines.push(`Restart: ${reload.instruction}`);
@@ -4090,12 +4190,12 @@ async function runCli(argv) {
     process.stdout.write(usage());
     return;
   }
-  if (!options.apiKey) {
-    const stored = readOwnerApiKey(options.home);
-    if (stored.apiKey) {
-      options.apiKey = stored.apiKey;
-      options.apiKeySource = 'owner_env_file';
-    }
+  const stored = readOwnerApiKey(options.home);
+  const keyInfo = { source: options.apiKey ? 'environment' : null, path: null, owner_files_disagree: stored.conflict };
+  if (!options.apiKey && stored.apiKey) {
+    options.apiKey = stored.apiKey;
+    keyInfo.source = 'owner_env_file';
+    keyInfo.path = stored.source;
   }
   const oneCommand = Boolean((options.activate || options.update) && !options.dryRun && !options.doctor);
   if (oneCommand && !options.apiKey) {
@@ -4129,6 +4229,7 @@ async function runCli(argv) {
     printReport(report);
     return;
   }
+  report.api_key = keyInfo;
   const { lines, selfTestFailed } = installSummaryLines(report, options);
   let full = '';
   printReport(report, (text) => { full += text; });
@@ -4162,6 +4263,7 @@ module.exports = {
   stableAgentId,
   detectedClient,
   localControllerAgentId,
+  identityAllowlist,
   activationProfile,
   claudeNativeHookFingerprint,
   codexNativeHookFingerprint,
