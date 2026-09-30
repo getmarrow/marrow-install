@@ -305,6 +305,15 @@ test('code written by the agent makes later test runs in that workspace go to th
       assert.equal(run.decision, 'deny');
       assert.match(run.reason, /reviewing new process-spawning code/);
       assert.ok(stub.state.gateBodies[0].action.local_reasons.includes('runs_agent_written_code'));
+      assert.equal(decisionOf(await agentd.hook('claude-code', 'pre', preEvent('npx vite build', { cwd: proj }))).decision, 'deny', 'dev servers and bundlers run workspace code too');
+      // Code written into another directory taints that directory too.
+      const tools = path.join(home, 'tools');
+      fs.mkdirSync(path.join(tools, 'test'), { recursive: true });
+      fs.writeFileSync(path.join(tools, 'package.json'), JSON.stringify({ scripts: { test: 'vitest run' } }));
+      assert.equal(decisionOf(await agentd.hook('claude-code', 'pre', preEvent('npm test', { cwd: tools }))).decision, 'allow');
+      const elsewhere = { ...preEvent('x', { cwd: proj }), tool_name: 'Write', tool_input: { file_path: path.join(tools, 'test', 'b.test.js'), content: "import { execSync } from 'node:child_process'; execSync('npm publish')" } };
+      assert.equal(decisionOf(await agentd.hook('claude-code', 'pre', elsewhere)).decision, 'allow');
+      assert.equal(decisionOf(await agentd.hook('claude-code', 'pre', preEvent('npm test', { cwd: tools }))).decision, 'deny');
       assert.equal(decisionOf(await agentd.hook('claude-code', 'pre', preEvent('git status', { cwd: proj }))).decision, 'allow', 'non-runners stay local');
     });
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
@@ -337,4 +346,36 @@ test('the loaded key is scrubbed from everything sent or stored, even when the a
       assert.equal(text.includes(agentd.key.slice(9, 29)), false);
     }
   });
+});
+
+test('scrub() alone keeps an opaque key (one no redaction pattern knows) out of gate bodies, telemetry and the queue', async () => {
+  const { scratchHome, startAgentd: start } = require('./support/agentd-harness');
+  const { redactText } = require('../src/agentd/redact');
+  const stub = createStub();
+  await stub.start();
+  const { root, home } = scratchHome();
+  // 32 lowercase letters and digits: below the 40-character catch-all, no known prefix.
+  const alphabet = 'abcdefghijkmnpqrstuvwxyz23456789';
+  const key = `op${Array.from(crypto.randomBytes(30), (b) => alphabet[b % alphabet.length]).join('')}`;
+  assert.equal(redactText(key), key, 'precondition: pattern redaction does not recognise this key, so scrub() is the only guard');
+  fs.mkdirSync(path.join(home, '.marrow'), { mode: 0o700 });
+  fs.writeFileSync(path.join(home, '.marrow', 'env'), `MARROW_API_KEY=${key}\n`, { mode: 0o600 });
+  const agentd = await start({ stub, home, root, key });
+  try {
+    stub.state.gateHandler = () => ({ verdict: 'deny', reason: 'no' });
+    for (const command of [`mytool ${key}`, `make deploy KEY=x ${key}`, `node scripts/sync.js ${key}`]) {
+      assert.equal(decisionOf(await agentd.hook('claude-code', 'pre', preEvent(command))).decision, 'deny');
+    }
+    assert.ok(stub.state.gateBodies.length >= 3, 'the commands reached the gate');
+    const queued = allFilesUnder(path.join(home, '.marrow', 'agentd', 'queue')).map((f) => fs.readFileSync(f, 'utf8')).join('\n');
+    await agentd.admin('flush');
+    const sent = JSON.stringify(stub.state.gateBodies) + JSON.stringify(stub.state.events);
+    assert.equal(sent.includes(key), false, 'gate bodies and telemetry never carry the key');
+    assert.equal(queued.includes(key), false, 'the queue never stores the key');
+    assert.ok(sent.includes('[redacted]'), 'the key position was replaced, not silently dropped');
+  } finally {
+    await agentd.stop();
+    await stub.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

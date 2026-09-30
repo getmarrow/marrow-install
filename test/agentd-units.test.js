@@ -297,3 +297,42 @@ test('redaction is linear on huge inputs and knows the Marrow key format', () =>
   assert.equal(big.class, 'unknown');
   assert.ok(Date.now() - started < 500, `classification took ${Date.now() - started} ms`);
 });
+
+test('audit F1: only real Marrow MCP entries lose inline keys; look-alike servers keep theirs and never seed ~/.marrow/env', () => {
+  const { stripInlineKeys, applyPlan, buildPlan } = require('../src/agentd/install-plan');
+  const foreign = `acme_${crypto.randomBytes(12).toString('hex')}`;
+  const marrowKey = `mrw_test_${crypto.randomBytes(16).toString('hex')}`;
+  const doc = {
+    mcpServers: {
+      analytics: { type: 'sse', url: 'https://mcp.marrowmetrics.io/sse', headers: { Authorization: `Bearer ${foreign}` } },
+      lookalikeHost: { type: 'http', url: 'https://getmarrow.ai.evil.example/mcp', headers: { Authorization: `Bearer ${foreign}` } },
+      suffixHost: { type: 'http', url: 'https://evilgetmarrow.ai/mcp', headers: { 'x-api-key': foreign } },
+      toolpkg: { command: 'npx', args: ['-y', '@acme/marrow-helper', '--key', foreign], env: { MARROW_API_KEY: foreign } },
+      namedMarrow: { command: 'python3', args: ['server.py', '--api-key', foreign] },
+      real: { command: 'npx', args: ['-y', '@getmarrow/mcp@3.9.97', '--key', marrowKey], env: { MARROW_API_KEY: marrowKey, MARROW_BASE_URL: 'http://127.0.0.1:1' } },
+      realRemote: { type: 'http', url: 'https://mcp.getmarrow.ai/mcp', headers: { Authorization: `Bearer ${marrowKey}` } },
+      realOddValue: { command: 'marrow-mcp', env: { MARROW_API_KEY: 'hunter2-not-a-marrow-key' } },
+    },
+  };
+  const { doc: cleaned, removed, keptUnrecognized } = stripInlineKeys(doc);
+  const text = JSON.stringify(cleaned);
+  for (const name of ['analytics', 'lookalikeHost', 'suffixHost', 'toolpkg', 'namedMarrow']) {
+    assert.deepEqual(cleaned.mcpServers[name], doc.mcpServers[name], `${name} untouched`);
+  }
+  assert.equal(removed.includes(foreign), false, 'a foreign secret is never harvested');
+  assert.equal(text.includes(marrowKey), false, 'the real Marrow entries lost their inline key');
+  assert.equal(cleaned.mcpServers.real.env.MARROW_BASE_URL, undefined);
+  assert.equal(cleaned.mcpServers.realOddValue.env.MARROW_API_KEY, 'hunter2-not-a-marrow-key', 'an unexpected value is left in place');
+  assert.equal(keptUnrecognized, 1);
+
+  const home = tempDir('agentd-f1-');
+  try {
+    const mcp = path.join(home, '.claude.json');
+    fs.writeFileSync(mcp, JSON.stringify({ mcpServers: { analytics: doc.mcpServers.analytics, toolpkg: doc.mcpServers.toolpkg } }));
+    const report = applyPlan(buildPlan({ home, harnesses: [] }), { compile: false, mcpConfigFiles: [mcp] });
+    assert.equal(report.keys_removed, 0);
+    assert.equal(report.key_file, 'unchanged');
+    assert.equal(fs.existsSync(path.join(home, '.marrow', 'env')), false, 'no foreign secret becomes the Marrow key');
+    assert.ok(fs.readFileSync(mcp, 'utf8').includes(foreign), 'the foreign server still works');
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});

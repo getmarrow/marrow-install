@@ -215,21 +215,53 @@ function mergeHookDocument(doc, harness, entries, shimPath = entries[0] && entri
 // Removes inline Marrow keys from MCP server entries (top level and Claude Code per-project
 // entries). Returns the cleaned document and the removed values; the caller stores one value
 // in ~/.marrow/env if that file has no key yet. Values are never printed.
+// An MCP server entry is Marrow's only on concrete signals: its command is one of Marrow's own
+// bins, a positional argument is the `@getmarrow/mcp` package (optionally @version, or as
+// `--package=`), or its URL host is getmarrow.ai or a subdomain of it. A substring such as
+// "marrow" in a third-party package name, argument value or host (for example
+// `@acme/marrow-helper` or `mcp.marrowmetrics.io`) is never enough.
+const MARROW_BINS = new Set(['marrow-mcp', 'marrow-agentd', 'marrow-hook']);
+const MARROW_PACKAGE_ARG = /^(?:--package=)?@getmarrow\/mcp(?:@[A-Za-z0-9._^~<>=*+-]+)?$/;
+function isMarrowServerEntry(entry) {
+  if (!entry || typeof entry !== 'object') return false;
+  if (typeof entry.command === 'string' && MARROW_BINS.has(path.basename(entry.command))) return true;
+  const args = Array.isArray(entry.args) ? entry.args.map(String) : [];
+  if (args.some((arg) => MARROW_PACKAGE_ARG.test(arg))) return true;
+  // `npx ... marrow-mcp` only counts when the runner is a package runner and marrow-mcp is a
+  // whole positional argument (not part of another token).
+  if (typeof entry.command === 'string' && /^(?:npx|pnpx|bunx|pnpm|yarn|npm)$/.test(path.basename(entry.command)) && args.includes('marrow-mcp')) return true;
+  if (typeof entry.url === 'string') {
+    try {
+      const host = new URL(entry.url).hostname.toLowerCase();
+      if (host === 'getmarrow.ai' || host.endsWith('.getmarrow.ai')) return true;
+    } catch { /* not a URL */ }
+  }
+  return false;
+}
+
+// Only values shaped like a Marrow key are moved. Anything else found in a Marrow entry is left
+// exactly where it is (and counted), so an unexpected value is never lost and never becomes the
+// Marrow key.
+const MARROW_KEY_SHAPE = /^(?:mrw_[A-Za-z0-9_]{8,256}|marrow_[A-Za-z0-9_]{8,256})$/;
+
 function stripInlineKeys(doc) {
   const removed = [];
+  let kept = 0;
+  const take = (value) => {
+    if (typeof value !== 'string' || !value || /^\$\{[A-Z_][A-Z0-9_]*\}$/.test(value)) return false;
+    if (!MARROW_KEY_SHAPE.test(value)) { kept += 1; return false; }
+    removed.push(value);
+    return true;
+  };
   const clean = (servers) => {
     if (!servers || typeof servers !== 'object') return;
     for (const entry of Object.values(servers)) {
-      if (!entry || typeof entry !== 'object') continue;
-      const text = `${entry.command || ''} ${(Array.isArray(entry.args) ? entry.args : []).join(' ')} ${entry.url || ''}`;
-      if (!/marrow/i.test(text)) continue;
+      if (!isMarrowServerEntry(entry)) continue;
       // Remote (HTTP/SSE) MCP entries can carry the key in a header.
       if (entry.headers && typeof entry.headers === 'object') {
         for (const name of Object.keys(entry.headers)) {
           if (!/^(?:authorization|x-api-key|x-marrow-key|x-marrow-api-key)$/i.test(name)) continue;
-          const value = String(entry.headers[name] || '').replace(/^Bearer\s+/i, '');
-          if (value && !/^\$\{[A-Z_][A-Z0-9_]*\}$/.test(value)) removed.push(value);
-          delete entry.headers[name];
+          if (take(String(entry.headers[name] || '').replace(/^Bearer\s+/i, ''))) delete entry.headers[name];
         }
       }
       // `--key <value>` / `--key=<value>` on argv (advertised by marrow-mcp) is removed too.
@@ -237,27 +269,23 @@ function stripInlineKeys(doc) {
         const args = [];
         for (let i = 0; i < entry.args.length; i += 1) {
           const arg = String(entry.args[i]);
-          if (arg === '--key' || arg === '--api-key') { if (entry.args[i + 1] !== undefined) removed.push(String(entry.args[i + 1])); i += 1; continue; }
-          if (/^--(?:api-)?key=/.test(arg)) { removed.push(arg.slice(arg.indexOf('=') + 1)); continue; }
+          if ((arg === '--key' || arg === '--api-key') && entry.args[i + 1] !== undefined && take(String(entry.args[i + 1]))) { i += 1; continue; }
+          if (/^--(?:api-)?key=/.test(arg) && take(arg.slice(arg.indexOf('=') + 1))) continue;
           args.push(entry.args[i]);
         }
         entry.args = args;
       }
       if (!entry.env || typeof entry.env !== 'object') continue;
       for (const name of ['MARROW_API_KEY', 'MARROW_KEY']) {
-        const value = entry.env[name];
-        if (typeof value === 'string' && value && !/^\$\{[A-Z_][A-Z0-9_]*\}$/.test(value)) {
-          removed.push(value);
-          delete entry.env[name];
-        }
+        if (take(entry.env[name])) delete entry.env[name];
       }
-      for (const name of ['MARROW_BASE_URL']) delete entry.env[name];
+      delete entry.env.MARROW_BASE_URL;
     }
   };
   const copy = JSON.parse(JSON.stringify(doc || {}));
   clean(copy.mcpServers);
   if (copy.projects && typeof copy.projects === 'object') for (const project of Object.values(copy.projects)) clean(project && project.mcpServers);
-  return { doc: copy, removedCount: removed.length, removed };
+  return { doc: copy, removedCount: removed.length, removed, keptUnrecognized: kept };
 }
 
 function readJsonFile(file) {
@@ -334,7 +362,8 @@ function applyPlan(plan, { compile = true, mcpConfigFiles = [], dryRun = false }
 
   let firstKey = null;
   for (const { file, doc: original } of mcpDocs) {
-    const { doc, removedCount, removed } = stripInlineKeys(original);
+    const { doc, removedCount, removed, keptUnrecognized } = stripInlineKeys(original);
+    report.unrecognized_inline_values = (report.unrecognized_inline_values || 0) + keptUnrecognized;
     if (removedCount === 0) continue;
     if (!firstKey) firstKey = removed[0];
     writeJsonPreservingMode(file, doc);
@@ -349,4 +378,4 @@ function applyPlan(plan, { compile = true, mcpConfigFiles = [], dryRun = false }
   return report;
 }
 
-module.exports = { buildPlan, applyPlan, mergeHookDocument, stripInlineKeys, systemdServiceUnit, systemdSocketUnit, hookCommand, HOOK_EVENTS, isMarrowHookCommand };
+module.exports = { buildPlan, applyPlan, mergeHookDocument, stripInlineKeys, isMarrowServerEntry, systemdServiceUnit, systemdSocketUnit, hookCommand, HOOK_EVENTS, isMarrowHookCommand };
