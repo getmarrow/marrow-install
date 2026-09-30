@@ -3,7 +3,8 @@
   "version": "0.1.66",
   "description": "Universal installer and governed runner for Marrow agent fleets.",
   "bin": {
-    "marrow-install": "bin/marrow-install.js"
+    "marrow-install": "bin/marrow-install.js",
+    "marrow-agentd": "bin/marrow-agentd.js"
   },
   "main": "src/installer.js",
   "scripts": {
