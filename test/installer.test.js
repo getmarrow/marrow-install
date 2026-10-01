@@ -31,9 +31,9 @@ test('release-candidate adapter provenance matches the exact MCP source and cert
   assert.deepEqual(ADAPTER_PROVENANCE, {
     mcp: {
       package: '@getmarrow/mcp',
-      version: '3.9.97',
-      source_sha: 'be607e1dffd4d9e6a3c40f01151e509c115fba3f',
-      integrity: 'sha512-wab1kvgec8WhDDrpkajauLu2QdADXudIxkic0BAgzV96FZVHY0ME45hrOyQmqfkI+OtKriYdgIFp90peWGh2mA==',
+      version: '3.9.98',
+      source_sha: 'e40d3cb40479456fd937bce0b9488eb0c3f10863',
+      integrity: 'sha512-AmDT3afwdm7+Dc555zDs+yGIG4RyC/YbaQm+9O1mThlC6g/9EujTr7y7UvRMEtYDvVWAAaG6CFM7/u/ytjKhwQ==',
       integrity_state: 'verified_npm_registry_metadata',
     },
     sdk: {
@@ -66,7 +66,7 @@ test('isolated MCP loop-guard self-test uses the exact pin and never touches the
         assert.notEqual(input.env.HOME, ownerHome);
         assert.equal(input.env.HOME, input.env.USERPROFILE);
         assert.equal(input.env.MARROW_API_KEY, '');
-        assert.deepEqual(input.args, ['-y', '--package=@getmarrow/mcp@3.9.97', 'marrow-mcp', 'loop-guard-self-test']);
+        assert.deepEqual(input.args, ['-y', '--package=@getmarrow/mcp@3.9.98', 'marrow-mcp', 'loop-guard-self-test']);
         return { status: 0, stdout: JSON.stringify(loopGuardProof()), stderr: '' };
       },
     });
@@ -172,7 +172,7 @@ function managedHomeWithStaleClaudeHooks() {
     yes: true, dryRun: false, doctor: false,
   });
   const settingsPath = path.join(home, '.claude', 'settings.json');
-  fs.writeFileSync(settingsPath, fs.readFileSync(settingsPath, 'utf8').replaceAll('@getmarrow/mcp@3.9.97', '@getmarrow/mcp@3.9.95'));
+  fs.writeFileSync(settingsPath, fs.readFileSync(settingsPath, 'utf8').replaceAll('@getmarrow/mcp@3.9.98', '@getmarrow/mcp@3.9.95'));
   return home;
 }
 
@@ -257,7 +257,7 @@ test('update targets the managed home root, and deliberate project install then 
     const homeUpdate = await install(updateOptions(home, home));
     assert.equal(homeUpdate.root, home);
     const homeSettings = fs.readFileSync(path.join(home, '.claude', 'settings.json'), 'utf8');
-    assert.match(homeSettings, /@getmarrow\/mcp@3\.9\.97 marrow-mcp claude-pre-action-hook/);
+    assert.match(homeSettings, /@getmarrow\/mcp@3\.9\.98 marrow-mcp claude-pre-action-hook/);
     assert.doesNotMatch(homeSettings, /@getmarrow\/mcp@3\.9\.95/);
 
     fs.mkdirSync(path.join(project, '.git'));
@@ -281,13 +281,13 @@ test('update targets the managed home root, and deliberate project install then 
 test('doctor identifies stale and mixed MCP processes without exposing command lines', () => {
   const report = inspectMcpProcesses({ commands: [
     'npx -y @getmarrow/mcp@2.8.0',
-    'npx -y --package=@getmarrow/mcp@3.9.97 marrow-mcp',
+    'npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp',
     'node unrelated.js --token=must-not-appear',
   ] });
   assert.equal(report.healthy, false);
   assert.equal(report.mixed_versions, true);
   assert.deepEqual(report.stale_versions, ['2.8.0']);
-  assert.deepEqual(report.active_versions, ['2.8.0', '3.9.97']);
+  assert.deepEqual(report.active_versions, ['2.8.0', '3.9.98']);
   assert.doesNotMatch(JSON.stringify(report), /must-not-appear|unrelated\.js/);
   assert.equal(report.exact_fix, 'npx -y @getmarrow/install@latest update');
   assert.equal(report.restart_required, true);
@@ -317,7 +317,7 @@ test('doctor treats version-unknown MCP processes as unhealthy with executable r
 
 test('doctor ignores parent shells and sandbox wrappers that only mention MCP commands', () => {
   const report = inspectMcpProcesses({ commands: [
-    '/usr/bin/bwrap --ro-bind / / /bin/bash -lc npx -y --package=@getmarrow/mcp@3.9.97 marrow-mcp setup',
+    '/usr/bin/bwrap --ro-bind / / /bin/bash -lc npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp setup',
     '/bin/bash -lc npx -y @getmarrow/mcp@2.8.0',
     'rg @getmarrow/mcp package.json',
     'rg /tmp/node_modules/@getmarrow/mcp package-lock.json',
@@ -333,12 +333,12 @@ test('doctor flags stale and mixed MCP owner configurations without exposing pat
   const stale = path.join(root, 'claude.json');
   const current = path.join(root, 'cursor.json');
   fs.writeFileSync(stale, JSON.stringify({ mcp: { command: 'npx', args: ['-y', '@getmarrow/mcp@2.8.0'], secret: 'must-not-appear' } }));
-  fs.writeFileSync(current, JSON.stringify({ mcp: { command: 'npx', args: ['-y', '--package=@getmarrow/mcp@3.9.97', 'marrow-mcp'] } }));
+  fs.writeFileSync(current, JSON.stringify({ mcp: { command: 'npx', args: ['-y', '--package=@getmarrow/mcp@3.9.98', 'marrow-mcp'] } }));
   try {
     const report = inspectMcpConfigurations({}, { paths: [stale, current] });
     assert.equal(report.healthy, false);
     assert.equal(report.mixed_versions, true);
-    assert.deepEqual(report.configured_versions, ['2.8.0', '3.9.97']);
+    assert.deepEqual(report.configured_versions, ['2.8.0', '3.9.98']);
     assert.deepEqual(report.stale_versions, ['2.8.0']);
     assert.equal(report.exact_fix, 'npx -y @getmarrow/install@latest update');
     assert.equal(report.restart_required, true);
@@ -352,12 +352,12 @@ test('doctor flags stale and mixed MCP owner configurations without exposing pat
 test('doctor accepts a current-only MCP owner configuration', () => {
   const root = tempDir();
   const current = path.join(root, '.mcp.json');
-  fs.writeFileSync(current, JSON.stringify({ mcpServers: { marrow: { command: 'npx', args: ['-y', '--package=@getmarrow/mcp@3.9.97', 'marrow-mcp'] } } }));
+  fs.writeFileSync(current, JSON.stringify({ mcpServers: { marrow: { command: 'npx', args: ['-y', '--package=@getmarrow/mcp@3.9.98', 'marrow-mcp'] } } }));
   try {
     const report = inspectMcpConfigurations({}, { paths: [current] });
     assert.equal(report.healthy, true);
     assert.equal(report.mixed_versions, false);
-    assert.deepEqual(report.configured_versions, ['3.9.97']);
+    assert.deepEqual(report.configured_versions, ['3.9.98']);
     assert.equal(report.exact_fix, null);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -389,7 +389,7 @@ test('doctor treats the previously pinned MCP 3.9.59 as stale', () => {
   const report = inspectMcpProcesses({ commands: [
     'npx -y --package=@getmarrow/mcp@3.9.59 marrow-mcp',
   ] });
-  assert.equal(report.expected_version, '3.9.97');
+  assert.equal(report.expected_version, '3.9.98');
   assert.deepEqual(report.active_versions, ['3.9.59']);
   assert.deepEqual(report.stale_versions, ['3.9.59']);
   assert.equal(report.healthy, false);
@@ -401,7 +401,7 @@ test('doctor treats both immediately superseded MCP releases as stale', () => {
     const report = inspectMcpProcesses({ commands: [
       `npx -y --package=@getmarrow/mcp@${version} marrow-mcp`,
     ] });
-    assert.equal(report.expected_version, '3.9.97');
+    assert.equal(report.expected_version, '3.9.98');
     assert.deepEqual(report.active_versions, [version]);
     assert.deepEqual(report.stale_versions, [version]);
     assert.equal(report.healthy, false);
@@ -411,11 +411,11 @@ test('doctor treats both immediately superseded MCP releases as stale', () => {
 
 test('doctor reports a nonexistent local MCP ahead as unverified without targeting or downgrading it', () => {
   const report = inspectMcpProcesses({ commands: [
-    'npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp',
+    'npx -y --package=@getmarrow/mcp@3.9.99 marrow-mcp',
   ] });
-  assert.equal(report.expected_version, '3.9.97');
+  assert.equal(report.expected_version, '3.9.98');
   assert.deepEqual(report.stale_versions, []);
-  assert.deepEqual(report.ahead_unverified_versions, ['3.9.98']);
+  assert.deepEqual(report.ahead_unverified_versions, ['3.9.99']);
   assert.equal(report.ahead_unverified, true);
   assert.equal(report.healthy, false);
   assert.equal(report.automatic_repair_suppressed, true);
@@ -429,7 +429,7 @@ test('doctor treats stable newer minor and major MCP processes as unverified-ahe
     'npx -y --package=@getmarrow/mcp@3.10.0 marrow-mcp',
     'npx -y --package=@getmarrow/mcp@4.0.0 marrow-mcp',
   ] });
-  assert.equal(report.expected_version, '3.9.97');
+  assert.equal(report.expected_version, '3.9.98');
   assert.deepEqual(report.active_versions, ['3.10.0', '4.0.0']);
   assert.deepEqual(report.stale_versions, []);
   assert.deepEqual(report.ahead_unverified_versions, ['3.10.0', '4.0.0']);
@@ -441,12 +441,12 @@ test('doctor treats stable newer minor and major MCP processes as unverified-ahe
 
 test('mixed stale and unverified-ahead MCP evidence fails closed before automatic repair', () => {
   const report = inspectMcpProcesses({ commands: [
-    'npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp',
+    'npx -y --package=@getmarrow/mcp@3.9.99 marrow-mcp',
     'npx -y --package=@getmarrow/mcp@3.9.72 marrow-mcp',
   ] });
-  assert.equal(report.expected_version, '3.9.97');
+  assert.equal(report.expected_version, '3.9.98');
   assert.deepEqual(report.stale_versions, ['3.9.72']);
-  assert.deepEqual(report.ahead_unverified_versions, ['3.9.98']);
+  assert.deepEqual(report.ahead_unverified_versions, ['3.9.99']);
   assert.equal(report.mixed_versions, true);
   assert.equal(report.automatic_repair_suppressed, true);
   assert.match(report.exact_fix, /official npm registry access/);
@@ -459,15 +459,15 @@ test('verified registry latest retargets update and repair plans with an exact p
     currentVersions: ['3.9.999'],
     registryMetadata: {
       name: '@getmarrow/mcp',
-      version: '3.9.97',
+      version: '3.9.98',
       dist: {
         integrity: registryIntegrity,
-        tarball: 'https://registry.npmjs.org/@getmarrow/mcp/-/mcp-3.9.97.tgz',
+        tarball: 'https://registry.npmjs.org/@getmarrow/mcp/-/mcp-3.9.98.tgz',
       },
     },
   });
   assert.deepEqual(target, {
-    version: '3.9.97',
+    version: '3.9.98',
     source: 'verified_npm_registry',
     integrity: registryIntegrity,
     source_sha: null,
@@ -489,7 +489,7 @@ test('verified registry latest retargets update and repair plans with an exact p
       fs.readFileSync(detection.paths.mcpJson, 'utf8'),
       fs.readFileSync(detection.paths.agentsMd, 'utf8'),
     ].join('\n');
-    assert.match(generated, /@getmarrow\/mcp@3\.9\.97/);
+    assert.match(generated, /@getmarrow\/mcp@3\.9\.98/);
     assert.doesNotMatch(generated, /@getmarrow\/mcp@3\.9\.79|@getmarrow\/mcp@latest/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -497,23 +497,23 @@ test('verified registry latest retargets update and repair plans with an exact p
 });
 
 test('latest-target resolution stays offline-safe and rejects unverified or incompatible registry claims', () => {
-  assert.deepEqual(resolveMcpTargetVersion({ currentVersions: ['3.9.97'] }), {
-    version: '3.9.97',
+  assert.deepEqual(resolveMcpTargetVersion({ currentVersions: ['3.9.98'] }), {
+    version: '3.9.98',
     source: 'sealed_installer',
-    integrity: 'sha512-wab1kvgec8WhDDrpkajauLu2QdADXudIxkic0BAgzV96FZVHY0ME45hrOyQmqfkI+OtKriYdgIFp90peWGh2mA==',
-    source_sha: 'be607e1dffd4d9e6a3c40f01151e509c115fba3f',
+    integrity: 'sha512-AmDT3afwdm7+Dc555zDs+yGIG4RyC/YbaQm+9O1mThlC6g/9EujTr7y7UvRMEtYDvVWAAaG6CFM7/u/ytjKhwQ==',
+    source_sha: 'e40d3cb40479456fd937bce0b9488eb0c3f10863',
   });
   assert.equal(resolveMcpTargetVersion({
     registryMetadata: {
       name: '@getmarrow/mcp',
-      version: '3.9.97',
+      version: '3.9.98',
       dist: {
         integrity: 'sha512-not-a-complete-digest',
-        tarball: 'https://registry.npmjs.org/@getmarrow/mcp/-/mcp-3.9.97.tgz',
+        tarball: 'https://registry.npmjs.org/@getmarrow/mcp/-/mcp-3.9.98.tgz',
       },
     },
-  }).version, '3.9.97');
-  assert.equal(resolveMcpTargetVersion({ currentVersions: ['4.0.0'] }).version, '3.9.97');
+  }).version, '3.9.98');
+  assert.equal(resolveMcpTargetVersion({ currentVersions: ['4.0.0'] }).version, '3.9.98');
 });
 
 test('offline repair preserves unverified-ahead config and never propagates it into managed targets', async () => {
@@ -522,10 +522,10 @@ test('offline repair preserves unverified-ahead config and never propagates it i
   const configPath = path.join(root, '.mcp.json');
   const codexHooksPath = path.join(root, '.codex', 'hooks.json');
   const configBefore = JSON.stringify({
-    mcpServers: { marrow: { command: 'npx', args: ['-y', '--package=@getmarrow/mcp@3.9.98', 'marrow-mcp'] } },
+    mcpServers: { marrow: { command: 'npx', args: ['-y', '--package=@getmarrow/mcp@3.9.99', 'marrow-mcp'] } },
   });
   const hooksBefore = JSON.stringify({
-    hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp codex-pre-action-hook' }] }] },
+    hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'npx -y --package=@getmarrow/mcp@3.9.99 marrow-mcp codex-pre-action-hook' }] }] },
   });
   fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
   fs.writeFileSync(path.join(root, 'AGENTS.md'), '# Owner instructions\n');
@@ -540,22 +540,22 @@ test('offline repair preserves unverified-ahead config and never propagates it i
       agentId: 'unverified-ahead-direct-target',
       baseUrl: 'https://api.getmarrow.ai',
       toolProfile: resolveToolProfile(undefined),
-      mcpTargetVersion: '3.9.98',
+      mcpTargetVersion: '3.9.99',
     });
-    assert.equal(unsafeDirectPlan.mcp_target_version, '3.9.97');
+    assert.equal(unsafeDirectPlan.mcp_target_version, '3.9.98');
     const forgedRegistryPlan = buildPlan(detectEnvironment(root, { HOME: home }), {
       mode: 'mcp',
       agentId: 'forged-registry-target',
       baseUrl: 'https://api.getmarrow.ai',
       toolProfile: resolveToolProfile(undefined),
       mcpTarget: {
-        version: '3.9.98',
+        version: '3.9.99',
         source: 'verified_npm_registry',
         integrity: `sha512-${Buffer.alloc(64, 7).toString('base64')}`,
         source_sha: null,
       },
     });
-    assert.equal(forgedRegistryPlan.mcp_target_version, '3.9.97');
+    assert.equal(forgedRegistryPlan.mcp_target_version, '3.9.98');
 
     const report = await install({
       cwd: root,
@@ -569,7 +569,7 @@ test('offline repair preserves unverified-ahead config and never propagates it i
       baseUrl: 'https://api.getmarrow.ai',
       agentId: '',
       controller: false,
-      processCommands: ['npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp'],
+      processCommands: ['npx -y --package=@getmarrow/mcp@3.9.99 marrow-mcp'],
       mcpConfigPaths: [configPath],
       mcpRegistryMetadata: null,
     });
@@ -577,23 +577,23 @@ test('offline repair preserves unverified-ahead config and never propagates it i
     assert.equal(fs.readFileSync(configPath, 'utf8'), configBefore);
     assert.equal(fs.readFileSync(codexHooksPath, 'utf8'), hooksBefore);
     const instructions = fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8');
-    assert.match(instructions, /@getmarrow\/mcp@3\.9\.97/);
+    assert.match(instructions, /@getmarrow\/mcp@3\.9\.98/);
     assert.doesNotMatch(instructions, /@getmarrow\/mcp@3\.9\.81|@getmarrow\/mcp@latest/);
     const suppressed = report.changes.find((change) => change.label === 'Project MCP server config');
     assert.equal(suppressed.automatic_repair_suppressed, true);
     assert.equal(suppressed.applied, false);
-    assert.deepEqual(suppressed.ahead_unverified_versions, ['3.9.98']);
+    assert.deepEqual(suppressed.ahead_unverified_versions, ['3.9.99']);
     const suppressedHook = report.changes.find((change) => change.label === 'Codex native hooks');
     assert.equal(suppressedHook.automatic_repair_suppressed, true);
     assert.equal(suppressedHook.applied, false);
     assert.equal(report.doctor.automatic_mcp_repair_suppressed, true);
-    assert.deepEqual(report.doctor.ahead_unverified_versions, ['3.9.98']);
+    assert.deepEqual(report.doctor.ahead_unverified_versions, ['3.9.99']);
     assert.match(report.doctor.recommendedFix, /npm view @getmarrow\/mcp@latest/);
     assert.doesNotMatch(report.doctor.recommendedFix, /--package=@getmarrow\/mcp@3\.9\.(?:89|90)/);
     assert.equal(report.activation.profile.automatic_repair_suppressed, true);
     assert.match(report.activation.profile.exact_fix, /npm view @getmarrow\/mcp@latest/);
     assert.doesNotMatch(report.activation.profile.exact_fix, /marrow-mcp setup/);
-    assert.equal(report.adapterProvenance.mcp.version, '3.9.97');
+    assert.equal(report.adapterProvenance.mcp.version, '3.9.98');
     assert.equal(report.adapterProvenance.mcp.integrity_state, 'verified_npm_registry_metadata');
   } finally {
     if (originalHome === undefined) delete process.env.HOME;
@@ -687,15 +687,15 @@ test('doctor uses verified registry evidence without emitting a downgrade recomm
       mcpConfigPaths: [configPath],
       mcpRegistryMetadata: {
         name: '@getmarrow/mcp',
-        version: '3.9.97',
+        version: '3.9.98',
         dist: {
           integrity: registryIntegrity,
-          tarball: 'https://registry.npmjs.org/@getmarrow/mcp/-/mcp-3.9.97.tgz',
+          tarball: 'https://registry.npmjs.org/@getmarrow/mcp/-/mcp-3.9.98.tgz',
         },
       },
     });
-    assert.equal(report.doctor.mcpProcesses.expected_version, '3.9.97');
-    assert.equal(report.doctor.mcpConfigurations.expected_version, '3.9.97');
+    assert.equal(report.doctor.mcpProcesses.expected_version, '3.9.98');
+    assert.equal(report.doctor.mcpConfigurations.expected_version, '3.9.98');
     assert.equal(report.doctor.recommendedFix, 'npx -y @getmarrow/install@latest update');
     assert.doesNotMatch(report.doctor.recommendedFix, /marrow-mcp setup|@getmarrow\/mcp@3\.9\.79/);
     assert.deepEqual(report.adapterProvenance.mcp, ADAPTER_PROVENANCE.mcp);
@@ -748,7 +748,7 @@ Historical owner example: \`npx -y --package=@getmarrow/mcp@3.9.79 marrow-mcp\`.
   }, null, 2) + '\n');
   fs.writeFileSync(paths.claude, JSON.stringify({
     owner: { retained: true },
-    hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: 'npx -y --package=@getmarrow/mcp@3.9.97 marrow-mcp pre-action-hook' }] }] },
+    hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: 'npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp pre-action-hook' }] }] },
   }, null, 2) + '\n');
   fs.writeFileSync(paths.codex, JSON.stringify({
     owner: { retained: true },
@@ -764,15 +764,15 @@ Historical owner example: \`npx -y --package=@getmarrow/mcp@3.9.79 marrow-mcp\`.
   const before = inspectMcpConfigurations({}, { paths: configurationPaths });
   assert.equal(before.healthy, false);
   assert.equal(before.mixed_versions, true);
-  assert.deepEqual(before.configured_versions, ['3.9.79', '3.9.97']);
+  assert.deepEqual(before.configured_versions, ['3.9.79', '3.9.98']);
   assert.equal(before.exact_fix, 'npx -y @getmarrow/install@latest update');
 
   const registryMetadata = {
     name: '@getmarrow/mcp',
-    version: '3.9.97',
+    version: '3.9.98',
     dist: {
       integrity: ADAPTER_PROVENANCE.mcp.integrity,
-      tarball: 'https://registry.npmjs.org/@getmarrow/mcp/-/mcp-3.9.97.tgz',
+      tarball: 'https://registry.npmjs.org/@getmarrow/mcp/-/mcp-3.9.98.tgz',
     },
   };
   let registryFetches = 0;
@@ -800,15 +800,15 @@ Historical owner example: \`npx -y --package=@getmarrow/mcp@3.9.79 marrow-mcp\`.
       registryFetch,
       processCommands: [
         'npx -y --package=@getmarrow/mcp@3.9.79 marrow-mcp',
-        'npx -y --package=@getmarrow/mcp@3.9.97 marrow-mcp',
+        'npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp',
       ],
       mcpConfigPaths: configurationPaths,
     };
     const report = await install({ ...options });
     assert.equal(registryFetches, 1);
-    assert.equal(report.adapterProvenance.mcp.version, '3.9.97');
+    assert.equal(report.adapterProvenance.mcp.version, '3.9.98');
     assert.equal(report.doctor.mcpConfigurations.healthy, true);
-    assert.deepEqual(report.doctor.mcpConfigurations.configured_versions, ['3.9.97']);
+    assert.deepEqual(report.doctor.mcpConfigurations.configured_versions, ['3.9.98']);
     assert.equal(report.doctor.mcpProcesses.healthy, false);
     assert.equal(report.doctor.mcpProcesses.update_completed, true);
     assert.equal(report.doctor.mcpProcesses.awaiting_restart, true);
@@ -823,11 +823,11 @@ Historical owner example: \`npx -y --package=@getmarrow/mcp@3.9.79 marrow-mcp\`.
       agents.indexOf('<!-- marrow:passive-start -->'),
       agents.indexOf('<!-- marrow:passive-end -->') + '<!-- marrow:passive-end -->'.length,
     );
-    assert.match(managedAgentsBlock, /@getmarrow\/mcp@3\.9\.97/);
+    assert.match(managedAgentsBlock, /@getmarrow\/mcp@3\.9\.98/);
     assert.doesNotMatch(managedAgentsBlock, /@getmarrow\/mcp@3\.9\.79|@getmarrow\/mcp@latest/);
     for (const filePath of [paths.mcp, paths.claude, paths.codex, paths.grok]) {
       const contents = fs.readFileSync(filePath, 'utf8');
-      assert.match(contents, /@getmarrow\/mcp@3\.9\.97/, filePath);
+      assert.match(contents, /@getmarrow\/mcp@3\.9\.98/, filePath);
       assert.doesNotMatch(contents, /@getmarrow\/mcp@3\.9\.79/, filePath);
       assert.doesNotMatch(contents, /@getmarrow\/mcp@latest/, filePath);
       assert.match(contents, /retained/, filePath);
@@ -854,13 +854,13 @@ Historical owner example: \`npx -y --package=@getmarrow/mcp@3.9.79 marrow-mcp\`.
     const snapshots = Object.fromEntries(configurationPaths.map((filePath) => [filePath, fs.readFileSync(filePath)]));
     const second = await install({
       ...options,
-      processCommands: ['npx -y --package=@getmarrow/mcp@3.9.97 marrow-mcp'],
+      processCommands: ['npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp'],
     });
     assert.equal(registryFetches, 2);
     assert.equal(second.changes.every((change) => !change.changed && !change.applied && change.already_present), true);
     assert.equal(second.harnessReload.required, false);
     assert.equal(second.doctor.mcpConfigurations.healthy, true);
-    assert.deepEqual(second.doctor.mcpConfigurations.configured_versions, ['3.9.97']);
+    assert.deepEqual(second.doctor.mcpConfigurations.configured_versions, ['3.9.98']);
     for (const filePath of configurationPaths) {
       assert.deepEqual(fs.readFileSync(filePath), snapshots[filePath]);
     }
@@ -1330,7 +1330,7 @@ test('generated passive instructions pin the supported MCP release', () => {
   const plan = buildPlan(detected, { mode: 'mcp' });
   const instructions = plan.writes.find((write) => write.path.endsWith('AGENTS.md'))?.block;
 
-  assert.match(instructions, /npx -y --package=@getmarrow\/mcp@3\.9\.97 marrow-mcp setup/);
+  assert.match(instructions, /npx -y --package=@getmarrow\/mcp@3\.9\.98 marrow-mcp setup/);
   assert.doesNotMatch(instructions, /@getmarrow\/mcp@latest/);
 });
 
@@ -1444,7 +1444,7 @@ test('managed JSON that differs only in key order or formatting is present and n
     for (const [filePath, text] of resaved) assert.equal(fs.readFileSync(filePath, 'utf8'), text);
 
     const claudePath = path.join(root, '.claude', 'settings.json');
-    fs.writeFileSync(claudePath, resaved.get(claudePath).replaceAll('@getmarrow/mcp@3.9.97', '@getmarrow/mcp@3.9.95'));
+    fs.writeFileSync(claudePath, resaved.get(claudePath).replaceAll('@getmarrow/mcp@3.9.98', '@getmarrow/mcp@3.9.95'));
     const stale = applyPlan(plan, { doctor: true }).find((change) => change.path === claudePath);
     assert.equal(stale.changed, true);
     assert.equal(stale.already_present, false);
@@ -2192,10 +2192,10 @@ test('self-test returns first five-minute value signal and proof', async () => {
       agentId: 'installer-test',
     });
     assert.equal(requestHeaders['x-marrow-package'], '@getmarrow/install');
-    assert.equal(requestHeaders['x-marrow-package-version'], '0.1.66');
-    assert.equal(requestHeaders['x-marrow-install-version'], '0.1.66');
+    assert.equal(requestHeaders['x-marrow-package-version'], '0.1.67');
+    assert.equal(requestHeaders['x-marrow-install-version'], '0.1.67');
     assert.equal(requestHeaders['x-marrow-sdk-version'], '3.7.64');
-    assert.equal(requestHeaders['x-marrow-mcp-version'], '3.9.97');
+    assert.equal(requestHeaders['x-marrow-mcp-version'], '3.9.98');
     assert.equal(result.mcp_tool_profile.configured_profile, 'unset');
     assert.equal(result.mcp_tool_profile.effective_profile, 'primary');
     assert.equal(result.mcp_tool_profile.expected_visible_count, 17);

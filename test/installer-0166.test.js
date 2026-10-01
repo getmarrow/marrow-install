@@ -23,7 +23,7 @@ const { planHermesMcpConfig, redactUndoLines } = require('../src/hermes-config')
 const { readOwnerApiKey } = require('../src/owner-env');
 
 const BIN = path.join(__dirname, '..', 'bin', 'marrow-install.js');
-const MCP_PIN = '@getmarrow/mcp@3.9.97';
+const MCP_PIN = '@getmarrow/mcp@3.9.98';
 const INSTALLER_VERSION = require('../package.json').version;
 const MATCHER = 'Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|functions\\.(?!mcp__marrow__marrow_).*|mcp__(?!marrow__marrow_).*';
 const command = (entrypoint) => `npx -y --package=${MCP_PIN} marrow-mcp ${entrypoint}`;
@@ -45,7 +45,7 @@ function filesContaining(root, needle) {
   return found.sort();
 }
 
-// The Claude hook reconciliation that `marrow-mcp setup` performs in MCP 3.9.97 (be607e1d,
+// The Claude hook reconciliation that `marrow-mcp setup` performs in MCP 3.9.98 (e40d3cb4,
 // src/hook-contract.ts reconcileMarrowCommandHook and the four install*Hook callers in
 // src/cli.ts). Reproduced here so the installer output is checked against the other writer.
 function mcpSubcommand(value) {
@@ -324,7 +324,7 @@ test('Hermes MCP wiring is added once, keeps the file, makes no copy of it and l
     assert.equal(first.hermes.state, 'configured');
     const after = fs.readFileSync(configPath, 'utf8');
     for (const line of HERMES_CONFIG.split('\n').filter(Boolean)) assert.ok(after.includes(line), line);
-    assert.match(after, /\n {2}marrow:\n {4}command: npx\n {4}args: \["-y", "--package=@getmarrow\/mcp@3\.9\.97", "marrow-mcp"\]\n {4}env:\n {6}MARROW_CLIENT: hermes\n# after servers/);
+    assert.match(after, /\n {2}marrow:\n {4}command: npx\n {4}args: \["-y", "--package=@getmarrow\/mcp@3\.9\.98", "marrow-mcp"\]\n {4}env:\n {6}MARROW_CLIENT: hermes\n# after servers/);
     assert.doesNotMatch(after, /MARROW_API_KEY|mrw_fixture/);
     assert.equal(fs.statSync(configPath).mode & 0o777, 0o600);
     // The owner rule: no copy of a file that holds credentials, anywhere.
@@ -336,7 +336,7 @@ test('Hermes MCP wiring is added once, keeps the file, makes no copy of it and l
     assert.deepEqual(first.hermes.undo, [{ change: 'added', lines: [
       '  marrow:',
       '    command: npx',
-      '    args: ["-y", "--package=@getmarrow/mcp@3.9.97", "marrow-mcp"]',
+      '    args: ["-y", "--package=@getmarrow/mcp@3.9.98", "marrow-mcp"]',
       '    env:',
       '      MARROW_CLIENT: hermes',
     ] }]);
@@ -401,7 +401,7 @@ test('Hermes undo notes never copy YAML comments, which may hold credentials (L-
   const dummy = `fixture-${crypto.randomBytes(8).toString('hex')}`;
   const cases = {
     commentInArgsBlock: `mcp_servers:\n  marrow:\n    command: npx\n    args:\n    - -y\n    # old key ${dummy}\n    - "@getmarrow/mcp@3.9.90"\n`,
-    commentOnClientLine: `mcp_servers:\n  marrow:\n    command: npx\n    args: ["-y", "--package=@getmarrow/mcp@3.9.97", "marrow-mcp"]\n    env:\n      MARROW_CLIENT: claude # ${dummy}\n`,
+    commentOnClientLine: `mcp_servers:\n  marrow:\n    command: npx\n    args: ["-y", "--package=@getmarrow/mcp@3.9.98", "marrow-mcp"]\n    env:\n      MARROW_CLIENT: claude # ${dummy}\n`,
     commentOnEmptyServers: `mcp_servers: {}  # ${dummy}\nmodel: x\n`,
   };
   for (const [name, text] of Object.entries(cases)) {
@@ -438,7 +438,7 @@ test('Hermes wiring keeps an existing entry\'s own env keys and prefers a Hermes
     assert.equal(inline.hermes.state, 'configured');
     assert.equal(inline.hermes.key_source, 'hermes_entry');
     assert.match(inlineText, /MARROW_API_KEY: owner-inline-value\n {6}MARROW_SESSION_ID: s1\n {6}MARROW_CLIENT: hermes/);
-    assert.match(inlineText, /args: \["-y", "--package=@getmarrow\/mcp@3\.9\.97", "marrow-mcp"\]/);
+    assert.match(inlineText, /args: \["-y", "--package=@getmarrow\/mcp@3\.9\.98", "marrow-mcp"\]/);
     assert.equal(fs.existsSync(path.join(inlineHome, '.marrow', 'env')), false);
     assert.doesNotMatch(JSON.stringify(inline), /owner-inline-value/);
 
@@ -478,7 +478,7 @@ test('Hermes wiring refuses a config it cannot edit safely and prints the exact 
         assert.equal(fs.readFileSync(path.join(home, '.hermes', 'config.yaml'), 'utf8'), text, name);
         assert.deepEqual(fs.readdirSync(path.join(home, '.hermes')).filter((entry) => entry.includes('backup')), [], name);
         assert.match(report.hermes.exact_fix, /mcp_servers:\n {2}marrow:\n {4}command: npx/);
-        assert.match(report.hermes.exact_fix, /@getmarrow\/mcp@3\.9\.97/);
+        assert.match(report.hermes.exact_fix, /@getmarrow\/mcp@3\.9\.98/);
         assert.doesNotMatch(JSON.stringify(report), /fixture-arg-value/);
       } finally {
         fs.rmSync(home, { recursive: true, force: true });
@@ -814,7 +814,7 @@ test('first install runs the self-test and prints one summary line with the full
   const fakeBin = tempDir();
   fs.writeFileSync(path.join(project, 'package.json'), '{}\n');
   // The loop-guard self-test runs the pinned MCP package through npx; a local stand-in keeps
-  // this test offline and returns the proof shape MCP 3.9.97 prints.
+  // this test offline and returns the proof shape MCP 3.9.98 prints.
   fs.writeFileSync(path.join(fakeBin, 'npx'), `#!/bin/sh\nprintf '%s' '${JSON.stringify({ pass: true, isolated: true, live_hook_observed: false, repeat_denied: true, mutation_reset: true, owner_disabled_bypass: true })}'\n`, { mode: 0o755 });
   const key = 'mrw_fixture_summary_key';
   const api = await startStubApi((request) => {

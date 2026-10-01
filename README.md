@@ -108,11 +108,15 @@ Persistent controller lifecycle is currently Linux-only. On macOS or Windows, ac
 
 The controller is not a boot service. After a host restart, or any exit that skips its shutdown handler, doctor reports it as `stale` until the next install, update, or `controller ensure`. While local control is disabled, the controller is not started, and doctor reports a stopped or stale controller as not required instead of recommending `controller ensure`; unsafe controller state or an unverified or unresponsive controller process keeps its exact fix.
 
-## What's New in v0.1.66
+## What's New in v0.1.67
+
+v0.1.67 installs MCP `3.9.98` (source `e40d3cb40479456fd937bce0b9488eb0c3f10863`, packed integrity `sha512-AmDT3afwdm7+Dc555zDs+yGIG4RyC/YbaQm+9O1mThlC6g/9EujTr7y7UvRMEtYDvVWAAaG6CFM7/u/ytjKhwQ==`), which makes `npx @getmarrow/mcp ...` commands work again. SDK `3.7.64` and everything else are unchanged.
+
+### Previous release: v0.1.66
 
 v0.1.66 keeps MCP `3.9.97` (source `be607e1dffd4d9e6a3c40f01151e509c115fba3f`, packed integrity `sha512-wab1kvgec8WhDDrpkajauLu2QdADXudIxkic0BAgzV96FZVHY0ME45hrOyQmqfkI+OtKriYdgIFp90peWGh2mA==`) and SDK `3.7.64` unchanged. It fixes the governed runner's gate and permit path, makes updating one command, and removes internal publishing tooling from the public package.
 
-### Update: one command
+#### Update: one command
 
 ```bash
 MARROW_API_KEY=mrw_live_... npx -y @getmarrow/install@latest update
@@ -128,7 +132,7 @@ First install is the same command without `update`. On its own, the command now:
 
 Restart the owning harness afterwards so new hooks and MCP configuration load; restart Hermes if its config changed.
 
-### Fixes
+#### Fixes
 
 - **Governed runner gate and permits.** `gate`, `run` and `permit` read Marrow's real gate decision. Previously the runtime's default package response lacked the fields the runner read, so `gate` printed `unknown`, and every protected `run` sent an empty gate receipt, got HTTP 400 and exited 13.
   - `gate` now prints the decision with its mode (enforced or advisory), and exits 12 when an enforced gate blocks or needs owner approval. It used to exit 0.
