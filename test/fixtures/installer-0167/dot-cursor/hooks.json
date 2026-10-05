@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "command": "./owner/pre.sh",
+        "matcher": "Write"
+      },
+      {
+        "command": "npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp cursor-pre-action-hook",
+        "matcher": "Shell|Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|MCP:(?!marrow(?:_.*|:marrow_.*)$).*",
+        "timeout": 5,
+        "failClosed": true,
+        "async": false
+      }
+    ],
+    "beforeShellExecution": [
+      {
+        "command": "./owner/approve-network.sh",
+        "matcher": "curl|wget",
+        "timeout": 30
+      }
+    ],
+    "sessionStart": [
+      {
+        "command": "./owner/session-init.sh"
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "./owner/prompt-audit.sh"
+      }
+    ],
+    "afterFileEdit": [
+      {
+        "command": "./owner/format.sh"
+      }
+    ],
+    "postToolUse": [
+      {
+        "command": "npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp cursor-hook",
+        "matcher": "Shell|Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|MCP:(?!marrow(?:_.*|:marrow_.*)$).*",
+        "timeout": 5
+      }
+    ],
+    "postToolUseFailure": [
+      {
+        "command": "npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp cursor-hook",
+        "matcher": "Shell|Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|MCP:(?!marrow(?:_.*|:marrow_.*)$).*",
+        "timeout": 5
+      }
+    ],
+    "stop": [
+      {
+        "command": "npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp cursor-session-hook",
+        "timeout": 3
+      }
+    ]
+  }
+}

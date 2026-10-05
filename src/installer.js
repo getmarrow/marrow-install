@@ -8,6 +8,7 @@ const {
   controllerStatus,
   controllerSupportedPlatform,
   ensureCurrentGovernanceController,
+  stopProjectControllers,
 } = require('./controller-manager');
 const { firstCapturePath, harnessReloadPlan } = require('./first-hour');
 const { evidence: localControlEvidence } = require('./control-state');
@@ -19,15 +20,18 @@ const {
   planHermesMcpConfig,
 } = require('./hermes-config');
 const { ensureOwnerApiKey, readOwnerApiKey } = require('./owner-env');
+const {
+  MCP_ADAPTER_VERSION,
+  MCP_ADAPTER_SOURCE_SHA,
+  MCP_ADAPTER_INTEGRITY,
+  MCP_HOST_APPROVAL_HOOKS_SINCE,
+  SDK_ADAPTER_VERSION,
+  SDK_ADAPTER_INTEGRITY,
+} = require('./pins');
 
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MARROW_BLOCK_START = '<!-- marrow:passive-start -->';
 const MARROW_BLOCK_END = '<!-- marrow:passive-end -->';
-const MCP_ADAPTER_VERSION = '3.9.98';
-const MCP_ADAPTER_SOURCE_SHA = 'e40d3cb40479456fd937bce0b9488eb0c3f10863';
-const MCP_ADAPTER_INTEGRITY = 'sha512-AmDT3afwdm7+Dc555zDs+yGIG4RyC/YbaQm+9O1mThlC6g/9EujTr7y7UvRMEtYDvVWAAaG6CFM7/u/ytjKhwQ==';
-const SDK_ADAPTER_VERSION = '3.7.64';
-const SDK_ADAPTER_INTEGRITY = 'sha512-8qJj/8ouHEz1NnZkmujtFxUm/fWldqR/rHv62/sqabaxT0H90xCCHxodLOkV0SVxDscAtnahioZakqkeGNUwyA==';
 const SDK_ADAPTER_TARBALL = `https://registry.npmjs.org/@getmarrow/sdk/-/sdk-${SDK_ADAPTER_VERSION}.tgz`;
 const MCP_PACKAGE_SPEC = `@getmarrow/mcp@${MCP_ADAPTER_VERSION}`;
 const ADAPTER_PROVENANCE = Object.freeze({
@@ -95,6 +99,12 @@ function compatibleMcpTargetVersion(value) {
     && candidate[0] === sealed[0]
     && candidate[1] === sealed[1]
     && compareMcpVersions(value, MCP_ADAPTER_VERSION) >= 0);
+}
+
+// Whether an MCP version answers the host-approval hooks (see MCP_HOST_APPROVAL_HOOKS_SINCE).
+function hostApprovalHooksSupported(version = MCP_ADAPTER_VERSION) {
+  const comparison = compareMcpVersions(version, MCP_HOST_APPROVAL_HOOKS_SINCE);
+  return comparison !== null && comparison >= 0;
 }
 
 function mcpVersionsInText(value) {
@@ -248,6 +258,11 @@ const MCP_CONTEXT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mc
 const MCP_PRE_ACTION_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp claude-pre-action-hook`;
 const MCP_ACTION_RESULT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp claude-hook`;
 const MCP_SESSION_END_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp claude-session-hook`;
+// Host approvals: a pass-through PermissionRequest hook (installed async) that only notes that
+// Claude Code is about to show its own permission dialog for a held call, and PostToolBatch
+// (async, the result entrypoint) that settles a declined dialog. Same spelling and fields as
+// `marrow-mcp setup` writes, so neither writer rewrites the other.
+const MCP_PERMISSION_REQUEST_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp claude-permission-request-hook`;
 const CODEX_CONTEXT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp codex-context-hook`;
 const CODEX_PRE_ACTION_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp codex-pre-action-hook`;
 const CODEX_ACTION_RESULT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp codex-hook`;
@@ -255,6 +270,7 @@ const CODEX_SESSION_END_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} mar
 const CURSOR_PRE_ACTION_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp cursor-pre-action-hook`;
 const CURSOR_ACTION_RESULT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp cursor-hook`;
 const CURSOR_SESSION_END_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp cursor-session-hook`;
+const CURSOR_CONTEXT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp cursor-context-hook`;
 const CLINE_PRE_ACTION_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp cline-pre-action-hook`;
 const CLINE_ACTION_RESULT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp cline-hook`;
 const CLINE_SESSION_END_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp cline-session-hook`;
@@ -271,6 +287,53 @@ const GEMINI_SESSION_END_ENTRYPOINT = `npx -y --package=${MCP_PACKAGE_SPEC} marr
 const GEMINI_FIXED_DENIAL = 'Marrow blocked this action because required governance approval or proof is unavailable.';
 const GEMINI_LAUNCH_FAILURE = 'Marrow governance adapter was unavailable; this action is blocked.';
 const GEMINI_PRE_ACTION_HOOK_COMMAND = `sh -c 'output="$(${GEMINI_PRE_ACTION_ENTRYPOINT} 2>/dev/null)" && { case "$output" in "{\\"decision\\":\\"allow\\"}"|"{\\"decision\\":\\"deny\\",\\"reason\\":\\"${GEMINI_FIXED_DENIAL}\\"}") printf "%s\\n" "$output"; exit 0 ;; esac; }; printf "%s\\n" "${GEMINI_LAUNCH_FAILURE}" >&2; exit 2'`;
+// Host approvals: the BeforeTool guard also passes the hold denial that carries a typed-reply
+// code for the user only (`systemMessage`), so it checks the JSON shape instead of two fixed
+// strings. Anything else (a crash, a timeout before Gemini's own, invalid or oversized output)
+// still blocks with the fixed launch-failure text. stdin goes straight to the MCP entrypoint.
+const GEMINI_HOOK_GUARD_TIMEOUT_MS = 4500;
+const GEMINI_PRE_ACTION_GUARD_SOURCE = [
+  'const {spawn}=require("node:child_process");',
+  'const valid=value=>{try{const p=JSON.parse(value);if(!p||typeof p!=="object"||Array.isArray(p)||JSON.stringify(p)!==value)return false;const keys=Object.keys(p);',
+  'if(p.decision==="allow")return keys.length===1;',
+  'if(p.decision!=="deny"||typeof p.reason!=="string"||p.reason.length<1||p.reason.length>500)return false;',
+  'if(keys.length===2)return keys.includes("reason");',
+  'return keys.length===3&&keys.includes("systemMessage")&&typeof p.systemMessage==="string"&&p.systemMessage.length>0&&p.systemMessage.length<=600;}catch{return false;}};',
+  'let child=null,timer=null,done=false,output="",bytes=0;',
+  // Exits at once: a grandchild still holding the pipe must not keep the hook alive until the
+  // host's own timeout, which Gemini treats as a non-blocking failure.
+  `const fail=()=>{if(done)return;done=true;if(timer)clearTimeout(timer);try{if(child){if(child.stdout)child.stdout.destroy();if(!child.killed)child.kill("SIGKILL");}}catch{}process.exitCode=2;process.stderr.write(${JSON.stringify(`${GEMINI_LAUNCH_FAILURE}\n`)},()=>process.exit(2));};`,
+  'try{',
+  `child=spawn(process.platform==="win32"?"npx.cmd":"npx",${JSON.stringify(['-y', `--package=${MCP_PACKAGE_SPEC}`, 'marrow-mcp', 'gemini-pre-action-hook'])},{stdio:["inherit","pipe","ignore"]});`,
+  `timer=setTimeout(fail,${GEMINI_HOOK_GUARD_TIMEOUT_MS});`,
+  'child.stdout.on("data",chunk=>{if(done)return;bytes+=chunk.length;if(bytes>4096){fail();return;}output+=chunk.toString("utf8");});',
+  'child.on("error",fail);',
+  'child.on("close",code=>{if(done)return;const out=output.replace(/\\n+$/,"");if(code!==0||!valid(out)){fail();return;}done=true;clearTimeout(timer);process.stdout.write(out+"\\n");});',
+  '}catch{fail();}',
+].join('');
+const GEMINI_PRE_ACTION_GUARD_COMMAND = `node -e '${GEMINI_PRE_ACTION_GUARD_SOURCE}'`;
+// BeforeAgent records a typed reply ("marrow approve CODE") in a local interactive session. It
+// never blocks the prompt: only a confirmation for the user (`systemMessage`) and a retry note
+// for the agent pass; any failure prints `{}` and the prompt continues. A held action stays
+// denied at BeforeTool until Marrow has the answer, so this hook cannot let one run.
+const GEMINI_CONTEXT_GUARD_SOURCE = [
+  'const {spawn}=require("node:child_process");',
+  'const text=(v)=>typeof v==="string"&&v.length<=1000;',
+  'const valid=value=>{try{const p=JSON.parse(value);if(!p||typeof p!=="object"||Array.isArray(p)||JSON.stringify(p)!==value)return false;',
+  'for(const key of Object.keys(p)){if(key==="systemMessage"){if(!text(p.systemMessage))return false;}',
+  'else if(key==="hookSpecificOutput"){const h=p.hookSpecificOutput;if(!h||typeof h!=="object"||Array.isArray(h)||Object.keys(h).sort().join()!=="additionalContext,hookEventName"||h.hookEventName!=="BeforeAgent"||!text(h.additionalContext))return false;}',
+  'else return false;}return true;}catch{return false;}};',
+  'let child=null,timer=null,done=false,output="",bytes=0;',
+  'const neutral=()=>{if(done)return;done=true;if(timer)clearTimeout(timer);try{if(child){if(child.stdout)child.stdout.destroy();if(!child.killed)child.kill("SIGKILL");}}catch{}process.exitCode=0;process.stdout.write("{}\\n",()=>process.exit(0));};',
+  'try{',
+  `child=spawn(process.platform==="win32"?"npx.cmd":"npx",${JSON.stringify(['-y', `--package=${MCP_PACKAGE_SPEC}`, 'marrow-mcp', 'gemini-context-hook'])},{stdio:["inherit","pipe","ignore"]});`,
+  `timer=setTimeout(neutral,${GEMINI_HOOK_GUARD_TIMEOUT_MS});`,
+  'child.stdout.on("data",chunk=>{if(done)return;bytes+=chunk.length;if(bytes>4096){neutral();return;}output+=chunk.toString("utf8");});',
+  'child.on("error",neutral);',
+  'child.on("close",code=>{if(done)return;const out=output.replace(/\\n+$/,"");if(code!==0||!valid(out)){neutral();return;}done=true;clearTimeout(timer);process.stdout.write(out+"\\n");});',
+  '}catch{neutral();}',
+].join('');
+const GEMINI_CONTEXT_HOOK_COMMAND = `node -e '${GEMINI_CONTEXT_GUARD_SOURCE}'`;
 const GEMINI_ACTION_RESULT_HOOK_COMMAND = `sh -c '${GEMINI_ACTION_RESULT_ENTRYPOINT} >/dev/null 2>&1 || :; printf "%s\\n" "{}"; exit 0'`;
 const GEMINI_SESSION_END_HOOK_COMMAND = `sh -c '${GEMINI_SESSION_END_ENTRYPOINT} >/dev/null 2>&1 || :; printf "%s\\n" "{}"; exit 0'`;
 const GROK_CONTEXT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp grok-context-hook`;
@@ -297,6 +360,12 @@ const GROK_PRE_ACTION_HOOK_COMMAND = `node -e '${GROK_PRE_ACTION_GUARD_SOURCE}'`
 const NATIVE_HOOK_MATCHER = 'Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|functions\\.(?!mcp__marrow__marrow_).*|mcp__(?!marrow__marrow_).*';
 const CODEX_NATIVE_HOOK_MATCHER = 'Bash|apply_patch|Edit|Write|MultiEdit|mcp__(?!marrow__marrow_).*|functions\\.(?!marrow_).*';
 const CURSOR_NATIVE_HOOK_MATCHER = 'Shell|Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|MCP:(?!marrow(?:_.*|:marrow_.*)$).*';
+// Host approvals: Cursor enforces an "ask" only on beforeShellExecution and beforeMCPExecution,
+// never on preToolUse, so shell and MCP calls move to those two hooks (failClosed) and leave
+// the preToolUse matcher. The result hooks keep the full matcher.
+const CURSOR_PRE_TOOL_USE_HOST_APPROVAL_MATCHER = 'Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List';
+const CURSOR_EXECUTION_PRE_EVENTS = Object.freeze(['beforeShellExecution', 'beforeMCPExecution']);
+const CURSOR_EXECUTION_POST_EVENTS = Object.freeze(['afterShellExecution', 'afterMCPExecution']);
 const GEMINI_NATIVE_HOOK_MATCHER = '^(?:run_shell_command|write_file|replace|edit_file|delete_file|read_file|read_many_files|glob|grep_search|list_directory|get_file_info|web_search|google_web_search|mcp_(?!marrow_marrow_)[A-Za-z0-9_]{1,192})$';
 const GROK_NATIVE_HOOK_MATCHER = 'run_terminal_command|search_replace|write|spawn_subagent|use_tool|workflow|image_gen|image_edit|image_to_video|reference_to_video';
 const CODEX_HOOK_TIMEOUT_SECONDS = 5;
@@ -767,6 +836,10 @@ function parseArgs(argv, env = process.env) {
       explicitOperation = true;
       options.dryRun = true;
     }
+    else if (arg === 'uninstall' || arg === '--uninstall') {
+      explicitOperation = true;
+      options.uninstall = true;
+    }
     else if (arg === '--doctor' || arg === 'doctor' || arg === 'check') {
       explicitOperation = true;
       options.doctor = true;
@@ -814,6 +887,9 @@ function parseArgs(argv, env = process.env) {
     }
   }
 
+  if (options.uninstall && (options.activate || options.repair || options.doctor)) {
+    throw new Error('uninstall cannot be combined with activate, update, repair, or doctor');
+  }
   if (!['auto', 'mcp', 'sdk', 'both', 'md'].includes(options.mode)) {
     throw new Error('--mode must be one of auto, mcp, sdk, both, md');
   }
@@ -845,6 +921,7 @@ function usage() {
   npx @getmarrow/install doctor
   npx @getmarrow/install --mcp --yes
   npx @getmarrow/install --sdk --yes
+  npx @getmarrow/install uninstall [--yes]
 
 Options:
   (no command)       Detect, install, self-test, and start the supported persistent controller
@@ -861,6 +938,8 @@ Options:
   --no-controller    Do not start the local background controller during install/repair
   --no-self-test     Skip API smoke/self-test
   --verbose          Print the full report instead of the one-line summary and log file
+  uninstall          Preview removing only Marrow's own hooks, MCP server entries and instructions;
+                     add --yes to remove them. Your own hooks and settings are kept.
 
 The API key comes from MARROW_API_KEY, or from the owner-only ~/.marrow/env when unset.
 
@@ -1123,7 +1202,12 @@ function findLikelyEnvFiles(detection, env = process.env) {
   });
 }
 
-function passiveInstructions() {
+function passiveInstructions(options = {}) {
+  const hostApprovals = options.hostApprovals === true;
+  const geminiHooks = hostApprovals ? 'BeforeTool, AfterTool, AfterAgent, and BeforeAgent' : 'BeforeTool, AfterTool, and AfterAgent';
+  const approvals = hostApprovals
+    ? '\n- When Marrow holds an action for approval, the operator approves it in the host\'s own permission prompt, or with the typed reply the hook shows them; for actions only the account owner may approve, Marrow sends the owner a one-tap link. Never ask anyone to log in to a dashboard to approve, and never report, write, or claim an approval yourself. Retry the held action only after the approval or when the operator asks.'
+    : '';
   return `${MARROW_BLOCK_START}
 ## Marrow Passive Agent Memory
 
@@ -1137,10 +1221,10 @@ Marrow should run passively after install:
 - Before risky work, use Marrow's decision brief or passive prompt hook.
 - After activate writes MCP or hooks, restart this harness, then run \`npx @getmarrow/install@latest doctor --self-test\`. Do not claim Marrow is live in a process that has not reloaded.
 - First turn: tell the owner the gate is live and empty savings are honest. The next deploy, merge, or publish must go through Marrow.
-- Cursor and Composer use configured native hooks after restart and \`/hooks\` trust review. Cline uses its configured PreToolUse, PostToolUse, and TaskCancel hooks only after Enable Hooks, restart, executable trust, and workspace trust; TaskComplete is not claimed as current coverage. Windsurf uses configured native pre-action, success-result, and response-closeout hooks only after restart, trust review, and leaving Restricted Mode. Gemini CLI uses configured BeforeTool, AfterTool, and AfterAgent hooks only after restart and project fingerprint review and approval in \`/hooks panel\`; explicit user disablement is preserved. Grok uses global native PreToolUse, PostToolUse/PostToolUseFailure, and one nonblocking Stop closeout only after restart and \`/hooks\` inspection; Grok hooks remain user-toggleable. MCP tools remain on demand. Codex uses configured native hooks after restart and \`/hooks\` trust review. The governed wrapper remains an explicit bounded fallback.
+- Cursor and Composer use configured native hooks after restart and \`/hooks\` trust review. Cline uses its configured PreToolUse, PostToolUse, and TaskCancel hooks only after Enable Hooks, restart, executable trust, and workspace trust; TaskComplete is not claimed as current coverage. Windsurf uses configured native pre-action, success-result, and response-closeout hooks only after restart, trust review, and leaving Restricted Mode. Gemini CLI uses configured ${geminiHooks} hooks only after restart and project fingerprint review and approval in \`/hooks panel\`; explicit user disablement is preserved. Grok uses global native PreToolUse, PostToolUse/PostToolUseFailure, and one nonblocking Stop closeout only after restart and \`/hooks\` inspection; Grok hooks remain user-toggleable. MCP tools remain on demand. Codex uses configured native hooks after restart and \`/hooks\` trust review. The governed wrapper remains an explicit bounded fallback.
 - Before the session ends, close open work with session-end auto-commit or \`marrow_commit\`. Record model usage only when the host response includes counts.
 - After meaningful work, record the outcome so future agents learn from it.
-- After Marrow blocks, warns, or requires review, use the decision trace receipt to tell the operator what changed and which recorded workflow or proof is required. Stay quiet for routine low-risk work.
+- After Marrow blocks, warns, or requires review, use the decision trace receipt to tell the operator what changed and which recorded workflow or proof is required. Stay quiet for routine low-risk work.${approvals}
 - Check health with \`marrow_agent_status\` or \`GET /v1/agent/status\`.
 - When status/runtime returns a \`client_update\` notice, tell the operator and use its exact update and verification commands only when local change policy permits.
 
@@ -1293,7 +1377,7 @@ function exactHookDescriptors(settings, eventName, command, matcher) {
 function marrowHookSubcommand(command) {
   if (typeof command !== 'string') return null;
   const match = command.trim().match(
-    /^npx\s+(?:-y\s+)?(?:--package=@getmarrow\/mcp(?:@[^\s]+)?\s+marrow-mcp|@getmarrow\/mcp(?:@[^\s]+)?)\s+(?:(?:claude|cline|codex|cursor|gemini|grok|windsurf)-)?(context-hook|pre-action-hook|hook|session-hook)$/,
+    /^npx\s+(?:-y\s+)?(?:--package=@getmarrow\/mcp(?:@[^\s]+)?\s+marrow-mcp|@getmarrow\/mcp(?:@[^\s]+)?)\s+(?:(?:claude|cline|codex|cursor|gemini|grok|windsurf)-)?(context-hook|pre-action-hook|hook|session-hook|permission-request-hook)$/,
   );
   return match?.[1] || null;
 }
@@ -1367,11 +1451,33 @@ function safeJsonObject(filePath) {
   }
 }
 
-function claudeNativeHookFingerprint(settings) {
+// The host-approval hooks Claude Code needs besides the core five (see upsertClaudeHooks).
+function claudeHostApprovalHooksConfigured(settings, targetCommand = (command) => command) {
+  return {
+    permission_request: exactHookConfigured(settings, 'PermissionRequest', targetCommand(MCP_PERMISSION_REQUEST_HOOK_COMMAND), NATIVE_HOOK_MATCHER),
+    post_tool_batch: exactHookConfigured(settings, 'PostToolBatch', targetCommand(MCP_ACTION_RESULT_HOOK_COMMAND)),
+  };
+}
+
+function claudeNativeHookFingerprint(settings, options = {}) {
+  const hostApprovals = options.hostApprovals ?? hostApprovalHooksSupported();
   const contract = {
     schema: 'marrow-claude-native-hooks.v3',
     adapter_version: MCP_ADAPTER_VERSION,
     expected_hooks: NATIVE_EXPECTED_HOOKS,
+    ...(hostApprovals ? {
+      host_approvals: {
+        configured: claudeHostApprovalHooksConfigured(settings),
+        descriptors: {
+          permission_request: exactHookDescriptors(settings, 'PermissionRequest', MCP_PERMISSION_REQUEST_HOOK_COMMAND, NATIVE_HOOK_MATCHER),
+          post_tool_batch: exactHookDescriptors(settings, 'PostToolBatch', MCP_ACTION_RESULT_HOOK_COMMAND),
+        },
+        active_marrow_handlers: {
+          permission_request: marrowHookDescriptors(settings, 'PermissionRequest'),
+          post_tool_batch: marrowHookDescriptors(settings, 'PostToolBatch'),
+        },
+      },
+    } : {}),
     configured: {
       prompt: exactHookConfigured(settings, 'UserPromptSubmit', MCP_CONTEXT_HOOK_COMMAND),
       pre_action: exactHookConfigured(settings, 'PreToolUse', MCP_PRE_ACTION_HOOK_COMMAND, NATIVE_HOOK_MATCHER),
@@ -1397,7 +1503,7 @@ function claudeNativeHookFingerprint(settings) {
   return crypto.createHash('sha256').update(JSON.stringify(contract)).digest('hex');
 }
 
-function upsertClaudeHooks(settingsPath) {
+function upsertClaudeHooks(settingsPath, options = {}) {
   const settings = parseJsonObject(settingsPath);
   const hooks = settings.hooks && typeof settings.hooks === 'object' && !Array.isArray(settings.hooks)
     ? settings.hooks
@@ -1426,6 +1532,18 @@ function upsertClaudeHooks(settingsPath) {
     UserPromptSubmit: userPromptSubmit,
     Stop: stop,
   };
+  if (options.hostApprovals) {
+    // Both async, exactly as `marrow-mcp setup` writes them: the marker never delays or answers
+    // the dialog, and PostToolBatch settles a declined dialog in the background.
+    settings.hooks.PermissionRequest = reconcileMarrowCommandHook(
+      settings, 'PermissionRequest', 'permission-request-hook', MCP_PERMISSION_REQUEST_HOOK_COMMAND, NATIVE_HOOK_MATCHER,
+      { async: true },
+    );
+    settings.hooks.PostToolBatch = reconcileMarrowCommandHook(
+      settings, 'PostToolBatch', 'hook', MCP_ACTION_RESULT_HOOK_COMMAND, undefined,
+      { async: true },
+    );
+  }
 
   return JSON.stringify(settings, null, 2) + '\n';
 }
@@ -1517,13 +1635,44 @@ function cursorHookDescriptors(settings, eventName) {
   });
 }
 
-function cursorNativeHookFingerprint(settings) {
+// The Cursor hooks that host approvals add (see upsertCursorHooks), as configured checks.
+function cursorHostApprovalHooksConfigured(settings, targetCommand = (command) => command) {
+  const pre = targetCommand(CURSOR_PRE_ACTION_HOOK_COMMAND);
+  const post = targetCommand(CURSOR_ACTION_RESULT_HOOK_COMMAND);
+  return {
+    pre_tool_use: exactCursorHookConfigured(settings, 'preToolUse', pre, CURSOR_PRE_TOOL_USE_HOST_APPROVAL_MATCHER, {
+      timeout: CODEX_HOOK_TIMEOUT_SECONDS, failClosed: true, async: false,
+    }),
+    ...Object.fromEntries(CURSOR_EXECUTION_PRE_EVENTS.map((event) => [event, exactCursorHookConfigured(settings, event, pre, undefined, {
+      timeout: CODEX_HOOK_TIMEOUT_SECONDS, failClosed: true, async: false,
+    })])),
+    ...Object.fromEntries(CURSOR_EXECUTION_POST_EVENTS.map((event) => [event, exactCursorHookConfigured(settings, event, post, undefined, {
+      timeout: CODEX_HOOK_TIMEOUT_SECONDS,
+    })])),
+    sessionStart: exactCursorHookConfigured(settings, 'sessionStart', targetCommand(CURSOR_SESSION_END_HOOK_COMMAND), undefined, {
+      timeout: CODEX_HOOK_TIMEOUT_SECONDS,
+    }),
+    beforeSubmitPrompt: exactCursorHookConfigured(settings, 'beforeSubmitPrompt', targetCommand(CURSOR_CONTEXT_HOOK_COMMAND), undefined, {
+      timeout: CODEX_HOOK_TIMEOUT_SECONDS,
+    }),
+  };
+}
+
+function cursorNativeHookFingerprint(settings, options = {}) {
+  const hostApprovals = options.hostApprovals ?? hostApprovalHooksSupported();
   const contract = {
     schema: 'marrow-cursor-native-hooks.v1',
     adapter_version: MCP_ADAPTER_VERSION,
     expected_hooks: ['pre_action', 'action_result', 'outcome_closure'],
+    ...(hostApprovals ? {
+      host_approvals: {
+        configured: cursorHostApprovalHooksConfigured(settings),
+        descriptors: Object.fromEntries([...CURSOR_EXECUTION_PRE_EVENTS, ...CURSOR_EXECUTION_POST_EVENTS, 'sessionStart', 'beforeSubmitPrompt']
+          .map((event) => [event, cursorHookDescriptors(settings, event)])),
+      },
+    } : {}),
     configured: {
-      pre_action: exactCursorHookConfigured(settings, 'preToolUse', CURSOR_PRE_ACTION_HOOK_COMMAND, CURSOR_NATIVE_HOOK_MATCHER, {
+      pre_action: exactCursorHookConfigured(settings, 'preToolUse', CURSOR_PRE_ACTION_HOOK_COMMAND, hostApprovals ? CURSOR_PRE_TOOL_USE_HOST_APPROVAL_MATCHER : CURSOR_NATIVE_HOOK_MATCHER, {
         timeout: CODEX_HOOK_TIMEOUT_SECONDS,
         failClosed: true,
         async: false,
@@ -1548,17 +1697,18 @@ function cursorNativeHookFingerprint(settings) {
   return crypto.createHash('sha256').update(JSON.stringify(contract)).digest('hex');
 }
 
-function upsertCursorHooks(hooksPath) {
+function upsertCursorHooks(hooksPath, options = {}) {
   const settings = parseJsonObject(hooksPath);
   const hooks = settings.hooks && typeof settings.hooks === 'object' && !Array.isArray(settings.hooks)
     ? settings.hooks
     : {};
   settings.version = 1;
+  const hostApprovals = options.hostApprovals === true;
   settings.hooks = {
     ...hooks,
     preToolUse: reconcileCursorHook(settings, 'preToolUse', 'pre-action-hook', {
       command: CURSOR_PRE_ACTION_HOOK_COMMAND,
-      matcher: CURSOR_NATIVE_HOOK_MATCHER,
+      matcher: hostApprovals ? CURSOR_PRE_TOOL_USE_HOST_APPROVAL_MATCHER : CURSOR_NATIVE_HOOK_MATCHER,
       timeout: CODEX_HOOK_TIMEOUT_SECONDS,
       failClosed: true,
       async: false,
@@ -1578,6 +1728,36 @@ function upsertCursorHooks(hooksPath) {
       timeout: CODEX_SESSION_TIMEOUT_SECONDS,
     }),
   };
+  if (hostApprovals) {
+    // Cursor enforces "ask" only here. failClosed: a crash or timeout blocks the call instead
+    // of letting it through (Cursor fails open by default).
+    for (const eventName of CURSOR_EXECUTION_PRE_EVENTS) {
+      settings.hooks[eventName] = reconcileCursorHook(settings, eventName, 'pre-action-hook', {
+        command: CURSOR_PRE_ACTION_HOOK_COMMAND,
+        timeout: CODEX_HOOK_TIMEOUT_SECONDS,
+        failClosed: true,
+        async: false,
+      });
+    }
+    for (const eventName of CURSOR_EXECUTION_POST_EVENTS) {
+      settings.hooks[eventName] = reconcileCursorHook(settings, eventName, 'hook', {
+        command: CURSOR_ACTION_RESULT_HOOK_COMMAND,
+        timeout: CODEX_HOOK_TIMEOUT_SECONDS,
+      });
+    }
+    // sessionStart tells the hooks whether the session is local and interactive (not a
+    // background agent); without it Cursor holds are denied instead of asked.
+    settings.hooks.sessionStart = reconcileCursorHook(settings, 'sessionStart', 'session-hook', {
+      command: CURSOR_SESSION_END_HOOK_COMMAND,
+      timeout: CODEX_HOOK_TIMEOUT_SECONDS,
+    });
+    // The typed reply ("marrow approve CODE") in a local interactive session. Never failClosed:
+    // a failure must not block the operator's own prompts.
+    settings.hooks.beforeSubmitPrompt = reconcileCursorHook(settings, 'beforeSubmitPrompt', 'context-hook', {
+      command: CURSOR_CONTEXT_HOOK_COMMAND,
+      timeout: CODEX_HOOK_TIMEOUT_SECONDS,
+    });
+  }
   return JSON.stringify(settings, null, 2) + '\n';
 }
 
@@ -1647,7 +1827,9 @@ function upsertWindsurfHooks(hooksPath) {
 
 function geminiMarrowHookEntrypoint(command) {
   if (typeof command !== 'string') return null;
-  const match = command.match(/@getmarrow\/mcp(?:@[^\s]+)?\s+marrow-mcp\s+gemini-(pre-action-hook|hook|session-hook)(?:\s|['"]|$)/);
+  const match = command.match(/@getmarrow\/mcp(?:@[^\s]+)?\s+marrow-mcp\s+gemini-(pre-action-hook|context-hook|hook|session-hook)(?:\s|['"]|$)/)
+    // The node guards name the entrypoint as JSON array items.
+    || command.match(/@getmarrow\/mcp@[^\s"',]+["'],["']marrow-mcp["'],["']gemini-(pre-action-hook|context-hook|hook|session-hook)["']/);
   return match?.[1] || null;
 }
 
@@ -1689,7 +1871,14 @@ function geminiHooksExplicitlyDisabled(settings) {
   return settings?.hooksConfig?.enabled === false;
 }
 
-function geminiNativeHookFingerprint(settings) {
+// The Gemini BeforeTool command: the JSON-checking guard with host approvals, otherwise the
+// earlier fixed-string wrapper.
+function geminiPreActionCommand(hostApprovals) {
+  return hostApprovals ? GEMINI_PRE_ACTION_GUARD_COMMAND : GEMINI_PRE_ACTION_HOOK_COMMAND;
+}
+
+function geminiNativeHookFingerprint(settings, options = {}) {
+  const hostApprovals = options.hostApprovals ?? hostApprovalHooksSupported();
   return crypto.createHash('sha256').update(JSON.stringify({
     schema: 'marrow-gemini-native-hooks.v1',
     adapter_version: MCP_ADAPTER_VERSION,
@@ -1698,7 +1887,7 @@ function geminiNativeHookFingerprint(settings) {
     explicitly_disabled: geminiHooksExplicitlyDisabled(settings),
     configured: {
       pre_action: exactGeminiHookConfigured(
-        settings, 'BeforeTool', 'marrow-before-tool', GEMINI_PRE_ACTION_HOOK_COMMAND,
+        settings, 'BeforeTool', 'marrow-before-tool', geminiPreActionCommand(hostApprovals),
         GEMINI_NATIVE_HOOK_MATCHER, GEMINI_HOOK_TIMEOUT_MS,
       ),
       action_result: exactGeminiHookConfigured(
@@ -1709,6 +1898,12 @@ function geminiNativeHookFingerprint(settings) {
         settings, 'AfterAgent', 'marrow-after-agent', GEMINI_SESSION_END_HOOK_COMMAND,
         undefined, GEMINI_CLOSEOUT_TIMEOUT_MS,
       ),
+      ...(hostApprovals ? {
+        typed_reply: exactGeminiHookConfigured(
+          settings, 'BeforeAgent', 'marrow-before-agent', GEMINI_CONTEXT_HOOK_COMMAND,
+          undefined, GEMINI_HOOK_TIMEOUT_MS,
+        ),
+      } : {}),
     },
     session_end_claimed: false,
   })).digest('hex');
@@ -1825,11 +2020,12 @@ function managedGrokHooksFile(filePath) {
   }
 }
 
-function upsertGeminiHooks(settingsPath) {
+function upsertGeminiHooks(settingsPath, options = {}) {
   const settings = parseJsonObject(settingsPath);
   const hooks = settings.hooks && typeof settings.hooks === 'object' && !Array.isArray(settings.hooks)
     ? settings.hooks
     : {};
+  const hostApprovals = options.hostApprovals === true;
   settings.hooks = {
     ...hooks,
     BeforeTool: reconcileGeminiHook(settings, 'BeforeTool', {
@@ -1837,7 +2033,7 @@ function upsertGeminiHooks(settingsPath) {
       hooks: [{
         name: 'marrow-before-tool',
         type: 'command',
-        command: GEMINI_PRE_ACTION_HOOK_COMMAND,
+        command: geminiPreActionCommand(hostApprovals),
         timeout: GEMINI_HOOK_TIMEOUT_MS,
       }],
     }),
@@ -1859,6 +2055,17 @@ function upsertGeminiHooks(settingsPath) {
       }],
     }),
   };
+  if (hostApprovals) {
+    // The typed reply in a local interactive session (`gemini`, never `gemini -p`).
+    settings.hooks.BeforeAgent = reconcileGeminiHook(settings, 'BeforeAgent', {
+      hooks: [{
+        name: 'marrow-before-agent',
+        type: 'command',
+        command: GEMINI_CONTEXT_HOOK_COMMAND,
+        timeout: GEMINI_HOOK_TIMEOUT_MS,
+      }],
+    });
+  }
   return JSON.stringify(settings, null, 2) + '\n';
 }
 
@@ -1946,6 +2153,7 @@ function activationProfile(detection, plan, changes, client) {
     ? plan.mcp_target_version
     : MCP_ADAPTER_VERSION;
   const targetCommand = (command) => retargetMcpPackageSpec(command, mcpTargetVersion);
+  const hostApprovals = hostApprovalHooksSupported(mcpTargetVersion);
   const adapterVersion = capabilityLevel === 'native_hooks' || capabilityLevel === 'mcp'
     ? mcpTargetVersion
     : capabilityLevel === 'sdk_passive_runtime'
@@ -1964,14 +2172,18 @@ function activationProfile(detection, plan, changes, client) {
     if (exactHookConfigured(codexSettings, 'PostToolUse', targetCommand(CODEX_ACTION_RESULT_HOOK_COMMAND), CODEX_NATIVE_HOOK_MATCHER)) observedHooks.push('action_result');
     if (exactHookConfigured(codexSettings, 'SessionEnd', targetCommand(CODEX_SESSION_END_HOOK_COMMAND))) observedHooks.push('session_end');
   } else if (client === 'cursor' || client === 'composer') {
-    if (exactCursorHookConfigured(cursorSettings, 'preToolUse', targetCommand(CURSOR_PRE_ACTION_HOOK_COMMAND), CURSOR_NATIVE_HOOK_MATCHER, {
-      timeout: CODEX_HOOK_TIMEOUT_SECONDS, failClosed: true, async: false,
-    })) observedHooks.push('pre_action');
+    const approvalHooks = hostApprovals ? cursorHostApprovalHooksConfigured(cursorSettings, targetCommand) : null;
+    if ((hostApprovals
+      ? approvalHooks.pre_tool_use && approvalHooks.beforeShellExecution && approvalHooks.beforeMCPExecution
+        && approvalHooks.sessionStart && approvalHooks.beforeSubmitPrompt
+      : exactCursorHookConfigured(cursorSettings, 'preToolUse', targetCommand(CURSOR_PRE_ACTION_HOOK_COMMAND), CURSOR_NATIVE_HOOK_MATCHER, {
+        timeout: CODEX_HOOK_TIMEOUT_SECONDS, failClosed: true, async: false,
+      }))) observedHooks.push('pre_action');
     if (exactCursorHookConfigured(cursorSettings, 'postToolUse', targetCommand(CURSOR_ACTION_RESULT_HOOK_COMMAND), CURSOR_NATIVE_HOOK_MATCHER, {
       timeout: CODEX_HOOK_TIMEOUT_SECONDS,
     }) && exactCursorHookConfigured(cursorSettings, 'postToolUseFailure', targetCommand(CURSOR_ACTION_RESULT_HOOK_COMMAND), CURSOR_NATIVE_HOOK_MATCHER, {
       timeout: CODEX_HOOK_TIMEOUT_SECONDS,
-    })) observedHooks.push('action_result');
+    }) && (!hostApprovals || (approvalHooks.afterShellExecution && approvalHooks.afterMCPExecution))) observedHooks.push('action_result');
     if (exactCursorHookConfigured(cursorSettings, 'stop', targetCommand(CURSOR_SESSION_END_HOOK_COMMAND), undefined, {
       timeout: CODEX_SESSION_TIMEOUT_SECONDS,
     })) observedHooks.push('outcome_closure');
@@ -1991,9 +2203,12 @@ function activationProfile(detection, plan, changes, client) {
     )) observedHooks.push('response_closeout');
   } else if (client === 'gemini' && !geminiHooksExplicitlyDisabled(geminiSettings)) {
     if (exactGeminiHookConfigured(
-      geminiSettings, 'BeforeTool', 'marrow-before-tool', targetCommand(GEMINI_PRE_ACTION_HOOK_COMMAND),
+      geminiSettings, 'BeforeTool', 'marrow-before-tool', targetCommand(geminiPreActionCommand(hostApprovals)),
       GEMINI_NATIVE_HOOK_MATCHER, GEMINI_HOOK_TIMEOUT_MS,
-    )) observedHooks.push('pre_action');
+    ) && (!hostApprovals || exactGeminiHookConfigured(
+      geminiSettings, 'BeforeAgent', 'marrow-before-agent', targetCommand(GEMINI_CONTEXT_HOOK_COMMAND),
+      undefined, GEMINI_HOOK_TIMEOUT_MS,
+    ))) observedHooks.push('pre_action');
     if (exactGeminiHookConfigured(
       geminiSettings, 'AfterTool', 'marrow-after-tool', targetCommand(GEMINI_ACTION_RESULT_HOOK_COMMAND),
       GEMINI_NATIVE_HOOK_MATCHER, GEMINI_HOOK_TIMEOUT_MS,
@@ -2017,11 +2232,14 @@ function activationProfile(detection, plan, changes, client) {
   } else {
     if (capabilityLevel === 'native_hooks'
       && exactHookConfigured(claudeSettings, 'UserPromptSubmit', targetCommand(MCP_CONTEXT_HOOK_COMMAND))) observedHooks.push('prompt');
+    const claudeApprovalHooks = hostApprovals ? claudeHostApprovalHooksConfigured(claudeSettings, targetCommand) : null;
     if (capabilityLevel === 'native_hooks'
-      && exactHookConfigured(claudeSettings, 'PreToolUse', targetCommand(MCP_PRE_ACTION_HOOK_COMMAND), NATIVE_HOOK_MATCHER)) observedHooks.push('pre_action');
+      && exactHookConfigured(claudeSettings, 'PreToolUse', targetCommand(MCP_PRE_ACTION_HOOK_COMMAND), NATIVE_HOOK_MATCHER)
+      && (!hostApprovals || claudeApprovalHooks.permission_request)) observedHooks.push('pre_action');
     if (capabilityLevel === 'native_hooks'
       && exactHookConfigured(claudeSettings, 'PostToolUse', targetCommand(MCP_ACTION_RESULT_HOOK_COMMAND), NATIVE_HOOK_MATCHER)
-      && exactHookConfigured(claudeSettings, 'PostToolUseFailure', targetCommand(MCP_ACTION_RESULT_HOOK_COMMAND), NATIVE_HOOK_MATCHER)) observedHooks.push('action_result');
+      && exactHookConfigured(claudeSettings, 'PostToolUseFailure', targetCommand(MCP_ACTION_RESULT_HOOK_COMMAND), NATIVE_HOOK_MATCHER)
+      && (!hostApprovals || claudeApprovalHooks.post_tool_batch)) observedHooks.push('action_result');
     if (capabilityLevel === 'native_hooks'
       && exactHookConfigured(claudeSettings, 'Stop', targetCommand(MCP_SESSION_END_HOOK_COMMAND))) observedHooks.push('session_end');
   }
@@ -2048,12 +2266,12 @@ function activationProfile(detection, plan, changes, client) {
     .join('|');
   const configFingerprint = capabilityLevel === 'native_hooks'
     ? client === 'codex' ? codexNativeHookFingerprint(codexSettings)
-      : client === 'cursor' || client === 'composer' ? cursorNativeHookFingerprint(cursorSettings)
+      : client === 'cursor' || client === 'composer' ? cursorNativeHookFingerprint(cursorSettings, { hostApprovals })
       : client === 'cline' ? clineNativeHookFingerprint(detection)
       : client === 'windsurf' ? windsurfNativeHookFingerprint(windsurfSettings)
-      : client === 'gemini' ? geminiNativeHookFingerprint(geminiSettings)
+      : client === 'gemini' ? geminiNativeHookFingerprint(geminiSettings, { hostApprovals })
       : client === 'grok' ? grokNativeHookFingerprint(grokSettings)
-      : claudeNativeHookFingerprint(claudeSettings)
+      : claudeNativeHookFingerprint(claudeSettings, { hostApprovals })
     : crypto.createHash('sha256')
       .update(`${client}:${capabilityLevel}:${expectedHooks.join(',')}:${fingerprintMaterial}`)
       .digest('hex');
@@ -2346,11 +2564,14 @@ function defaultHarnessInstallMatrix(detection = detectEnvironment(process.cwd()
       && exactHookConfigured(codexSettings, 'PreToolUse', CODEX_PRE_ACTION_HOOK_COMMAND, CODEX_NATIVE_HOOK_MATCHER)
       && exactHookConfigured(codexSettings, 'PostToolUse', CODEX_ACTION_RESULT_HOOK_COMMAND, CODEX_NATIVE_HOOK_MATCHER)
       && exactHookConfigured(codexSettings, 'SessionEnd', CODEX_SESSION_END_HOOK_COMMAND));
+    const hostApprovals = hostApprovalHooksSupported();
     const cursorSettings = ['cursor', 'composer'].includes(entry.client) ? safeJsonObject(detection.paths.cursorHooks) : null;
+    const cursorApprovalHooks = cursorSettings && hostApprovals ? cursorHostApprovalHooksConfigured(cursorSettings) : null;
     const cursorConfigured = Boolean(cursorSettings
-      && exactCursorHookConfigured(cursorSettings, 'preToolUse', CURSOR_PRE_ACTION_HOOK_COMMAND, CURSOR_NATIVE_HOOK_MATCHER, {
+      && exactCursorHookConfigured(cursorSettings, 'preToolUse', CURSOR_PRE_ACTION_HOOK_COMMAND, hostApprovals ? CURSOR_PRE_TOOL_USE_HOST_APPROVAL_MATCHER : CURSOR_NATIVE_HOOK_MATCHER, {
         timeout: CODEX_HOOK_TIMEOUT_SECONDS, failClosed: true, async: false,
       })
+      && (!cursorApprovalHooks || Object.values(cursorApprovalHooks).every(Boolean))
       && exactCursorHookConfigured(cursorSettings, 'postToolUse', CURSOR_ACTION_RESULT_HOOK_COMMAND, CURSOR_NATIVE_HOOK_MATCHER, {
         timeout: CODEX_HOOK_TIMEOUT_SECONDS,
       })
@@ -2377,9 +2598,13 @@ function defaultHarnessInstallMatrix(detection = detectEnvironment(process.cwd()
     const geminiConfigured = Boolean(geminiSettings
       && !geminiHooksExplicitlyDisabled(geminiSettings)
       && exactGeminiHookConfigured(
-        geminiSettings, 'BeforeTool', 'marrow-before-tool', GEMINI_PRE_ACTION_HOOK_COMMAND,
+        geminiSettings, 'BeforeTool', 'marrow-before-tool', geminiPreActionCommand(hostApprovals),
         GEMINI_NATIVE_HOOK_MATCHER, GEMINI_HOOK_TIMEOUT_MS,
       )
+      && (!hostApprovals || exactGeminiHookConfigured(
+        geminiSettings, 'BeforeAgent', 'marrow-before-agent', GEMINI_CONTEXT_HOOK_COMMAND,
+        undefined, GEMINI_HOOK_TIMEOUT_MS,
+      ))
       && exactGeminiHookConfigured(
         geminiSettings, 'AfterTool', 'marrow-after-tool', GEMINI_ACTION_RESULT_HOOK_COMMAND,
         GEMINI_NATIVE_HOOK_MATCHER, GEMINI_HOOK_TIMEOUT_MS,
@@ -2489,6 +2714,8 @@ function buildPlan(detection, options) {
   };
   const mcpTargetVersion = executableMcpTarget(options).version;
   const retarget = (value) => retargetMcpPackageSpec(value, mcpTargetVersion);
+  // The host-approval hook layout only for an MCP that answers those hooks.
+  const hostApprovals = hostApprovalHooksSupported(mcpTargetVersion);
   const mode = options.mode === 'auto'
     ? detection.node ? 'both' : 'mcp'
     : options.mode;
@@ -2516,7 +2743,7 @@ function buildPlan(detection, options) {
         type: 'json-transform',
         path: detection.paths.claudeSettings,
         label: 'Claude Code MCP passive hooks',
-        transform: (filePath) => retarget(upsertClaudeHooks(filePath)),
+        transform: (filePath) => retarget(upsertClaudeHooks(filePath, { hostApprovals })),
       });
     }
     if (detection.codex) {
@@ -2552,7 +2779,7 @@ function buildPlan(detection, options) {
         type: 'json-transform',
         path: detection.paths.geminiSettings,
         label: 'Gemini CLI native hooks',
-        transform: (filePath) => retarget(upsertGeminiHooks(filePath)),
+        transform: (filePath) => retarget(upsertGeminiHooks(filePath, { hostApprovals })),
       });
     }
     if (detection.grok) {
@@ -2587,7 +2814,7 @@ function buildPlan(detection, options) {
         type: 'json-transform',
         path: detection.paths.cursorHooks,
         label: 'Cursor native hooks',
-        transform: (filePath) => retarget(upsertCursorHooks(filePath)),
+        transform: (filePath) => retarget(upsertCursorHooks(filePath, { hostApprovals })),
       });
       writes.push(mcpConfigWrite(detection.paths.cursorMcp, 'Cursor MCP server config'));
     }
@@ -2598,7 +2825,7 @@ function buildPlan(detection, options) {
       type: 'md-block',
       path: detection.paths.agentsMd,
       label: 'Agent instructions',
-      block: retarget(passiveInstructions()),
+      block: retarget(passiveInstructions({ hostApprovals })),
     });
   }
 
@@ -2607,11 +2834,11 @@ function buildPlan(detection, options) {
       type: 'file',
       path: detection.paths.cursorRules,
       label: 'Cursor Marrow rule',
-      content: retarget(passiveInstructions()).replace(/<!--[^>]+-->/g, '').trim() + '\n',
+      content: retarget(passiveInstructions({ hostApprovals })).replace(/<!--[^>]+-->/g, '').trim() + '\n',
     });
   }
 
-  return { mode, root: detection.root, writes, mcp_target_version: mcpTargetVersion };
+  return { mode, root: detection.root, writes, mcp_target_version: mcpTargetVersion, host_approval_hooks: hostApprovals };
 }
 
 function assertContainedManagedTarget(root, targetPath) {
@@ -2728,7 +2955,9 @@ function applyPlan(plan, options) {
         undo = planned.action === 'update' ? planned.undo || [] : null;
       }
     } else if (write.type === 'owned-executable') {
-      if (fileExists && before !== write.content) {
+      // A file Marrow wrote for another pinned MCP version is still Marrow's and moves to this
+      // pin; any other difference is the owner's edit and is never overwritten.
+      if (fileExists && before !== write.content && !sameMarrowFile(before, [write.content])) {
         after = before;
         hookConflict = true;
       } else {
@@ -2801,6 +3030,286 @@ function applyPlan(plan, options) {
     }
   }
   return changes;
+}
+
+// ---------------------------------------------------------------------------
+// Uninstall: removes only what Marrow wrote. Every other hook, server, setting and file is kept.
+// Files are read in-process and never printed; the report names paths and counts only.
+// ---------------------------------------------------------------------------
+
+// Hook groups of the Claude Code, Codex, Grok and Gemini shape:
+// hooks[event] = [{ matcher?, hooks: [handler, ...] }].
+function withoutMarrowGroupedHandlers(settings, isMarrowHandler) {
+  const hooks = settings?.hooks;
+  if (!hooks || typeof hooks !== 'object' || Array.isArray(hooks)) return { settings, removed: 0, kept: 0 };
+  let removed = 0;
+  let kept = 0;
+  const next = {};
+  for (const [eventName, entries] of Object.entries(hooks)) {
+    if (!Array.isArray(entries)) {
+      next[eventName] = entries;
+      continue;
+    }
+    const retained = [];
+    let touched = false;
+    for (const entry of entries) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry) || !Array.isArray(entry.hooks)) {
+        retained.push(entry);
+        kept += 1;
+        continue;
+      }
+      const handlers = entry.hooks.filter((handler) => !isMarrowHandler(handler));
+      kept += handlers.length;
+      if (handlers.length === entry.hooks.length) {
+        retained.push(entry);
+        continue;
+      }
+      touched = true;
+      removed += entry.hooks.length - handlers.length;
+      if (handlers.length > 0) retained.push({ ...entry, hooks: handlers });
+    }
+    // An event that held only Marrow's entries goes away with them.
+    if (touched && retained.length === 0) continue;
+    next[eventName] = retained;
+  }
+  const result = { ...settings, hooks: next };
+  if (removed > 0 && Object.keys(next).length === 0) delete result.hooks;
+  return { settings: result, removed, kept };
+}
+
+// Flat hook lists of the Cursor and Windsurf shape: hooks[event] = [{ command, ... }].
+function withoutMarrowFlatEntries(settings, isMarrowEntry) {
+  const hooks = settings?.hooks;
+  if (!hooks || typeof hooks !== 'object' || Array.isArray(hooks)) return { settings, removed: 0, kept: 0 };
+  let removed = 0;
+  let kept = 0;
+  const next = {};
+  for (const [eventName, entries] of Object.entries(hooks)) {
+    if (!Array.isArray(entries)) {
+      next[eventName] = entries;
+      continue;
+    }
+    const retained = entries.filter((entry) => !(entry && typeof entry === 'object' && !Array.isArray(entry) && isMarrowEntry(entry)));
+    kept += retained.length;
+    removed += entries.length - retained.length;
+    if (retained.length === 0 && entries.length > 0) continue;
+    next[eventName] = retained;
+  }
+  const result = { ...settings, hooks: next };
+  if (removed > 0 && Object.keys(next).length === 0) delete result.hooks;
+  return { settings: result, removed, kept };
+}
+
+const isMarrowCommandHandler = (handler) => Boolean(handler && typeof handler === 'object' && !Array.isArray(handler)
+  && handler.type === 'command' && marrowHookSubcommand(handler.command));
+const isMarrowGeminiHandler = (handler) => Boolean(handler && typeof handler === 'object' && !Array.isArray(handler)
+  && (String(handler.name || '').startsWith('marrow-') || geminiMarrowHookEntrypoint(handler.command)));
+const isMarrowGrokHandler = (handler) => Boolean(handler && typeof handler === 'object' && !Array.isArray(handler)
+  && handler.type === 'command' && grokMarrowHookSubcommand(handler.command));
+
+// The MCP server entry only when Marrow wrote it: npx running the published package.
+function withoutMarrowMcpServer(config) {
+  const servers = config?.mcpServers;
+  const entry = servers && typeof servers === 'object' && !Array.isArray(servers) ? servers.marrow : null;
+  if (!entry) return { config, removed: 0, kept: 0, custom: false };
+  const args = Array.isArray(entry.args) ? entry.args.map(String) : [];
+  const ours = entry.command === 'npx' && args.includes('marrow-mcp')
+    && args.some((arg) => /^--package=@getmarrow\/mcp(?:@[^\s]+)?$/.test(arg));
+  if (!ours) return { config, removed: 0, kept: 1, custom: true };
+  const nextServers = { ...servers };
+  delete nextServers.marrow;
+  const result = { ...config, mcpServers: nextServers };
+  if (Object.keys(nextServers).length === 0) delete result.mcpServers;
+  return { config: result, removed: 1, kept: Object.keys(nextServers).length, custom: false };
+}
+
+function withoutMarrowInstructionBlock(content) {
+  const block = marrowManagedBlockInText(content);
+  if (!block) return { content, removed: 0 };
+  const start = content.indexOf(block);
+  const before = content.slice(0, start);
+  const after = content.slice(start + block.length).replace(/^\n/, '');
+  const head = before.trim() ? before.replace(/\n*$/, after.trim() ? '\n\n' : '\n') : '';
+  return { content: `${head}${after}`, removed: 1 };
+}
+
+// Marrow-written files compare equal once the pinned MCP version is normalized.
+function sameMarrowFile(actual, candidates) {
+  const normalize = (value) => String(value).replace(/@getmarrow\/mcp@\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?/g, '@getmarrow/mcp@<pinned>');
+  const normalized = normalize(actual);
+  return candidates.some((candidate) => normalize(candidate) === normalized);
+}
+
+function buildUninstallPlan(detection) {
+  const steps = [];
+  const json = (filePath, label, transform, extra = {}) => steps.push({ kind: 'json', path: filePath, label, transform, ...extra });
+  const mcpServer = (value) => {
+    const result = withoutMarrowMcpServer(value);
+    return { settings: result.config, removed: result.removed, kept: result.kept, custom: result.custom };
+  };
+  json(detection.paths.claudeSettings, 'Claude Code hooks', (value) => withoutMarrowGroupedHandlers(value, isMarrowCommandHandler));
+  json(detection.paths.codexHooks, 'Codex hooks', (value) => withoutMarrowGroupedHandlers(value, isMarrowCommandHandler));
+  json(detection.paths.cursorHooks, 'Cursor hooks', (value) => withoutMarrowFlatEntries(value, (entry) => Boolean(marrowHookSubcommand(entry.command))));
+  json(detection.paths.windsurfHooks, 'Windsurf hooks', (value) => withoutMarrowFlatEntries(value, (entry) => Boolean(windsurfMarrowHookEntrypoint(entry.command))));
+  json(detection.paths.geminiSettings, 'Gemini CLI hooks', (value) => withoutMarrowGroupedHandlers(value, isMarrowGeminiHandler));
+  json(detection.paths.grokHooks, 'Grok hooks', (value) => withoutMarrowGroupedHandlers(value, isMarrowGrokHandler), {
+    root: detection.home,
+    grok: true,
+    // Marrow's own global file: deleted when nothing but Marrow's hooks was in it.
+    removeWhenEmpty: true,
+  });
+  json(detection.paths.mcpJson, 'Project MCP server config', mcpServer);
+  json(detection.paths.cursorMcp, 'Cursor MCP server config', mcpServer);
+  steps.push({ kind: 'md-block', path: detection.paths.agentsMd, label: 'Agent instructions' });
+  const instructionVariants = [false, true].map((hostApprovals) => passiveInstructions({ hostApprovals }).replace(/<!--[^>]+-->/g, '').trim() + '\n');
+  steps.push({ kind: 'owned-file', path: detection.paths.cursorRules, label: 'Cursor Marrow rule', candidates: instructionVariants });
+  for (const hook of clineHookContract(detection)) {
+    steps.push({ kind: 'owned-file', path: hook.path, label: hook.label, candidates: [hook.content] });
+  }
+  return steps;
+}
+
+function uninstallFileState(filePath) {
+  try {
+    const stat = fs.lstatSync(filePath);
+    if (stat.isSymbolicLink() || !stat.isFile()) return 'unsafe';
+    if (stat.size > 4 * 1024 * 1024) return 'too_large';
+    return 'file';
+  } catch {
+    return 'missing';
+  }
+}
+
+async function uninstall(options = {}) {
+  const home = options.home || process.env.HOME || process.env.USERPROFILE || os.homedir();
+  const detection = detectEnvironment(options.cwd || process.cwd(), { ...process.env, HOME: home, USERPROFILE: home });
+  const apply = Boolean(options.yes && !options.dryRun);
+  const root = path.resolve(detection.root);
+  const changes = [];
+  let controller = null;
+  if (apply && options.controller !== false) {
+    // A running controller restores missing managed hooks every five minutes; stop it first.
+    try {
+      const stopped = await stopProjectControllers({ root, client: detectedClient(detection), mode: 'auto' });
+      controller = { stopped: stopped.stopped || 0, changed: Boolean(stopped.changed) };
+    } catch {
+      controller = { stopped: 0, changed: false, error: 'controller_stop_failed' };
+    }
+  }
+  for (const step of buildUninstallPlan(detection)) {
+    const state = uninstallFileState(step.path);
+    if (state === 'missing') continue;
+    const change = { path: step.path, label: step.label, removed_entries: 0, kept_entries: 0, action: 'unchanged', applied: false };
+    if (state !== 'file') {
+      changes.push({ ...change, action: 'skipped', reason: state === 'unsafe' ? 'not a regular file' : 'larger than 4 MB' });
+      continue;
+    }
+    try {
+      const writeRoot = step.root ? path.resolve(step.root) : root;
+      if (step.grok) {
+        if (!managedGrokHooksFile(step.path)) {
+          changes.push({ ...change, action: 'skipped', reason: 'not managed by Marrow' });
+          continue;
+        }
+        assertSafeGrokHookTarget(writeRoot, step.path);
+      }
+      assertContainedManagedTarget(writeRoot, step.path);
+      const before = fs.readFileSync(step.path, 'utf8');
+      if (step.kind === 'owned-file') {
+        if (!sameMarrowFile(before, step.candidates)) {
+          if (MARROW_MANAGED_TEXT_RE.test(before)) changes.push({ ...change, action: 'kept', reason: 'edited after Marrow wrote it' });
+          continue;
+        }
+        change.removed_entries = 1;
+        change.action = 'delete_file';
+        if (apply) fs.unlinkSync(step.path);
+      } else if (step.kind === 'md-block') {
+        const result = withoutMarrowInstructionBlock(before);
+        if (!result.removed) continue;
+        change.removed_entries = 1;
+        change.action = result.content.trim() ? 'update' : 'delete_file';
+        if (change.action === 'delete_file') change.note = 'it held only the Marrow block';
+        if (apply) {
+          if (change.action === 'delete_file') fs.unlinkSync(step.path);
+          else atomicWriteManagedFile(writeRoot, step.path, result.content);
+        }
+      } else {
+        let parsed;
+        try {
+          parsed = before.trim() ? JSON.parse(before) : {};
+        } catch {
+          changes.push({ ...change, action: 'skipped', reason: 'invalid JSON' });
+          continue;
+        }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          changes.push({ ...change, action: 'skipped', reason: 'root is not a JSON object' });
+          continue;
+        }
+        const result = step.transform(parsed);
+        change.kept_entries = result.kept;
+        if (result.custom) {
+          changes.push({ ...change, action: 'kept', reason: 'custom marrow server entry' });
+          continue;
+        }
+        if (!result.removed) continue;
+        change.removed_entries = result.removed;
+        const emptied = step.removeWhenEmpty && result.kept === 0
+          && Object.keys(result.settings).every((key) => key === 'hooks');
+        change.action = emptied ? 'delete_file' : 'update';
+        if (apply) {
+          if (emptied) fs.unlinkSync(step.path);
+          else atomicWriteManagedFile(writeRoot, step.path, JSON.stringify(result.settings, null, 2) + '\n');
+        }
+      }
+      change.applied = apply;
+      changes.push(change);
+    } catch (error) {
+      changes.push({ ...change, action: 'skipped', reason: error instanceof Error ? error.message.slice(0, 200) : 'unsafe target' });
+    }
+  }
+  const kept = [];
+  if (exists(detection.paths.passiveRuntime)) kept.push({ path: detection.paths.passiveRuntime, reason: 'your start command may import it; remove that import first, then delete the file' });
+  if (exists(detection.paths.passiveEnv)) kept.push({ path: detection.paths.passiveEnv, reason: 'it may hold your own edits; delete it when no longer needed' });
+  let hermesEntry = false;
+  try {
+    hermesEntry = Boolean(detection.hermesConfig)
+      && /(?:^|\n)mcp_servers:[\s\S]*\n[ \t]+marrow:/.test(fs.readFileSync(detection.paths.hermesConfig, 'utf8'));
+  } catch {
+    hermesEntry = false;
+  }
+  if (hermesEntry) kept.push({ path: detection.paths.hermesConfig, reason: 'remove mcp_servers.marrow by hand; uninstall never rewrites the Hermes config, which holds other servers\' settings' });
+  const removedEntries = changes.reduce((sum, change) => sum + change.removed_entries, 0);
+  return {
+    uninstall: {
+      applied: apply,
+      dry_run: !apply,
+      root,
+      controller,
+      changes,
+      kept,
+      removed_entries: removedEntries,
+      next_step: apply
+        ? 'Restart the agent hosts so they stop loading the removed hooks and MCP server.'
+        : removedEntries > 0
+        ? 'Nothing was changed. Run npx @getmarrow/install uninstall --yes to remove these Marrow entries.'
+        : 'Nothing to remove.',
+    },
+  };
+}
+
+function printUninstallReport(report, sink = (text) => process.stdout.write(text)) {
+  const result = report.uninstall;
+  const where = (filePath) => (filePath.startsWith(`${result.root}${path.sep}`) ? path.relative(result.root, filePath) : filePath);
+  const entries = (count) => `${count} Marrow entr${count === 1 ? 'y' : 'ies'}`;
+  sink(`Marrow uninstall${result.applied ? '' : ' (preview)'}: ${entries(result.removed_entries)} ${result.applied ? 'removed' : 'to remove'}.\n`);
+  for (const change of result.changes) {
+    if (change.action === 'update') sink(`- ${where(change.path)}: ${result.applied ? 'removed' : 'would remove'} ${entries(change.removed_entries)}; kept ${change.kept_entries} of yours.\n`);
+    else if (change.action === 'delete_file') sink(`- ${where(change.path)}: ${result.applied ? 'deleted' : 'would delete'} (${change.note || 'Marrow\'s own file'}).\n`);
+    else if (change.action === 'kept' || change.action === 'skipped') sink(`- ${where(change.path)}: left unchanged (${change.reason}).\n`);
+  }
+  for (const entry of result.kept) sink(`- ${where(entry.path)}: left in place; ${entry.reason}.\n`);
+  if (result.controller?.stopped) sink(`Stopped ${result.controller.stopped} Marrow controller${result.controller.stopped === 1 ? '' : 's'} for this project.\n`);
+  sink(`${result.next_step}\n`);
 }
 
 const SELF_TEST_READ_TIMEOUT_MS = 15_000;
@@ -4190,6 +4699,12 @@ async function runCli(argv) {
     process.stdout.write(usage());
     return;
   }
+  if (options.uninstall) {
+    const report = await uninstall(options);
+    if (options.json) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    else printUninstallReport(report);
+    return;
+  }
   const stored = readOwnerApiKey(options.home);
   const keyInfo = { source: options.apiKey ? 'environment' : null, path: null, owner_files_disagree: stored.conflict };
   if (!options.apiKey && stored.apiKey) {
@@ -4267,6 +4782,13 @@ module.exports = {
   activationProfile,
   claudeNativeHookFingerprint,
   codexNativeHookFingerprint,
+  hostApprovalHooksSupported,
+  uninstall,
+  printUninstallReport,
+  CURSOR_PRE_TOOL_USE_HOST_APPROVAL_MATCHER,
+  GEMINI_PRE_ACTION_GUARD_COMMAND,
+  GEMINI_CONTEXT_HOOK_COMMAND,
+  MCP_PERMISSION_REQUEST_HOOK_COMMAND,
   cursorNativeHookFingerprint,
   clineNativeHookFingerprint,
   windsurfNativeHookFingerprint,

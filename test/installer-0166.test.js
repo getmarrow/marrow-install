@@ -21,9 +21,10 @@ const {
 } = require('../src/installer');
 const { planHermesMcpConfig, redactUndoLines } = require('../src/hermes-config');
 const { readOwnerApiKey } = require('../src/owner-env');
+const PINS = require('../src/pins');
 
 const BIN = path.join(__dirname, '..', 'bin', 'marrow-install.js');
-const MCP_PIN = '@getmarrow/mcp@3.9.98';
+const MCP_PIN = `@getmarrow/mcp@${PINS.MCP_ADAPTER_VERSION}`;
 const INSTALLER_VERSION = require('../package.json').version;
 const MATCHER = 'Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|functions\\.(?!mcp__marrow__marrow_).*|mcp__(?!marrow__marrow_).*';
 const command = (entrypoint) => `npx -y --package=${MCP_PIN} marrow-mcp ${entrypoint}`;
@@ -336,7 +337,7 @@ test('Hermes MCP wiring is added once, keeps the file, makes no copy of it and l
     assert.deepEqual(first.hermes.undo, [{ change: 'added', lines: [
       '  marrow:',
       '    command: npx',
-      '    args: ["-y", "--package=@getmarrow/mcp@3.9.98", "marrow-mcp"]',
+      `    args: ["-y", "--package=@getmarrow/mcp@${PINS.MCP_ADAPTER_VERSION}", "marrow-mcp"]`,
       '    env:',
       '      MARROW_CLIENT: hermes',
     ] }]);
@@ -401,7 +402,7 @@ test('Hermes undo notes never copy YAML comments, which may hold credentials (L-
   const dummy = `fixture-${crypto.randomBytes(8).toString('hex')}`;
   const cases = {
     commentInArgsBlock: `mcp_servers:\n  marrow:\n    command: npx\n    args:\n    - -y\n    # old key ${dummy}\n    - "@getmarrow/mcp@3.9.90"\n`,
-    commentOnClientLine: `mcp_servers:\n  marrow:\n    command: npx\n    args: ["-y", "--package=@getmarrow/mcp@3.9.98", "marrow-mcp"]\n    env:\n      MARROW_CLIENT: claude # ${dummy}\n`,
+    commentOnClientLine: `mcp_servers:\n  marrow:\n    command: npx\n    args: ["-y", "--package=@getmarrow/mcp@${PINS.MCP_ADAPTER_VERSION}", "marrow-mcp"]\n    env:\n      MARROW_CLIENT: claude # ${dummy}\n`,
     commentOnEmptyServers: `mcp_servers: {}  # ${dummy}\nmodel: x\n`,
   };
   for (const [name, text] of Object.entries(cases)) {

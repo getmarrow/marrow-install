@@ -1,0 +1,69 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "owner-prompt-check"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "timeout": 5,
+            "type": "command",
+            "command": "npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp codex-context-hook"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "owner-stop"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "timeout": 5,
+            "async": false,
+            "type": "command",
+            "command": "npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp codex-pre-action-hook"
+          }
+        ],
+        "matcher": "Bash|apply_patch|Edit|Write|MultiEdit|mcp__(?!marrow__marrow_).*|functions\\.(?!marrow_).*"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "timeout": 5,
+            "type": "command",
+            "command": "npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp codex-hook"
+          }
+        ],
+        "matcher": "Bash|apply_patch|Edit|Write|MultiEdit|mcp__(?!marrow__marrow_).*|functions\\.(?!marrow_).*"
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "timeout": 3,
+            "type": "command",
+            "command": "npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp codex-session-hook"
+          }
+        ]
+      }
+    ]
+  }
+}

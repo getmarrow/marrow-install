@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "owner-db": {
+      "command": "owner-db-mcp"
+    },
+    "marrow": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "--package=@getmarrow/mcp@3.9.98",
+        "marrow-mcp"
+      ],
+      "env": {
+        "MARROW_BASE_URL": "https://api.getmarrow.ai"
+      }
+    }
+  }
+}

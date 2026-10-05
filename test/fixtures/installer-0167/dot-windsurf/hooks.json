@@ -1,0 +1,50 @@
+{
+  "hooks": {
+    "pre_run_command": [
+      {
+        "command": "owner-windsurf-check",
+        "show_output": true
+      },
+      {
+        "command": "sh -c 'stderr=\"$(npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp windsurf-pre-action-hook 2>&1 >/dev/null)\"; status=$?; if [ \"$status\" -eq 0 ]; then exit 0; fi; if [ \"$status\" -eq 2 ]; then printf \"%s\\n\" \"$stderr\" >&2; exit 2; fi; printf \"%s\\n\" \"Marrow governance adapter was unavailable; this action is blocked.\" >&2; exit 2'",
+        "show_output": false
+      }
+    ],
+    "pre_write_code": [
+      {
+        "command": "sh -c 'stderr=\"$(npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp windsurf-pre-action-hook 2>&1 >/dev/null)\"; status=$?; if [ \"$status\" -eq 0 ]; then exit 0; fi; if [ \"$status\" -eq 2 ]; then printf \"%s\\n\" \"$stderr\" >&2; exit 2; fi; printf \"%s\\n\" \"Marrow governance adapter was unavailable; this action is blocked.\" >&2; exit 2'",
+        "show_output": false
+      }
+    ],
+    "pre_mcp_tool_use": [
+      {
+        "command": "sh -c 'stderr=\"$(npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp windsurf-pre-action-hook 2>&1 >/dev/null)\"; status=$?; if [ \"$status\" -eq 0 ]; then exit 0; fi; if [ \"$status\" -eq 2 ]; then printf \"%s\\n\" \"$stderr\" >&2; exit 2; fi; printf \"%s\\n\" \"Marrow governance adapter was unavailable; this action is blocked.\" >&2; exit 2'",
+        "show_output": false
+      }
+    ],
+    "post_write_code": [
+      {
+        "command": "sh -c 'npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp windsurf-hook >/dev/null 2>&1 || :; exit 0'",
+        "show_output": false
+      }
+    ],
+    "post_run_command": [
+      {
+        "command": "sh -c 'npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp windsurf-hook >/dev/null 2>&1 || :; exit 0'",
+        "show_output": false
+      }
+    ],
+    "post_mcp_tool_use": [
+      {
+        "command": "sh -c 'npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp windsurf-hook >/dev/null 2>&1 || :; exit 0'",
+        "show_output": false
+      }
+    ],
+    "post_cascade_response": [
+      {
+        "command": "sh -c 'npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp windsurf-session-hook >/dev/null 2>&1 || :; exit 0'",
+        "show_output": false
+      }
+    ]
+  }
+}

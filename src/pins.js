@@ -1,0 +1,19 @@
+// The Marrow packages this installer pins into hooks, MCP configuration and request headers.
+// This is the only place they are set: a release changes the MCP version, source SHA and
+// integrity here together (and the SDK pair together), and the tests read them from here.
+module.exports = Object.freeze({
+  MCP_ADAPTER_VERSION: '3.9.98',
+  MCP_ADAPTER_SOURCE_SHA: 'e40d3cb40479456fd937bce0b9488eb0c3f10863',
+  MCP_ADAPTER_INTEGRITY: 'sha512-AmDT3afwdm7+Dc555zDs+yGIG4RyC/YbaQm+9O1mThlC6g/9EujTr7y7UvRMEtYDvVWAAaG6CFM7/u/ytjKhwQ==',
+  // The first MCP version that ships the host-approval hook entrypoints
+  // (claude-permission-request-hook, cursor-context-hook, gemini-context-hook) and reads Cursor's
+  // shell/MCP execution events and Gemini's BeforeAgent prompt. The installer writes the
+  // host-approval hook layout only when the MCP version it pins (or a registry-verified newer
+  // one) is at or above this; an older target keeps the earlier layout, because its MCP cannot
+  // answer those hooks and Cursor shell and MCP calls would then go ungated. Set this to the
+  // version the host-approvals MCP is published as when the release re-pins the MCP above.
+  MCP_HOST_APPROVAL_HOOKS_SINCE: '3.9.99',
+  // Planned next SDK pin: 3.7.65 (the backend's parity re-pin). Change version and integrity together.
+  SDK_ADAPTER_VERSION: '3.7.64',
+  SDK_ADAPTER_INTEGRITY: 'sha512-8qJj/8ouHEz1NnZkmujtFxUm/fWldqR/rHv62/sqabaxT0H90xCCHxodLOkV0SVxDscAtnahioZakqkeGNUwyA==',
+});

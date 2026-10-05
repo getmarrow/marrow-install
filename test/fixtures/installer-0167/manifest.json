@@ -1,0 +1,57 @@
+{
+  "source": "getmarrow/marrow-install 71c55c1 (v0.1.67), buildPlan(mode mcp) + applyPlan over the owner files in owner-files.json",
+  "files": {
+    ".claude/settings.json": {
+      "label": "Claude Code MCP passive hooks",
+      "mode": "664"
+    },
+    ".codex/hooks.json": {
+      "label": "Codex native hooks",
+      "mode": "664"
+    },
+    ".clinerules/hooks/PreToolUse": {
+      "label": "Cline PreToolUse native hook",
+      "mode": "755"
+    },
+    ".clinerules/hooks/PostToolUse": {
+      "label": "Cline PostToolUse native hook",
+      "mode": "755"
+    },
+    ".clinerules/hooks/TaskCancel": {
+      "label": "Cline TaskCancel native hook",
+      "mode": "755"
+    },
+    ".windsurf/hooks.json": {
+      "label": "Windsurf native hooks",
+      "mode": "664"
+    },
+    ".gemini/settings.json": {
+      "label": "Gemini CLI native hooks",
+      "mode": "664"
+    },
+    "~/.grok/hooks/marrow.json": {
+      "label": "Grok native hooks",
+      "mode": "600"
+    },
+    ".mcp.json": {
+      "label": "Project MCP server config",
+      "mode": "664"
+    },
+    ".cursor/hooks.json": {
+      "label": "Cursor native hooks",
+      "mode": "664"
+    },
+    ".cursor/mcp.json": {
+      "label": "Cursor MCP server config",
+      "mode": "664"
+    },
+    "AGENTS.md": {
+      "label": "Agent instructions",
+      "mode": "664"
+    },
+    ".cursor/rules/marrow.mdc": {
+      "label": "Cursor Marrow rule",
+      "mode": "600"
+    }
+  }
+}

@@ -1,0 +1,70 @@
+{
+  "owner_setting": {
+    "retained": true
+  },
+  "hooksConfig": {
+    "enabled": true
+  },
+  "hooks": {
+    "BeforeTool": [
+      {
+        "matcher": "write_file",
+        "hooks": [
+          {
+            "name": "owner-before",
+            "type": "command",
+            "command": "printf owner-before",
+            "timeout": 99
+          }
+        ]
+      },
+      {
+        "matcher": "^(?:run_shell_command|write_file|replace|edit_file|delete_file|read_file|read_many_files|glob|grep_search|list_directory|get_file_info|web_search|google_web_search|mcp_(?!marrow_marrow_)[A-Za-z0-9_]{1,192})$",
+        "hooks": [
+          {
+            "name": "marrow-before-tool",
+            "type": "command",
+            "command": "sh -c 'output=\"$(npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp gemini-pre-action-hook 2>/dev/null)\" && { case \"$output\" in \"{\\\"decision\\\":\\\"allow\\\"}\"|\"{\\\"decision\\\":\\\"deny\\\",\\\"reason\\\":\\\"Marrow blocked this action because required governance approval or proof is unavailable.\\\"}\") printf \"%s\\n\" \"$output\"; exit 0 ;; esac; }; printf \"%s\\n\" \"Marrow governance adapter was unavailable; this action is blocked.\" >&2; exit 2'",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "BeforeAgent": [
+      {
+        "hooks": [
+          {
+            "name": "owner-before-agent",
+            "type": "command",
+            "command": "printf owner-agent"
+          }
+        ]
+      }
+    ],
+    "AfterTool": [
+      {
+        "matcher": "^(?:run_shell_command|write_file|replace|edit_file|delete_file|read_file|read_many_files|glob|grep_search|list_directory|get_file_info|web_search|google_web_search|mcp_(?!marrow_marrow_)[A-Za-z0-9_]{1,192})$",
+        "hooks": [
+          {
+            "name": "marrow-after-tool",
+            "type": "command",
+            "command": "sh -c 'npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp gemini-hook >/dev/null 2>&1 || :; printf \"%s\\n\" \"{}\"; exit 0'",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "AfterAgent": [
+      {
+        "hooks": [
+          {
+            "name": "marrow-after-agent",
+            "type": "command",
+            "command": "sh -c 'npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp gemini-session-hook >/dev/null 2>&1 || :; printf \"%s\\n\" \"{}\"; exit 0'",
+            "timeout": 3000
+          }
+        ]
+      }
+    ]
+  }
+}

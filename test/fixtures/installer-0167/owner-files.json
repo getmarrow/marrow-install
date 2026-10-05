@@ -1,0 +1,42 @@
+{
+  "package.json": "{\"name\":\"owner-project\",\"private\":true}\n",
+  "CLAUDE.md": "# Owner notes for Claude\n",
+  "AGENTS.md": "# Owner agent instructions\n\nKeep changes small.\n",
+  ".claude/settings.json": {
+    "permissions": { "allow": ["Read"] },
+    "hooks": {
+      "PreToolUse": [{ "matcher": "Bash", "hooks": [{ "type": "command", "command": "owner-audit pre", "timeout": 7 }] }],
+      "PermissionRequest": [{ "matcher": "Edit", "hooks": [{ "type": "command", "command": "owner-permission-note" }] }],
+      "PostToolBatch": [{ "hooks": [{ "type": "command", "command": "owner-batch-log", "async": true }] }],
+      "Notification": [{ "hooks": [{ "type": "command", "command": "owner-notify" }] }]
+    }
+  },
+  ".codex/config.toml": "model = \"owner-model\"\n",
+  ".codex/hooks.json": {
+    "hooks": {
+      "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "owner-prompt-check" }] }],
+      "Stop": [{ "hooks": [{ "type": "command", "command": "owner-stop" }] }]
+    }
+  },
+  ".cursor/hooks.json": {
+    "version": 1,
+    "hooks": {
+      "preToolUse": [{ "command": "./owner/pre.sh", "matcher": "Write" }],
+      "beforeShellExecution": [{ "command": "./owner/approve-network.sh", "matcher": "curl|wget", "timeout": 30 }],
+      "sessionStart": [{ "command": "./owner/session-init.sh" }],
+      "beforeSubmitPrompt": [{ "command": "./owner/prompt-audit.sh" }],
+      "afterFileEdit": [{ "command": "./owner/format.sh" }]
+    }
+  },
+  ".cursor/mcp.json": { "mcpServers": { "owner-server": { "command": "owner-mcp", "args": ["--stdio"] } } },
+  ".gemini/settings.json": {
+    "owner_setting": { "retained": true },
+    "hooksConfig": { "enabled": true },
+    "hooks": {
+      "BeforeTool": [{ "matcher": "write_file", "hooks": [{ "name": "owner-before", "type": "command", "command": "printf owner-before", "timeout": 99 }] }],
+      "BeforeAgent": [{ "hooks": [{ "name": "owner-before-agent", "type": "command", "command": "printf owner-agent" }] }]
+    }
+  },
+  ".windsurf/hooks.json": { "hooks": { "pre_run_command": [{ "command": "owner-windsurf-check", "show_output": true }] } },
+  ".mcp.json": { "mcpServers": { "owner-db": { "command": "owner-db-mcp" } } }
+}

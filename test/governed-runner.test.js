@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { PassThrough, Writable } = require('node:stream');
 const test = require('node:test');
+const PINS = require('../src/pins');
 
 const {
   gateDecision,
@@ -715,7 +716,8 @@ test('gateDecision extracts receipt and shouldBlock enforces owner approval', ()
   assert.equal(decision.receiptId, 'gate_123');
   assert.equal(decision.ownerApprovalRequired, true);
   assert.equal(shouldBlock(decision, { policy: 'enforce', ownerApproval: '' }), true);
-  assert.equal(shouldBlock(decision, { policy: 'enforce', ownerApproval: 'buu-approved' }), false);
+  // --owner-approved is inert: a caller-supplied reference never unblocks a hold.
+  assert.equal(shouldBlock(decision, { policy: 'enforce', ownerApproval: 'buu-approved' }), true);
   assert.equal(shouldBlock(decision, { policy: 'warn', ownerApproval: '' }), false);
 });
 
@@ -760,7 +762,7 @@ test('local integration registry covers major harnesses and model CLIs', () => {
   assert.ok(labels.includes('ci'));
   assert.ok(labels.includes('custom'));
   assert.ok(mcpSetupCommands.length > 0);
-  assert.ok(mcpSetupCommands.every((command) => command.includes('--package=@getmarrow/mcp@3.9.98')));
+  assert.ok(mcpSetupCommands.every((command) => command.includes(`--package=@getmarrow/mcp@${PINS.MCP_ADAPTER_VERSION}`)));
   assert.ok(mcpSetupCommands.every((command) => !command.includes('@getmarrow/mcp@latest')));
 });
 
@@ -779,8 +781,8 @@ test('governed runner attaches stable client attribution from env and CLI', () =
     assert.equal(headers(envParsed.options)['X-Marrow-Package'], '@getmarrow/install');
     assert.equal(headers(envParsed.options)['X-Marrow-Package-Version'], '0.1.67');
     assert.equal(headers(envParsed.options)['X-Marrow-Install-Version'], '0.1.67');
-    assert.equal(headers(envParsed.options)['X-Marrow-SDK-Version'], '3.7.64');
-    assert.equal(headers(envParsed.options)['X-Marrow-MCP-Version'], '3.9.98');
+    assert.equal(headers(envParsed.options)['X-Marrow-SDK-Version'], PINS.SDK_ADAPTER_VERSION);
+    assert.equal(headers(envParsed.options)['X-Marrow-MCP-Version'], PINS.MCP_ADAPTER_VERSION);
 
     const cliParsed = parseArgs(['run', '--client', 'Hermes', '--agent', 'hermes-agent', '--', 'hermes', '/goal']);
     const meta = sourceMeta(cliParsed.options, 'runtime', {

@@ -1,0 +1,104 @@
+{
+  "permissions": {
+    "allow": [
+      "Read"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "owner-audit pre",
+            "timeout": 7
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp claude-pre-action-hook"
+          }
+        ],
+        "matcher": "Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|functions\\.(?!mcp__marrow__marrow_).*|mcp__(?!marrow__marrow_).*"
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "owner-permission-note"
+          }
+        ]
+      }
+    ],
+    "PostToolBatch": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "owner-batch-log",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "owner-notify"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp claude-hook"
+          }
+        ],
+        "matcher": "Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|functions\\.(?!mcp__marrow__marrow_).*|mcp__(?!marrow__marrow_).*"
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp claude-hook"
+          }
+        ],
+        "matcher": "Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|functions\\.(?!mcp__marrow__marrow_).*|mcp__(?!marrow__marrow_).*"
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp claude-context-hook"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp claude-session-hook"
+          }
+        ]
+      }
+    ]
+  }
+}

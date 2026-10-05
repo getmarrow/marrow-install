@@ -1,0 +1,13 @@
+#!/bin/sh
+output="$(npx -y --package=@getmarrow/mcp@3.9.98 marrow-mcp cline-pre-action-hook 2>/dev/null)" || output=""
+if [ -n "$output" ]; then
+  validated="$(printf '%s' "$output" | NODE_OPTIONS= node -e 'let s="";process.stdin.setEncoding("utf8");process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>{try{const v=JSON.parse(s);const keys=Object.keys(v).sort();const allow=v.cancel===false&&keys.length===1&&keys[0]==="cancel";const deny=v.cancel===true&&typeof v.errorMessage==="string"&&v.errorMessage.length>0&&v.errorMessage.length<=500&&keys.length===2&&keys[0]==="cancel"&&keys[1]==="errorMessage";if(!allow&&!deny)process.exit(1);process.stdout.write(JSON.stringify(v));}catch{process.exit(1);}});' 2>/dev/null)" || validated=""
+  if [ -n "$validated" ]; then
+    printf '%s
+' "$validated"
+    exit 0
+  fi
+fi
+printf '%s
+' '{"cancel":true,"errorMessage":"Marrow governance did not return a valid decision. Restore trusted configuration and retry."}'
+exit 0
