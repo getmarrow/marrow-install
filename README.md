@@ -88,6 +88,16 @@ npx -y --package=@getmarrow/mcp@latest marrow-mcp ping
 
 `update` resolves official npm metadata once, selects one exact verified MCP target, and synchronizes every Marrow-managed surface in the detected owning workspace while retaining unrelated user hooks and configuration. It also restarts a controller that a different installer version started, and runs the self-test with a one-line summary. Restart the detected owning harnesses once after it completes; running processes do not change before that restart. Run the doctor verification once after restart. Do not run separate `marrow-mcp setup` and restart cycles for the same detected workspace.
 
+On its own, `update`:
+
+- restarts a running controller that a different installer version started, so `controller stop` and `controller ensure` are not separate steps. Local control stays enabled or disabled as the owner left it;
+- detects Hermes from `~/.hermes/config.yaml` (or `$HERMES_HOME`) or `hermes` on `PATH`, and adds or refreshes `mcp_servers.marrow` with the pinned MCP server and `MARROW_CLIENT: hermes`. The rest of the file, comments included, is kept. No copy of the file is made, because it holds other servers' credentials; the private log lists only the `mcp_servers.marrow` lines added or replaced, with values redacted, as undo steps. If the file cannot be edited safely, or the existing `marrow` entry has a custom command or custom arguments, it is left untouched and the exact block to add is printed;
+- needs no `MARROW_AGENT_ID`: Marrow uses the API key's bound agent or the plan's agent seat. `MARROW_AGENT_ID` still overrides;
+- runs the self-test and prints a short summary: healthy with the committed decision id, or the failure (including a decision recorded without trusted closure) and one fix command, with a non-zero exit. The full report goes to `~/.marrow/logs/` (mode 600); `--verbose` prints it instead;
+- reads the key from `MARROW_API_KEY`, or from the owner-only `~/.marrow/env.local` or `~/.marrow/env`, and names the file it used. It warns when those two files hold different keys. With no key it prints the command to run and stops before writing anything.
+
+Claude Code hooks use the Claude-specific entrypoints (`claude-pre-action-hook`, `claude-hook`, `claude-context-hook`, `claude-session-hook`, and for approvals `claude-permission-request-hook`), the same spelling `marrow-mcp setup` writes, so the installer and MCP setup never rewrite each other's entries; earlier spellings are migrated in place without duplicates. Marrow-written Cline hook files that differ only in the pinned MCP version move to the new pin; a Cline hook file the owner edited is never overwritten.
+
 `update` and `--repair` only refresh an existing install. Run from a directory with no Marrow-managed files while your home directory is managed, they stop without writing and print the exact `update --cwd <home>` command; to add Marrow to that project, run the install command there instead. Managed JSON that differs only in key order or formatting, for example after a harness re-saves its settings, counts as present and is not rewritten.
 
 `activate` remains available for initial activation. After explicit activation, the local controller can restore drifted Marrow-managed hooks and configuration. Package upgrades, owner policy, credentials, explicitly disabled hooks, and unrelated local files remain explicit and subject to the operator's normal change policy.
@@ -109,6 +119,16 @@ Persistent controller lifecycle is currently Linux-only. On macOS or Windows, ac
 The controller is not a boot service. After a host restart, or any exit that skips its shutdown handler, doctor reports it as `stale` until the next install, update, or `controller ensure`. While local control is disabled, the controller is not started, and doctor reports a stopped or stale controller as not required instead of recommending `controller ensure`; unsafe controller state or an unverified or unresponsive controller process keeps its exact fix.
 
 ## What's New in v0.1.67
+
+### Next release (unreleased; the version is not bumped yet)
+
+- **Approvals in chat and terminal.** With an MCP that answers them, install and update add the approval hooks for Claude Code (`PermissionRequest`, `PostToolBatch`), Cursor (shell and MCP execution hooks with `failClosed`, `sessionStart`, `beforeSubmitPrompt`) and Gemini CLI (`BeforeAgent`); Codex keeps its prompt hook. See Approvals in Chat and Terminal.
+- **Governed runner.** A held `run` asks the operator at an interactive terminal, or asks the account owner through a one-tap link and waits; it never answers for anyone without a terminal. `--owner-approved` no longer does anything.
+- **Uninstall.** `npx @getmarrow/install uninstall --yes` removes only Marrow's entries.
+- **One pin location.** The MCP and SDK pins live in `src/pins.js`.
+- **Cline upgrades.** Marrow-written Cline hook files move to a new MCP pin instead of being reported as owner conflicts.
+
+### v0.1.67
 
 v0.1.67 installs MCP `3.9.98` (source `e40d3cb40479456fd937bce0b9488eb0c3f10863`, packed integrity `sha512-AmDT3afwdm7+Dc555zDs+yGIG4RyC/YbaQm+9O1mThlC6g/9EujTr7y7UvRMEtYDvVWAAaG6CFM7/u/ytjKhwQ==`), which makes `npx @getmarrow/mcp ...` commands work again. SDK `3.7.64` and everything else are unchanged.
 
@@ -433,13 +453,13 @@ The runner:
 1. requests the Marrow runtime gate and reads its decision, mode (enforced or advisory) and gate receipt;
 2. uses the decision the runtime created, or records one against that exact gate;
 3. where the plan enforces the gate, requests and verifies a single-use permit bound to the exact action, target, canonical action surfaces and gate receipt;
-4. blocks protected work if an enforced gate, policy or permit verification fails. Where the gate is advisory, it shows the warning and runs the command;
+4. blocks protected work if an enforced gate, policy or permit verification fails. Where the gate is advisory, it shows the warning and runs the command. When Marrow holds the action for approval, the runner asks where the operator is, or asks the account owner (see Approvals in Chat and Terminal), and runs the command only after Marrow has recorded the approval;
 5. runs the original command with the scoped permit, not the Marrow API key;
 6. records success or failure with the gate receipt, supplies every exact server-required proof field through a redacted proof pack, and closes the permit. It reports an outcome that Marrow did not commit as trusted instead of skipping it.
 
 Runtime, think and commit calls retry HTTP 429/502/503/504, timed-out attempts and pending answers up to three times with the same `Idempotency-Key`, within a 25-second deadline. Each `run`, `gate` and `permit` uses its own keys. An answer in which Marrow withholds authorization (`allow: false` or observation-only) blocks the command under every plan and policy.
 
-`gate` exits 0 when the action may proceed, 12 when an enforced gate blocks it or needs owner approval, and 13 when no gate decision is available, so `gate ... && deploy` stops on a block. When the gate creates a decision, it prints the exact `proof` command, with `--session` and `--gate-receipt`, that records the outcome afterwards. `proof` exits non-zero unless Marrow returns `committed: true`.
+`run` exits 12 when a held action is declined, not answered, or still waiting when the link or `--approval-wait` runs out; the command never ran. `gate` exits 0 when the action may proceed, 12 when an enforced gate blocks it or holds it for approval, and 13 when no gate decision is available, so `gate ... && deploy` stops on a block. When the gate creates a decision, it prints the exact `proof` command, with `--session` and `--gate-receipt`, that records the outcome afterwards. `proof` exits non-zero unless Marrow returns `committed: true`.
 
 Useful commands:
 
@@ -448,6 +468,8 @@ npx @getmarrow/install gate --type deploy --action "deploy production"
 npx @getmarrow/install permit --type deploy --action "deploy production"
 MARROW_ACTION_PERMIT=... npx @getmarrow/install verify-permit --type deploy --action "deploy production"
 npx @getmarrow/install proof --session <session> --decision-id <id> --gate-receipt <receipt> --success --summary "smoke passed"
+npx @getmarrow/install run --request-owner-link --type deploy -- wrangler deploy
+npx @getmarrow/install run --approval-wait 120 --type deploy -- wrangler deploy
 npx @getmarrow/install coverage
 npx @getmarrow/install sidecar
 npx @getmarrow/install controller status
@@ -456,13 +478,50 @@ npx @getmarrow/install doctor
 npx @getmarrow/install --repair
 ```
 
+## Approvals in Chat and Terminal
+
+When Marrow holds an action for approval (`review_required`), it is approved where people already work. Nobody logs in to approve; the dashboard lists receipts and reports.
+
+Who can approve is Marrow's decision, read from the runtime for each hold. By default the operator's answer in the host's own prompt counts and is recorded as client-attested. For a category the owner approves personally, after the owner declined the action, or when Marrow cannot read the approval state, only the account owner can approve, through a one-tap link Marrow sends to the owner's own channel (email today). The link never reaches a hook, an agent, or the runner. No runner, hook, or installer output names the dashboard as the step to approve.
+
+### Hooks the installer writes
+
+| Host | Hooks for approvals | How the operator answers |
+| --- | --- | --- |
+| Claude Code | `PermissionRequest` → `claude-permission-request-hook` and `PostToolBatch` → `claude-hook`, both `async: true`, next to the existing hooks; the same entries `marrow-mcp setup` writes | In Claude Code's own permission dialog. The pass-through marker never answers or delays the dialog; a permission rejection is recorded as a decline, an interruption never is |
+| Cursor | `beforeShellExecution` and `beforeMCPExecution` → `cursor-pre-action-hook` with `failClosed: true`; `afterShellExecution` and `afterMCPExecution` → `cursor-hook`; `sessionStart` → `cursor-session-hook`; `beforeSubmitPrompt` → `cursor-context-hook`. Shell and MCP calls leave the `preToolUse` matcher, because Cursor enforces "ask" only on the two execution hooks | Cursor's own prompt for shell and MCP calls in a local interactive session; otherwise the typed reply the hook shows the user (`marrow approve CODE`) |
+| Gemini CLI | `BeforeAgent` → `gemini-context-hook`. The `BeforeTool` guard passes a denial that carries a code for the user only (`systemMessage`); any other output, a crash, or no answer within 4.5 seconds still blocks the call | The typed reply, in a local interactive session (`gemini`, never `gemini -p`) |
+| Codex | `UserPromptSubmit` → `codex-context-hook` (unchanged). Codex is never configured to "ask", because Codex lets an asked call run | The typed reply, in a local interactive session (never `codex exec`) |
+
+The installer writes these hooks only for an MCP version that answers them (`MCP_HOST_APPROVAL_HOOKS_SINCE` in `src/pins.js`, compared with the pinned or registry-verified MCP); with an older MCP the earlier hook layout stays exactly as it was. Re-running install or update never duplicates an entry and never removes or reorders the owner's own hooks in the same events. Restart the host and complete its hook review before relying on them.
+
+### Governed runner
+
+For a held `run`:
+
+- In an interactive terminal, when the operator may answer, the runner asks once: `Approve and run it now? [y/N]`. `y` is reported as the operator's answer from the runner's prompt (host `other`, labelled an allow rule because Marrow cannot see that prompt); the command then runs and closes on its gate receipt. `n` records a decline and closes the decision as a gate denial. No answer records nothing.
+- Otherwise, and always without a terminal (CI, scripts, pipes), the runner never answers for anyone. It asks Marrow to send the account owner a one-tap link, prints only the channel and the link's expiry, and waits on the approval status until the owner answers or the link expires. `--approval-wait <seconds>` sets a shorter wait; `0` sends the link and exits. The runner requests a link at most three times per run, and only when Marrow says a retry can help.
+- After the account owner declined the action, the runner asks the owner again only when the operator asks: `--request-owner-link`, or `y` at the terminal prompt.
+- An approved hold runs without an action permit, as with the MCP hooks: Marrow records the approval on the gate receipt, and the commit closes that receipt.
+
+`--owner-approved` no longer does anything. It is accepted so older scripts keep working, prints a one-line notice, and never unblocks a hold. The runner never writes `proof.owner_approval` and drops one that a proof file carries: an approval is what Marrow records, not something a caller claims.
+
+## Uninstall
+
+```bash
+npx @getmarrow/install uninstall          # preview: lists what would be removed, changes nothing
+npx @getmarrow/install uninstall --yes    # removes Marrow's own entries
+```
+
+Uninstall removes only what Marrow wrote: Marrow's hook entries for every host (Claude Code, Codex, Cursor, Windsurf, Gemini CLI, Grok), the Marrow MCP server entry in `.mcp.json` and `.cursor/mcp.json`, and the Marrow block in `AGENTS.md`. The owner's own hooks, servers and settings in the same files are kept as they were. Files only Marrow writes (Cline hooks, the Cursor rule, Grok's `~/.grok/hooks/marrow.json`) are deleted only while they still hold exactly what Marrow wrote; an edited one is left in place and named. A `marrow` MCP server entry with a custom command is kept. Uninstall stops the project's Marrow controller first, because the controller restores missing managed hooks. It never edits the Hermes config, the SDK passive runtime or the env example; it names them with the step to take. Output lists paths and counts only. Restart the hosts afterwards.
+
 ## Fleet Operator TUI
 
 ```bash
 npx @getmarrow/install fleet
 ```
 
-The fleet view shows live agents, active workflows, agent disagreements and their latest arbitration receipt, risky actions waiting for proof, stale or failed outcomes, capture health, recent decisions, and exact repair commands. Press Enter on **Agent disagreements** to inspect the bound decision, selected proposal, whether Marrow selected a proposal, synthesized a safe sequence, held the action for owner review, or blocked the conflicting actions. Review-required work must be approved from an authenticated Marrow dashboard session; the TUI does not let an agent approve itself. It is an operator surface for the authenticated account, not a public status dashboard.
+The fleet view shows live agents, active workflows, agent disagreements and their latest arbitration receipt, risky actions waiting for proof, stale or failed outcomes, capture health, recent decisions, and exact repair commands. Press Enter on **Agent disagreements** to inspect the bound decision, selected proposal, whether Marrow selected a proposal, synthesized a safe sequence, held the action for owner review, or blocked the conflicting actions. Review-required work is approved by the account owner; the TUI does not let an agent approve itself. It is an operator surface for the authenticated account, not a public status dashboard.
 
 ## Integration Paths
 

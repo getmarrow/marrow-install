@@ -71,3 +71,18 @@ test('fresh-install smoke verifies the current structured self-test contract', (
   assert.match(freshInstallSmoke, /\.selfTest\.client_update\.version_status == "current"/);
   assert.doesNotMatch(freshInstallSmoke, /write test event: passed|outcome closed: passed|key valid: yes/);
 });
+
+test('README documents chat and terminal approvals and never makes a dashboard login the approval step', () => {
+  for (const heading of ['## Approvals in Chat and Terminal', '### Hooks the installer writes', '### Governed runner', '## Uninstall']) {
+    assert.ok(readme.includes(heading), heading);
+  }
+  for (const text of ['claude-permission-request-hook', 'PostToolBatch', 'beforeShellExecution', 'failClosed: true', 'cursor-context-hook', 'gemini-context-hook', 'codex-context-hook', '--request-owner-link', '--approval-wait', 'MCP_HOST_APPROVAL_HOOKS_SINCE']) {
+    assert.ok(readme.includes(text), text);
+  }
+  assert.match(readme, /`--owner-approved` no longer does anything/);
+  assert.doesNotMatch(readme, /approved from an authenticated Marrow dashboard session/);
+  assert.doesNotMatch(readme, /log in to the dashboard to approve|approve (?:it )?in the dashboard/i);
+  // The What's New rule: the block names the unreleased changes until the release bumps the version.
+  const whatsNew = readme.slice(readme.indexOf(`## What's New in v${pkg.version}`), readme.indexOf('### Previous release:'));
+  assert.match(whatsNew, /### Next release \(unreleased; the version is not bumped yet\)/);
+});
