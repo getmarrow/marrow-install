@@ -681,6 +681,7 @@ test('runner: an owner decline, an expired receipt, and a wait limit all stop th
   assert.equal(denial.success, false);
   assert.match(denial.outcome, /^Denied by Marrow pre-action gate: the account owner declined\./);
   assert.equal(denial.gate_receipt_id, RECEIPT);
+  assert.equal('proof' in denial, false, 'a gate denial report carries no proof');
   assertCleanOutput(declined.output, declined.result);
 
   const expired = await runHeld({ runtime: holdRuntime(), statuses: ['expired'] });
@@ -746,6 +747,8 @@ test('runner, interactive terminal: n records a decline and a denial; no answer 
   const denial = routeCalls(declined.calls, '/v1/agent/commit')[0].body;
   assert.match(denial.outcome, /^Denied by Marrow pre-action gate: the operator declined in the governed runner\./);
   assert.equal(denial.success, false);
+  assert.equal('proof' in denial, false);
+  assert.equal(denial.gate_receipt_id, RECEIPT);
   for (const answer of ['', 'maybe', null]) {
     const silent = await runHeld({ runtime: holdRuntime() }, [], { approvalPrompt: () => answer });
     assert.equal(silent.ran, false);

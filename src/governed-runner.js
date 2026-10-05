@@ -1135,24 +1135,13 @@ async function waitForOwnerAnswer(options, hold, deadline, io) {
   }
 }
 
-async function commitHoldDenial(options, decisionIds, hold, outcome, commandText) {
+// A gate denial report closes trusted only with its receipt and no proof: there is no
+// completion to prove, and the receipt is what makes the denial verifiable.
+async function commitHoldDenial(options, decisionIds, hold, outcome) {
   const decisionId = decisionIds.runtimeDecisionId || decisionIds.decisionId;
   if (!decisionId) return 'not_recorded';
-  const proof = {
-    summary: outcome,
-    checks: ['command_not_run'],
-    evidence_source: 'governed_runner_hold',
-    evidence_state: 'failed',
-    verified_completion: false,
-    outcome: 'failure',
-    blockers: ['approval_declined'],
-    command: commandText,
-    runner: '@getmarrow/install run',
-    profile: options.profile,
-    source_meta: sourceMeta(options, 'proof', { action: outcome }),
-  };
   try {
-    const commit = await commitOutcome(options, decisionId, false, outcome, proof,
+    const commit = await commitOutcome(options, decisionId, false, outcome, undefined,
       decisionIds.runtimeDecisionId ? hold.gateReceiptId : '');
     return commit?.committed === true ? 'committed' : 'not_committed';
   } catch {
@@ -1178,7 +1167,7 @@ async function resolveHold(options, hold, context) {
   });
   const refused = (message, extra = {}) => ({ approved: false, exitCode: 12, message, approval: summary(extra) });
   const denial = async (message, outcome, extra) => {
-    const commitState = await commitHoldDenial(options, context.decisionIds, hold, outcome, context.commandText);
+    const commitState = await commitHoldDenial(options, context.decisionIds, hold, outcome);
     return refused(message, { ...extra, denial_commit: commitState });
   };
 
@@ -1457,7 +1446,6 @@ async function runGoverned(parsed, execution = {}) {
       decisionResolved = true;
       const resolved = await resolveHold(options, hold, {
         io: execution,
-        commandText,
         decisionIds: { decisionId, runtimeDecisionId: decision.runtimeDecisionId || '' },
       });
       holdApproval = resolved.approval;
