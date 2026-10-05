@@ -791,6 +791,16 @@ test('runner: --owner-approved is accepted and inert; a caller-written proof.own
   const held = await runHeld({ runtime: holdRuntime(), statuses: ['pending'] }, ['--owner-approved', 'buu-ok', '--approval-wait', '0']);
   assert.equal(held.ran, false, 'the flag no longer unblocks a hold');
   assert.equal(routeCalls(held.calls, '/approval-link').length, 1);
+  // A hold whose gate does not say allow:false reaches the approval check itself.
+  const allowUnset = holdRuntime();
+  delete allowUnset.risk_gate.allow;
+  const reached = await runHeld({ runtime: allowUnset, statuses: ['pending'] }, ['--owner-approved', 'buu-ok', '--approval-wait', '0']);
+  assert.equal(reached.ran, false);
+  assert.equal(reached.calls.filter((call) => call.pathname === '/v1/agent/enforcement').length, 0);
+  const decision = runner.gateDecision(allowUnset);
+  for (const flag of [{ ownerApprovedFlagIgnored: true }, { ownerApproval: 'ref' }]) {
+    assert.equal(runner.shouldBlock(decision, { policy: 'enforce', ...flag }), true, JSON.stringify(flag));
+  }
   const parsed = runner.parseArgs(['run', '--owner-approved', 'ref', '--', 'true']);
   assert.equal(parsed.options.ownerApprovedFlagIgnored, true);
   assert.equal('ownerApproval' in parsed.options, false);
