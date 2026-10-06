@@ -885,7 +885,8 @@ test('runner: a rerun picks the hold up on the same receipt (no new receipt, no 
   const firstSession = sessionOf(routeCalls(first.calls, '/v1/agent/runtime')[0]);
   assert.match(firstSession, /^marrow-run-[a-f0-9]{24}$/);
 
-  const stillWaiting = await runHeld({ runtime: holdRuntime(), statuses: ['pending'] }, [], { home });
+  // Even with another --session, the hold is read in the session it was made in.
+  const stillWaiting = await runHeld({ runtime: holdRuntime(), statuses: ['pending'] }, ['--session', 'another-session'], { home });
   assert.equal(stillWaiting.ran, false);
   assert.equal(routeCalls(stillWaiting.calls, '/v1/agent/runtime').length, 0, 'no new receipt');
   assert.equal(routeCalls(stillWaiting.calls, '/approval-link').length, 0, 'no new email');
