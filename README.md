@@ -459,7 +459,7 @@ The runner:
 
 Runtime, think and commit calls retry HTTP 429/502/503/504, timed-out attempts and pending answers up to three times with the same `Idempotency-Key`, within a 25-second deadline. Each `run`, `gate` and `permit` uses its own keys. An answer in which Marrow withholds authorization (`allow: false` or observation-only) blocks the command under every plan and policy.
 
-`run` exits 12 when a held action is declined, not answered, or still waiting when the link or `--approval-wait` runs out; the command never ran. `gate` exits 0 when the action may proceed, 12 when an enforced gate blocks it or holds it for approval, and 13 when no gate decision is available, so `gate ... && deploy` stops on a block. When the gate creates a decision, it prints the exact `proof` command, with `--session` and `--gate-receipt`, that records the outcome afterwards. `proof` exits non-zero unless Marrow returns `committed: true`.
+`run` exits 12 when a held action is declined, not answered, held with nobody present to approve it, or still waiting when the link or `--approval-wait` runs out; the command never ran. `gate` exits 0 when the action may proceed, 12 when an enforced gate blocks it or holds it for approval, and 13 when no gate decision is available, so `gate ... && deploy` stops on a block. When the gate creates a decision, it prints the exact `proof` command, with `--session` and `--gate-receipt`, that records the outcome afterwards. `proof` exits non-zero unless Marrow returns `committed: true`.
 
 Useful commands:
 

@@ -140,8 +140,9 @@ Options:
                           prompt, at this runner's terminal prompt, or by the account owner's link
   --request-owner-link    When the account owner declined this action earlier, ask the owner again
                           with a one-tap approval link (only the owner can reverse the decline)
-  --approval-wait <sec>   How long run waits for the owner's answer after a link is sent
-                          (0 to 3600; default: until the link expires, at most 10 minutes)
+  --approval-wait <sec>   How long run waits for an approval before it holds (0 to 3600).
+                          Default: at an interactive terminal, until the owner's link
+                          expires; otherwise 0, and a later run picks up the answer
   --permit <token>        Short-lived action permit. Prefer MARROW_ACTION_PERMIT
   --target <text>         Protected target binding, such as repository/environment
   --sidecar-port <port>   Loopback sidecar port. Default: ephemeral
