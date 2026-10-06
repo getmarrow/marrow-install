@@ -981,6 +981,16 @@ function heldApproval(runtime, decision) {
   };
 }
 
+// Answers that refuse for good: the request itself or its scope is wrong, the permit or the
+// approval ran out, or the target is gone. Anything else (no answer, 5xx) may pass on a rerun.
+const PERMIT_REFUSAL_STATUSES = new Set([400, 403, 404, 409]);
+
+function permitErrorCode(error) {
+  const code = error?.details?.code || error?.details?.details?.code;
+  if (typeof code === 'string' && /^[A-Z][A-Z0-9_]{1,79}$/.test(code)) return code;
+  return error?.status ? `HTTP ${error.status}` : 'no answer';
+}
+
 function holdNextText(hold) {
   if (hold.kind === 'legacy') {
     return `Marrow holds this action for approval (gate receipt ${hold.gateReceiptId}). This Marrow service does not take approvals from a terminal yet, so it stays held and nothing ran.`;
@@ -1214,6 +1224,11 @@ function holdRecordStore(io = {}) {
     },
     remove(key) {
       try { fs.unlinkSync(file(key)); } catch { /* already gone */ }
+      try { fs.unlinkSync(path.join(directory, `${key}.claim`)); } catch { /* no claim */ }
+    },
+    // Gives the approval back (the run stopped before the command started, on a failure a
+    // later run may not meet); the record stays, so the next run picks the approval up again.
+    release(key) {
       try { fs.unlinkSync(path.join(directory, `${key}.claim`)); } catch { /* no claim */ }
     },
     // One run per approval: the first run to claim an approved receipt runs it; an identical
@@ -1968,7 +1983,13 @@ async function runGoverned(parsed, execution = {}) {
         });
       } catch (error) {
         if (arbitrationApproved) {
-          throw new Error('Marrow issued no permit for this command on the owner\'s arbitration approval (the approved proposal is not this exact action), so it did not run.');
+          const code = permitErrorCode(error);
+          if (PERMIT_REFUSAL_STATUSES.has(error.status)) {
+            throw new Error(`Marrow refused the permit for this command on the owner's arbitration approval (${code}), so it did not run. Marrow issues it only when the proposal the owner approved is this exact action.`);
+          }
+          const unavailable = new Error(`Marrow could not issue the permit for the owner's arbitration approval right now (${code}), so it did not run. Rerun the command; it picks up the approval.`);
+          unavailable.status = error.status;
+          throw unavailable;
         }
         throw error;
       }
@@ -1995,7 +2016,12 @@ async function runGoverned(parsed, execution = {}) {
       degraded = true;
       process.stderr.write(`Marrow degraded: ${error.message}. Continuing because this action is not protected${decisionId ? '' : '; its outcome will not be recorded'}.\n`);
     } else {
-      if (claimed) records.remove(holdKey);
+      // A refusal spends the hold (a fresh gate is needed); a failure a later run may not meet
+      // (Marrow unreachable or unavailable) keeps it, so the next run picks the approval up.
+      if (claimed) {
+        if (PERMIT_REFUSAL_STATUSES.has(error.status)) records.remove(holdKey);
+        else records.release(holdKey);
+      }
       return {
         ok: false,
         blocked: true,

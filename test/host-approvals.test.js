@@ -760,7 +760,8 @@ function fakeMarrow(scenario) {
     if (route === '/v1/agent/commit') return Response.json({ data: { committed: true } });
     if (route === '/v1/agent/enforcement') {
       if (body.operation === 'issue') {
-        if (scenario.permitRefused) return Response.json({ error: 'action_permit_owner_approval_scope_invalid' }, { status: 403 });
+        if (scenario.permitRefused) return Response.json({ error: 'Action permit scope was rejected.', code: 'FORBIDDEN', details: { code: 'ACTION_PERMIT_OWNER_APPROVAL_SCOPE_INVALID' } }, { status: 403 });
+        if (scenario.permitUnavailable) return Response.json({ error: 'Action permit control plane is unavailable.', code: 'SERVICE_UNAVAILABLE', details: { code: 'MARROW_ACTION_PERMIT_UNAVAILABLE' } }, { status: 503 });
         return Response.json({ data: { permit: 'permit-token', permit_id: 'permit-1', protocol_version: 2 } });
       }
       if (body.operation === 'verify') return Response.json({ data: { verified: true } });
@@ -1145,9 +1146,34 @@ test('runner: arbitration asks the owner by link, runs only with a permit for th
   assert.equal(commit.gate_receipt_id, RECEIPT);
   assertCleanOutput(run.output, run.result);
 
-  const other = await runHeld({ runtime: arbitrationRuntime(), statuses: [approved], permitRefused: true }, [], { approvalPrompt: () => 'y' });
+  // A refused permit spends the hold: the next run gates afresh.
+  const refusedHome = freshHome();
+  const other = await runHeld({ runtime: arbitrationRuntime(), statuses: [approved], permitRefused: true }, ['--approval-wait', '5'], { home: refusedHome });
   assert.equal(other.ran, false);
-  assert.match(other.result.message, /the approved proposal is not this exact action/);
+  assert.equal(other.result.exitCode, 13);
+  assert.match(other.result.message, /^Marrow refused the permit for this command on the owner's arbitration approval \(ACTION_PERMIT_OWNER_APPROVAL_SCOPE_INVALID\), so it did not run\. Marrow issues it only when the proposal the owner approved is this exact action\.$/);
+  assert.deepEqual(recordFiles(refusedHome), []);
+  fs.rmSync(refusedHome, { recursive: true, force: true });
+
+  // An unavailable permit service keeps the hold and the owner's approval for the next run.
+  const keptHome = freshHome();
+  const down = await runHeld({ runtime: arbitrationRuntime(), statuses: [approved], permitUnavailable: true }, ['--approval-wait', '5'], { home: keptHome });
+  assert.equal(down.ran, false);
+  assert.equal(down.result.exitCode, 13);
+  assert.match(down.result.message, /^Marrow could not issue the permit for the owner's arbitration approval right now \(MARROW_ACTION_PERMIT_UNAVAILABLE\), so it did not run\. Rerun the command; it picks up the approval\.$/);
+  assert.doesNotMatch(down.result.message, /not this exact action/);
+  assert.equal(recordFiles(keptHome).length, 1);
+  const later = await runHeld({ runtime: arbitrationRuntime(), statuses: [approved] }, [], { home: keptHome });
+  assert.equal(routeCalls(later.calls, '/v1/agent/runtime').length, 0, 'the rerun picks up the hold');
+  assert.equal(routeCalls(later.calls, '/approval-link').length, 0, 'and asks the owner nothing new');
+  assert.equal(later.ran, true);
+  const laterIssue = later.calls.find((call) => call.pathname === '/v1/agent/enforcement' && call.body.operation === 'issue').body;
+  assert.equal(laterIssue.owner_approval_receipt_id, OWNER_RECEIPT);
+  const laterCommit = routeCalls(later.calls, '/v1/agent/commit')[0].body;
+  assert.equal(laterCommit.arbitration_receipt_id, ARBITRATION);
+  assert.equal(laterCommit.owner_approval_receipt_id, OWNER_RECEIPT);
+  assert.deepEqual(recordFiles(keptHome), []);
+  fs.rmSync(keptHome, { recursive: true, force: true });
 
   const unattended = await runHeld({ runtime: arbitrationRuntime(), statuses: [approved] });
   assert.equal(routeCalls(unattended.calls, '/approval-link').length, 1, 'the arbitration link is owner-locked, sent even unattended');
