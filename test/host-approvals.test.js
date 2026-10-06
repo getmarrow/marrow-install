@@ -1181,7 +1181,13 @@ test('runner: arbitration asks the owner by link, runs only with a permit for th
 
   const none = await runHeld({ runtime: arbitrationRuntime(), statuses: ['declined'] }, ['--approval-wait', '5']);
   assert.equal(none.ran, false);
-  assert.match(routeCalls(none.calls, '/v1/agent/commit')[0].body.outcome, /approved none of the proposals/);
+  const noneCommit = routeCalls(none.calls, '/v1/agent/commit')[0].body;
+  assert.match(noneCommit.outcome, /approved none of the proposals/);
+  // Marrow closes an arbitrated decision only with both receipts.
+  assert.equal(noneCommit.gate_receipt_id, RECEIPT);
+  assert.equal(noneCommit.arbitration_receipt_id, ARBITRATION);
+  assert.equal('owner_approval_receipt_id' in noneCommit, false);
+  assert.equal('proof' in noneCommit && noneCommit.proof !== undefined, false);
 });
 
 test('runner: an older Marrow service without terminal approvals holds and says so, with no prompt and no link', async () => {

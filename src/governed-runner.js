@@ -1389,12 +1389,15 @@ async function waitForOwnerAnswer(options, gateReceiptId, pollAfterMs, deadline,
 
 // A gate denial report closes trusted only with its receipt and no proof: there is no
 // completion to prove, and the receipt is what makes the denial verifiable.
-async function commitHoldDenial(options, decisionIds, gateReceiptId, outcome) {
+// An arbitration hold's denial carries its arbitration receipt with the gate receipt, as Marrow
+// closes an arbitrated decision only with both.
+async function commitHoldDenial(options, decisionIds, gateReceiptId, outcome, arbitrationReceiptId = '') {
   const decisionId = decisionIds.runtimeDecisionId || decisionIds.decisionId;
   if (!decisionId) return 'not_recorded';
   try {
-    const commit = await commitOutcome(options, decisionId, false, outcome, undefined,
-      decisionIds.runtimeDecisionId ? gateReceiptId : '');
+    const receipt = decisionIds.runtimeDecisionId ? gateReceiptId : '';
+    const commit = await commitOutcome(options, decisionId, false, outcome, undefined, receipt, null,
+      { extras: receipt && arbitrationReceiptId ? { arbitration_receipt_id: arbitrationReceiptId } : {} });
     return commit?.committed === true ? 'committed' : 'not_committed';
   } catch {
     return 'failed';
@@ -1452,7 +1455,7 @@ async function resolveHold(options, hold, context) {
     return refused(message, { state: 'held', ...extra });
   };
   const denial = async (message, outcome, declinedBy, extra) => {
-    const commitState = await commitHoldDenial(options, decisionIds, hold.gateReceiptId, outcome);
+    const commitState = await commitHoldDenial(options, decisionIds, hold.gateReceiptId, outcome, hold.kind === 'arbitration' ? hold.arbitrationReceiptId : '');
     records?.write(context.holdKey, { ...recordBase(), state: 'declined', declined_by: declinedBy, declined_at: new Date().toISOString(), denial_committed: commitState === 'committed' ? 'yes' : undefined });
     return refused(message, { ...extra, denial_commit: commitState });
   };
@@ -1652,7 +1655,7 @@ async function resumeRecordedHold(options, records, holdKey, io = {}) {
     return refusedHere(message, { state: 'held', ...extra });
   };
   const denialHere = async (message, outcome, declinedBy, extra) => {
-    const commitState = record.denial_committed === 'yes' ? 'committed' : await commitHoldDenial(holdOptions, decisionIds, record.gate_receipt_id, outcome);
+    const commitState = record.denial_committed === 'yes' ? 'committed' : await commitHoldDenial(holdOptions, decisionIds, record.gate_receipt_id, outcome, record.kind === 'arbitration' ? record.arbitration_receipt_id || '' : '');
     records.write(holdKey, { ...record, state: 'declined', declined_by: declinedBy, declined_at: new Date().toISOString(), denial_committed: commitState === 'committed' ? 'yes' : undefined });
     return refusedHere(message, { ...extra, denial_commit: commitState });
   };
