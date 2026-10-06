@@ -7,6 +7,10 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const PINS = require('../src/pins');
+const PIN_RE = PINS.MCP_ADAPTER_VERSION.replaceAll('.', '\\.');
+// A stable version just ahead of the pin (the next patch), for unverified-ahead cases.
+const AHEAD = PINS.MCP_ADAPTER_VERSION.replace(/\d+$/, (patch) => String(Number(patch) + 1));
+const HOST_APPROVALS = require('../src/installer').hostApprovalHooksSupported(PINS.MCP_ADAPTER_VERSION);
 
 const {
   HARNESS_CAPABILITY_REGISTRY,
@@ -199,16 +203,19 @@ test('Cursor hooks reconcile exact native events, preserve unrelated entries, an
       const entry = entries[0];
       assert.equal(entry.matcher, matcher);
       assert.equal(entry.timeout, timeout);
-      assert.match(entry.command, /@getmarrow\/mcp@3\.9\.98/);
+      assert.match(entry.command, new RegExp(String.raw`@getmarrow\/mcp@${PIN_RE}`));
       return entry;
     };
-    const preAction = exact('preToolUse', 'cursor-pre-action-hook', CURSOR_NATIVE_HOOK_MATCHER, 5);
+    // With an MCP that answers the host-approval hooks, shell calls leave preToolUse and the
+    // gating hooks get the longer Cursor timeout.
+    const preAction = exact('preToolUse', 'cursor-pre-action-hook',
+      HOST_APPROVALS ? require('../src/installer').CURSOR_PRE_TOOL_USE_HOST_APPROVAL_MATCHER : CURSOR_NATIVE_HOOK_MATCHER, HOST_APPROVALS ? 15 : 5);
     assert.equal(preAction.failClosed, true);
     assert.equal(preAction.async, false);
     exact('postToolUse', 'cursor-hook', CURSOR_NATIVE_HOOK_MATCHER, 5);
     exact('postToolUseFailure', 'cursor-hook', CURSOR_NATIVE_HOOK_MATCHER, 5);
     exact('stop', 'cursor-session-hook', undefined, 3);
-    assert.doesNotMatch(JSON.stringify(settings), /cursor-context-hook|UserPromptSubmit/);
+    assert.doesNotMatch(JSON.stringify(settings), HOST_APPROVALS ? /UserPromptSubmit/ : /cursor-context-hook|UserPromptSubmit/);
 
     for (const client of ['cursor', 'composer']) {
       const profile = activationProfile(detection, plan, changes, client);
@@ -290,12 +297,12 @@ test('Cline hooks install exact executable non-blocking scripts and remain byte-
     const pre = fs.readFileSync(hookPaths[0], 'utf8');
     const post = fs.readFileSync(hookPaths[1], 'utf8');
     const cancel = fs.readFileSync(hookPaths[2], 'utf8');
-    assert.match(pre, /@getmarrow\/mcp@3\.9\.98 marrow-mcp cline-pre-action-hook/);
+    assert.match(pre, new RegExp(String.raw`@getmarrow\/mcp@${PIN_RE} marrow-mcp cline-pre-action-hook`));
     assert.match(pre, /"cancel":true/);
     assert.match(pre, /JSON\.parse/);
-    assert.match(post, /@getmarrow\/mcp@3\.9\.98 marrow-mcp cline-hook/);
+    assert.match(post, new RegExp(String.raw`@getmarrow\/mcp@${PIN_RE} marrow-mcp cline-hook`));
     assert.match(post, /\|\| :/);
-    assert.match(cancel, /@getmarrow\/mcp@3\.9\.98 marrow-mcp cline-session-hook/);
+    assert.match(cancel, new RegExp(String.raw`@getmarrow\/mcp@${PIN_RE} marrow-mcp cline-session-hook`));
     assert.match(cancel, /\|\| :/);
     assert.equal(fs.existsSync(path.join(hookDir, 'TaskComplete')), false);
 
@@ -447,7 +454,7 @@ test('Windsurf reconciles exact native hooks, preserves unrelated config, fails 
       const marrow = settings.hooks[eventName].filter((entry) => /marrow-mcp windsurf-/.test(entry.command));
       assert.equal(marrow.length, 1, eventName);
       assert.equal(marrow[0].show_output, false, eventName);
-      assert.match(marrow[0].command, /@getmarrow\/mcp@3\.9\.98/);
+      assert.match(marrow[0].command, new RegExp(String.raw`@getmarrow\/mcp@${PIN_RE}`));
     }
 
     const preCommand = settings.hooks.pre_run_command.find((entry) => /windsurf-pre-action-hook/.test(entry.command)).command;
@@ -598,7 +605,8 @@ test('Gemini CLI reconciles exact native groups, validates decisions, keeps neut
       assert.equal(group.matcher, matcher, eventName);
       assert.equal(marrowHandlers[0].type, 'command');
       assert.equal(marrowHandlers[0].timeout, timeout);
-      assert.match(marrowHandlers[0].command, new RegExp(`@getmarrow/mcp@${PINS.MCP_ADAPTER_VERSION.replaceAll('.', '\\.')} marrow-mcp ${entrypoint}`));
+      // The plain entrypoint, or (BeforeTool with host approvals) the guard naming it as JSON items.
+      assert.match(marrowHandlers[0].command, new RegExp(`@getmarrow/mcp@${PIN_RE}(?: marrow-mcp |","marrow-mcp",")${entrypoint}`));
       commands[eventName] = marrowHandlers[0].command;
     }
     assert.doesNotMatch(JSON.stringify(settings), /MARROW_API_KEY|mrw_/);
@@ -752,7 +760,7 @@ test('fresh Grok installs create one private managed global hook and remain byte
     assert.equal(fs.statSync(hookPath).mode & 0o777, 0o600);
     const first = fs.readFileSync(hookPath);
     const settings = JSON.parse(first);
-    assert.match(JSON.stringify(settings), /@getmarrow\/mcp@3\.9\.98/);
+    assert.match(JSON.stringify(settings), new RegExp(String.raw`@getmarrow\/mcp@${PIN_RE}`));
     assert.equal(settings.hooks.PreToolUse.some((entry) => (
       entry.matcher === GROK_NATIVE_HOOK_MATCHER
       && entry.hooks?.some((hook) => hook.command === GROK_PRE_ACTION_HOOK_COMMAND && hook.timeout === 7)
@@ -919,6 +927,19 @@ test('Claude native-hook configuration records local completeness without provin
       schema: 'marrow-claude-native-hooks.v3',
       adapter_version: PINS.MCP_ADAPTER_VERSION,
       expected_hooks: ['prompt', 'pre_action', 'action_result', 'session_end'],
+      ...(HOST_APPROVALS ? {
+        host_approvals: {
+          configured: { permission_request: true, post_tool_batch: true },
+          descriptors: {
+            permission_request: [{ matcher: NATIVE_HOOK_MATCHER, command: `npx -y --package=@getmarrow/mcp@${PINS.MCP_ADAPTER_VERSION} marrow-mcp claude-permission-request-hook`, timeout: null }],
+            post_tool_batch: [{ matcher: null, command: `npx -y --package=@getmarrow/mcp@${PINS.MCP_ADAPTER_VERSION} marrow-mcp claude-hook`, timeout: null }],
+          },
+          active_marrow_handlers: {
+            permission_request: [{ matcher: NATIVE_HOOK_MATCHER, command: `npx -y --package=@getmarrow/mcp@${PINS.MCP_ADAPTER_VERSION} marrow-mcp claude-permission-request-hook`, timeout: null }],
+            post_tool_batch: [{ matcher: null, command: `npx -y --package=@getmarrow/mcp@${PINS.MCP_ADAPTER_VERSION} marrow-mcp claude-hook`, timeout: null }],
+          },
+        },
+      } : {}),
       configured: {
         prompt: true,
         pre_action: true,
@@ -947,7 +968,7 @@ test('Claude native-hook configuration records local completeness without provin
     assert.match(settings, /pre-action-hook/);
     assert.match(settings, /PostToolUseFailure/);
     assert.match(settings, /session-hook/);
-    assert.match(settings, /getmarrow\/mcp@3\.9\.98.*marrow-mcp claude-hook/);
+    assert.match(settings, new RegExp(String.raw`getmarrow\/mcp@${PIN_RE}.*marrow-mcp claude-hook`));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -987,7 +1008,8 @@ test('Claude setup replaces old Marrow hooks without duplicate execution', () =>
     const commandCounts = Object.values(settings.hooks).flatMap((entries) => entries)
       .flatMap((entry) => entry.hooks || [])
       .filter((hook) => /^npx\s+(?:-y\s+)?(?:--package=)?@getmarrow\/mcp(?:@[^\s]+)?\s+(?:marrow-mcp\s+)?/.test(hook.command || ''));
-    assert.equal(commandCounts.length, 5);
+    // The core five, plus PermissionRequest and PostToolBatch with an MCP that answers them.
+    assert.equal(commandCounts.length, HOST_APPROVALS ? 7 : 5);
     assert.ok(commandCounts.every((hook) => hook.command.includes(`@getmarrow/mcp@${PINS.MCP_ADAPTER_VERSION}`)));
     assert.deepEqual(settings.permissions, { allow: ['Read'] });
     assert.match(first, /printf unrelated/);
@@ -1083,7 +1105,7 @@ test('Codex hooks reconcile exact native events, preserve unrelated entries, and
       const hook = entry.hooks.find((candidate) => candidate.command?.endsWith(`marrow-mcp ${suffix}`));
       assert.ok(hook, `missing ${event} ${suffix}`);
       assert.equal(hook.timeout, timeout);
-      assert.match(hook.command, /@getmarrow\/mcp@3\.9\.98/);
+      assert.match(hook.command, new RegExp(String.raw`@getmarrow\/mcp@${PIN_RE}`));
       return hook;
     };
     exact('UserPromptSubmit', 'codex-context-hook', null, 5);

@@ -271,6 +271,28 @@ const CURSOR_PRE_ACTION_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} mar
 const CURSOR_ACTION_RESULT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp cursor-hook`;
 const CURSOR_SESSION_END_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp cursor-session-hook`;
 const CURSOR_CONTEXT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp cursor-context-hook`;
+// Cursor's beforeMCPExecution takes no matcher, so this guard answers allow at once for
+// Marrow's own tools (server "marrow", tools marrow_*), as the old preToolUse matcher exempted
+// them, without starting npx. Every other call goes to the MCP entrypoint with its input
+// unchanged; a crash, a non-zero exit or output that is not a JSON object blocks (exit 2).
+const CURSOR_MCP_GUARD_FAILURE = 'Marrow governance adapter was unavailable; this MCP call is blocked.';
+const CURSOR_MCP_PRE_ACTION_GUARD_SOURCE = [
+  'const {spawn}=require("node:child_process");',
+  'const chunks=[];let size=0,over=false,done=false;',
+  `const fail=()=>{if(done)return;done=true;process.exitCode=2;process.stderr.write(${JSON.stringify(`${CURSOR_MCP_GUARD_FAILURE}\n`)},()=>process.exit(2));};`,
+  'process.stdin.on("error",fail);',
+  'process.stdin.on("data",c=>{size+=c.length;if(size>16777216){over=true;return;}chunks.push(c);});',
+  'process.stdin.on("end",()=>{if(over){fail();return;}const raw=Buffer.concat(chunks);let ev=null;try{ev=JSON.parse(raw.toString("utf8"));}catch{ev=null;}',
+  'if(ev&&typeof ev==="object"&&ev.mcp_server_name==="marrow"&&typeof ev.tool_name==="string"&&/^marrow_[a-z0-9_]{1,64}$/.test(ev.tool_name)){done=true;process.stdout.write("{\\"permission\\":\\"allow\\"}\\n");return;}',
+  'let child;try{',
+  `child=spawn(process.platform==="win32"?"npx.cmd":"npx",${JSON.stringify(['-y', `--package=${MCP_PACKAGE_SPEC}`, 'marrow-mcp', 'cursor-pre-action-hook'])},{stdio:["pipe","pipe","ignore"]});`,
+  '}catch{fail();return;}',
+  'let out="",bytes=0;child.stdout.on("data",c=>{bytes+=c.length;if(bytes<=65536)out+=c.toString("utf8");});',
+  'child.on("error",fail);child.stdin.on("error",()=>{});',
+  'child.on("close",code=>{if(done)return;let p=null;try{p=JSON.parse(out);}catch{p=null;}if(code!==0||bytes>65536||!p||typeof p!=="object"||Array.isArray(p)){fail();return;}done=true;process.stdout.write(JSON.stringify(p)+"\\n");});',
+  'child.stdin.end(raw);});',
+].join('');
+const CURSOR_MCP_PRE_ACTION_GUARD_COMMAND = `node -e '${CURSOR_MCP_PRE_ACTION_GUARD_SOURCE}'`;
 const CLINE_PRE_ACTION_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp cline-pre-action-hook`;
 const CLINE_ACTION_RESULT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp cline-hook`;
 const CLINE_SESSION_END_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp cline-session-hook`;
@@ -361,9 +383,14 @@ const NATIVE_HOOK_MATCHER = 'Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|Web
 const CODEX_NATIVE_HOOK_MATCHER = 'Bash|apply_patch|Edit|Write|MultiEdit|mcp__(?!marrow__marrow_).*|functions\\.(?!marrow_).*';
 const CURSOR_NATIVE_HOOK_MATCHER = 'Shell|Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|MCP:(?!marrow(?:_.*|:marrow_.*)$).*';
 // Host approvals: Cursor enforces an "ask" only on beforeShellExecution and beforeMCPExecution,
-// never on preToolUse, so shell and MCP calls move to those two hooks (failClosed) and leave
-// the preToolUse matcher. The result hooks keep the full matcher.
-const CURSOR_PRE_TOOL_USE_HOST_APPROVAL_MATCHER = 'Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List';
+// never on preToolUse. Shell calls move to beforeShellExecution (it runs in cloud agents too).
+// MCP calls stay in preToolUse as well, because cloud agents never run beforeMCPExecution: the
+// MCP hook defers there to beforeMCPExecution only in a local interactive session (sessionStart
+// evidence) and holds in cloud and background agents. The result hooks keep the full matcher.
+const CURSOR_PRE_TOOL_USE_HOST_APPROVAL_MATCHER = 'Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|MCP:(?!marrow(?:_.*|:marrow_.*)$).*';
+// Cursor's gating hooks are failClosed: a cold npx start on a slow network must not block a
+// call, so they get room beyond the MCP hook's own 4-second budget.
+const CURSOR_GATE_HOOK_TIMEOUT_SECONDS = 15;
 const CURSOR_EXECUTION_PRE_EVENTS = Object.freeze(['beforeShellExecution', 'beforeMCPExecution']);
 const CURSOR_EXECUTION_POST_EVENTS = Object.freeze(['afterShellExecution', 'afterMCPExecution']);
 const GEMINI_NATIVE_HOOK_MATCHER = '^(?:run_shell_command|write_file|replace|edit_file|delete_file|read_file|read_many_files|glob|grep_search|list_directory|get_file_info|web_search|google_web_search|mcp_(?!marrow_marrow_)[A-Za-z0-9_]{1,192})$';
@@ -1206,7 +1233,7 @@ function passiveInstructions(options = {}) {
   const hostApprovals = options.hostApprovals === true;
   const geminiHooks = hostApprovals ? 'BeforeTool, AfterTool, AfterAgent, and BeforeAgent' : 'BeforeTool, AfterTool, and AfterAgent';
   const approvals = hostApprovals
-    ? '\n- When Marrow holds an action for approval, the operator approves it in the host\'s own permission prompt, or with the typed reply the hook shows them; for actions only the account owner may approve, Marrow sends the owner a one-tap link. Never ask anyone to log in to a dashboard to approve, and never report, write, or claim an approval yourself. Retry the held action only after the approval or when the operator asks.'
+    ? '\n- When Marrow holds an action for approval, the operator approves it in the host\'s own permission prompt, or with the typed reply the hook shows them. With nobody at the prompt, the action waits quietly: do not run it, carry on with other work, and tell the person it is waiting. Marrow sends the account owner a one-tap link only for actions the owner approves personally, to reverse the owner\'s own decline when asked, or when the owner turned on unattended pings. Never ask anyone to log in to a dashboard to approve, and never report, write, or claim an approval yourself. Retry the held action only after the approval or when the operator asks.'
     : '';
   return `${MARROW_BLOCK_START}
 ## Marrow Passive Agent Memory
@@ -1602,11 +1629,20 @@ function upsertCodexHooks(hooksPath) {
   return JSON.stringify(settings, null, 2) + '\n';
 }
 
+// A Marrow Cursor entry: the npx entrypoint, or the node guard that names it as JSON items.
+function cursorMarrowHookSubcommand(command) {
+  const direct = marrowHookSubcommand(command);
+  if (direct) return direct;
+  if (typeof command !== 'string') return null;
+  const guarded = command.match(/@getmarrow\/mcp@[^\s"',]+["'],["']marrow-mcp["'],["']cursor-(pre-action-hook|context-hook|hook|session-hook)["']/);
+  return guarded?.[1] || null;
+}
+
 function reconcileCursorHook(settings, eventName, subcommand, canonical) {
   const original = Array.isArray(settings?.hooks?.[eventName]) ? settings.hooks[eventName] : [];
   const retained = original.filter((entry) => !(
     entry && typeof entry === 'object' && !Array.isArray(entry)
-    && marrowHookSubcommand(entry.command)
+    && cursorMarrowHookSubcommand(entry.command)
   ));
   return [...retained, canonical];
 }
@@ -1624,7 +1660,7 @@ function cursorHookDescriptors(settings, eventName) {
   const entries = settings?.hooks?.[eventName];
   if (!Array.isArray(entries)) return [];
   return entries.flatMap((entry) => {
-    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || !marrowHookSubcommand(entry.command)) return [];
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || !cursorMarrowHookSubcommand(entry.command)) return [];
     return [{
       matcher: typeof entry.matcher === 'string' ? entry.matcher : null,
       command: String(entry.command).trim(),
@@ -1639,13 +1675,11 @@ function cursorHookDescriptors(settings, eventName) {
 function cursorHostApprovalHooksConfigured(settings, targetCommand = (command) => command) {
   const pre = targetCommand(CURSOR_PRE_ACTION_HOOK_COMMAND);
   const post = targetCommand(CURSOR_ACTION_RESULT_HOOK_COMMAND);
+  const gate = { timeout: CURSOR_GATE_HOOK_TIMEOUT_SECONDS, failClosed: true, async: false };
   return {
-    pre_tool_use: exactCursorHookConfigured(settings, 'preToolUse', pre, CURSOR_PRE_TOOL_USE_HOST_APPROVAL_MATCHER, {
-      timeout: CODEX_HOOK_TIMEOUT_SECONDS, failClosed: true, async: false,
-    }),
-    ...Object.fromEntries(CURSOR_EXECUTION_PRE_EVENTS.map((event) => [event, exactCursorHookConfigured(settings, event, pre, undefined, {
-      timeout: CODEX_HOOK_TIMEOUT_SECONDS, failClosed: true, async: false,
-    })])),
+    pre_tool_use: exactCursorHookConfigured(settings, 'preToolUse', pre, CURSOR_PRE_TOOL_USE_HOST_APPROVAL_MATCHER, gate),
+    beforeShellExecution: exactCursorHookConfigured(settings, 'beforeShellExecution', pre, undefined, gate),
+    beforeMCPExecution: exactCursorHookConfigured(settings, 'beforeMCPExecution', targetCommand(CURSOR_MCP_PRE_ACTION_GUARD_COMMAND), undefined, gate),
     ...Object.fromEntries(CURSOR_EXECUTION_POST_EVENTS.map((event) => [event, exactCursorHookConfigured(settings, event, post, undefined, {
       timeout: CODEX_HOOK_TIMEOUT_SECONDS,
     })])),
@@ -1673,7 +1707,7 @@ function cursorNativeHookFingerprint(settings, options = {}) {
     } : {}),
     configured: {
       pre_action: exactCursorHookConfigured(settings, 'preToolUse', CURSOR_PRE_ACTION_HOOK_COMMAND, hostApprovals ? CURSOR_PRE_TOOL_USE_HOST_APPROVAL_MATCHER : CURSOR_NATIVE_HOOK_MATCHER, {
-        timeout: CODEX_HOOK_TIMEOUT_SECONDS,
+        timeout: hostApprovals ? CURSOR_GATE_HOOK_TIMEOUT_SECONDS : CODEX_HOOK_TIMEOUT_SECONDS,
         failClosed: true,
         async: false,
       }),
@@ -1709,7 +1743,7 @@ function upsertCursorHooks(hooksPath, options = {}) {
     preToolUse: reconcileCursorHook(settings, 'preToolUse', 'pre-action-hook', {
       command: CURSOR_PRE_ACTION_HOOK_COMMAND,
       matcher: hostApprovals ? CURSOR_PRE_TOOL_USE_HOST_APPROVAL_MATCHER : CURSOR_NATIVE_HOOK_MATCHER,
-      timeout: CODEX_HOOK_TIMEOUT_SECONDS,
+      timeout: hostApprovals ? CURSOR_GATE_HOOK_TIMEOUT_SECONDS : CODEX_HOOK_TIMEOUT_SECONDS,
       failClosed: true,
       async: false,
     }),
@@ -1733,8 +1767,8 @@ function upsertCursorHooks(hooksPath, options = {}) {
     // of letting it through (Cursor fails open by default).
     for (const eventName of CURSOR_EXECUTION_PRE_EVENTS) {
       settings.hooks[eventName] = reconcileCursorHook(settings, eventName, 'pre-action-hook', {
-        command: CURSOR_PRE_ACTION_HOOK_COMMAND,
-        timeout: CODEX_HOOK_TIMEOUT_SECONDS,
+        command: eventName === 'beforeMCPExecution' ? CURSOR_MCP_PRE_ACTION_GUARD_COMMAND : CURSOR_PRE_ACTION_HOOK_COMMAND,
+        timeout: CURSOR_GATE_HOOK_TIMEOUT_SECONDS,
         failClosed: true,
         async: false,
       });
@@ -2569,7 +2603,7 @@ function defaultHarnessInstallMatrix(detection = detectEnvironment(process.cwd()
     const cursorApprovalHooks = cursorSettings && hostApprovals ? cursorHostApprovalHooksConfigured(cursorSettings) : null;
     const cursorConfigured = Boolean(cursorSettings
       && exactCursorHookConfigured(cursorSettings, 'preToolUse', CURSOR_PRE_ACTION_HOOK_COMMAND, hostApprovals ? CURSOR_PRE_TOOL_USE_HOST_APPROVAL_MATCHER : CURSOR_NATIVE_HOOK_MATCHER, {
-        timeout: CODEX_HOOK_TIMEOUT_SECONDS, failClosed: true, async: false,
+        timeout: hostApprovals ? CURSOR_GATE_HOOK_TIMEOUT_SECONDS : CODEX_HOOK_TIMEOUT_SECONDS, failClosed: true, async: false,
       })
       && (!cursorApprovalHooks || Object.values(cursorApprovalHooks).every(Boolean))
       && exactCursorHookConfigured(cursorSettings, 'postToolUse', CURSOR_ACTION_RESULT_HOOK_COMMAND, CURSOR_NATIVE_HOOK_MATCHER, {
@@ -3149,7 +3183,7 @@ function buildUninstallPlan(detection) {
   };
   json(detection.paths.claudeSettings, 'Claude Code hooks', (value) => withoutMarrowGroupedHandlers(value, isMarrowCommandHandler));
   json(detection.paths.codexHooks, 'Codex hooks', (value) => withoutMarrowGroupedHandlers(value, isMarrowCommandHandler));
-  json(detection.paths.cursorHooks, 'Cursor hooks', (value) => withoutMarrowFlatEntries(value, (entry) => Boolean(marrowHookSubcommand(entry.command))));
+  json(detection.paths.cursorHooks, 'Cursor hooks', (value) => withoutMarrowFlatEntries(value, (entry) => Boolean(cursorMarrowHookSubcommand(entry.command))));
   json(detection.paths.windsurfHooks, 'Windsurf hooks', (value) => withoutMarrowFlatEntries(value, (entry) => Boolean(windsurfMarrowHookEntrypoint(entry.command))));
   json(detection.paths.geminiSettings, 'Gemini CLI hooks', (value) => withoutMarrowGroupedHandlers(value, isMarrowGeminiHandler));
   json(detection.paths.grokHooks, 'Grok hooks', (value) => withoutMarrowGroupedHandlers(value, isMarrowGrokHandler), {
@@ -3229,6 +3263,7 @@ async function uninstall(options = {}) {
         change.removed_entries = 1;
         change.action = result.content.trim() ? 'update' : 'delete_file';
         if (change.action === 'delete_file') change.note = 'it held only the Marrow block';
+        else change.note = 'block_only';
         if (apply) {
           if (change.action === 'delete_file') fs.unlinkSync(step.path);
           else atomicWriteManagedFile(writeRoot, step.path, result.content);
@@ -3303,7 +3338,8 @@ function printUninstallReport(report, sink = (text) => process.stdout.write(text
   const entries = (count) => `${count} Marrow entr${count === 1 ? 'y' : 'ies'}`;
   sink(`Marrow uninstall${result.applied ? '' : ' (preview)'}: ${entries(result.removed_entries)} ${result.applied ? 'removed' : 'to remove'}.\n`);
   for (const change of result.changes) {
-    if (change.action === 'update') sink(`- ${where(change.path)}: ${result.applied ? 'removed' : 'would remove'} ${entries(change.removed_entries)}; kept ${change.kept_entries} of yours.\n`);
+    if (change.action === 'update' && change.note) sink(`- ${where(change.path)}: ${result.applied ? 'removed' : 'would remove'} the Marrow block; your text is kept.\n`);
+    else if (change.action === 'update') sink(`- ${where(change.path)}: ${result.applied ? 'removed' : 'would remove'} ${entries(change.removed_entries)}; kept ${change.kept_entries} of yours.\n`);
     else if (change.action === 'delete_file') sink(`- ${where(change.path)}: ${result.applied ? 'deleted' : 'would delete'} (${change.note || 'Marrow\'s own file'}).\n`);
     else if (change.action === 'kept' || change.action === 'skipped') sink(`- ${where(change.path)}: left unchanged (${change.reason}).\n`);
   }

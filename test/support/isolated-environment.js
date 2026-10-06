@@ -9,6 +9,12 @@ const isolatedHome = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-install-test-
 for (const name of Object.keys(process.env)) {
   if (name.startsWith('MARROW_') || name.startsWith('OPENCLAW_') || name.startsWith('HERMES_')) delete process.env[name];
 }
+// An agent host's markers make the governed runner treat its terminal as unattended. Tests must
+// not depend on whether they run inside one, so the markers are removed (CI too).
+for (const name of ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_CHILD_SESSION', 'GEMINI_CLI', 'CODEX_SANDBOX',
+  'CODEX_SANDBOX_NETWORK_DISABLED', 'CODEX_MANAGED_BY_NPM', 'CODEX_THREAD_ID', 'CURSOR_AGENT', 'OPENCODE', 'CI']) {
+  delete process.env[name];
+}
 // A harness executable on the operator's PATH (for example `hermes`) is a detection signal.
 // Tests must not depend on what this machine has installed, so those PATH entries are removed.
 const HARNESS_EXECUTABLES = ['hermes'];

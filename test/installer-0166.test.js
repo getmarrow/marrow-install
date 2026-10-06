@@ -22,6 +22,10 @@ const {
 const { planHermesMcpConfig, redactUndoLines } = require('../src/hermes-config');
 const { readOwnerApiKey } = require('../src/owner-env');
 const PINS = require('../src/pins');
+const PIN_RE = PINS.MCP_ADAPTER_VERSION.replaceAll('.', '\\.');
+// A stable version just ahead of the pin (the next patch), for unverified-ahead cases.
+const AHEAD = PINS.MCP_ADAPTER_VERSION.replace(/\d+$/, (patch) => String(Number(patch) + 1));
+const HOST_APPROVALS = require('../src/installer').hostApprovalHooksSupported(PINS.MCP_ADAPTER_VERSION);
 
 const BIN = path.join(__dirname, '..', 'bin', 'marrow-install.js');
 const MCP_PIN = `@getmarrow/mcp@${PINS.MCP_ADAPTER_VERSION}`;
@@ -46,16 +50,17 @@ function filesContaining(root, needle) {
   return found.sort();
 }
 
-// The Claude hook reconciliation that `marrow-mcp setup` performs in MCP 3.9.98 (e40d3cb4,
-// src/hook-contract.ts reconcileMarrowCommandHook and the four install*Hook callers in
-// src/cli.ts). Reproduced here so the installer output is checked against the other writer.
+// The Claude hook reconciliation that `marrow-mcp setup` performs for the pinned MCP
+// (src/hook-contract.ts reconcileMarrowCommandHook and the install*Hook callers in src/cli.ts;
+// with the host-approval hooks, as in MCP 0bfc055 and later, also installPermissionRequestHook).
+// Reproduced here so the installer output is checked against the other writer.
 function mcpSubcommand(value) {
   if (typeof value !== 'string') return null;
-  const match = value.trim().match(/^npx\s+(?:-y\s+)?(?:--package=@getmarrow\/mcp(?:@[^\s]+)?\s+marrow-mcp|@getmarrow\/mcp(?:@[^\s]+)?)\s+(?:(?:claude|cline|codex|cursor|gemini|grok|windsurf)-)?(context-hook|pre-action-hook|hook|session-hook)$/);
+  const match = value.trim().match(/^npx\s+(?:-y\s+)?(?:--package=@getmarrow\/mcp(?:@[^\s]+)?\s+marrow-mcp|@getmarrow\/mcp(?:@[^\s]+)?)\s+(?:(?:claude|cline|codex|cursor|gemini|grok|windsurf)-)?(context-hook|pre-action-hook|hook|session-hook|permission-request-hook)$/);
   return match?.[1] || null;
 }
 
-function mcpReconcile(settings, eventName, subcommand, wanted, matcher) {
+function mcpReconcile(settings, eventName, subcommand, wanted, matcher, handlerFields = {}) {
   const hooks = settings.hooks && typeof settings.hooks === 'object' ? settings.hooks : {};
   const original = Array.isArray(hooks[eventName]) ? hooks[eventName] : [];
   let preferred = null;
@@ -77,7 +82,7 @@ function mcpReconcile(settings, eventName, subcommand, wanted, matcher) {
     }
     if (remaining.length > 0) retained.push({ ...entry, hooks: remaining });
   }
-  const canonical = { hooks: [{ ...(preferred || {}), type: 'command', command: wanted }] };
+  const canonical = { hooks: [{ ...(preferred || {}), ...handlerFields, type: 'command', command: wanted }] };
   if (matcher !== undefined) canonical.matcher = matcher;
   retained.push(canonical);
   return retained;
@@ -88,6 +93,10 @@ function mcpSetup(settingsPath) {
     (settings) => ({ PostToolUse: mcpReconcile(settings, 'PostToolUse', 'hook', command('claude-hook'), MATCHER), PostToolUseFailure: mcpReconcile(settings, 'PostToolUseFailure', 'hook', command('claude-hook'), MATCHER) }),
     (settings) => ({ UserPromptSubmit: mcpReconcile(settings, 'UserPromptSubmit', 'context-hook', command('claude-context-hook')) }),
     (settings) => ({ PreToolUse: mcpReconcile(settings, 'PreToolUse', 'pre-action-hook', command('claude-pre-action-hook'), MATCHER) }),
+    ...(HOST_APPROVALS ? [(settings) => ({
+      PermissionRequest: mcpReconcile(settings, 'PermissionRequest', 'permission-request-hook', command('claude-permission-request-hook'), MATCHER, { async: true }),
+      PostToolBatch: mcpReconcile(settings, 'PostToolBatch', 'hook', command('claude-hook'), undefined, { async: true }),
+    })] : []),
     (settings) => ({ Stop: mcpReconcile(settings, 'Stop', 'session-hook', command('claude-session-hook')) }),
   ];
   for (const step of steps) {
@@ -120,6 +129,7 @@ test('Claude hooks use the claude-* entrypoints and converge with MCP setup in b
     PostToolUse: command('claude-hook'),
     PostToolUseFailure: command('claude-hook'),
     Stop: command('claude-session-hook'),
+    ...(HOST_APPROVALS ? { PermissionRequest: command('claude-permission-request-hook'), PostToolBatch: command('claude-hook') } : {}),
   };
   // Fresh install, then MCP setup: MCP leaves the installer's bytes alone.
   const fresh = tempDir();
@@ -325,7 +335,7 @@ test('Hermes MCP wiring is added once, keeps the file, makes no copy of it and l
     assert.equal(first.hermes.state, 'configured');
     const after = fs.readFileSync(configPath, 'utf8');
     for (const line of HERMES_CONFIG.split('\n').filter(Boolean)) assert.ok(after.includes(line), line);
-    assert.match(after, /\n {2}marrow:\n {4}command: npx\n {4}args: \["-y", "--package=@getmarrow\/mcp@3\.9\.98", "marrow-mcp"\]\n {4}env:\n {6}MARROW_CLIENT: hermes\n# after servers/);
+    assert.match(after, new RegExp(String.raw`\n {2}marrow:\n {4}command: npx\n {4}args: \["-y", "--package=@getmarrow\/mcp@${PIN_RE}", "marrow-mcp"\]\n {4}env:\n {6}MARROW_CLIENT: hermes\n# after servers`));
     assert.doesNotMatch(after, /MARROW_API_KEY|mrw_fixture/);
     assert.equal(fs.statSync(configPath).mode & 0o777, 0o600);
     // The owner rule: no copy of a file that holds credentials, anywhere.
@@ -439,7 +449,7 @@ test('Hermes wiring keeps an existing entry\'s own env keys and prefers a Hermes
     assert.equal(inline.hermes.state, 'configured');
     assert.equal(inline.hermes.key_source, 'hermes_entry');
     assert.match(inlineText, /MARROW_API_KEY: owner-inline-value\n {6}MARROW_SESSION_ID: s1\n {6}MARROW_CLIENT: hermes/);
-    assert.match(inlineText, /args: \["-y", "--package=@getmarrow\/mcp@3\.9\.98", "marrow-mcp"\]/);
+    assert.match(inlineText, new RegExp(String.raw`args: \["-y", "--package=@getmarrow\/mcp@${PIN_RE}", "marrow-mcp"\]`));
     assert.equal(fs.existsSync(path.join(inlineHome, '.marrow', 'env')), false);
     assert.doesNotMatch(JSON.stringify(inline), /owner-inline-value/);
 
@@ -479,7 +489,7 @@ test('Hermes wiring refuses a config it cannot edit safely and prints the exact 
         assert.equal(fs.readFileSync(path.join(home, '.hermes', 'config.yaml'), 'utf8'), text, name);
         assert.deepEqual(fs.readdirSync(path.join(home, '.hermes')).filter((entry) => entry.includes('backup')), [], name);
         assert.match(report.hermes.exact_fix, /mcp_servers:\n {2}marrow:\n {4}command: npx/);
-        assert.match(report.hermes.exact_fix, /@getmarrow\/mcp@3\.9\.98/);
+        assert.match(report.hermes.exact_fix, new RegExp(String.raw`@getmarrow\/mcp@${PIN_RE}`));
         assert.doesNotMatch(JSON.stringify(report), /fixture-arg-value/);
       } finally {
         fs.rmSync(home, { recursive: true, force: true });

@@ -156,10 +156,6 @@ Options:
 `;
 }
 
-function nowId(prefix) {
-  return `${prefix}-${new Date().toISOString().replace(/[^0-9TZ]/g, '')}-${crypto.randomBytes(4).toString('hex')}`;
-}
-
 function redact(value) {
   let text = String(value || '');
   text = text.replace(/\b[A-Z0-9_]*(?:TOKEN|SECRET|KEY|PASSWORD)[A-Z0-9_]*=([^\s]+)/gi, (match, captured) => match.replace(captured, '[redacted]'));
@@ -436,7 +432,10 @@ function parseBaseOptions(argv, startIndex = 0) {
   if (!['enforce', 'warn', 'audit'].includes(options.policy)) {
     throw new Error('--policy must be enforce, warn, or audit');
   }
-  if (!options.sessionId) options.sessionId = nowId('marrow-run');
+  if (!options.sessionId) {
+    options.sessionId = defaultRunnerSession(options);
+    options.sessionDefaulted = true;
+  }
   return { options, index: i };
 }
 
@@ -886,6 +885,12 @@ function blockMessage(decision, hold = null) {
 
 // ---------------------------------------------------------------------------
 // Held actions (review_required): who can approve is Marrow's decision, read from the runtime.
+// Approvals keep people in flow: with a person at an interactive terminal the runner asks once;
+// with nobody there (CI, scripts, pipes, an agent's own shell) the action holds quietly and the
+// command does not run. The account owner's one-tap link is requested only when Marrow says it
+// would be sent (approval_link_available: an owner-locked category, arbitration, the owner's own
+// decline the operator asked to reverse, or an owner who turned on unattended pings). A later
+// run of the same command picks the hold up on the same gate receipt.
 // The runner never relays the server's agent-directed text for a hold, never prints a link,
 // a token or an address, and never names the dashboard as a step.
 // ---------------------------------------------------------------------------
@@ -899,6 +904,10 @@ const APPROVAL_PROMPT_TIMEOUT_MS = 5 * 60_000;
 const APPROVAL_STATUS_MIN_POLL_MS = 1_000;
 const APPROVAL_STATUS_MAX_POLL_MS = 15_000;
 const APPROVAL_REQUEST_RETRY_MS = 2_000;
+// The backend lets a decline stand for this long (same decision, or the same action in the
+// receipt's session); the local record keeps it for the same time across reruns.
+const DECLINE_STANDS_MS = 30 * 60_000;
+const HOLD_RECORD_MAX_AGE_MS = 24 * 60 * 60_000;
 const RUNNER_HOOK_EVENT = 'governed_runner_prompt';
 const OWNER_APPROVAL_NOTICE = 'Approvals happen in the host\'s own prompt, at this runner\'s terminal prompt, or through the one-tap link Marrow sends the account owner.';
 
@@ -908,18 +917,53 @@ function isoTime(value) {
   return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
 }
 
-// The hold kind from the runtime's completion contract. Endpoints are built from the receipt id
-// here, never taken from response text.
+const safeId = (value, pattern = DECISION_ID_RE) => (typeof value === 'string' && pattern.test(value) ? value : '');
+
+// The hold from the runtime's completion contract. Endpoints are built from the receipt id here,
+// never taken from response text. `legacy`: a Marrow service from before terminal approvals.
 function heldApproval(runtime, decision) {
-  const completion = recordOf(recordOf(runtime).completion_contract);
+  const value = recordOf(runtime);
+  const completion = recordOf(value.completion_contract);
   const guidance = recordOf(completion.owner_approval);
   if (!decision || decision.observationOnly || decision.decision === 'block') return null;
   const receiptId = String(decision.receiptId || '');
-  if (guidance.mode === 'arbitration_review_required') return { kind: 'arbitration', gateReceiptId: receiptId };
+  const expiresAt = isoTime(recordOf(value.gate_receipt).expires_at) || isoTime(completion.gate_receipt_expires_at);
+  const poll = Number(guidance.approval_status_poll_after_ms);
+  const pollAfterMs = Number.isFinite(poll) && poll > 0 ? poll : 3_000;
+  const announcesLinks = typeof guidance.approval_link_available === 'boolean';
+  if (guidance.mode === 'arbitration_review_required') {
+    const arbitration = recordOf(value.arbitration);
+    const arbitrationReceiptId = safeId(arbitration.receipt_id) || safeId(completion.arbitration_receipt_id);
+    const linkAvailable = announcesLinks ? guidance.approval_link_available === true : typeof guidance.approval_link_endpoint === 'string';
+    if (!GATE_RECEIPT_ID_RE.test(receiptId) || !arbitrationReceiptId || !linkAvailable) {
+      return { kind: 'legacy', arbitration: true, gateReceiptId: receiptId };
+    }
+    return {
+      kind: 'arbitration',
+      gateReceiptId: receiptId,
+      arbitrationReceiptId,
+      arbitrationDecisionId: safeId(arbitration.decision_id),
+      linkAvailable: true,
+      linkReason: 'owner_locked',
+      expiresAt,
+      pollAfterMs,
+    };
+  }
   if (guidance.mode !== 'ordinary_non_arbitrated' || !GATE_RECEIPT_ID_RE.test(receiptId)) return null;
+  // Before terminal approvals the service has no host-approval route to record an answer.
+  if (guidance.host_approval_endpoint === undefined && guidance.host_approval_accepted === undefined) {
+    return { kind: 'legacy', arbitration: false, gateReceiptId: receiptId };
+  }
   const refusal = ['owner_decline_stands', 'verified_approval_required', 'approval_state_unavailable']
     .includes(guidance.host_approval_refusal_reason) ? guidance.host_approval_refusal_reason : null;
-  const poll = Number(guidance.approval_status_poll_after_ms);
+  // A service that does not announce links (before round 4) sends one for an owner-locked hold
+  // or the owner's decline; the runner asks for nothing else there.
+  const linkAvailable = announcesLinks
+    ? guidance.approval_link_available === true
+    : typeof guidance.approval_link_endpoint === 'string' && (refusal === 'verified_approval_required' || refusal === 'owner_decline_stands');
+  const linkReason = ['owner_locked', 'owner_decline_stands', 'unattended_owner_ping'].includes(guidance.approval_link_reason)
+    ? guidance.approval_link_reason
+    : refusal === 'verified_approval_required' ? 'owner_locked' : refusal === 'owner_decline_stands' ? 'owner_decline_stands' : null;
   return {
     kind: 'ordinary',
     gateReceiptId: receiptId,
@@ -927,14 +971,21 @@ function heldApproval(runtime, decision) {
     refusal,
     operatorOnly: guidance.host_approval_operator_only === true,
     ownerDeclinedAt: isoTime(guidance.owner_declined_at),
+    earlierDeclineAt: isoTime(guidance.earlier_decline_at),
     operatorNotice: typeof guidance.operator_notice === 'string' ? displayText(guidance.operator_notice, 160) : '',
-    pollAfterMs: Number.isFinite(poll) && poll > 0 ? poll : 3_000,
+    linkAvailable,
+    linkReason: linkAvailable ? linkReason : null,
+    expiresAt,
+    pollAfterMs,
   };
 }
 
 function holdNextText(hold) {
+  if (hold.kind === 'legacy') {
+    return `Marrow holds this action for approval (gate receipt ${hold.gateReceiptId}). This Marrow service does not take approvals from a terminal yet, so it stays held and nothing ran.`;
+  }
   if (hold.kind === 'arbitration') {
-    return `Marrow holds this action for arbitration review (gate receipt ${hold.gateReceiptId}). The account owner approves the selected proposal; it cannot be approved from this terminal.`;
+    return `Marrow holds this action for arbitration review (gate receipt ${hold.gateReceiptId}). The account owner picks one proposal; run it with npx @getmarrow/install run, which asks Marrow to send the owner a one-tap link and runs it once the owner approves this one.`;
   }
   if (hold.refusal === 'owner_decline_stands') {
     return `The account owner declined this action${hold.ownerDeclinedAt ? ` at ${hold.ownerDeclinedAt}` : ''}, and only the owner can reverse that. To ask the owner with a one-tap approval link, rerun with --request-owner-link.`;
@@ -942,11 +993,14 @@ function holdNextText(hold) {
   if (hold.refusal === 'approval_state_unavailable') {
     return 'Marrow could not read the approval state for this action, so it did not run. Retry in a moment.';
   }
-  return `Marrow holds this action for approval (gate receipt ${hold.gateReceiptId}). Run it with npx @getmarrow/install run in an interactive terminal to approve it there, or the account owner approves it through the one-tap link Marrow sends.`;
+  if (hold.refusal === 'verified_approval_required') {
+    return `Marrow holds this action until the account owner approves it (gate receipt ${hold.gateReceiptId}). Run it with npx @getmarrow/install run, which asks Marrow to send the owner a one-tap link.`;
+  }
+  return `Marrow holds this action until a person approves it (gate receipt ${hold.gateReceiptId}). Run it with npx @getmarrow/install run in an interactive terminal to approve it there.`;
 }
 
-function gateReceiptRoute(hold, suffix) {
-  return `/v1/agent/gate-receipts/${encodeURIComponent(hold.gateReceiptId)}/${suffix}`;
+function gateReceiptRoute(gateReceiptId, suffix) {
+  return `/v1/agent/gate-receipts/${encodeURIComponent(gateReceiptId)}/${suffix}`;
 }
 
 function errorCode(json) {
@@ -957,12 +1011,58 @@ function errorCode(json) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// One terminal line, read only from a person at an interactive terminal.
+// ---------------------------------------------------------------------------
+// Who is at this terminal. An agent driving a pseudo-terminal must not answer the prompt.
+// ---------------------------------------------------------------------------
+
+// Environment set by agent hosts for the commands they run (Claude Code, Gemini CLI, Codex,
+// Cursor's agent, OpenCode).
+const AGENT_HOST_ENV = Object.freeze([
+  'CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_CHILD_SESSION', 'GEMINI_CLI',
+  'CODEX_SANDBOX', 'CODEX_SANDBOX_NETWORK_DISABLED', 'CODEX_MANAGED_BY_NPM', 'CODEX_THREAD_ID',
+  'CURSOR_AGENT', 'OPENCODE',
+]);
+const AGENT_HOST_PROGRAM_RE = /^(?:claude|codex|gemini|cursor-agent|opencode|aider|goose)(?:\.exe|\.js|\.mjs|\.cjs)?$/i;
+const AGENT_HOST_PATH_RE = /(?:^|[\\/])(?:@anthropic-ai[\\/]claude-code|@openai[\\/]codex|@google[\\/]gemini-cli)(?:[\\/]|$)/i;
+
+function linuxProcessArgs(pid) {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const ppid = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
+    const args = fs.readFileSync(`/proc/${pid}/cmdline`).toString('utf8').split('\0').filter(Boolean).slice(0, 8);
+    return Number.isSafeInteger(ppid) ? { ppid, args } : null;
+  } catch {
+    return null;
+  }
+}
+
+// An agent host among this process's ancestors (Linux /proc; elsewhere the environment decides).
+function agentHostAncestor(reader = process.platform === 'linux' ? linuxProcessArgs : () => null, startPid = process.ppid) {
+  let pid = startPid;
+  for (let depth = 0; depth < 8 && pid > 1; depth += 1) {
+    const info = reader(pid);
+    if (!info) return false;
+    const programs = info.args.slice(0, 2);
+    if (programs.some((arg) => AGENT_HOST_PROGRAM_RE.test(path.basename(String(arg))) || AGENT_HOST_PATH_RE.test(String(arg)))) return true;
+    pid = info.ppid;
+  }
+  return false;
+}
+
+function agentHostDetected(env = process.env, reader) {
+  if (AGENT_HOST_ENV.some((name) => typeof env[name] === 'string' && env[name] !== '' && env[name] !== '0' && env[name].toLowerCase() !== 'false')) return true;
+  return agentHostAncestor(reader);
+}
+
+// One terminal line, read only from a person at an interactive terminal: stdin and stderr are
+// terminals, not CI, not --no-interactive, and no agent host runs this process.
 function approvalPromptAvailable(options, io = {}) {
-  if (typeof io.approvalPrompt === 'function') return true;
+  const env = io.env || process.env;
+  if (agentHostDetected(env, io.processReader)) return false;
   if (options.interactive === false) return false;
-  const ci = String(process.env.CI || '').toLowerCase();
+  const ci = String(env.CI || '').toLowerCase();
   if (ci && ci !== 'false' && ci !== '0') return false;
+  if (typeof io.approvalPrompt === 'function') return true;
   const input = io.stdin || process.stdin;
   const output = io.stderr || process.stderr;
   return Boolean(input?.isTTY && output?.isTTY);
@@ -985,6 +1085,7 @@ function askLine(question, io = {}) {
       if (input.pause) input.pause();
       resolve(value);
     };
+    // No answer is never a yes.
     timer = setTimeout(() => {
       output.write('\n');
       finish(null);
@@ -1005,12 +1106,137 @@ function parseAnswer(value) {
   return null;
 }
 
-function runnerHostSessionId(options) {
-  const session = String(options.sessionId || '');
+function runnerHostSessionId(sessionId) {
+  const session = String(sessionId || '');
   return HOST_SESSION_ID_RE.test(session)
     ? session
     : `runner-${crypto.createHash('sha256').update(session).digest('hex').slice(0, 32)}`;
 }
+
+// ---------------------------------------------------------------------------
+// The default session and the local record of a command's hold.
+// ---------------------------------------------------------------------------
+
+function baseUrlOrigin(value) {
+  try {
+    const url = new URL(String(value || DEFAULT_BASE_URL));
+    return `${url.protocol}//${url.host}`;
+  } catch {
+    return 'invalid-base-url';
+  }
+}
+
+function realCwd() {
+  try {
+    return fs.realpathSync(process.cwd());
+  } catch {
+    return path.resolve(process.cwd());
+  }
+}
+
+// One session per agent, project directory, OS user and Marrow service, per UTC day, so the
+// backend sees reruns of a command as the same session (an owner's decline stands across
+// them). The local hold record carries the session a hold was made in, so picking a hold up
+// later, from another terminal or the next day, uses that session.
+function defaultRunnerSession(options, now = new Date()) {
+  const uid = typeof process.getuid === 'function' ? String(process.getuid()) : os.userInfo().username;
+  const day = now.toISOString().slice(0, 10).replace(/-/g, '');
+  const digest = crypto.createHash('sha256')
+    .update(['runner-session-v1', uid, realCwd(), String(options.agentId || ''), baseUrlOrigin(options.baseUrl), day].join('\0'))
+    .digest('hex');
+  return `marrow-run-${digest.slice(0, 24)}`;
+}
+
+// The record key: this exact command, for this agent, project, user and service. It names no
+// action text; the record holds only ids, states and times.
+function runnerHoldKey(options, binding) {
+  const uid = typeof process.getuid === 'function' ? String(process.getuid()) : os.userInfo().username;
+  return crypto.createHash('sha256').update([
+    'runner-hold-v1', baseUrlOrigin(options.baseUrl), String(options.agentId || ''), realCwd(), uid,
+    binding.type, binding.action, binding.target, binding.commandText, [...binding.surfaces].sort().join(','),
+  ].join('\0')).digest('hex').slice(0, 40);
+}
+
+const HOLD_RECORD_KEYS = new Set([
+  'version', 'kind', 'state', 'gate_receipt_id', 'decision_id', 'runtime_decision_id', 'arbitration_receipt_id',
+  'session_id', 'declined_by', 'declined_at', 'receipt_expires_at', 'approvable_here', 'link_reason',
+  'link_sent_at', 'link_expires_at', 'denial_committed', 'created_at', 'updated_at',
+]);
+
+function holdRecordStore(io = {}) {
+  const home = io.home || os.homedir();
+  const directory = path.join(home, '.marrow', 'runner-holds');
+  const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+  const file = (key) => path.join(directory, `${key}.json`);
+  const ensureDirectory = () => {
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const stat = fs.lstatSync(directory);
+    if (!stat.isDirectory() || stat.isSymbolicLink() || (uid !== null && stat.uid !== uid)) throw new Error('unsafe runner hold directory');
+    if ((stat.mode & 0o077) !== 0) fs.chmodSync(directory, 0o700);
+  };
+  const valid = (record) => {
+    if (!record || typeof record !== 'object' || Array.isArray(record) || record.version !== 1) return false;
+    if (Object.keys(record).some((key) => !HOLD_RECORD_KEYS.has(key))) return false;
+    if (!['ordinary', 'arbitration'].includes(record.kind) || !['waiting', 'declined'].includes(record.state)) return false;
+    if (!GATE_RECEIPT_ID_RE.test(String(record.gate_receipt_id || '')) || !HOST_SESSION_ID_RE.test(String(record.session_id || ''))) return false;
+    if (record.decision_id && !DECISION_ID_RE.test(record.decision_id)) return false;
+    if (record.runtime_decision_id && !DECISION_ID_RE.test(record.runtime_decision_id)) return false;
+    if (record.arbitration_receipt_id && !DECISION_ID_RE.test(record.arbitration_receipt_id)) return false;
+    return Number.isFinite(Date.parse(record.created_at));
+  };
+  return {
+    read(key) {
+      try {
+        const target = file(key);
+        const stat = fs.lstatSync(target);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 8192 || (uid !== null && stat.uid !== uid) || (stat.mode & 0o077) !== 0) return null;
+        const record = JSON.parse(fs.readFileSync(target, 'utf8'));
+        if (!valid(record) || Date.now() - Date.parse(record.created_at) > HOLD_RECORD_MAX_AGE_MS) return null;
+        return record;
+      } catch {
+        return null;
+      }
+    },
+    write(key, record) {
+      try {
+        ensureDirectory();
+        const now = new Date().toISOString();
+        const value = Object.fromEntries(Object.entries({ version: 1, created_at: now, ...record, updated_at: now })
+          .filter(([name, entry]) => HOLD_RECORD_KEYS.has(name) && entry !== undefined && entry !== null && entry !== ''));
+        const temp = path.join(directory, `.${key}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`);
+        fs.writeFileSync(temp, `${JSON.stringify(value)}\n`, { flag: 'wx', mode: 0o600 });
+        fs.renameSync(temp, file(key));
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    remove(key) {
+      try { fs.unlinkSync(file(key)); } catch { /* already gone */ }
+      try { fs.unlinkSync(path.join(directory, `${key}.claim`)); } catch { /* no claim */ }
+    },
+    // One run per approval: the first run to claim an approved receipt runs it; an identical
+    // run started at the same time does not. A claim older than the receipt's life is stale.
+    claim(key, gateReceiptId) {
+      try {
+        ensureDirectory();
+        const target = path.join(directory, `${key}.claim`);
+        try {
+          const stat = fs.lstatSync(target);
+          if (stat.isFile() && Date.now() - stat.mtimeMs > 60 * 60_000) fs.unlinkSync(target);
+        } catch { /* no claim yet */ }
+        fs.writeFileSync(target, `${gateReceiptId}\n`, { flag: 'wx', mode: 0o600 });
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Marrow calls for a hold.
+// ---------------------------------------------------------------------------
 
 // POSTs that answer a hold are resent unchanged on a retryable answer (the host route and the
 // link route record nothing on those), at most three attempts.
@@ -1035,18 +1261,27 @@ async function holdPost(options, route, body, io = {}) {
   return last;
 }
 
-async function reportRunnerVerdict(options, hold, verdict, times, decisionIds, io) {
+async function holdPostOnce(options, route, body) {
+  try {
+    const { response, json } = await rawRequest(options, 'POST', route, body, {}, { timeoutMs: 15_000 });
+    return { ok: response.ok, status: response.status, code: errorCode(json), json, data: response.ok ? dataOf(json) : null };
+  } catch (error) {
+    return { ok: false, status: 0, code: isTimeout(error) ? 'timed_out' : 'request_failed', json: {} };
+  }
+}
+
+async function reportRunnerVerdict(options, gateReceiptId, verdict, times, decisionIds, io) {
   const decisionId = verdict === 'approved' ? decisionIds.decisionId : decisionIds.runtimeDecisionId;
   const body = {
     verdict,
     host: 'other',
-    host_session_id: runnerHostSessionId(options),
+    host_session_id: runnerHostSessionId(options.sessionId),
     hook_event: RUNNER_HOOK_EVENT,
     asked_at: times.askedAt,
     answered_at: times.answeredAt,
     ...(decisionId && DECISION_ID_RE.test(decisionId) ? { decision_id: decisionId } : {}),
   };
-  const result = await holdPost(options, gateReceiptRoute(hold, 'host-approval'), body, io);
+  const result = await holdPost(options, gateReceiptRoute(gateReceiptId, 'host-approval'), body, io);
   if (result.ok) {
     const recorded = recordOf(recordOf(result.data).host_approval);
     return { recorded: recorded.verdict === verdict, verdict: recorded.verdict === 'declined' ? 'declined' : recorded.verdict === 'approved' ? 'approved' : null, answeredBy: typeof recorded.answered_by === 'string' ? recorded.answered_by : null };
@@ -1059,19 +1294,23 @@ async function reportRunnerVerdict(options, hold, verdict, times, decisionIds, i
   return { recorded: false, verdict: null, code: result.code || `HTTP_${result.status}` };
 }
 
-// Asks Marrow to send the owner a one-tap link. Keeps only the channel and expiry: the response
-// never contains the link, and its recipient hint is dropped here.
-async function requestOwnerLink(options, hold, decisionIds, state, io) {
+// Asks Marrow to send the owner a one-tap link. A 200 answer that says it was not sent (the owner
+// has not turned on unattended pings) is a quiet hold, not an error. Keeps only the channel and
+// expiry: the response never contains the link, and its recipient hint is dropped here.
+async function requestOwnerLink(options, gateReceiptId, decisionId, state, io) {
   while (state.linkRequests < APPROVAL_LINK_MAX_REQUESTS) {
     state.linkRequests += 1;
-    const decisionId = decisionIds.decisionId;
-    const result = await holdPostOnce(options, gateReceiptRoute(hold, 'approval-link'),
+    const result = await holdPostOnce(options, gateReceiptRoute(gateReceiptId, 'approval-link'),
       decisionId && DECISION_ID_RE.test(decisionId) ? { decision_id: decisionId } : {});
     if (result.ok) {
-      const link = recordOf(recordOf(result.data).approval_link);
-      const expiresAt = isoTime(link.expires_at);
+      const data = recordOf(result.data);
+      if (data.sent === false || data.state === 'not_sent') {
+        return { sent: false, quiet: true, reason: typeof data.reason === 'string' ? data.reason.slice(0, 40) : 'not_sent' };
+      }
+      const link = recordOf(data.approval_link);
+      if (!Object.keys(link).length) return { sent: false, code: 'MARROW_APPROVAL_LINK_ANSWER_INVALID' };
       state.channel = APPROVAL_LINK_CHANNELS.has(link.channel) ? link.channel : 'owner channel';
-      state.expiresAt = expiresAt;
+      state.expiresAt = isoTime(link.expires_at);
       return { sent: true };
     }
     const retryable = result.status >= 500 || result.status === 0
@@ -1085,15 +1324,6 @@ async function requestOwnerLink(options, hold, decisionIds, state, io) {
   return { sent: false, code: 'MARROW_APPROVAL_LINK_REQUESTS_EXHAUSTED' };
 }
 
-async function holdPostOnce(options, route, body) {
-  try {
-    const { response, json } = await rawRequest(options, 'POST', route, body, {}, { timeoutMs: 15_000 });
-    return { ok: response.ok, status: response.status, code: errorCode(json), json, data: response.ok ? dataOf(json) : null };
-  } catch (error) {
-    return { ok: false, status: 0, code: isTimeout(error) ? 'timed_out' : 'request_failed', json: {} };
-  }
-}
-
 const LINK_FAILURE_TEXT = {
   MARROW_APPROVAL_CHANNEL_UNAVAILABLE: 'the account has no approval channel Marrow can send it to',
   MARROW_APPROVAL_LINK_LIMITED: 'enough approval links were already sent for this action or this hour',
@@ -1105,30 +1335,36 @@ const LINK_FAILURE_TEXT = {
   MARROW_APPROVAL_LINK_REQUESTS_EXHAUSTED: `Marrow could not deliver it after ${APPROVAL_LINK_MAX_REQUESTS} requests`,
 };
 
+// One status read: the state, plus the approval fields the runner keeps.
+async function readHoldStatus(options, gateReceiptId) {
+  try {
+    const { response, json } = await rawRequest(options, 'GET', gateReceiptRoute(gateReceiptId, 'owner-approval'), undefined, {}, { timeoutMs: 15_000 });
+    if (response.status === 404) return { state: 'unknown' };
+    if (!response.ok) return { state: 'unavailable' };
+    const view = recordOf(dataOf(json));
+    const stateValue = typeof view.state === 'string' ? view.state : 'unavailable';
+    return {
+      state: stateValue,
+      source: typeof view.approval_source === 'string' ? view.approval_source.slice(0, 40) : null,
+      answeredBy: typeof view.approval_answered_by === 'string' ? view.approval_answered_by.slice(0, 40) : null,
+      ownerApprovalReceiptId: safeId(view.owner_approval_receipt_id),
+      pollAfterMs: Number(view.poll_after_ms),
+    };
+  } catch {
+    return { state: 'unavailable' };
+  }
+}
+
+const WAITING_STATES = new Set(['pending', 'arbitration_review', 'unavailable']);
+
 // Waits on the status endpoint until the hold is answered, expires, or the deadline passes.
-async function waitForOwnerAnswer(options, hold, deadline, io) {
+async function waitForOwnerAnswer(options, gateReceiptId, pollAfterMs, deadline, io) {
   const minPoll = Number.isFinite(io.approvalPollMs) ? io.approvalPollMs : APPROVAL_STATUS_MIN_POLL_MS;
-  let pollMs = Math.max(minPoll, Math.min(hold.pollAfterMs, APPROVAL_STATUS_MAX_POLL_MS));
+  let pollMs = Math.max(minPoll, Math.min(pollAfterMs, APPROVAL_STATUS_MAX_POLL_MS));
   for (;;) {
-    let view = null;
-    try {
-      const { response, json } = await rawRequest(options, 'GET', gateReceiptRoute(hold, 'owner-approval'), undefined, {}, { timeoutMs: 15_000 });
-      if (response.status === 404) return { state: 'unknown' };
-      if (response.ok) view = recordOf(dataOf(json));
-    } catch {
-      view = null;
-    }
-    const stateValue = typeof view?.state === 'string' ? view.state : 'unavailable';
-    if (stateValue === 'approved') {
-      return {
-        state: 'approved',
-        source: typeof view.approval_source === 'string' ? view.approval_source : null,
-        answeredBy: typeof view.approval_answered_by === 'string' ? view.approval_answered_by : null,
-      };
-    }
-    if (['declined', 'expired', 'used', 'not_held', 'arbitration_review'].includes(stateValue)) return { state: stateValue };
-    const hinted = Number(view?.poll_after_ms);
-    if (Number.isFinite(hinted) && hinted > 0) pollMs = Math.max(minPoll, Math.min(hinted, APPROVAL_STATUS_MAX_POLL_MS));
+    const status = await readHoldStatus(options, gateReceiptId);
+    if (!WAITING_STATES.has(status.state)) return status;
+    if (Number.isFinite(status.pollAfterMs) && status.pollAfterMs > 0) pollMs = Math.max(minPoll, Math.min(status.pollAfterMs, APPROVAL_STATUS_MAX_POLL_MS));
     const remaining = deadline - Date.now();
     if (remaining <= 0) return { state: 'timeout' };
     await sleep(Math.min(pollMs, remaining));
@@ -1137,27 +1373,44 @@ async function waitForOwnerAnswer(options, hold, deadline, io) {
 
 // A gate denial report closes trusted only with its receipt and no proof: there is no
 // completion to prove, and the receipt is what makes the denial verifiable.
-async function commitHoldDenial(options, decisionIds, hold, outcome) {
+async function commitHoldDenial(options, decisionIds, gateReceiptId, outcome) {
   const decisionId = decisionIds.runtimeDecisionId || decisionIds.decisionId;
   if (!decisionId) return 'not_recorded';
   try {
     const commit = await commitOutcome(options, decisionId, false, outcome, undefined,
-      decisionIds.runtimeDecisionId ? hold.gateReceiptId : '');
+      decisionIds.runtimeDecisionId ? gateReceiptId : '');
     return commit?.committed === true ? 'committed' : 'not_committed';
   } catch {
     return 'failed';
   }
 }
 
-// Resolves one ordinary hold. Returns { approved: true, ... } only when Marrow recorded an
+function heldText(hold, interactive) {
+  if (hold.kind === 'arbitration') return `Marrow holds this action for arbitration review (gate receipt ${hold.gateReceiptId}): the account owner picks one proposal.`;
+  return `Marrow holds this action until ${hold.accepted && !hold.operatorOnly && interactive ? 'you approve it' : hold.refusal ? 'the account owner approves it' : 'a person approves it'} (gate receipt ${hold.gateReceiptId}).`;
+}
+
+function quietHoldText(hold, interactive) {
+  if (hold.kind === 'ordinary' && hold.operatorOnly && hold.accepted) {
+    return `You declined this action${hold.earlierDeclineAt ? ` at ${hold.earlierDeclineAt}` : ' earlier'}, so it stays held and nothing ran.`;
+  }
+  if (hold.kind === 'ordinary' && hold.accepted && !interactive) {
+    return 'It is held until a person approves it, and nothing ran. Rerun this command in an interactive terminal to approve it there; that run picks up this hold.';
+  }
+  return 'It stays held until the account owner approves it, and nothing ran. Rerun this command to check; a later run picks up this hold.';
+}
+
+// Resolves one hold in this run. Returns { approved: true, ... } only when Marrow recorded an
 // approval: the operator's typed "y" at an interactive terminal (reported as the operator's
-// answer, client-attested), or the account owner's one-tap link. Non-interactive runs never
-// answer for anyone: they ask the owner and wait.
+// answer, client-attested), or the account owner's approval. Otherwise the command does not
+// run, and the hold is remembered so the next run of this command picks it up.
 async function resolveHold(options, hold, context) {
   const io = context.io || {};
   const err = io.stderr || process.stderr;
   const say = (text) => err.write(`${text}\n`);
+  const records = context.records;
   const state = { linkRequests: 0, channel: null, expiresAt: null, source: null };
+  const decisionIds = context.decisionIds;
   const summary = (extra = {}) => ({
     gate_receipt_id: hold.gateReceiptId,
     link_requests: state.linkRequests,
@@ -1165,84 +1418,282 @@ async function resolveHold(options, hold, context) {
     ...(state.source ? { source: state.source } : {}),
     ...extra,
   });
+  const recordBase = () => ({
+    kind: hold.kind,
+    gate_receipt_id: hold.gateReceiptId,
+    decision_id: decisionIds.decisionId,
+    runtime_decision_id: decisionIds.runtimeDecisionId,
+    arbitration_receipt_id: hold.arbitrationReceiptId,
+    session_id: options.sessionId,
+    receipt_expires_at: hold.expiresAt,
+    approvable_here: hold.kind === 'ordinary' && hold.accepted && !hold.operatorOnly,
+    link_reason: hold.linkReason,
+  });
+  const remember = (extra = {}) => records?.write(context.holdKey, { ...recordBase(), state: 'waiting', ...extra });
   const refused = (message, extra = {}) => ({ approved: false, exitCode: 12, message, approval: summary(extra) });
-  const denial = async (message, outcome, extra) => {
-    const commitState = await commitHoldDenial(options, context.decisionIds, hold, outcome);
+  const held = (message, extra = {}) => {
+    remember(state.channel ? { link_sent_at: new Date().toISOString(), link_expires_at: state.expiresAt } : {});
+    return refused(message, { state: 'held', ...extra });
+  };
+  const denial = async (message, outcome, declinedBy, extra) => {
+    const commitState = await commitHoldDenial(options, decisionIds, hold.gateReceiptId, outcome);
+    records?.write(context.holdKey, { ...recordBase(), state: 'declined', declined_by: declinedBy, declined_at: new Date().toISOString(), denial_committed: commitState === 'committed' ? 'yes' : undefined });
     return refused(message, { ...extra, denial_commit: commitState });
   };
 
   if (hold.refusal === 'approval_state_unavailable') return refused(holdNextText(hold), { state: 'state_unavailable' });
   const interactive = approvalPromptAvailable(options, io);
-  say(`Marrow holds this action for approval (gate receipt ${hold.gateReceiptId}).`);
+  say(heldText(hold, interactive));
 
-  // 1. The operator answers here. Not when only the owner may answer, and not after an earlier
-  // operator decline: Marrow then accepts only a marked answer in a host's own dialog, which
-  // this prompt is not.
-  if (hold.accepted && !hold.operatorOnly && interactive) {
+  let asked = Boolean(options.requestOwnerLink);
+  let ownerOnly = hold.kind === 'arbitration' || !hold.accepted || hold.operatorOnly;
+  let linkAvailable = hold.linkAvailable;
+
+  // 1. The operator answers here, at an interactive terminal, when Marrow lets the operator
+  // approve: not after an earlier operator decline (Marrow then accepts only a marked answer in
+  // a host's own dialog, which this prompt is not), and not for owner-only holds.
+  if (hold.kind === 'ordinary' && !ownerOnly && interactive) {
     const askedAt = new Date().toISOString();
     const raw = await askLine(`${hold.operatorNotice ? `${hold.operatorNotice} ` : ''}Approve and run it now? [y/N] `, io);
     const answer = parseAnswer(raw);
     const times = { askedAt, answeredAt: new Date().toISOString() };
     state.source = 'operator_prompt';
-    if (answer === null) return refused('No answer was given, so nothing ran and nothing was recorded.', { state: 'no_answer' });
-    const report = await reportRunnerVerdict(options, hold, answer === 'yes' ? 'approved' : 'declined', times, context.decisionIds, io);
+    if (answer === null) {
+      remember();
+      return refused('No answer was given, so nothing ran and nothing was recorded. Rerun this command to answer; it picks up this hold.', { state: 'no_answer' });
+    }
+    const report = await reportRunnerVerdict(options, hold.gateReceiptId, answer === 'yes' ? 'approved' : 'declined', times, decisionIds, io);
     if (answer === 'no') {
       if (report.verdict !== 'declined') {
+        remember();
         return refused(`Marrow could not record the decline (${report.code || 'not recorded'}). Nothing ran.`, { state: 'declined_unrecorded' });
       }
-      return denial('Declined. The action did not run.', 'Denied by Marrow pre-action gate: the operator declined in the governed runner.', { state: 'declined' });
+      return denial('Declined. The action did not run.', 'Denied by Marrow pre-action gate: the operator declined in the governed runner.', 'operator', { state: 'declined' });
     }
     if (report.verdict === 'declined') {
-      return denial('This action was already declined. It did not run.', 'Denied by Marrow pre-action gate: the approval was declined.', { state: 'declined' });
+      return denial('This action was already declined. It did not run.', 'Denied by Marrow pre-action gate: the approval was declined.', 'account_owner', { state: 'declined' });
     }
     if (report.verdict === 'approved') {
       say('Marrow recorded your approval (client-attested).');
       return { approved: true, approval: summary({ state: 'approved', answered_by: report.answeredBy }) };
     }
-    if (!['MARROW_OWNER_DECLINE_STANDS', 'MARROW_VERIFIED_OWNER_APPROVAL_REQUIRED', 'MARROW_EARLIER_DECLINE_STANDS'].includes(report.code)) {
+    if (report.code === 'MARROW_VERIFIED_OWNER_APPROVAL_REQUIRED') {
+      ownerOnly = true;
+      linkAvailable = true;
+      hold = { ...hold, linkReason: 'owner_locked' };
+      say('Only the account owner can approve this action.');
+    } else if (report.code === 'MARROW_OWNER_DECLINE_STANDS') {
+      ownerOnly = true;
+      linkAvailable = true;
+      asked = true;
+      hold = { ...hold, refusal: 'owner_decline_stands', linkReason: 'owner_decline_stands' };
+      say('The account owner declined this action; only the owner can reverse that.');
+    } else {
+      remember();
       return refused(`Marrow could not record your approval (${report.code || 'not recorded'}). Nothing ran.`, { state: 'not_recorded' });
     }
-    say('Only the account owner can approve this action.');
   }
 
-  // 2. Only the owner can reverse the owner's decline: a link goes out only when asked for.
-  if (hold.refusal === 'owner_decline_stands' && !options.requestOwnerLink) {
-    const ask = interactive
+  // 2. Only the owner reverses the owner's own decline, and Marrow asks them only on request.
+  if (hold.kind === 'ordinary' && hold.refusal === 'owner_decline_stands' && !asked) {
+    asked = interactive
       ? parseAnswer(await askLine(`The account owner declined this action${hold.ownerDeclinedAt ? ` at ${hold.ownerDeclinedAt}` : ''}; only the owner can reverse that. Ask the owner now with a one-tap approval link? [y/N] `, io)) === 'yes'
       : false;
-    if (!ask) return refused(holdNextText(hold), { state: 'owner_decline_stands' });
+    if (!asked) {
+      records?.write(context.holdKey, { ...recordBase(), state: 'declined', declined_by: 'account_owner', declined_at: hold.ownerDeclinedAt || new Date().toISOString() });
+      return refused(holdNextText(hold), { state: 'owner_decline_stands' });
+    }
   }
 
-  // 3. The account owner's one-tap link, then the wait.
-  state.source = 'owner_link';
-  const link = await requestOwnerLink(options, hold, context.decisionIds, state, io);
-  if (!link.sent) {
-    return refused(`No approval link was sent: ${LINK_FAILURE_TEXT[link.code] || `Marrow answered ${link.code}`}. Nothing ran.`, { state: 'link_not_sent', code: link.code });
+  // 3. The owner's one-tap link, only where Marrow says it would be sent.
+  let linkSent = false;
+  if (linkAvailable) {
+    state.source = 'owner_link';
+    const link = await requestOwnerLink(options, hold.gateReceiptId, decisionIds.decisionId, state, io);
+    if (link.sent) {
+      linkSent = true;
+      say(`An approval link was sent to the account owner (${state.channel}). It works once${state.expiresAt ? `, until ${state.expiresAt}` : ''}.`);
+    } else if (!link.quiet) {
+      remember();
+      return refused(`No approval link was sent: ${LINK_FAILURE_TEXT[link.code] || `Marrow answered ${link.code}`}. Nothing ran.`, { state: 'link_not_sent', code: link.code });
+    }
   }
-  say(`An approval link was sent to the account owner (${state.channel}). It works once${state.expiresAt ? `, until ${state.expiresAt}` : ''}.`);
+
+  // 4. Wait while a person is here for the owner's link, or when asked to (--approval-wait);
+  // otherwise hold quietly. A later run of this command picks the answer up on this receipt.
   const waitSeconds = options.approvalWaitSeconds;
-  if (waitSeconds === 0) {
-    return refused('Not waiting (--approval-wait 0). Rerun this command after the owner approves.', { state: 'pending' });
+  const linkDeadline = linkSent && state.expiresAt ? Date.parse(state.expiresAt) : linkSent ? Date.now() + 10 * 60_000 : null;
+  const wait = waitSeconds == null
+    ? (interactive && linkSent ? linkDeadline - Date.now() : 0)
+    : linkSent ? Math.min(waitSeconds * 1000, linkDeadline - Date.now()) : waitSeconds * 1000;
+  if (wait <= 0) {
+    return held(linkSent
+      ? 'It is held until the owner approves it, and nothing ran. Rerun this command after they answer; it picks up this hold.'
+      : quietHoldText(hold, interactive), linkAvailable && !linkSent ? { link: 'not_sent' } : {});
   }
-  const linkDeadline = state.expiresAt ? Date.parse(state.expiresAt) : Date.now() + 10 * 60_000;
-  const deadline = Math.min(linkDeadline, waitSeconds == null ? linkDeadline : Date.now() + waitSeconds * 1000);
-  say('Waiting for the owner\'s answer. Ctrl+C stops waiting; the link stays valid until it expires.');
-  const answer = await waitForOwnerAnswer(options, hold, deadline, io);
+  say(linkSent
+    ? 'Waiting for the owner\'s answer. Ctrl+C stops waiting; a later run of this command picks up the answer.'
+    : 'Waiting for a person to approve it. Ctrl+C stops waiting; a later run of this command picks up the answer.');
+  const answer = await waitForOwnerAnswer(options, hold.gateReceiptId, hold.pollAfterMs, Date.now() + wait, io);
+  return finishOwnerAnswer(answer, { hold, say, summary, refused, held, denial, records, holdKey: context.holdKey, linkDeadline });
+}
+
+// What the runner does with the owner's answer (in this run, or picked up by a later run).
+async function finishOwnerAnswer(answer, ctx) {
+  const { hold, say, summary, refused, held, denial, records, holdKey } = ctx;
   if (answer.state === 'approved') {
-    say('The action was approved. Running it.');
-    return { approved: true, approval: summary({ state: 'approved', approved_via: answer.source, answered_by: answer.answeredBy }) };
+    if (hold.kind === 'arbitration' && !answer.ownerApprovalReceiptId) {
+      return refused('Marrow reported the arbitration as approved without an owner approval receipt, so nothing ran.', { state: 'approval_incomplete' });
+    }
+    say(hold.kind === 'arbitration' ? 'The account owner approved a proposal. Checking that it is this one.' : 'The action was approved. Running it.');
+    return {
+      approved: true,
+      approval: summary({ state: 'approved', approved_via: answer.source, answered_by: answer.answeredBy }),
+      commitExtras: hold.kind === 'arbitration'
+        ? { arbitration_receipt_id: hold.arbitrationReceiptId, owner_approval_receipt_id: answer.ownerApprovalReceiptId }
+        : {},
+    };
   }
   if (answer.state === 'declined') {
-    return denial('The approval was declined. The action did not run.', 'Denied by Marrow pre-action gate: the account owner declined.', { state: 'declined' });
+    return denial(hold.kind === 'arbitration' ? 'The account owner approved none of the proposals. The action did not run.' : 'The approval was declined. The action did not run.',
+      hold.kind === 'arbitration' ? 'Denied by Marrow pre-action gate: the account owner approved none of the proposals.' : 'Denied by Marrow pre-action gate: the account owner declined.',
+      answer.answeredBy === 'account_owner' || hold.kind === 'arbitration' ? 'account_owner' : 'operator', { state: 'declined' });
   }
   if (answer.state === 'timeout') {
-    return refused(Date.now() >= linkDeadline - 1000
-      ? 'The approval link expired before anyone answered. Nothing ran; rerun the command to ask again.'
-      : 'Stopped waiting before the owner answered. Nothing ran; rerun the command after the owner approves.', { state: 'timeout' });
+    return held(ctx.linkDeadline && Date.now() >= ctx.linkDeadline - 1000
+      ? 'The approval link expired before anyone answered. Nothing ran; rerun the command to check or ask again.'
+      : 'Stopped waiting before the owner answered. Nothing ran; a later run of this command picks up their answer.', { state: 'timeout' });
   }
+  records?.remove(holdKey);
   return refused(answer.state === 'expired'
     ? 'The gate receipt expired before it was approved. Nothing ran; rerun the command for a fresh gate.'
     : `Marrow reports this hold as ${answer.state}. Nothing ran.`, { state: answer.state });
+}
+
+// A hold an earlier run of this exact command left behind. Its answer decides, on the same gate
+// receipt: no new receipt and no new email. Returns { state: 'none' } when there is nothing to
+// pick up (or it ran out), { state: 'blocked', ... } when the command must not run, or
+// { state: 'approved', ... } to run it on that receipt.
+async function resumeRecordedHold(options, records, holdKey, io = {}) {
+  const record = records.read(holdKey);
+  if (!record) return { state: 'none' };
+  const err = io.stderr || process.stderr;
+  const say = (text) => err.write(`${text}\n`);
+  const now = Date.now();
+  const hold = {
+    kind: record.kind,
+    gateReceiptId: record.gate_receipt_id,
+    arbitrationReceiptId: record.arbitration_receipt_id || '',
+    accepted: record.approvable_here === true,
+    operatorOnly: false,
+    refusal: null,
+    linkAvailable: Boolean(record.link_reason),
+    linkReason: record.link_reason || null,
+    expiresAt: record.receipt_expires_at || null,
+    pollAfterMs: 3_000,
+  };
+  const decisionIds = { decisionId: record.decision_id || '', runtimeDecisionId: record.runtime_decision_id || '' };
+  const holdOptions = { ...options, sessionId: record.session_id };
+  const base = { gateReceiptId: record.gate_receipt_id, decisionId: decisionIds.decisionId || decisionIds.runtimeDecisionId };
+  const blocked = (message, approval = {}) => ({ state: 'blocked', exitCode: 12, message, ...base, approval: { gate_receipt_id: record.gate_receipt_id, resumed: true, ...approval } });
+
+  if (record.state === 'declined') {
+    const declinedAt = Date.parse(record.declined_at);
+    if (!Number.isFinite(declinedAt) || now - declinedAt > DECLINE_STANDS_MS) {
+      records.remove(holdKey);
+      return { state: 'none' };
+    }
+    if (record.declined_by === 'account_owner') {
+      if (options.requestOwnerLink) {
+        // A new hold in the decline's own session, where Marrow sees the decline and sends the
+        // owner the link to reverse it.
+        records.remove(holdKey);
+        return { state: 'none', sessionId: record.session_id };
+      }
+      return blocked(`The account owner declined this action at ${new Date(declinedAt).toISOString()}, and only the owner can reverse that. Nothing ran. To ask the owner with a one-tap approval link, rerun with --request-owner-link.`, { state: 'owner_decline_stands' });
+    }
+    return blocked(`You declined this action at ${new Date(declinedAt).toISOString()}. That answer stands until ${new Date(declinedAt + DECLINE_STANDS_MS).toISOString()}, and nothing ran.`, { state: 'declined' });
+  }
+
+  if (hold.expiresAt && Date.parse(hold.expiresAt) <= now) {
+    records.remove(holdKey);
+    return { state: 'none' };
+  }
+  const status = await readHoldStatus(holdOptions, record.gate_receipt_id);
+  if (status.state === 'unavailable') {
+    return blocked(`Marrow holds this action (gate receipt ${record.gate_receipt_id}) and its approval state could not be read, so nothing ran. Retry in a moment.`, { state: 'state_unavailable' });
+  }
+  if (['unknown', 'expired', 'used', 'not_held'].includes(status.state)) {
+    records.remove(holdKey);
+    return { state: 'none' };
+  }
+  const state = { linkRequests: 0, channel: null, expiresAt: record.link_expires_at || null, source: null };
+  const summary = (extra = {}) => ({ gate_receipt_id: record.gate_receipt_id, resumed: true, link_requests: state.linkRequests, ...(state.channel ? { channel: state.channel, expires_at: state.expiresAt } : {}), ...extra });
+  const refusedHere = (message, extra = {}) => ({ approved: false, exitCode: 12, message, approval: summary(extra) });
+  const keep = (extra = {}) => records.write(holdKey, { ...record, ...extra });
+  const heldHere = (message, extra = {}) => {
+    keep(state.channel ? { link_sent_at: new Date().toISOString(), link_expires_at: state.expiresAt } : {});
+    return refusedHere(message, { state: 'held', ...extra });
+  };
+  const denialHere = async (message, outcome, declinedBy, extra) => {
+    const commitState = record.denial_committed === 'yes' ? 'committed' : await commitHoldDenial(holdOptions, decisionIds, record.gate_receipt_id, outcome);
+    records.write(holdKey, { ...record, state: 'declined', declined_by: declinedBy, declined_at: new Date().toISOString(), denial_committed: commitState === 'committed' ? 'yes' : undefined });
+    return refusedHere(message, { ...extra, denial_commit: commitState });
+  };
+  const toResult = (resolved) => (resolved.approved
+    ? { state: 'approved', hold, ...base, options: holdOptions, approval: resolved.approval, commitExtras: resolved.commitExtras || {} }
+    : { state: 'blocked', exitCode: resolved.exitCode, message: resolved.message, ...base, approval: resolved.approval });
+  const ctx = { hold, say, summary, refused: refusedHere, held: heldHere, denial: denialHere, records, holdKey, linkDeadline: state.expiresAt ? Date.parse(state.expiresAt) : null };
+
+  if (status.state === 'approved' || status.state === 'declined') {
+    say(`Picking up the earlier hold of this command (gate receipt ${record.gate_receipt_id}).`);
+    return toResult(await finishOwnerAnswer(status, ctx));
+  }
+
+  // Still waiting.
+  const interactive = approvalPromptAvailable(holdOptions, io);
+  say(`This command is still held (gate receipt ${record.gate_receipt_id}).`);
+  if (hold.kind === 'ordinary' && hold.accepted && interactive) {
+    const askedAt = new Date().toISOString();
+    const raw = await askLine('Approve and run it now? [y/N] ', io);
+    const answer = parseAnswer(raw);
+    const times = { askedAt, answeredAt: new Date().toISOString() };
+    state.source = 'operator_prompt';
+    if (answer === null) return toResult(refusedHere('No answer was given, so nothing ran and nothing was recorded.', { state: 'no_answer' }));
+    const report = await reportRunnerVerdict(holdOptions, record.gate_receipt_id, answer === 'yes' ? 'approved' : 'declined', times, decisionIds, io);
+    if (answer === 'no') {
+      if (report.verdict !== 'declined') return toResult(refusedHere(`Marrow could not record the decline (${report.code || 'not recorded'}). Nothing ran.`, { state: 'declined_unrecorded' }));
+      return toResult(await denialHere('Declined. The action did not run.', 'Denied by Marrow pre-action gate: the operator declined in the governed runner.', 'operator', { state: 'declined' }));
+    }
+    if (report.verdict === 'approved') {
+      say('Marrow recorded your approval (client-attested).');
+      return toResult({ approved: true, approval: summary({ state: 'approved', source: 'operator_prompt', answered_by: report.answeredBy }) });
+    }
+    if (report.verdict === 'declined') return toResult(await denialHere('This action was already declined. It did not run.', 'Denied by Marrow pre-action gate: the approval was declined.', 'account_owner', { state: 'declined' }));
+    return toResult(refusedHere(`Marrow could not record your approval (${report.code || 'not recorded'}). Nothing ran.`, { state: 'not_recorded' }));
+  }
+
+  // Waiting on the owner. A link that expired is asked for again only where Marrow sends one.
+  const linkExpired = !record.link_expires_at || Date.parse(record.link_expires_at) <= now;
+  if (hold.linkAvailable && hold.linkReason !== 'unattended_owner_ping' && linkExpired) {
+    state.source = 'owner_link';
+    const link = await requestOwnerLink(holdOptions, record.gate_receipt_id, decisionIds.decisionId, state, io);
+    if (link.sent) say(`An approval link was sent to the account owner (${state.channel}). It works once${state.expiresAt ? `, until ${state.expiresAt}` : ''}.`);
+  }
+  const deadlineAt = state.expiresAt ? Date.parse(state.expiresAt) : record.link_expires_at ? Date.parse(record.link_expires_at) : null;
+  const waitSeconds = options.approvalWaitSeconds;
+  const wait = waitSeconds == null
+    ? (interactive && deadlineAt ? deadlineAt - Date.now() : 0)
+    : Math.min(waitSeconds * 1000, deadlineAt ? deadlineAt - Date.now() : waitSeconds * 1000);
+  if (wait <= 0) {
+    return toResult(heldHere(hold.kind === 'ordinary' && hold.accepted
+      ? 'It is held until a person approves it, and nothing ran. Rerun this command in an interactive terminal to approve it there.'
+      : 'It stays held until the account owner approves it, and nothing ran. Rerun this command after they answer.'));
+  }
+  say('Waiting for the owner\'s answer. Ctrl+C stops waiting; a later run of this command picks up the answer.');
+  const answer = await waitForOwnerAnswer(holdOptions, record.gate_receipt_id, 3_000, Date.now() + wait, io);
+  ctx.linkDeadline = deadlineAt;
+  return toResult(await finishOwnerAnswer(answer, ctx));
 }
 
 function gateModeText(decision) {
@@ -1264,7 +1715,7 @@ function printGate(decision, runtime, stream = process.stdout, { resolvesHolds =
   // and `run` explains the hold itself while it resolves it.
   const hold = shouldBlock(decision, { policy: 'enforce' }) ? heldApproval(runtime, decision) : null;
   if (hold) {
-    if (!resolvesHolds || hold.kind !== 'ordinary') stream.write(`Next: ${holdNextText(hold)}\n`);
+    if (!resolvesHolds) stream.write(`Next: ${holdNextText(hold)}\n`);
   } else if (decision.exactNextAction) stream.write(`Next: ${decision.exactNextAction}\n`);
   if (decision.proofPack?.required) {
     const missing = decision.proofPack.missing?.length ? ` missing: ${decision.proofPack.missing.join(', ')}` : '';
@@ -1359,7 +1810,7 @@ function commitIdempotencyKey(options, decisionId, { perInvocation = true } = {}
   return `marrow-run-${crypto.createHash('sha256').update(parts.join('\u0000')).digest('hex')}`;
 }
 
-async function commitOutcome(options, decisionId, success, outcome, proof, gateReceiptId, modelUsage = null, { perInvocation = true } = {}) {
+async function commitOutcome(options, decisionId, success, outcome, proof, gateReceiptId, modelUsage = null, { perInvocation = true, extras = {} } = {}) {
   const body = {
     decision_id: decisionId,
     success,
@@ -1368,6 +1819,9 @@ async function commitOutcome(options, decisionId, success, outcome, proof, gateR
     source_meta: sourceMeta(options, 'commit', { action: outcome }),
   };
   if (gateReceiptId) body.gate_receipt_id = gateReceiptId;
+  // An arbitration hold closes with its arbitration receipt and the owner's approval receipt.
+  if (extras.arbitration_receipt_id) body.arbitration_receipt_id = extras.arbitration_receipt_id;
+  if (extras.owner_approval_receipt_id) body.owner_approval_receipt_id = extras.owner_approval_receipt_id;
   if (modelUsage) body.model_usage = modelUsage;
   return durableRequestJson(options, '/v1/agent/commit', body, commitIdempotencyKey(options, decisionId, { perInvocation }));
 }
@@ -1380,7 +1834,8 @@ async function decisionForAction(options, decision, action, type, target, surfac
 }
 
 async function runGoverned(parsed, execution = {}) {
-  const { options, childCommand } = parsed;
+  const { childCommand } = parsed;
+  let options = parsed.options;
   const commandText = redactedCommand(childCommand);
   const action = options.action ? redact(options.action) : commandText;
   const riskText = `${action} ${commandText} ${options.target || ''}`;
@@ -1395,10 +1850,18 @@ async function runGoverned(parsed, execution = {}) {
   let degraded = false;
   let advisory = false;
   let protectedAction = risky;
-  let approvedHold = null;
+  let hold = null;
   let holdApproval = null;
+  let approvedHold = false;
+  let gateReceiptId = '';
+  let commitExtras = {};
   let decisionResolved = false;
+  let claimed = false;
   const surfaces = inferSurfaces(commandText || action);
+  const target = options.target || commandText;
+  const records = holdRecordStore(execution);
+  const holdKey = runnerHoldKey(options, { action, type, target, commandText, surfaces });
+  const blocked = (exitCode, message, extra = {}) => ({ ok: false, blocked: true, exitCode, action, type, risky, ...extra, message });
 
   let localControl;
   try { localControl = readLocalControlState(execution.controlStateOptions || {}); }
@@ -1413,81 +1876,101 @@ async function runGoverned(parsed, execution = {}) {
   }
 
   try {
-    runtime = await preflightRuntime(options, action, type, commandText);
-    decision = runnerGateDecision(runtime);
-    protectedAction = risky
-      || decision.required === true
-      || decision.riskLevel === 'high'
-      || decision.riskLevel === 'critical';
-    if (!decision.recognized) {
-      if (protectedAction) throw new Error('Marrow runtime returned no gate decision, so this protected action cannot be checked.');
-      process.stderr.write('Marrow gate: no decision returned; continuing because this action is not protected.\n');
-    } else {
-      printGate(decision, runtime, execution.gateOutput || process.stdout, { resolvesHolds: true });
+    // 0. An earlier run of this exact command left a hold: its answer decides, on the same gate
+    // receipt (no new receipt, no new email). Once a hold exists nothing may run it unapproved.
+    const resumed = await resumeRecordedHold(options, records, holdKey, execution);
+    if (resumed.state !== 'none') protectedAction = true;
+    if (resumed.state === 'blocked') {
+      return blocked(resumed.exitCode, resumed.message, { decision_id: resumed.decisionId || '', gate_receipt_id: resumed.gateReceiptId, approval: resumed.approval });
     }
-    const target = options.target || commandText;
-    if (shouldBlock(decision, options)) {
-      const hold = heldApproval(runtime, decision);
-      if (hold?.kind !== 'ordinary') {
-        return {
-          ok: false,
-          blocked: true,
-          exitCode: 12,
-          action,
-          type,
-          risky,
-          decision,
-          message: blockMessage(decision, hold),
-        };
-      }
-      // An ordinary hold: the operator answers at this terminal, or the account owner answers
-      // through a one-tap link. The decision is resolved first so both reports can name it.
-      ({ decisionId, source: decisionSource } = await decisionForAction(options, decision, action, type, target, surfaces));
+    // Asking the owner to reverse their decline starts a new hold in the decline's session.
+    if (resumed.state === 'none' && resumed.sessionId) options = { ...options, sessionId: resumed.sessionId };
+    if (resumed.state === 'approved') {
+      hold = resumed.hold;
+      approvedHold = true;
+      options = resumed.options;
+      holdApproval = resumed.approval;
+      gateReceiptId = resumed.gateReceiptId;
+      decisionId = resumed.decisionId;
+      decisionSource = 'earlier_hold';
       decisionResolved = true;
-      const resolved = await resolveHold(options, hold, {
-        io: execution,
-        decisionIds: { decisionId, runtimeDecisionId: decision.runtimeDecisionId || '' },
-      });
-      holdApproval = resolved.approval;
-      if (!resolved.approved) {
-        return {
-          ok: false,
-          blocked: true,
-          exitCode: resolved.exitCode,
-          action,
-          type,
-          risky,
-          decision,
-          decision_id: decisionId,
-          gate_receipt_id: hold.gateReceiptId,
-          approval: holdApproval,
-          message: resolved.message,
-        };
+      commitExtras = resumed.commitExtras || {};
+    } else {
+      runtime = await preflightRuntime(options, action, type, commandText);
+      decision = runnerGateDecision(runtime);
+      protectedAction = risky
+        || decision.required === true
+        || decision.riskLevel === 'high'
+        || decision.riskLevel === 'critical';
+      if (!decision.recognized) {
+        if (protectedAction) throw new Error('Marrow runtime returned no gate decision, so this protected action cannot be checked.');
+        process.stderr.write('Marrow gate: no decision returned; continuing because this action is not protected.\n');
+      } else {
+        printGate(decision, runtime, execution.gateOutput || process.stdout, { resolvesHolds: true });
       }
-      approvedHold = hold;
+      gateReceiptId = decision.receiptId || '';
+      if (shouldBlock(decision, options)) {
+        // Held or blocked: from here every failure blocks; nothing degrades into running it.
+        protectedAction = true;
+        hold = heldApproval(runtime, decision);
+        if (!hold || hold.kind === 'legacy') {
+          return blocked(12, blockMessage(decision, hold), { decision, gate_receipt_id: gateReceiptId || null });
+        }
+        // The decision is resolved first so the operator's answer and the owner's link name it.
+        ({ decisionId, source: decisionSource } = await decisionForAction(options, decision, action, type, target, surfaces));
+        decisionResolved = true;
+        const resolved = await resolveHold(options, hold, {
+          io: execution,
+          records,
+          holdKey,
+          decisionIds: { decisionId, runtimeDecisionId: decision.runtimeDecisionId || hold.arbitrationDecisionId || '' },
+        });
+        holdApproval = resolved.approval;
+        if (!resolved.approved) {
+          return blocked(resolved.exitCode, resolved.message, { decision, decision_id: decisionId, gate_receipt_id: hold.gateReceiptId, approval: holdApproval });
+        }
+        approvedHold = true;
+        commitExtras = resolved.commitExtras || {};
+      }
+    }
+    if (approvedHold) {
+      // One run per approval: an identical run already using it keeps this one from running.
+      if (!records.claim(holdKey, gateReceiptId)) {
+        return blocked(12, `An identical run is already using the approval of gate receipt ${gateReceiptId}, so this one did not run.`, { decision_id: decisionId, gate_receipt_id: gateReceiptId, approval: holdApproval });
+      }
+      claimed = true;
     }
     if (!decisionResolved) ({ decisionId, source: decisionSource } = await decisionForAction(options, decision, action, type, target, surfaces));
     // Permits exist only where the plan enforces the gate. An advisory plan shows its warning,
     // runs the command and still records the outcome; it never asks for a permit it cannot get.
-    // A hold Marrow recorded as approved runs on its gate receipt, as the MCP hooks do: Marrow
-    // issues permits for held receipts only against an arbitration owner approval, and the
-    // commit below closes the receipt with the recorded approval.
-    const permitRequired = protectedAction && decision.enforced !== false && !approvedHold;
-    if (protectedAction && !permitRequired) {
+    // An approved ordinary hold runs on its gate receipt, as the MCP hooks do, and the commit
+    // closes that receipt. An approved arbitration hold needs the permit: Marrow issues it only
+    // when the proposal the owner approved is this exact action.
+    const arbitrationApproved = approvedHold && hold?.kind === 'arbitration';
+    const permitRequired = arbitrationApproved || (protectedAction && !approvedHold && decision?.enforced !== false);
+    if (protectedAction && !approvedHold && !permitRequired) {
       advisory = true;
-      process.stderr.write(`Marrow advisory: this ${type} action is not enforced on this plan (gate ${decision.decision}). Running it and recording the outcome.\n`);
+      process.stderr.write(`Marrow advisory: this ${type} action is not enforced on this plan (gate ${decision?.decision}). Running it and recording the outcome.\n`);
     }
     if (permitRequired) {
-      if (!decision.receiptId) throw new Error('Marrow runtime returned no gate receipt, so no action permit can be issued.');
-      actionPermit = await issueActionPermit(requestJson, options, {
-        action,
-        type,
-        target,
-        surfaces,
-        decisionId,
-        gateReceiptId: decision.receiptId,
-        proofRequirements: decision.proofPack?.required_fields || decision.proofPack?.missing || [],
-      });
+      if (!gateReceiptId) throw new Error('Marrow runtime returned no gate receipt, so no action permit can be issued.');
+      try {
+        actionPermit = await issueActionPermit(requestJson, options, {
+          action,
+          type,
+          target,
+          surfaces,
+          decisionId,
+          gateReceiptId,
+          ...(arbitrationApproved ? { ownerApproval: commitExtras.owner_approval_receipt_id } : {}),
+          proofRequirements: decision?.proofPack?.required_fields || decision?.proofPack?.missing || [],
+        });
+      } catch (error) {
+        if (arbitrationApproved) {
+          throw new Error('Marrow issued no permit for this command on the owner\'s arbitration approval (the approved proposal is not this exact action), so it did not run.');
+        }
+        throw error;
+      }
       if (!actionPermit?.permit || !actionPermit?.permit_id) {
         throw new Error('Marrow did not issue a valid action permit.');
       }
@@ -1511,6 +1994,7 @@ async function runGoverned(parsed, execution = {}) {
       degraded = true;
       process.stderr.write(`Marrow degraded: ${error.message}. Continuing because this action is not protected${decisionId ? '' : '; its outcome will not be recorded'}.\n`);
     } else {
+      if (claimed) records.remove(holdKey);
       return {
         ok: false,
         blocked: true,
@@ -1519,6 +2003,7 @@ async function runGoverned(parsed, execution = {}) {
         action,
         type,
         risky,
+        ...(hold ? { gate_receipt_id: gateReceiptId || null, approval: holdApproval } : {}),
         message: error.message,
       };
     }
@@ -1542,8 +2027,9 @@ async function runGoverned(parsed, execution = {}) {
         success,
         outcome,
         proof,
-        decision?.receiptId || '',
+        gateReceiptId,
         child.modelUsage,
+        { extras: commitExtras },
       );
       commitState = commit?.committed === true ? 'committed' : 'not_committed';
       if (commitState === 'not_committed') {
@@ -1555,6 +2041,8 @@ async function runGoverned(parsed, execution = {}) {
   } else if (!degraded) {
     process.stderr.write('Marrow outcome not recorded: no decision id was returned before the command ran.\n');
   }
+  // The approval is spent: this command's hold is done.
+  if (approvedHold) records.remove(holdKey);
 
   let permitClosed = null;
   if (actionPermit?.permit) {
@@ -1584,7 +2072,7 @@ async function runGoverned(parsed, execution = {}) {
     decision,
     decision_id: decisionId,
     decision_source: decisionSource,
-    gate_receipt_id: decision?.receiptId || null,
+    gate_receipt_id: gateReceiptId || null,
     ...(holdApproval ? { approval: holdApproval } : {}),
     outcome_committed: commitState === 'committed',
     outcome_commit_state: commitState,
@@ -3181,6 +3669,12 @@ module.exports = {
   heldApproval,
   holdNextText,
   resolveHold,
+  resumeRecordedHold,
+  holdRecordStore,
+  runnerHoldKey,
+  defaultRunnerSession,
+  agentHostDetected,
+  agentHostAncestor,
   approvalPromptAvailable,
   withoutCallerApproval,
   governPanel,
