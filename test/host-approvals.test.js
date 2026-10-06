@@ -924,6 +924,44 @@ test('runner: one run per approval; an identical run already using it does not r
   fs.rmSync(home, { recursive: true, force: true });
 });
 
+test('runner: the default session is stable for the same user, project, agent, service and UTC day', () => {
+  const first = runner.parseArgs(['run', '--agent', 'agent-session-a', '--', 'true']);
+  const again = runner.parseArgs(['run', '--agent', 'agent-session-a', '--', 'true']);
+  assert.match(first.options.sessionId, /^marrow-run-[a-f0-9]{24}$/);
+  assert.equal(first.options.sessionDefaulted, true);
+  assert.equal(again.options.sessionId, first.options.sessionId, 'a rerun lands in the same session');
+  assert.equal(runner.defaultRunnerSession(first.options), first.options.sessionId);
+  assert.notEqual(runner.parseArgs(['run', '--agent', 'agent-session-b', '--', 'true']).options.sessionId, first.options.sessionId);
+  assert.notEqual(runner.defaultRunnerSession(first.options, new Date(Date.now() + 86_400_000)), first.options.sessionId, 'a new UTC day starts a new session');
+  const explicit = runner.parseArgs(['run', '--agent', 'agent-session-a', '--session', 'my-session', '--', 'true']);
+  assert.equal(explicit.options.sessionId, 'my-session');
+  assert.equal(explicit.options.sessionDefaulted, undefined);
+});
+
+test('runner: a hold record that others can read, or a symlink, is ignored, and the command is gated afresh', async () => {
+  const home = freshHome();
+  const first = await runHeld({ runtime: holdRuntime() }, [], { home });
+  assert.equal(first.result.exitCode, 12);
+  const [file] = recordFiles(home);
+  assert.ok(file);
+  fs.chmodSync(file, 0o644);
+  const loose = await runHeld({ runtime: holdRuntime() }, [], { home });
+  assert.equal(routeCalls(loose.calls, '/v1/agent/runtime').length, 1, 'a record others can read is not trusted');
+  assert.equal(loose.ran, false);
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600, 'the fresh hold rewrites it owner-only');
+  const elsewhere = path.join(home, 'elsewhere.json');
+  fs.copyFileSync(file, elsewhere);
+  fs.chmodSync(elsewhere, 0o600);
+  fs.rmSync(file);
+  fs.symlinkSync(elsewhere, file);
+  const linked = await runHeld({ runtime: holdRuntime() }, [], { home });
+  assert.equal(routeCalls(linked.calls, '/v1/agent/runtime').length, 1, 'a symlinked record is not trusted');
+  assert.equal(linked.ran, false);
+  const trusted = await runHeld({ runtime: holdRuntime() }, [], { home });
+  assert.equal(routeCalls(trusted.calls, '/v1/agent/runtime').length, 0, 'the owner-only record is picked up');
+  fs.rmSync(home, { recursive: true, force: true });
+});
+
 test('runner: the owner\'s decline stands across reruns; the owner is asked again only on request, in the decline\'s session', async () => {
   const home = freshHome();
   const owner = { host_approval_accepted: false, host_approval_refusal_reason: 'verified_approval_required', ...LINKED };
@@ -941,7 +979,9 @@ test('runner: the owner\'s decline stands across reruns; the owner is asked agai
   assert.match(rerun.result.message, /The account owner declined this action at .+ only the owner can reverse that\. Nothing ran\. To ask the owner with a one-tap approval link, rerun with --request-owner-link\./);
 
   const standing = { host_approval_accepted: false, host_approval_refusal_reason: 'owner_decline_stands', owner_declined_at: new Date().toISOString(), approval_link_available: true, approval_link_reason: 'owner_decline_stands', approval_link_endpoint: `/v1/agent/gate-receipts/${RECEIPT}/approval-link` };
-  const asked = await runHeld({ runtime: holdRuntime(standing), statuses: ['approved'] }, ['--request-owner-link', '--approval-wait', '5'], { home });
+  // Even under another --session, the request goes to the decline's session, where Marrow knows the decline.
+  const asked = await runHeld({ runtime: holdRuntime(standing), statuses: ['approved'] }, ['--request-owner-link', '--approval-wait', '5', '--session', 'another-session'], { home });
+  assert.notEqual(declinedSession, 'another-session');
   assert.equal(sessionOf(routeCalls(asked.calls, '/v1/agent/runtime')[0]), declinedSession);
   assert.equal(routeCalls(asked.calls, '/approval-link').length, 1);
   assert.equal(asked.ran, true);
