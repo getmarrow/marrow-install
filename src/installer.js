@@ -827,6 +827,14 @@ function sourceClient() {
   return aliases[raw] || (SOURCE_CLIENTS.has(raw) ? raw : 'custom');
 }
 
+// What an error may print of an argument it does not know: an option's name (the text before
+// `=`, never its value), or a short plain word. Anything else may be a pasted key and is not shown.
+function argumentLabel(arg) {
+  const text = String(arg ?? '');
+  if (text.startsWith('-')) return text.split('=')[0].slice(0, 64);
+  return /^[a-z][a-z-]{0,23}$/.test(text) ? text : '(a value that is not an option; not shown)';
+}
+
 function parseArgs(argv, env = process.env) {
   const options = {
     cwd: process.cwd(),
@@ -922,7 +930,7 @@ function parseArgs(argv, env = process.env) {
     else if (arg === '--help' || arg === '-h') {
       options.help = true;
     } else {
-      throw new Error(`Unknown argument: ${arg}`);
+      throw new Error(`Unknown argument: ${argumentLabel(arg)}`);
     }
   }
 
@@ -3594,7 +3602,7 @@ function identityRefusalFix(message, configuredAgentId = '') {
   if (!IDENTITY_REFUSED_RE.test(String(message || ''))) return null;
   return configuredAgentId
     ? 'unset MARROW_AGENT_ID MARROW_FLEET_AGENT_ID && npx -y @getmarrow/install@latest'
-    : 'MARROW_API_KEY=<a key for one agent from your Marrow account> npx -y @getmarrow/install@latest';
+    : 'MARROW_API_KEY=your_agent_key npx -y @getmarrow/install@latest  (replace your_agent_key with a key for one agent from your Marrow account)';
 }
 
 // The agent Marrow resolved for this key: its single bound agent or the Free plan seat. An
@@ -3843,7 +3851,11 @@ async function runSelfTest(options) {
         method: 'POST',
         headers,
         body: JSON.stringify({
-          event_id: `activation-${activationConfigFingerprint.slice(0, 32)}`,
+          // One registration per agent: two agents with the same hook configuration (a second
+          // agent installed on the same project) are two events, so the second is not refused
+          // as a conflicting reuse of the first agent's event id. Reruns by one agent repeat
+          // the same id.
+          event_id: `activation-${crypto.createHash('sha256').update(`${activationConfigFingerprint}\0${activationAgentId}`).digest('hex').slice(0, 32)}`,
           event_type: 'activation_profile_registered',
           harness: options.activation.harness,
           agent_id: activationAgentId,
@@ -4113,6 +4125,9 @@ function printReport(report, sink) {
     out(`- state: ${runtime.state}${runtime.reason ? ` (${runtime.reason})` : ''}\n`);
     if (runtime.removed_versions?.length) out(`- removed older versions: ${runtime.removed_versions.join(', ')}\n`);
   }
+  if (report.owner_key_storage) {
+    out(`\nAPI key for hosts opened outside this terminal: ${report.owner_key_storage.state}${report.owner_key_storage.path ? ` (${report.owner_key_storage.path})` : ''}\n`);
+  }
   out('\nLocal session loop guard:\n');
   out(`- configured: ${report.loop_guard_configured ? 'yes' : 'no'}\n`);
   out(`- isolated self-test passed: ${report.loop_guard_self_tested ? 'yes' : 'no'}\n`);
@@ -4373,10 +4388,15 @@ function hermesWiringReport(detection, changes, options, planMode) {
 
 // The local MCP runtime for the target version: installed (or kept) on a write run of the
 // command, otherwise only an existing verified copy is used. `mcpLocalRuntime: false` (or
-// MARROW_LOCAL_RUNTIME=0, --no-local-runtime) leaves every hook on npx.
+// MARROW_LOCAL_RUNTIME=0, --no-local-runtime) leaves every hook on npx, and a write run then
+// removes the local copy, so the controller's maintenance cannot move hooks back onto it.
 function resolveMcpRuntime(detection, options, mcpTarget) {
   const home = options.home || detection.home;
-  if (options.mcpLocalRuntime === false) return { state: 'disabled' };
+  if (options.mcpLocalRuntime === false) {
+    const write = options.yes && !options.dryRun && !options.doctor && options.maintenance !== true;
+    const removal = write && home ? removeMcpRuntime(home) : null;
+    return { state: 'disabled', ...(removal?.removed ? { removed: true } : {}) };
+  }
   const version = mcpTarget.version;
   const integrity = mcpTarget.integrity || (version === MCP_ADAPTER_VERSION ? MCP_ADAPTER_INTEGRITY : null);
   if (!integrity) return { state: 'skipped', reason: 'no_verified_integrity', version };
@@ -4389,9 +4409,20 @@ function resolveMcpRuntime(detection, options, mcpTarget) {
       sdk: { version: SDK_ADAPTER_VERSION, integrity: SDK_ADAPTER_INTEGRITY },
       ...(typeof options.mcpRuntimeInstall === 'function' ? { npmInstall: options.mcpRuntimeInstall } : {}),
       ...(options.mcpRuntimeNode ? { nodePath: options.mcpRuntimeNode } : {}),
+      // One line on stderr before npm runs, so the wait is never silent (stdout stays clean
+      // for --json).
+      onProgress: typeof options.mcpRuntimeProgress === 'function' ? options.mcpRuntimeProgress : (text) => process.stderr.write(text),
     });
   }
   return verifyMcpRuntime(home, version, integrity) || { state: 'absent', version };
+}
+
+// The controller's maintenance rewrites managed hooks for the pinned MCP. It uses the verified
+// local runtime for that version when there is one (verify only: maintenance never installs),
+// so it keeps hooks on the runtime instead of rewriting them back to npx.
+function maintenanceMcpRuntime(detection, options = {}) {
+  const runtime = resolveMcpRuntime(detection, { ...options, maintenance: true, yes: false }, executableMcpTarget(options));
+  return runtime.version && ['present', 'installed', 'verified'].includes(runtime.state) ? runtime : null;
 }
 
 function mcpRuntimeReport(runtime) {
@@ -4774,12 +4805,19 @@ function installCommandFor(options) {
 
 // One summary for the one-command paths (first install and update). The full report goes to a
 // private log file. Nothing here prints the API key.
+// One verdict for the self-test, used by the summary and by key storage: it passed only when it
+// ran, raised no error, found the account active and Marrow committed the closure.
+function selfTestVerdict(selfTest = {}) {
+  const untrusted = !selfTest.skipped && !selfTest.error && Boolean(selfTest.active) && selfTest.decision_committed !== true;
+  const failed = !selfTest.skipped && (Boolean(selfTest.error) || !selfTest.active || untrusted);
+  return { untrusted, failed, passed: !selfTest.skipped && !failed };
+}
+
 function installSummaryLines(report, options) {
   const selfTest = report.selfTest || {};
   const activation = report.activation || {};
   const lines = [];
-  const untrusted = !selfTest.skipped && !selfTest.error && selfTest.active && selfTest.decision_committed !== true;
-  const selfTestFailed = !selfTest.skipped && (Boolean(selfTest.error) || !selfTest.active || untrusted);
+  const { untrusted, failed: selfTestFailed } = selfTestVerdict(selfTest);
   if (selfTest.skipped) {
     lines.push(`Marrow ${INSTALLER_ADAPTER_VERSION}: configuration updated; self-test skipped (${selfTest.reason}).${selfTest.exact_fix ? ` Fix: ${selfTest.exact_fix}` : ''}`);
   } else if (untrusted) {
@@ -4884,7 +4922,7 @@ async function runCli(argv) {
         USERPROFILE: options.home || options.cwd,
       }));
     }
-    process.stdout.write(`Marrow needs your API key. Run: MARROW_API_KEY=<your key> ${installCommandFor(options)}  (create a key at https://getmarrow.ai)\n`);
+    process.stdout.write(`Marrow needs your API key. Run: MARROW_API_KEY=your_key ${installCommandFor(options)}  (replace your_key with your key; create one at https://getmarrow.ai)\n`);
     process.exitCode = 2;
     return;
   }
@@ -4898,6 +4936,19 @@ async function runCli(argv) {
     process.exitCode = 1;
     return;
   }
+  // Claude Code opened from the desktop app, an IDE or a new terminal has no MARROW_API_KEY.
+  // The MCP server and hooks read ~/.marrow/env, so a first install stores a key that came
+  // from the environment there (owner-only), once the self-test passed by the same verdict the
+  // summary prints (never on an untrusted closure), with --json and --verbose too.
+  const keyWorked = report.selfTest ? selfTestVerdict(report.selfTest).passed : false;
+  if (options.activate && !options.update && keyInfo.source === 'environment' && !options.keyFromArg && keyWorked) {
+    try {
+      const stored = ensureOwnerApiKey(options.home, options.apiKey);
+      report.owner_key_storage = { state: stored.state, path: stored.path };
+    } catch {
+      report.owner_key_storage = { state: 'not_written', path: null };
+    }
+  }
   if (options.json) {
     process.stdout.write(JSON.stringify(report, null, 2) + '\n');
     return;
@@ -4907,18 +4958,6 @@ async function runCli(argv) {
     return;
   }
   report.api_key = keyInfo;
-  // Claude Code opened from the desktop app, an IDE or a new terminal has no MARROW_API_KEY.
-  // The MCP server and hooks read ~/.marrow/env, so a first install stores a key that came
-  // from the environment there (owner-only), once the self-test showed the key works.
-  const keyWorked = report.selfTest && !report.selfTest.skipped && !report.selfTest.error && report.selfTest.active;
-  if (options.activate && !options.update && keyInfo.source === 'environment' && !options.keyFromArg && keyWorked) {
-    try {
-      const stored = ensureOwnerApiKey(options.home, options.apiKey);
-      report.owner_key_storage = { state: stored.state, path: stored.path };
-    } catch {
-      report.owner_key_storage = { state: 'not_written', path: null };
-    }
-  }
   const { lines, selfTestFailed } = installSummaryLines(report, options);
   let full = '';
   printReport(report, (text) => { full += text; });
@@ -4935,6 +4974,8 @@ async function runCli(argv) {
 }
 
 module.exports = {
+  argumentLabel,
+  maintenanceMcpRuntime,
   parseArgs,
   detectEnvironment,
   buildPlan,

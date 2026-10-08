@@ -294,7 +294,8 @@ function cleanControllerEnv(options) {
   }
   env.MARROW_CLIENT = options.client;
   // The owner's identity allowlist travels with the controller so maintenance honors it.
-  for (const name of ['MARROW_ALLOWED_BASE_URLS', 'MARROW_ALLOWED_AGENT_IDS']) {
+  // So does the local-runtime switch, so maintenance keeps hooks where install put them.
+  for (const name of ['MARROW_ALLOWED_BASE_URLS', 'MARROW_ALLOWED_AGENT_IDS', 'MARROW_LOCAL_RUNTIME']) {
     if (process.env[name]) env[name] = process.env[name];
   }
   env.MARROW_GOVERN_PROFILE = options.profile;
@@ -584,6 +585,7 @@ async function stopProjectControllers(options) {
 }
 
 module.exports = {
+  cleanControllerEnv,
   INSTALLER_VERSION,
   controllerDirectory,
   controllerIdentity,

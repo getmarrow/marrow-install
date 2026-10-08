@@ -507,7 +507,7 @@ test('Hermes wiring refuses a config it cannot edit safely and prints the exact 
   }
 });
 
-function selfTestStub({ status = {}, runtime = {}, firstValueFailures = 0, runtimeFailures = 0 } = {}) {
+function selfTestStub({ status = {}, runtime = {}, firstValueFailures = 0, runtimeFailures = 0, eventOwners = null } = {}) {
   const calls = [];
   let runtimeAttempts = 0;
   let firstValueAttempts = 0;
@@ -545,7 +545,15 @@ function selfTestStub({ status = {}, runtime = {}, firstValueFailures = 0, runti
         } : null,
       });
     }
-    if (href.endsWith('/v1/agent/integrations/events')) return json({ accepted: true, evidence_authority: 'client_self_reported' });
+    if (href.endsWith('/v1/agent/integrations/events')) {
+      // Like the backend: an event id already recorded for another agent is a 409 conflict.
+      if (eventOwners) {
+        const owner = eventOwners.get(body.event_id);
+        if (owner !== undefined && owner !== body.agent_id) return new Response(JSON.stringify({ error: { code: 'event_conflict' } }), { status: 409 });
+        eventOwners.set(body.event_id, body.agent_id);
+      }
+      return json({ accepted: true, evidence_authority: 'client_self_reported' });
+    }
     return json({ ok: true });
   };
   return { calls, restore: () => { global.fetch = originalFetch; } };
@@ -607,6 +615,22 @@ test('the self-test never sends a derived id and activates the server-resolved s
   assert.equal(Object.hasOwn(unboundFirstValue, 'activation'), false);
   assert.equal(Object.hasOwn(unboundFirstValue, 'agent_id'), false);
   assert.equal(unbound.result.active, true);
+});
+
+// MEDIUM-5 (round-3 audit): a second agent installed on the same project (the same hook
+// configuration, so the same config fingerprint) registers its own activation event instead of
+// being refused with 409 for reusing the first agent's event id. One agent's reruns repeat it.
+test('activation: each agent registers its own activation event; a rerun by the same agent repeats its event id', async () => {
+  const eventOwners = new Map();
+  const first = await selfTest({ eventOwners, status: { identity: { agent_id: 'agent-one', bound_agent_ids: ['agent-one'] } } }, { agentId: 'agent-one' });
+  const second = await selfTest({ eventOwners, status: { identity: { agent_id: 'agent-two', bound_agent_ids: ['agent-two'] } } }, { agentId: 'agent-two' });
+  const again = await selfTest({ eventOwners, status: { identity: { agent_id: 'agent-one', bound_agent_ids: ['agent-one'] } } }, { agentId: 'agent-one' });
+  const eventOf = (run) => run.calls.find((call) => call.href.endsWith('/v1/agent/integrations/events')).body;
+  for (const run of [first, second, again]) assert.equal(run.result.activation_verified, true);
+  assert.notEqual(eventOf(first).event_id, eventOf(second).event_id);
+  assert.equal(eventOf(first).event_id, eventOf(again).event_id);
+  assert.equal(eventOf(first).config_fingerprint, eventOf(second).config_fingerprint, 'the configuration fingerprint itself is unchanged');
+  assert.match(eventOf(second).event_id, /^activation-[0-9a-f]{32}$/);
 });
 
 test('the self-test closes the decision its runtime call created, in the same session (F-E)', async () => {
@@ -779,14 +803,16 @@ test('the one command stops with one line when no API key is available, and read
     const env = { PATH: process.env.PATH, HOME: home };
     const bare = await runBin([], { cwd: project, env });
     assert.equal(bare.status, 2);
-    assert.equal(bare.stdout, 'Marrow needs your API key. Run: MARROW_API_KEY=<your key> npx -y @getmarrow/install@latest  (create a key at https://getmarrow.ai)\n');
+    assert.equal(bare.stdout, 'Marrow needs your API key. Run: MARROW_API_KEY=your_key npx -y @getmarrow/install@latest  (replace your_key with your key; create one at https://getmarrow.ai)\n');
+    // Paste-safe: no < or > that a shell would read as a redirect.
+    assert.doesNotMatch(bare.stdout, /[<>]/);
     assert.deepEqual(fs.readdirSync(project), ['package.json']);
     assert.deepEqual(fs.readdirSync(home), []);
 
     fs.writeFileSync(path.join(project, 'AGENTS.md'), '<!-- marrow:passive-start -->\nx\n<!-- marrow:passive-end -->\n');
     const update = await runBin(['update'], { cwd: project, env });
     assert.equal(update.status, 2);
-    assert.match(update.stdout, /^Marrow needs your API key\. Run: MARROW_API_KEY=<your key> npx -y @getmarrow\/install@latest update /);
+    assert.match(update.stdout, /^Marrow needs your API key\. Run: MARROW_API_KEY=your_key npx -y @getmarrow\/install@latest update /);
 
     fs.mkdirSync(path.join(home, '.marrow'), { mode: 0o700 });
     fs.writeFileSync(path.join(home, '.marrow', 'env'), 'MARROW_API_KEY=mrw_fixture_stored_key\n', { mode: 0o644 });
@@ -827,13 +853,14 @@ test('day one: the key is stored only after a working self-test, never from --ke
   const key = `mrw_test_${crypto.randomBytes(12).toString('hex')}`;
   let healthy = false;
   let inactive = false;
+  let untrusted = false;
   const api = await startStubApi((request) => {
     if (!healthy) return [503, { error: 'store timeout' }];
     // An unbound key on an inactive account: the install completes, the self-test fails.
     if (inactive && request.pathname === '/v1/agent/status') return [200, { ok: false, enabled: false, health: 'inactive', identity: { agent_id: null, bound_agent_ids: [] } }];
     switch (request.pathname) {
       case '/v1/agent/think': return [200, { decision_id: 'dec_day1' }];
-      case '/v1/agent/commit': return [200, { committed: true, decision_id: request.body.decision_id }];
+      case '/v1/agent/commit': return [200, { committed: !untrusted, decision_id: request.body.decision_id }];
       case '/v1/agent/status': return [200, { ok: true, enabled: true, health: 'healthy', identity: { agent_id: 'free-seat-day1', bound_agent_ids: ['free-seat-day1'] } }];
       case '/v1/agent/runtime': return [200, { ok: true, agent_id: 'free-seat-day1', risk_gate: { allow: true, decision: 'proceed', enforced: false } }];
       case '/v1/agent/first-value': return [200, {
@@ -868,6 +895,24 @@ test('day one: the key is stored only after a working self-test, never from --ke
     assert.notEqual(inactiveRun.result.status, 0, inactiveRun.result.stdout);
     assert.equal(fs.existsSync(path.join(inactiveRun.home, '.marrow', 'env')), false);
     inactive = false;
+    // LOW-6: the closure was not committed (an untrusted self-test by the summary's own
+    // verdict): nothing is stored.
+    untrusted = true;
+    const untrustedRun = await run([], { MARROW_API_KEY: key });
+    cleanup.push(untrustedRun.home, untrustedRun.project);
+    assert.notEqual(untrustedRun.result.status, 0, untrustedRun.result.stdout);
+    assert.equal(fs.existsSync(path.join(untrustedRun.home, '.marrow', 'env')), false);
+    untrusted = false;
+    // --json and --verbose first installs store the key under the same rule.
+    for (const flag of ['--json', '--verbose']) {
+      const flagged = await run([flag], { MARROW_API_KEY: key });
+      cleanup.push(flagged.home, flagged.project);
+      assert.equal(flagged.result.status, 0, `${flag}: ${flagged.result.stderr}`);
+      assert.equal(readOwnerApiKey(flagged.home).apiKey === key, true, `${flag} stored the key`);
+      assert.equal(fs.statSync(path.join(flagged.home, '.marrow', 'env')).mode & 0o777, 0o600);
+      assert.equal(flagged.result.stdout.includes(key) || flagged.result.stderr.includes(key), false);
+      if (flag === '--json') assert.equal(JSON.parse(flagged.result.stdout).owner_key_storage.state, 'written');
+    }
     // A key passed with --key is not stored.
     const fromArg = await run(['--key', key], {});
     cleanup.push(fromArg.home, fromArg.project);
@@ -913,7 +958,7 @@ test('day one: an unbound key gets no homework; an identity Marrow refuses gets 
     activation: { agent_id: null, agent_id_source: 'unresolved' },
     doctor: { recommendedFix: null },
   }, {});
-  assert.match(unbound.lines[0], /Fix: MARROW_API_KEY=<a key for one agent from your Marrow account> npx -y @getmarrow\/install@latest$/);
+  assert.match(unbound.lines[0], /Fix: MARROW_API_KEY=your_agent_key npx -y @getmarrow\/install@latest  \(replace your_agent_key with a key for one agent from your Marrow account\)$/);
 });
 
 test('day one: Claude Code is found from the user\'s installation, gets project hooks, and the restart line names it', () => {

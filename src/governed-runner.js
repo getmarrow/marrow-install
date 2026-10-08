@@ -29,6 +29,8 @@ const {
   detectEnvironment,
   detectedClient,
   localControllerAgentId,
+  maintenanceMcpRuntime,
+  argumentLabel,
 } = require('./installer');
 const { createHostUsageCapture } = require('./usage-telemetry');
 const { readLocalControlState, recordGovernedBypass } = require('./control-state');
@@ -161,13 +163,185 @@ Options:
 `;
 }
 
+// Redaction replaces a secret VALUE and nothing else. Everything around it stays visible,
+// because the redacted text is what Marrow sees, what the owner approves and what an action
+// permit is bound to: two actions that differ anywhere outside a secret must stay different.
+const REDACTED = '[redacted]';
+
+// A credential name CONTAINS one of these words in one of its segments (split at _ . - and
+// camelCase): TF_TOKEN, PGPASSWORD, SECRET_KEY_BASE, GITHUB_TOKEN_V2, X_API_KEY_ID, apiKey,
+// client_secret, basic_auth, Authorization.
+const CREDENTIAL_WORD_RE = /token|secret|password|passwd|passphrase|key|credential|auth/;
+// Segments that contain such a word but name no secret.
+const NON_SECRET_WORDS = new Set([
+  'keyspace', 'keyspaces', 'keyboard', 'keyboards', 'keyword', 'keywords', 'keymap', 'keymaps', 'keyframe', 'keyframes',
+  'keystroke', 'keystrokes', 'keynote', 'keyless', 'hotkey', 'hotkeys', 'monkey', 'monkeypatch', 'donkey', 'turkey', 'hockey',
+  'jockey', 'whiskey', 'tokenizer', 'tokenizers', 'tokenize', 'tokenization', 'detokenize', 'author', 'authors', 'authored',
+  'authorship', 'authority', 'authorities', 'oauth', 'oauth2', 'passwordless', 'secretary',
+]);
+// Whole names (normalized: lower case, _ for . and -, camelCase split) that name no secret.
+const NON_SECRET_NAMES = new Set([
+  'max_tokens', 'max_new_tokens', 'max_output_tokens', 'max_completion_tokens', 'max_input_tokens', 'num_tokens',
+  'token_count', 'token_limit', 'token_budget', 'token_type', 'token_usage', 'tokens_used',
+  'auth_type', 'auth_method', 'auth_mode', 'auth_provider', 'auth_scheme',
+  'key_type', 'key_size', 'key_length', 'key_algorithm', 'public_key', 'primary_key', 'foreign_key', 'sort_key',
+  'partition_key', 'hash_key', 'range_key', 'cache_key', 'idempotency_key',
+]);
+
+function credentialName(name) {
+  const normalized = String(name || '').replace(/^-+/, '').replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase().replace(/[.-]/g, '_');
+  if (!normalized || NON_SECRET_NAMES.has(normalized)) return false;
+  return normalized.split('_').some((segment) => CREDENTIAL_WORD_RE.test(segment) && !NON_SECRET_WORDS.has(segment));
+}
+
+// An unquoted value runs to whitespace or a quote. Inside it, & ; | end it only before
+// another `name=` or as a shell operator (&&, ||, & or | or ; before a space or the end, ; or |
+// before a command with arguments or a subshell, where a shell would split it too); # and ,
+// end it only before `name=`. Anything else, to the end, is the secret.
+const NAME_ASSIGNMENT_AHEAD = /[A-Za-z_][A-Za-z0-9_.-]*=/y;
+const COMMAND_AHEAD = /(?:[({]|[A-Za-z_./$][A-Za-z0-9_./$=-]*(?:\s|&&|\|\||[;|)]))/y;
+const aheadAt = (pattern, text, index) => {
+  pattern.lastIndex = index;
+  return pattern.test(text);
+};
+function unquotedValueEnd(text, start) {
+  let index = start;
+  while (index < text.length) {
+    const char = text[index];
+    if (/\s/.test(char) || char === '"' || char === "'") break;
+    const next = index + 1;
+    if (char === '&' || char === '|' || char === ';') {
+      if ((char === '&' || char === '|') && text[next] === char) break;
+      if (next >= text.length || /\s/.test(text[next]) || aheadAt(NAME_ASSIGNMENT_AHEAD, text, next)) break;
+      if (char !== '&' && aheadAt(COMMAND_AHEAD, text, next)) break;
+    }
+    if ((char === '#' || char === ',') && aheadAt(NAME_ASSIGNMENT_AHEAD, text, next)) break;
+    index = next;
+  }
+  return index;
+}
+
+// The value at `start`: its end and its redacted form, or null when there is none to redact.
+const ESCAPED_QUOTED_RE = /\\"((?:[^"\\]|\\[^"])*)\\"/y;
+const DOUBLE_QUOTED_RE = /"((?:[^"\\]|\\.)*)"/y;
+const SINGLE_QUOTED_RE = /'([^']*)'/y;
+function secretValueAt(text, start) {
+  const quoted = (pattern, open, close) => {
+    pattern.lastIndex = start;
+    const match = pattern.exec(text);
+    if (match) return { end: start + match[0].length, value: match[1], replacement: `${open}${REDACTED}${close}` };
+    // An unclosed quote: the rest of the line is the value.
+    const lineEnd = text.indexOf('\n', start);
+    const end = lineEnd === -1 ? text.length : lineEnd;
+    return { end, value: text.slice(start + open.length, end), replacement: `${open}${REDACTED}` };
+  };
+  let found;
+  if (text.startsWith('\\"', start)) found = quoted(ESCAPED_QUOTED_RE, '\\"', '\\"');
+  else if (text[start] === '"') found = quoted(DOUBLE_QUOTED_RE, '"', '"');
+  else if (text[start] === "'") found = quoted(SINGLE_QUOTED_RE, "'", "'");
+  else if (text[start] === '{' || text[start] === '[') return null; // nested JSON: its own keys are checked
+  else {
+    const end = unquotedValueEnd(text, start);
+    found = { end, value: text.slice(start, end), replacement: REDACTED };
+  }
+  if (!found.value || found.value === REDACTED) return null;
+  return found;
+}
+
+// `name: value` with a plain word mid-sentence ("rotate the key: production first") is prose,
+// a `host:port` or `name:/path` is not a credential; JSON, YAML lines, headers and env-style
+// names are.
+function credentialColon(text, index, lead, quote, name, valueStart) {
+  if (text[valueStart] === '/' || (lead === '/' && text[index - 1] === '/')) return false;
+  if (name.includes('.') && /^\d+(?:[/?#]|$)/.test(text.slice(valueStart))) return false;
+  if (quote) return true;
+  if (lead === '' || /[\n{[,]/.test(lead)) return true;
+  return !/^(?:[a-z]+|[A-Z][a-z]+)$/.test(name);
+}
+
+const AUTH_SCHEME_RE = /^(?:bearer|basic|token|digest|bot|apikey|negotiate)$/i;
+const ASSIGNMENT_PREFIX_SOURCE = '(^|[^A-Za-z0-9_.-])(\\\\?["\']?)([A-Za-z0-9_.-]+)\\2(\\s*[:=]\\s*)';
+function redactAssignments(text) {
+  const pattern = new RegExp(ASSIGNMENT_PREFIX_SOURCE, 'g');
+  let out = '';
+  let last = 0;
+  let match;
+  while ((match = pattern.exec(text)) !== null) {
+    const [whole, lead, quote, name, separator] = match;
+    const valueStart = match.index + whole.length;
+    const colon = !separator.includes('=');
+    let value = null;
+    if (credentialName(name)
+      && !(colon && !quote && /authorization$/i.test(name)) // the header pass did these
+      && !(colon && !credentialColon(text, match.index, lead, quote, name, valueStart))) {
+      value = secretValueAt(text, valueStart);
+      // `X-Token: Bearer [redacted]`: the scheme pass did this one.
+      if (value && AUTH_SCHEME_RE.test(value.value) && text.startsWith(` ${REDACTED}`, value.end)) value = null;
+    }
+    if (!value) {
+      // Scan again from the next character: a rejected match must not hide a secret inside it.
+      pattern.lastIndex = match.index + 1;
+      continue;
+    }
+    out += `${text.slice(last, valueStart)}${value.replacement}`;
+    last = value.end;
+    pattern.lastIndex = value.end;
+  }
+  return out + text.slice(last);
+}
+
+// Secret flags whose value is the next word: --token VALUE, --password VALUE.
+const SECRET_FLAG_SOURCE = '--(?:token|password|passwd|passphrase|secret|api-?key|api-token|access-token|auth-token|refresh-token|client-secret)';
+const SECRET_FLAG_RE = new RegExp(`^${SECRET_FLAG_SOURCE}$`, 'i');
+function redactSecretFlags(text) {
+  const pattern = new RegExp(`(^|\\s)(${SECRET_FLAG_SOURCE})(\\s+)(?!-)`, 'gi');
+  let out = '';
+  let last = 0;
+  let match;
+  while ((match = pattern.exec(text)) !== null) {
+    const valueStart = match.index + match[0].length;
+    const value = secretValueAt(text, valueStart);
+    if (!value) continue;
+    out += `${text.slice(last, valueStart)}${value.replacement}`;
+    last = value.end;
+    pattern.lastIndex = value.end;
+  }
+  return out + text.slice(last);
+}
+
+const AUTH_HEADER_RE = /\b((?:proxy-)?authorization\s*:\s*)(?:(bearer|basic|token|digest|bot|apikey|negotiate)\s+)?([^\s'"]+)/gi;
+const BARE_SCHEME_RE = /\b(bearer|basic)(\s+)([^\s'"]{8,})/gi;
+const URL_USERINFO_RE = /\b([a-z][a-z0-9+.-]*:\/\/)([^\s'"/?#@:]+)(?::([^\s'"/?#@]*))?@/gi;
+const TOKEN_SHAPES = [
+  /\bmrw_(?:live|test)_[A-Za-z0-9._-]+/g,
+  /\bnpm_[A-Za-z0-9._-]+/g,
+  /\bgh(?:p|o|u|s|r)_[A-Za-z0-9._-]+/g,
+  /\bgithub_pat_[A-Za-z0-9._-]+/g,
+  /\bglpat-[A-Za-z0-9._-]+/g,
+  /\bsk-[A-Za-z0-9._-]+/g,
+  /\bxox[abposr]-[A-Za-z0-9._-]+/g,
+  /\bAKIA[0-9A-Z]{16}\b/g,
+  /\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}/g,
+];
+
 function redact(value) {
   let text = String(value || '');
-  text = text.replace(/\b[A-Z0-9_]*(?:TOKEN|SECRET|KEY|PASSWORD)[A-Z0-9_]*=([^\s]+)/gi, (match, captured) => match.replace(captured, '[redacted]'));
-  text = text.replace(/\bmrw_(?:live|test)_[A-Za-z0-9._-]+/g, '[redacted]');
-  text = text.replace(/\bnpm_[A-Za-z0-9._-]+/g, '[redacted]');
-  text = text.replace(/\bgh(?:p|o|u|s|r)_[A-Za-z0-9._-]+/g, '[redacted]');
-  text = text.replace(/\bsk-[A-Za-z0-9._-]+/g, '[redacted]');
+  text = text.replace(AUTH_HEADER_RE, (match, prefix, scheme, credential) => (
+    credential === REDACTED ? match : `${prefix}${scheme ? `${scheme} ` : ''}${REDACTED}`
+  ));
+  // Basic credentials are base64 with a digit, + / or = in practice; a plain word is prose.
+  text = text.replace(BARE_SCHEME_RE, (match, scheme, space, credential) => {
+    const prose = /^basic$/i.test(scheme) && !(/^[A-Za-z0-9+/]+={0,2}$/.test(credential) && /[0-9+/=]/.test(credential));
+    return credential === REDACTED || prose ? match : `${scheme}${space}${REDACTED}`;
+  });
+  text = text.replace(URL_USERINFO_RE, (match, scheme, user, password) => {
+    if (password !== undefined) return password ? `${scheme}${user}:${REDACTED}@` : match;
+    // A user with no password is a name (git@, deploy@) unless it is token-like.
+    return user.length >= 20 && /[0-9]/.test(user) ? `${scheme}${REDACTED}@` : match;
+  });
+  text = redactSecretFlags(text);
+  text = redactAssignments(text);
+  for (const shape of TOKEN_SHAPES) text = text.replace(shape, REDACTED);
   return text;
 }
 
@@ -178,7 +352,70 @@ function shellQuote(value) {
 }
 
 function redactedCommand(command) {
-  return command.map((part) => shellQuote(redact(part))).join(' ');
+  return command.map((part, index) => (
+    index > 0 && SECRET_FLAG_RE.test(String(command[index - 1] || '')) && !String(part || '').startsWith('-')
+      ? REDACTED
+      : shellQuote(redact(part))
+  )).join(' ');
+}
+
+// --action, --target and --type exactly as typed stay in this process: for local risk
+// classification and the local hold key. Every request and every printed line uses the
+// redacted values that replace them on the options.
+const RAW_INPUTS = Symbol('marrow raw inputs');
+function withRedactedInputs(options) {
+  const raw = {
+    action: typeof options.action === 'string' ? options.action : '',
+    target: typeof options.target === 'string' ? options.target : '',
+    type: typeof options.type === 'string' ? options.type : '',
+  };
+  const secured = {
+    ...options,
+    action: raw.action ? redact(raw.action) : options.action,
+    target: raw.target ? redact(raw.target) : options.target,
+    type: raw.type ? redact(raw.type) : options.type,
+  };
+  Object.defineProperty(secured, RAW_INPUTS, { value: raw, enumerable: false });
+  return secured;
+}
+
+function rawInputs(options) {
+  if (options && options[RAW_INPUTS]) return options[RAW_INPUTS];
+  return { action: String(options?.action || ''), target: String(options?.target || ''), type: String(options?.type || '') };
+}
+
+// Of two inferred types, the one that is protected; if both or neither are, the first.
+function stricterType(first, second) {
+  if (PROTECTED_ACTION_TYPES.has(first) || !PROTECTED_ACTION_TYPES.has(second)) return first;
+  return second;
+}
+
+// One governed action: the redacted text that may leave this machine, and a risk verdict that
+// is never looser than the command as typed. `surfacesFrom` keeps each command's surface
+// source: run uses the command, permit and verify-permit the target, gate the action.
+function governedInputs(options, childCommand = null, surfacesFrom = 'command') {
+  const raw = rawInputs(options);
+  const rawCommand = Array.isArray(childCommand) ? childCommand.map(String).join(' ') : '';
+  const commandText = Array.isArray(childCommand) ? redactedCommand(childCommand) : '';
+  // Redacted again in case options did not come through parseArgs (redaction is idempotent).
+  const action = options.action ? redact(options.action) : commandText;
+  const sentTarget = options.target ? redact(options.target) : '';
+  const target = sentTarget || commandText || action;
+  const rawAction = raw.action || rawCommand;
+  const rawRisk = `${rawAction} ${rawCommand} ${raw.target}`;
+  const redactedRisk = `${action} ${commandText} ${sentTarget}`;
+  const type = options.type ? redact(options.type) : stricterType(inferType(redactedRisk), inferType(rawRisk));
+  const risky = isRisky(redactedRisk, type) || isRisky(rawRisk, type);
+  let surfaceText = [commandText || action, rawCommand || rawAction];
+  if (surfacesFrom === 'target') surfaceText = [sentTarget || action, raw.target || rawAction];
+  else if (surfacesFrom === 'action') surfaceText = [action, rawAction];
+  // Surfaces are fixed labels, so the raw text can add some without anything raw leaving.
+  const surfaces = inferSurfaces(surfaceText.join(' '));
+  return {
+    commandText, action, target, type, risky, surfaces,
+    // Local only, for the hold key: the command and inputs exactly as typed.
+    holdMaterial: { argv: Array.isArray(childCommand) ? childCommand.map(String) : [], action: raw.action, target: raw.target, type: raw.type },
+  };
 }
 
 function isProtectedCommand(text) {
@@ -433,7 +670,7 @@ function parseBaseOptions(argv, startIndex = 0) {
     else if (arg === '--interactive') options.interactive = true;
     else if (arg === '--no-interactive') options.interactive = false;
     else if (arg === '--help' || arg === '-h') options.help = true;
-    else if (arg.startsWith('--')) throw new Error(`Unknown option: ${arg}`);
+    else if (arg.startsWith('--')) throw new Error(`Unknown option: ${argumentLabel(arg)}`);
     else break;
   }
   if (!['enforce', 'warn', 'audit'].includes(options.policy)) {
@@ -459,7 +696,7 @@ function parseArgs(argv) {
     if (childCommand[0] === '--') childCommand = childCommand.slice(1);
     if (parsed.options.help) return { command: 'help' };
     if (childCommand.length === 0) throw new Error('marrow run requires a command after --');
-    return { command, options: parsed.options, childCommand };
+    return { command, options: withRedactedInputs(parsed.options), childCommand };
   }
 
   if (command === 'gate') {
@@ -467,7 +704,7 @@ function parseArgs(argv) {
     const action = parsed.options.action || argv.slice(parsed.index).join(' ');
     if (parsed.options.help) return { command: 'help' };
     if (!action) throw new Error('marrow gate requires an action string');
-    return { command, options: { ...parsed.options, action } };
+    return { command, options: withRedactedInputs({ ...parsed.options, action }) };
   }
 
   if (command === 'permit' || command === 'verify-permit') {
@@ -478,7 +715,7 @@ function parseArgs(argv) {
     if (command === 'verify-permit' && !parsed.options.permit) {
       throw new Error('verify-permit requires MARROW_ACTION_PERMIT or --permit');
     }
-    return { command, options: { ...parsed.options, action } };
+    return { command, options: withRedactedInputs({ ...parsed.options, action }) };
   }
 
   if (command === 'proof') {
@@ -498,7 +735,7 @@ function parseArgs(argv) {
     }
     const parsed = parseBaseOptions(baseArgv, 1);
     if (parsed.options.help) return { command: 'help' };
-    if (parsed.index < baseArgv.length) throw new Error(`Unknown proof option: ${baseArgv[parsed.index]}`);
+    if (parsed.index < baseArgv.length) throw new Error(`Unknown proof option: ${argumentLabel(baseArgv[parsed.index])}`);
     const options = { ...parsed.options, ...proofOptions };
     if (!options.decisionId) throw new Error('marrow proof requires --decision-id');
     return { command, options };
@@ -520,7 +757,7 @@ function parseArgs(argv) {
     return { command, options: parsed.options };
   }
 
-  throw new Error(`Unknown command: ${command}`);
+  throw new Error(`Unknown command: ${argumentLabel(command)}`);
 }
 
 function headers(options) {
@@ -731,9 +968,11 @@ function withoutCallerApproval(proof) {
   return rest;
 }
 
-async function preflightRuntime(options, action, type, commandText) {
-  const target = options.target || commandText || action;
-  const surfaces = inferSurfaces(commandText || action);
+async function preflightRuntime(options, action, type, commandText, surfaceList = null) {
+  // Only redacted text is sent: action and commandText are redacted by the caller, and the
+  // target is redacted again here in case a caller passed options that were not.
+  const target = redact(options.target || '') || commandText || action;
+  const surfaces = Array.isArray(surfaceList) ? surfaceList : inferSurfaces(commandText || action);
   const meta = sourceMeta(options, 'runtime', { action, command: commandText, action_type: type });
   const project = detectProjectSignals(options.root || process.cwd());
   const body = {
@@ -1192,18 +1431,25 @@ function defaultRunnerSession(options, now = new Date()) {
   return `marrow-run-${digest.slice(0, 24)}`;
 }
 
-// The record key: this exact command, for this agent, project, user and service. It names no
-// action text; the record holds only ids, states and times.
-function runnerHoldKey(options, binding) {
+// The record key: an HMAC, under a private random salt kept in the hold directory, of the
+// command exactly as typed (every argv word), the raw --action, --target and --type, and this
+// agent, project, user and service. Any difference in the command, including text after a
+// secret, is a different key. The key never leaves this machine; the record stores only the
+// key (as its binding), ids, states and times, never the command.
+function runnerHoldKey(options, material, salt) {
   const uid = typeof process.getuid === 'function' ? String(process.getuid()) : os.userInfo().username;
-  return crypto.createHash('sha256').update([
-    'runner-hold-v1', baseUrlOrigin(options.baseUrl), String(options.agentId || ''), realCwd(), uid,
-    binding.type, binding.action, binding.target, binding.commandText, [...binding.surfaces].sort().join(','),
-  ].join('\0')).digest('hex').slice(0, 40);
+  return crypto.createHmac('sha256', salt || crypto.randomBytes(32)).update(JSON.stringify([
+    'runner-hold-v2', baseUrlOrigin(options.baseUrl), String(options.agentId || ''), realCwd(), uid,
+    Array.isArray(material?.argv) ? material.argv.map(String) : [],
+    String(material?.action || ''), String(material?.target || ''), String(material?.type || ''),
+  ])).digest('hex');
 }
 
+const HOLD_KEY_RE = /^[0-9a-f]{64}$/;
+
+const HOLD_RECORD_VERSION = 2;
 const HOLD_RECORD_KEYS = new Set([
-  'version', 'kind', 'state', 'gate_receipt_id', 'decision_id', 'runtime_decision_id', 'arbitration_receipt_id',
+  'version', 'binding', 'kind', 'state', 'gate_receipt_id', 'decision_id', 'runtime_decision_id', 'arbitration_receipt_id',
   'session_id', 'declined_by', 'declined_at', 'receipt_expires_at', 'approvable_here', 'link_reason',
   'link_sent_at', 'link_expires_at', 'link_person_present', 'denial_committed', 'created_at', 'updated_at',
 ]);
@@ -1220,7 +1466,8 @@ function holdRecordStore(io = {}) {
     if ((stat.mode & 0o077) !== 0) fs.chmodSync(directory, 0o700);
   };
   const valid = (record) => {
-    if (!record || typeof record !== 'object' || Array.isArray(record) || record.version !== 1) return false;
+    if (!record || typeof record !== 'object' || Array.isArray(record) || record.version !== HOLD_RECORD_VERSION) return false;
+    if (!HOLD_KEY_RE.test(String(record.binding || ''))) return false;
     if (Object.keys(record).some((key) => !HOLD_RECORD_KEYS.has(key))) return false;
     if (!['ordinary', 'arbitration'].includes(record.kind) || !['waiting', 'declined'].includes(record.state)) return false;
     if (!GATE_RECEIPT_ID_RE.test(String(record.gate_receipt_id || '')) || !HOST_SESSION_ID_RE.test(String(record.session_id || ''))) return false;
@@ -1229,14 +1476,61 @@ function holdRecordStore(io = {}) {
     if (record.arbitration_receipt_id && !DECISION_ID_RE.test(record.arbitration_receipt_id)) return false;
     return Number.isFinite(Date.parse(record.created_at));
   };
+  let saltValue = null;
+  let saltStored = false;
+  const saltFile = path.join(directory, '.salt');
+  const ownedPrivateFile = (stat) => stat.isFile() && !stat.isSymbolicLink() && (uid === null || stat.uid === uid) && (stat.mode & 0o077) === 0;
+  const readSalt = () => {
+    try {
+      const stat = fs.lstatSync(saltFile);
+      if (!ownedPrivateFile(stat) || stat.size > 128) return null;
+      const stored = fs.readFileSync(saltFile, 'utf8').trim();
+      return HOLD_KEY_RE.test(stored) ? Buffer.from(stored, 'hex') : null;
+    } catch {
+      return null;
+    }
+  };
+  // Saves this run's salt before the first record is written under a key made with it. A salt
+  // file that is not a private regular file of this user is replaced (the directory is this
+  // user's and owner-only, checked by ensureDirectory). If another run saved a different salt
+  // first, nothing is written: the next run starts a new hold rather than miss this one.
+  const storeSalt = () => {
+    if (!saltValue || saltStored) return true;
+    const current = readSalt();
+    if (!current) {
+      try {
+        const stat = fs.lstatSync(saltFile);
+        if (!stat.isDirectory()) fs.unlinkSync(saltFile);
+      } catch { /* none yet */ }
+      const temp = path.join(directory, `.salt.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`);
+      fs.writeFileSync(temp, `${saltValue.toString('hex')}\n`, { flag: 'wx', mode: 0o600 });
+      try { fs.linkSync(temp, saltFile); } catch { /* another run saved one first */ }
+      fs.unlinkSync(temp);
+    }
+    const saved = readSalt();
+    saltStored = Boolean(saved && crypto.timingSafeEqual(saved, saltValue));
+    return saltStored;
+  };
   return {
+    // The private salt for hold keys: 32 random bytes in an owner-only file. Reading it creates
+    // nothing; a run with no saved salt uses a new one, saved when its first record is written.
+    salt() {
+      if (saltValue) return saltValue;
+      saltValue = readSalt();
+      saltStored = Boolean(saltValue);
+      if (!saltValue) saltValue = crypto.randomBytes(32);
+      return saltValue;
+    },
     read(key) {
       try {
+        if (!HOLD_KEY_RE.test(String(key || ''))) return null;
         const target = file(key);
         const stat = fs.lstatSync(target);
         if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 8192 || (uid !== null && stat.uid !== uid) || (stat.mode & 0o077) !== 0) return null;
         const record = JSON.parse(fs.readFileSync(target, 'utf8'));
         if (!valid(record) || Date.now() - Date.parse(record.created_at) > HOLD_RECORD_MAX_AGE_MS) return null;
+        // Picked up only by exactly the command it was made for.
+        if (!crypto.timingSafeEqual(Buffer.from(record.binding, 'hex'), Buffer.from(key, 'hex'))) return null;
         return record;
       } catch {
         return null;
@@ -1244,9 +1538,11 @@ function holdRecordStore(io = {}) {
     },
     write(key, record) {
       try {
+        if (!HOLD_KEY_RE.test(String(key || ''))) return false;
         ensureDirectory();
+        if (!storeSalt()) return false;
         const now = new Date().toISOString();
-        const value = Object.fromEntries(Object.entries({ version: 1, created_at: now, ...record, updated_at: now })
+        const value = Object.fromEntries(Object.entries({ created_at: now, ...record, version: HOLD_RECORD_VERSION, binding: key, updated_at: now })
           .filter(([name, entry]) => HOLD_RECORD_KEYS.has(name) && entry !== undefined && entry !== null && entry !== ''));
         const temp = path.join(directory, `.${key}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`);
         fs.writeFileSync(temp, `${JSON.stringify(value)}\n`, { flag: 'wx', mode: 0o600 });
@@ -1269,6 +1565,7 @@ function holdRecordStore(io = {}) {
     // run started at the same time does not. A claim older than the receipt's life is stale.
     claim(key, gateReceiptId) {
       try {
+        if (!HOLD_KEY_RE.test(String(key || ''))) return false;
         ensureDirectory();
         const target = path.join(directory, `${key}.claim`);
         try {
@@ -1826,9 +2123,12 @@ async function resumeRecordedHold(options, records, holdKey, io = {}) {
     ? (interactive && deadlineAt ? deadlineAt - Date.now() : 0)
     : Math.min(waitSeconds * 1000, deadlineAt ? deadlineAt - Date.now() : waitSeconds * 1000);
   if (wait <= 0) {
+    // "After they answer" only when the owner has a live link; otherwise the quiet-hold text,
+    // which says where a link can be sent from.
+    const linkLive = Boolean(state.channel) || (Boolean(record.link_expires_at) && Date.parse(record.link_expires_at) > now);
     return toResult(heldHere(hold.kind === 'ordinary' && hold.accepted
       ? 'It is held until a person approves it, and nothing ran. Rerun this command in an interactive terminal to approve it there.'
-      : 'It stays held until the account owner approves it, and nothing ran. Rerun this command after they answer.'));
+      : linkLive ? 'It stays held until the account owner approves it, and nothing ran. Rerun this command after they answer.' : quietHoldText(hold, interactive)));
   }
   // A new link is recorded before the wait, so a stopped or killed run leaves it for the next.
   if (state.channel) keep(linkFieldsHere());
@@ -1978,11 +2278,8 @@ async function decisionForAction(options, decision, action, type, target, surfac
 async function runGoverned(parsed, execution = {}) {
   const { childCommand } = parsed;
   let options = parsed.options;
-  const commandText = redactedCommand(childCommand);
-  const action = options.action ? redact(options.action) : commandText;
-  const riskText = `${action} ${commandText} ${options.target || ''}`;
-  const type = options.type || inferType(riskText);
-  const risky = isRisky(riskText, type);
+  const inputs = governedInputs(options, childCommand);
+  const { commandText, action, type, risky, surfaces, target } = inputs;
   let runtime = null;
   let decision = null;
   let decisionId = '';
@@ -1999,10 +2296,8 @@ async function runGoverned(parsed, execution = {}) {
   let commitExtras = {};
   let decisionResolved = false;
   let claimed = false;
-  const surfaces = inferSurfaces(commandText || action);
-  const target = options.target || commandText;
   const records = holdRecordStore(execution);
-  const holdKey = runnerHoldKey(options, { action, type, target, commandText, surfaces });
+  const holdKey = runnerHoldKey(options, inputs.holdMaterial, records.salt());
   const blocked = (exitCode, message, extra = {}) => ({ ok: false, blocked: true, exitCode, action, type, risky, ...extra, message });
 
   let localControl;
@@ -2038,7 +2333,7 @@ async function runGoverned(parsed, execution = {}) {
       decisionResolved = true;
       commitExtras = resumed.commitExtras || {};
     } else {
-      runtime = await preflightRuntime(options, action, type, commandText);
+      runtime = await preflightRuntime(options, action, type, commandText, surfaces);
       decision = runnerGateDecision(runtime);
       protectedAction = risky
         || decision.required === true
@@ -2249,11 +2544,8 @@ async function runGoverned(parsed, execution = {}) {
 
 async function permitOnly(parsed) {
   const { options } = parsed;
-  const action = redact(options.action);
-  const type = options.type || inferType(action);
-  const target = options.target || action;
-  const surfaces = inferSurfaces(target);
-  const runtime = await preflightRuntime(options, action, type, target);
+  const { action, type, target, surfaces } = governedInputs(options, null, 'target');
+  const runtime = await preflightRuntime(options, action, type, target, surfaces);
   const decision = runnerGateDecision(runtime);
   if (!decision.recognized) {
     return { ok: false, blocked: true, exitCode: 13, decision, message: 'Marrow runtime returned no gate decision, so no permit was issued.' };
@@ -2291,13 +2583,11 @@ async function permitOnly(parsed) {
 
 async function verifyPermitOnly(parsed) {
   const { options } = parsed;
-  const action = redact(options.action);
-  const type = options.type || inferType(action);
-  const surfaces = inferSurfaces(options.target || action);
+  const { action, type, target, surfaces } = governedInputs(options, null, 'target');
   const result = await verifyActionPermit(requestJson, options, {
     action,
     type,
-    target: options.target || action,
+    target,
     surfaces,
     permit: options.permit,
   });
@@ -2320,13 +2610,16 @@ async function sidecarOnly(parsed) {
     const detection = detectEnvironment(root, process.env);
     // Maintenance re-applies the controller's own configured agent id and base URL. A different
     // value found in managed MCP config is replaced unless the owner allowlisted it, and the
-    // divergence is reported. It never edits the owner's Hermes config.
+    // divergence is reported. It never edits the owner's Hermes config. Hooks stay on the
+    // verified local MCP runtime when there is one (checked, never installed, here).
+    const mcpRuntime = maintenanceMcpRuntime(detection, { mcpLocalRuntime: process.env.MARROW_LOCAL_RUNTIME !== '0' });
     const plan = buildPlan(detection, {
       mode: managedMode,
       agentId: options.agentId,
       baseUrl: options.baseUrl,
       client: options.client,
       maintenance: true,
+      mcpRuntime,
     });
     const changes = applyPlan(plan, { yes: true, dryRun: false, doctor: false });
     const repaired = changes.filter((change) => change.applied).map((change) => change.label);
@@ -2386,19 +2679,17 @@ async function controllerOnly(parsed) {
 
 async function gateOnly(parsed) {
   const { options } = parsed;
-  const action = redact(options.action);
-  const type = options.type || inferType(action);
-  const protectedAction = isRisky(action, type);
+  const { action, type, risky: protectedAction, surfaces } = governedInputs(options, null, 'action');
   let localControl;
   try { localControl = readLocalControlState(); } catch (error) {
     if (protectedAction) return { ok: false, allowed: false, blocked: true, exitCode: 13, action, type, decision: null, message: error.message };
     localControl = { enabled: true };
   }
   if (!localControl.enabled) {
-    const bypass = protectedAction ? await recordGovernedBypass({ harness: options.client, agentId: options.agentId, surfaces: inferSurfaces(action), risk: 'high' }, options) : { bypass_recorded: false, remote_delivered: false };
+    const bypass = protectedAction ? await recordGovernedBypass({ harness: options.client, agentId: options.agentId, surfaces, risk: 'high' }, options) : { bypass_recorded: false, remote_delivered: false };
     return { ok: true, allowed: true, state: 'owner_disabled', action, type, bypass_recorded: bypass.bypass_recorded, bypass_remote_delivered: bypass.remote_delivered, decision: null, permit: null };
   }
-  const runtime = await preflightRuntime(options, action, type, action);
+  const runtime = await preflightRuntime(options, action, type, action, surfaces);
   const decision = runnerGateDecision(runtime);
   if (!decision.recognized) {
     return {
@@ -3827,6 +4118,8 @@ module.exports = {
   resumeRecordedHold,
   holdRecordStore,
   runnerHoldKey,
+  governedInputs,
+  withRedactedInputs,
   defaultRunnerSession,
   agentHostDetected,
   agentHostAncestor,

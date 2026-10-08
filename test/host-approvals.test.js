@@ -738,6 +738,7 @@ function fakeMarrow(scenario) {
       const reply = typeof scenario.link === 'function' ? scenario.link(calls) : scenario.link;
       if (reply === 'not_sent') return Response.json({ data: { sent: false, state: 'not_sent', reason: 'owner_ping_off', approval_link: null, exact_next_action: 'No link was sent to o…@example.test.' } });
       if (reply === 'not_sent_no_person') return Response.json({ data: { sent: false, state: 'not_sent', reason: 'no_person_present', approval_link: null, exact_next_action: 'No link was sent.' } });
+      if (reply === 'already_sent_no_link') return Response.json({ data: { sent: false, state: 'already_sent', reason: 'link_live', approval_link: null } });
       if (reply === 'already_sent') return Response.json({ data: { sent: false, state: 'already_sent', reason: 'link_live', approval_link: { id: 'link_1', gate_receipt_id: RECEIPT, channel: 'email', expires_at: new Date(Date.now() + 600_000).toISOString(), delivered_at: new Date().toISOString() }, exact_next_action: 'The account owner already has a live one-tap link https://api.getmarrow.ai/x' } });
       if (reply?.error) return Response.json({ error: 'No approval link was sent.', code: 'CONFLICT', details: { code: reply.error, retryable: reply.retryable === true, exact_next_action: 'Retry. Owner o…@example.test.' } }, { status: reply.status || 409 });
       return Response.json({ data: {
@@ -1362,6 +1363,15 @@ test('runner, arbitration links (backend round 6): person_present only for a per
   assert.equal(unattended.ran, false);
   assert.equal(unattended.result.exitCode, 12);
   assert.match(unattended.result.message, /Rerun this command in an interactive terminal to send the owner a one-tap link; that run picks up this hold\./);
+  // The next unattended run picks the hold up (RP2): still no person_present, and with no link
+  // sent it does not tell anyone to rerun "after they answer".
+  const resumedQuiet = await runHeld({ runtime: arbitrationRuntime({ personPresentLinks: true }), statuses: ['arbitration_review'], link: quietUnlessPerson }, [], { home });
+  assert.equal(routeCalls(resumedQuiet.calls, '/v1/agent/runtime').length, 0, 'the hold was picked up');
+  assert.deepEqual(linkBodies(resumedQuiet.calls), [{ decision_id: DECISION }]);
+  assert.equal(resumedQuiet.ran, false);
+  assert.equal(resumedQuiet.result.exitCode, 12);
+  assert.doesNotMatch(resumedQuiet.result.message, /after they answer/);
+  assert.match(resumedQuiet.result.message, /Rerun this command in an interactive terminal to send the owner a one-tap link; that run picks up this hold\./);
   const agentPty = await runHeld({ runtime: arbitrationRuntime({ personPresentLinks: true }), statuses: ['arbitration_review'], link: quietUnlessPerson }, [], { env: { CLAUDECODE: '1' }, approvalPrompt: () => 'y' });
   assert.deepEqual(linkBodies(agentPty.calls), [{ decision_id: DECISION }]);
   assert.equal(agentPty.ran, false);
@@ -1395,7 +1405,15 @@ test('runner, arbitration links (backend round 6): person_present only for a per
   const record = JSON.parse(fs.readFileSync(recordFiles(liveHome)[0], 'utf8'));
   assert.ok(Date.parse(record.link_expires_at) > Date.now(), 'the live link is on record for the next run');
   assert.equal(record.link_person_present, true);
-  for (const run of [person, unattended, agentPty, later, older, live, liveQuiet]) assertCleanOutput(run.output, run.result);
+  // already_sent with no link in the answer (RP8) is not a sent link: nothing ran, and the run
+  // says no link was sent instead of waiting on one.
+  const noLink = await runHeld({ runtime: arbitrationRuntime({ personPresentLinks: true }), statuses: ['arbitration_review', approved], link: 'already_sent_no_link' }, [], { approvalPrompt: () => 'y' });
+  assert.equal(noLink.ran, false);
+  assert.equal(noLink.result.exitCode, 12);
+  assert.equal(noLink.result.approval.state, 'link_not_sent');
+  assert.equal(noLink.result.approval.code, 'MARROW_APPROVAL_LINK_ANSWER_INVALID');
+  assert.doesNotMatch(noLink.output, /already has a one-tap approval link/);
+  for (const run of [person, unattended, resumedQuiet, agentPty, later, older, live, liveQuiet, noLink]) assertCleanOutput(run.output, run.result);
   fs.rmSync(liveHome, { recursive: true, force: true });
 });
 

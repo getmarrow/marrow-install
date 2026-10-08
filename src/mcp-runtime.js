@@ -26,7 +26,8 @@ const VERSION_RE = /^\d+\.\d+\.\d+$/;
 const INTEGRITY_RE = /^sha512-[A-Za-z0-9+/]{86}==$/;
 // Paths written into the run script, quoted with single quotes: no quote, backslash or newline.
 const SAFE_PATH_RE = /^[^'\\\n\r\0]+$/;
-const NPM_INSTALL_TIMEOUT_MS = 180_000;
+// A black-holed registry must not hold an install for minutes: past this, hooks stay on npx.
+const NPM_INSTALL_TIMEOUT_MS = 30_000;
 
 function currentUid() {
   return typeof process.getuid === 'function' ? process.getuid() : null;
@@ -99,11 +100,27 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const args = process.argv.slice(2);
+// Every package file now present, listed as at install: an added file is a change too.
+function listFiles(relative) {
+  const out = [];
+  const entries = fs.readdirSync(path.join(__dirname, relative), { withFileTypes: true })
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  for (const entry of entries) {
+    const rel = relative + '/' + entry.name;
+    if (rel === 'node_modules/.bin') continue;
+    if (entry.isSymbolicLink()) throw new Error('link');
+    if (entry.isDirectory()) out.push(...listFiles(rel));
+    else if (entry.isFile()) out.push(rel);
+  }
+  return out;
+}
 function verifiedEntry() {
   try {
     const record = JSON.parse(fs.readFileSync(path.join(__dirname, '.verified'), 'utf8'));
     if (record.schema !== ${JSON.stringify(RUNTIME_SCHEMA)}) return null;
     if (args[0] !== '--package=@getmarrow/mcp@' + record.version || args[1] !== 'marrow-mcp') return null;
+    const present = listFiles('node_modules').filter((file) => file !== 'node_modules/.package-lock.json');
+    if (JSON.stringify(present) !== JSON.stringify(record.files)) return null;
     const hash = crypto.createHash('sha256');
     for (const file of record.files) {
       hash.update(file);
@@ -216,7 +233,7 @@ function removeOtherRuntimes(home, keep) {
 // Installs (or keeps) the runtime for one MCP version whose tarball integrity is known.
 // `sdk` is the pinned SDK { version, integrity }; when the installed SDK has that version, its
 // integrity must match too. Never throws: a failure leaves hooks on npx.
-function ensureMcpRuntime({ home, version, integrity, sdk = null, nodePath = process.execPath, npmInstall = defaultNpmInstall, platform = process.platform } = {}) {
+function ensureMcpRuntime({ home, version, integrity, sdk = null, nodePath = process.execPath, npmInstall = defaultNpmInstall, platform = process.platform, onProgress = null } = {}) {
   if (platform === 'win32') return { state: 'unsupported', reason: 'windows' };
   if (!home || !VERSION_RE.test(String(version || '')) || !INTEGRITY_RE.test(String(integrity || ''))) {
     return { state: 'skipped', reason: 'no_verified_integrity' };
@@ -241,6 +258,9 @@ function ensureMcpRuntime({ home, version, integrity, sdk = null, nodePath = pro
     if (sdk && VERSION_RE.test(String(sdk.version || ''))) dependencies['@getmarrow/sdk'] = sdk.version;
     fs.writeFileSync(path.join(stage, 'package.json'), `${JSON.stringify({ name: 'marrow-mcp-runtime', private: true, dependencies }, null, 2)}\n`, { mode: 0o600 });
     const specs = Object.entries(dependencies).map(([name, spec]) => `${name}@${spec}`);
+    if (typeof onProgress === 'function') {
+      onProgress(`Installing a local copy of @getmarrow/mcp@${version} so hooks start faster (up to ${NPM_INSTALL_TIMEOUT_MS / 1000} s; hooks keep using npx if it does not finish)...\n`);
+    }
     if (!npmInstall(stage, specs)) return { state: 'failed', reason: 'npm_install_failed' };
     const lock = JSON.parse(fs.readFileSync(path.join(stage, 'package-lock.json'), 'utf8'));
     const packages = lock && typeof lock.packages === 'object' && lock.packages ? lock.packages : {};
@@ -412,6 +432,7 @@ function localizeHookSettingsText(text, version) {
 }
 
 module.exports = {
+  NPM_INSTALL_TIMEOUT_MS,
   RUNTIME_SCHEMA,
   LAUNCHER_SOURCE,
   delocalizeHookCommand,

@@ -18,6 +18,7 @@ const {
   uninstall,
 } = require('../src/installer');
 const {
+  NPM_INSTALL_TIMEOUT_MS,
   delocalizeHookCommand,
   ensureMcpRuntime,
   localizeHookCommand,
@@ -25,6 +26,8 @@ const {
   verifyMcpRuntime,
 } = require('../src/mcp-runtime');
 const PINS = require('../src/pins');
+const installer = require('../src/installer');
+const { cleanControllerEnv, controllerStatus, ensureCurrentGovernanceController, stopProjectControllers } = require('../src/controller-manager');
 
 const PIN = PINS.MCP_ADAPTER_VERSION;
 const AHEAD = PIN.replace(/\d+$/, (patch) => String(Number(patch) + 1));
@@ -120,7 +123,7 @@ function runHook(command, env) {
 
 const installOptions = (root, home, extra = {}) => ({
   cwd: root, home, mode: 'mcp', yes: true, dryRun: false, selfTest: false, loopGuardSelfTest: false, controller: false,
-  apiKey: '', baseUrl: 'https://api.getmarrow.ai', agentId: '', mcpLocalRuntime: true, mcpRuntimeInstall: fakeNpmInstall(), ...extra,
+  apiKey: '', baseUrl: 'https://api.getmarrow.ai', agentId: '', mcpLocalRuntime: true, mcpRuntimeInstall: fakeNpmInstall(), mcpRuntimeProgress: () => {}, ...extra,
 });
 
 test('every host\'s Marrow hook command maps to the local runtime and back exactly', () => {
@@ -379,17 +382,199 @@ test('the local runtime is installed only on write runs, and the switch keeps ho
     await install(installOptions(root, home));
     const claude = hookFiles(root, home).claude;
     assert.ok(fs.readFileSync(claude, 'utf8').includes('/.marrow/runtime/'));
-    // Switched off: the runtime is left alone and every hook goes back to npx.
+    // Switched off: every hook goes back to npx and the local copy is removed, so the
+    // controller's maintenance cannot move hooks back onto it. A dry run removes nothing.
+    await install(installOptions(root, home, { mcpLocalRuntime: false, yes: false, dryRun: true }));
+    assert.equal(fs.existsSync(path.join(home, '.marrow', 'runtime')), true);
     const off = await install(installOptions(root, home, { mcpLocalRuntime: false }));
     assert.equal(off.mcp_runtime.state, 'disabled');
     assert.equal(fs.readFileSync(claude, 'utf8').includes('/.marrow/runtime/'), false);
+    assert.equal(fs.existsSync(path.join(home, '.marrow', 'runtime')), false);
+    assert.equal(installer.maintenanceMcpRuntime(detectEnvironment(root, { HOME: home, PATH: process.env.PATH })), null);
+    await install(installOptions(root, home));
     // A maintenance pass (the controller) uses a verified copy but never installs one.
+    assert.equal(installer.maintenanceMcpRuntime(detectEnvironment(root, { HOME: home, PATH: process.env.PATH })).version, PIN);
+    assert.equal(installer.maintenanceMcpRuntime(detectEnvironment(root, { HOME: home, PATH: process.env.PATH }), { mcpLocalRuntime: false }), null);
     fs.rmSync(path.join(home, '.marrow', 'runtime'), { recursive: true, force: true });
+    assert.equal(installer.maintenanceMcpRuntime(detectEnvironment(root, { HOME: home, PATH: process.env.PATH })), null);
     const maintenanceCalls = [];
     await install(installOptions(root, home, { maintenance: true, mcpRuntimeInstall: fakeNpmInstall({ calls: maintenanceCalls }) }));
     assert.deepEqual(maintenanceCalls, []);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// MEDIUM-4 (round-3 audit): the controller's maintenance, run by the real sidecar at start and
+// every 5 minutes, must keep hooks on the verified local runtime, and a hook it repairs is
+// written in the local form too.
+test('the real controller maintenance keeps every hook on the local runtime and repairs in the local form', { skip: process.platform !== 'linux' }, async () => {
+  const { root, home } = allHostsProject();
+  const stateDirectory = tempDir('marrow-runtime-controller-');
+  const prior = { HOME: process.env.HOME, MARROW_SIDECAR_STATE_DIR: process.env.MARROW_SIDECAR_STATE_DIR };
+  const options = {
+    apiKey: 'test-controller-api-key', baseUrl: 'http://127.0.0.1:9', agentId: '', identityAgentId: 'runtime-maintain-fixture',
+    client: 'claude-code', root, mode: 'mcp', profile: 'default', policy: 'warn',
+  };
+  try {
+    await install(installOptions(root, home));
+    const files = hookFiles(root, home);
+    const before = Object.fromEntries(Object.entries(files).map(([host, filePath]) => [host, fs.readFileSync(filePath, 'utf8')]));
+    for (const [host, text] of Object.entries(before)) assert.ok(text.includes(`/.marrow/runtime/mcp/${PIN}/run`), host);
+    // A managed hook file the controller must repair.
+    fs.rmSync(files.cursor);
+    process.env.HOME = home;
+    process.env.MARROW_SIDECAR_STATE_DIR = stateDirectory;
+    await ensureCurrentGovernanceController(options);
+    let maintenance = null;
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      maintenance = (await controllerStatus(options)).maintenance;
+      if (maintenance) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.ok(maintenance, 'the controller ran its maintenance');
+    // The local-runtime switch reaches the controller, so its maintenance honours it too.
+    process.env.MARROW_LOCAL_RUNTIME = '0';
+    assert.equal(cleanControllerEnv(options).MARROW_LOCAL_RUNTIME, '0');
+    delete process.env.MARROW_LOCAL_RUNTIME;
+    assert.equal(Object.hasOwn(cleanControllerEnv(options), 'MARROW_LOCAL_RUNTIME'), false);
+    assert.ok(maintenance.repaired.length >= 1, JSON.stringify(maintenance));
+    for (const [host, filePath] of Object.entries(files)) {
+      const text = fs.readFileSync(filePath, 'utf8');
+      assert.equal(text, before[host], `${host}: maintenance kept the local-runtime hooks byte for byte`);
+      for (const command of marrowCommands(filePath)) assert.notEqual(delocalizeHookCommand(command), command, `${host}: ${command.slice(0, 80)}`);
+    }
+  } finally {
+    await stopProjectControllers(options).catch(() => {});
+    for (const [name, value] of Object.entries(prior)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(stateDirectory, { recursive: true, force: true });
+  }
+});
+
+// LOW-9 / LOW-8 / LOW-10 (round-3 audit): the runtime's guards, each pinned by a test.
+test('runtime guards: Windows, unsafe paths, loose or linked directories and records, changed launcher, run script or file set, and a failed npx spawn', () => {
+  const home = tempDir('marrow-runtime-guards-');
+  const shimDir = tempDir('marrow-runtime-shim-');
+  fs.writeFileSync(path.join(shimDir, 'npx'), '#!/bin/sh\nfor arg; do sub=$arg; done\n: > "$HOME/npx-$sub"\nprintf \'%s\' \'{"via":"npx"}\'\n', { mode: 0o755 });
+  const options = (extra = {}) => ({ home, version: PIN, integrity: PINS.MCP_ADAPTER_INTEGRITY, npmInstall: fakeNpmInstall(), ...extra });
+  const verify = () => verifyMcpRuntime(home, PIN, PINS.MCP_ADAPTER_INTEGRITY);
+  const dir = runtimeDir(home, PIN);
+  const start = (env = {}) => spawnSync(path.join(dir, 'run'), [`--package=@getmarrow/mcp@${PIN}`, 'marrow-mcp', 'claude-pre-action-hook'], {
+    env: { HOME: home, PATH: `${shimDir}:/usr/bin:/bin`, ...env }, input: '{}', encoding: 'utf8', timeout: 30_000,
+  });
+  try {
+    // LR32: no runtime on Windows.
+    assert.deepEqual(ensureMcpRuntime(options({ platform: 'win32' })), { state: 'unsupported', reason: 'windows' });
+    assert.equal(fs.existsSync(path.join(home, '.marrow')), false);
+    // LR14: a quote, a newline or a relative node path never reaches the run script.
+    for (const nodePath of ["/opt/it's/node", '/opt/a\nb/node', 'bin/node']) {
+      assert.deepEqual(ensureMcpRuntime(options({ nodePath })), { state: 'skipped', reason: 'unsafe_path' }, JSON.stringify(nodePath));
+    }
+    const quoted = path.join(home, "o'brien");
+    fs.mkdirSync(quoted, { mode: 0o700 });
+    assert.deepEqual(ensureMcpRuntime(options({ home: quoted })), { state: 'skipped', reason: 'unsafe_path' });
+    // LR12: a runtime directory that is a link is refused, and nothing is written through it.
+    const elsewhere = tempDir('marrow-runtime-elsewhere-');
+    fs.mkdirSync(path.join(home, '.marrow'), { mode: 0o700 });
+    fs.symlinkSync(elsewhere, path.join(home, '.marrow', 'runtime'));
+    assert.deepEqual(ensureMcpRuntime(options()), { state: 'failed', reason: 'unsafe_directory' });
+    assert.deepEqual(fs.readdirSync(elsewhere), []);
+    fs.rmSync(path.join(home, '.marrow', 'runtime'));
+    fs.rmSync(elsewhere, { recursive: true, force: true });
+    // LR13: loose existing directories are tightened to 700.
+    fs.mkdirSync(path.join(home, '.marrow', 'runtime', 'mcp'), { recursive: true });
+    fs.chmodSync(path.join(home, '.marrow'), 0o755);
+    fs.chmodSync(path.join(home, '.marrow', 'runtime'), 0o755);
+    fs.chmodSync(path.join(home, '.marrow', 'runtime', 'mcp'), 0o775);
+    assert.equal(ensureMcpRuntime(options()).state, 'installed');
+    for (const directory of [path.join(home, '.marrow'), path.join(home, '.marrow', 'runtime'), path.join(home, '.marrow', 'runtime', 'mcp'), dir]) {
+      assert.equal(fs.statSync(directory).mode & 0o777, 0o700, directory);
+    }
+    assert.ok(verify());
+    const local = start();
+    assert.equal(local.status, 0, local.stderr);
+    assert.equal(local.stdout, '{"local":true}');
+
+    // LR3: a runtime directory others can read or enter is not trusted.
+    fs.chmodSync(dir, 0o750);
+    assert.equal(verify(), null);
+    fs.chmodSync(dir, 0o700);
+    assert.ok(verify());
+    // LR28: a .verified others can read, or one that is a link, is not trusted.
+    const record = path.join(dir, '.verified');
+    fs.chmodSync(record, 0o644);
+    assert.equal(verify(), null);
+    fs.chmodSync(record, 0o600);
+    fs.renameSync(record, `${record}.real`);
+    fs.symlinkSync(`${record}.real`, record);
+    assert.equal(verify(), null);
+    fs.rmSync(record);
+    fs.renameSync(`${record}.real`, record);
+    assert.ok(verify());
+    // LR6 / LR7: a changed launcher or run script is not trusted.
+    for (const name of ['launch.cjs', 'run']) {
+      const file = path.join(dir, name);
+      const original = fs.readFileSync(file, 'utf8');
+      fs.writeFileSync(file, `${original}\n# changed\n`);
+      assert.equal(verify(), null, name);
+      fs.writeFileSync(file, original);
+      assert.ok(verify(), name);
+    }
+    // LR4 and LOW-8: an ADDED file (a shadow package or an extensionless twin) is a change, both
+    // for verify and for the launcher on every start, which then runs npx instead.
+    for (const added of [
+      ['node_modules', '@getmarrow', 'mcp', 'node_modules', '@getmarrow', 'sdk', 'index.js'],
+      ['node_modules', '@getmarrow', 'mcp', 'dist', 'cli'],
+    ]) {
+      const file = path.join(dir, ...added);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, 'module.exports = 1;\n');
+      assert.equal(verify(), null, added.join('/'));
+      const shadowed = start();
+      assert.equal(shadowed.status, 0, shadowed.stderr);
+      assert.equal(shadowed.stdout, '{"via":"npx"}', added.join('/'));
+      fs.rmSync(file);
+      assert.ok(verify(), added.join('/'));
+    }
+    // LR16: when the copy is not trusted and npx cannot start, the launcher exits non-zero with
+    // no output: never an empty success, which a failClosed host would read as allow.
+    const failed = spawnSync(process.execPath, [path.join(dir, 'launch.cjs'), '--package=@getmarrow/mcp@0.0.1', 'marrow-mcp', 'cursor-pre-action-hook'], {
+      env: { HOME: home, PATH: '/nonexistent-marrow-path' }, input: '{}', encoding: 'utf8', timeout: 30_000,
+    });
+    assert.notEqual(failed.status, 0);
+    assert.equal(failed.stdout, '');
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(shimDir, { recursive: true, force: true });
+  }
+});
+
+test('the runtime install waits at most 30 seconds for npm and says so first (LOW-10)', () => {
+  assert.ok(NPM_INSTALL_TIMEOUT_MS <= 30_000);
+  const home = tempDir('marrow-runtime-progress-');
+  try {
+    const events = [];
+    const result = ensureMcpRuntime({
+      home, version: PIN, integrity: PINS.MCP_ADAPTER_INTEGRITY,
+      onProgress: (text) => events.push(['progress', text]),
+      npmInstall: (stage, specs) => { events.push(['npm', specs.length]); return fakeNpmInstall()(stage, specs); },
+    });
+    assert.equal(result.state, 'installed');
+    assert.equal(events[0][0], 'progress', 'the line comes before npm runs');
+    assert.match(events[0][1], /^Installing a local copy of @getmarrow\/mcp@\d+\.\d+\.\d+ so hooks start faster \(up to 30 s; hooks keep using npx if it does not finish\)\.\.\.\n$/);
+    assert.equal(events[1][0], 'npm');
+    // A present copy: no line, no npm.
+    events.length = 0;
+    assert.equal(ensureMcpRuntime({ home, version: PIN, integrity: PINS.MCP_ADAPTER_INTEGRITY, onProgress: (text) => events.push(text), npmInstall: () => { events.push('npm'); return false; } }).state, 'present');
+    assert.deepEqual(events, []);
+  } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
 });
