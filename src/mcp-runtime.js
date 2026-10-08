@@ -67,6 +67,7 @@ function listFiles(base, relative = '') {
   const out = [];
   for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
     const rel = relative ? `${relative}/${entry.name}` : entry.name;
+    if (rel === 'node_modules/.bin') continue;
     if (entry.isSymbolicLink()) throw new Error(`unexpected link in runtime package: ${rel}`);
     if (entry.isDirectory()) out.push(...listFiles(base, rel));
     else if (entry.isFile()) out.push(rel);
@@ -74,7 +75,8 @@ function listFiles(base, relative = '') {
   return out;
 }
 
-// The installed package files, as the launcher hashes them on every start.
+// The installed package files, as the launcher hashes them on every start (npm's own lock copy
+// and any .bin links are not package files; the runtime is never started through .bin).
 function packageFiles(directory) {
   return listFiles(directory, 'node_modules').filter((file) => file !== 'node_modules/.package-lock.json');
 }
@@ -176,7 +178,7 @@ function verifyMcpRuntime(home, version, integrity) {
 
 function defaultNpmInstall(stage, specs) {
   const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-  const result = spawnSync(npm, ['install', '--no-audit', '--no-fund', '--ignore-scripts', '--loglevel=error', ...specs], {
+  const result = spawnSync(npm, ['install', '--no-audit', '--no-fund', '--ignore-scripts', '--no-bin-links', '--loglevel=error', ...specs], {
     cwd: stage,
     env: process.env,
     stdio: 'ignore',
