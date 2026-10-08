@@ -3330,7 +3330,9 @@ async function uninstall(options = {}) {
       } else {
         let parsed;
         try {
-          parsed = before.trim() ? JSON.parse(before) : {};
+          // Marrow's hook commands in their canonical form, whether they start through npx or
+          // the local runtime, so both are recognized and removed.
+          parsed = before.trim() ? mapHookCommands(JSON.parse(before), delocalizeHookCommand) : {};
         } catch {
           changes.push({ ...change, action: 'skipped', reason: 'invalid JSON' });
           continue;
