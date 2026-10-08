@@ -82,7 +82,17 @@ test('README documents chat and terminal approvals and never makes a dashboard l
   assert.match(readme, /`--owner-approved` no longer does anything/);
   assert.doesNotMatch(readme, /approved from an authenticated Marrow dashboard session/);
   assert.doesNotMatch(readme, /log in to the dashboard to approve|approve (?:it )?in the dashboard/i);
-  // The What's New rule: the block names the unreleased changes until the release bumps the version.
-  const whatsNew = readme.slice(readme.indexOf(`## What's New in v${pkg.version}`), readme.indexOf('### Previous release:'));
-  assert.match(whatsNew, /### Next release \(unreleased; the version is not bumped yet\)/);
+  // The What's New rule: only the current version is in the README; changes since then and every
+  // older note are in CHANGELOG.md, which the README links (on GitHub, as npm does not ship it).
+  const whatsNewStart = readme.indexOf(`## What's New in v${pkg.version}`);
+  const whatsNew = readme.slice(whatsNewStart, readme.indexOf('\n## ', whatsNewStart + 1));
+  assert.doesNotMatch(whatsNew, /Next release|Previous release/);
+  assert.match(whatsNew, new RegExp(`### v${pkg.version.replaceAll('.', '\\.')}`));
+  assert.match(readme, /https:\/\/github\.com\/getmarrow\/marrow-install\/blob\/master\/CHANGELOG\.md/);
+  const changelog = fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8');
+  assert.match(changelog, /^## Unreleased/m);
+  assert.match(changelog, new RegExp(`^## v${pkg.version.replaceAll('.', '\\.')}$`, 'm'));
+  // Approval hooks are tied to the MCP version that answers them, not to this published version.
+  assert.match(readme, /These hooks are written with MCP `3\.9\.99` and later/);
+  assert.match(readme, /### Local MCP runtime/);
 });
