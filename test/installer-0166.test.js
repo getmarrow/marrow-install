@@ -820,6 +820,69 @@ function startStubApi(handler) {
   });
 }
 
+test('day one: the key is stored only after a working self-test, never from --key, and a different stored key is kept', async () => {
+  const fakeBin = tempDir();
+  fs.writeFileSync(path.join(fakeBin, 'npx'), `#!/bin/sh\nprintf '%s' '${JSON.stringify({ pass: true, isolated: true, live_hook_observed: false, repeat_denied: true, mutation_reset: true, owner_disabled_bypass: true })}'\n`, { mode: 0o755 });
+  const key = `mrw_test_${crypto.randomBytes(12).toString('hex')}`;
+  let healthy = false;
+  const api = await startStubApi((request) => {
+    if (!healthy) return [503, { error: 'store timeout' }];
+    switch (request.pathname) {
+      case '/v1/agent/think': return [200, { decision_id: 'dec_day1' }];
+      case '/v1/agent/commit': return [200, { committed: true, decision_id: request.body.decision_id }];
+      case '/v1/agent/status': return [200, { ok: true, enabled: true, health: 'healthy', identity: { agent_id: 'free-seat-day1', bound_agent_ids: ['free-seat-day1'] } }];
+      case '/v1/agent/runtime': return [200, { ok: true, agent_id: 'free-seat-day1', risk_gate: { allow: true, decision: 'proceed', enforced: false } }];
+      case '/v1/agent/first-value': return [200, {
+        ok: true,
+        active: true,
+        activation_receipt: {
+          id: 'act_day1', decision_id: request.body.decision_id, agent_id: request.body.agent_id, outcome_success: true,
+          outcome_recorded_at: '2026-10-08T00:00:00.000Z', server_confirmed: true, capture_verified: true, intervention_verified: true, closure_verified: true,
+        },
+      }];
+      default: return [200, { accepted: true, evidence_authority: 'client_self_reported' }];
+    }
+  });
+  const run = async (args, extraEnv) => {
+    const home = tempDir('marrow-day1-key-home-');
+    const project = tempDir();
+    const env = { PATH: `${fakeBin}${path.delimiter}${path.dirname(process.execPath)}${path.delimiter}/usr/bin${path.delimiter}/bin`, HOME: home, MARROW_BASE_URL: api.url, ...extraEnv };
+    return { home, project, result: await runBin(['--no-controller', ...args], { cwd: project, env }) };
+  };
+  const cleanup = [];
+  try {
+    // A failing self-test: nothing is stored.
+    const failed = await run([], { MARROW_API_KEY: key });
+    cleanup.push(failed.home, failed.project);
+    assert.notEqual(failed.result.status, 0);
+    assert.equal(fs.existsSync(path.join(failed.home, '.marrow', 'env')), false);
+    healthy = true;
+    // A key passed with --key is not stored.
+    const fromArg = await run(['--key', key], {});
+    cleanup.push(fromArg.home, fromArg.project);
+    assert.equal(fromArg.result.status, 0, fromArg.result.stderr);
+    assert.equal(fs.existsSync(path.join(fromArg.home, '.marrow', 'env')), false);
+    assert.doesNotMatch(fromArg.result.stdout, /Saved your API key/);
+    // A different stored key is kept and named; this key is not written over it.
+    const other = `mrw_test_${crypto.randomBytes(12).toString('hex')}`;
+    const keptHome = tempDir('marrow-day1-key-kept-');
+    fs.mkdirSync(path.join(keptHome, '.marrow'), { mode: 0o700 });
+    fs.writeFileSync(path.join(keptHome, '.marrow', 'env'), `MARROW_API_KEY=${other}\n`, { mode: 0o600 });
+    const keptProject = tempDir();
+    cleanup.push(keptHome, keptProject);
+    const kept = await runBin(['--no-controller'], { cwd: keptProject, env: { PATH: `${fakeBin}${path.delimiter}${path.dirname(process.execPath)}${path.delimiter}/usr/bin${path.delimiter}/bin`, HOME: keptHome, MARROW_BASE_URL: api.url, MARROW_API_KEY: key } });
+    assert.equal(kept.status, 0, kept.stderr);
+    assert.match(kept.stdout, /holds a different Marrow key, and Claude Code uses that one when opened outside this terminal/);
+    assert.equal(readOwnerApiKey(keptHome).apiKey === other, true);
+    for (const output of [failed.result.stdout, failed.result.stderr, fromArg.result.stdout, kept.stdout, kept.stderr]) {
+      assert.equal(output.includes(key) || output.includes(other), false);
+    }
+  } finally {
+    await new Promise((resolve) => api.server.close(resolve));
+    for (const directory of [fakeBin, ...cleanup]) fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('day one: an unbound key gets no homework; an identity Marrow refuses gets one runnable command', () => {
   const healthy = installSummaryLines({
     selfTest: { skipped: false, active: true, decision_id: 'dec_day1', decision_committed: true },
