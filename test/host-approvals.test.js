@@ -1231,14 +1231,25 @@ test('runner: Ctrl+C or SIGTERM while waiting stops only the wait; the hold is r
       const stored = JSON.parse(fs.readFileSync(file, 'utf8'));
       fs.writeFileSync(file, JSON.stringify({ ...stored, link_expires_at: new Date(Date.now() - 1_000).toISOString() }));
       const resumedSignals = new EventEmitter();
-      const resumedSink = { isTTY: false, write: (chunk) => { if (/Waiting for the owner's answer/.test(String(chunk))) setTimeout(() => resumedSignals.emit('SIGINT'), 30); return true; } };
+      let resumedAtWait = null;
+      const resumedSink = {
+        isTTY: false,
+        write: (chunk) => {
+          if (/Waiting for the owner's answer/.test(String(chunk))) {
+            resumedAtWait = JSON.parse(fs.readFileSync(recordFiles(home)[0], 'utf8'));
+            setTimeout(() => resumedSignals.emit('SIGINT'), 30);
+          }
+          return true;
+        },
+      };
       const resumed = await runHeld({ runtime: holdRuntime(owner), statuses: ['pending'] }, ['--approval-wait', '600'], { home, signals: resumedSignals, stderr: resumedSink });
       assert.equal(routeCalls(resumed.calls, '/v1/agent/runtime').length, 0);
       assert.equal(routeCalls(resumed.calls, '/approval-link').length, 1, 'the expired link is asked for again');
       assert.equal(resumed.result.exitCode, 12);
       assert.equal(resumed.result.approval.state, 'interrupted');
+      assert.ok(resumedAtWait && Date.parse(resumedAtWait.link_expires_at) > Date.now(), 'the new link is on record before the wait');
       const kept = JSON.parse(fs.readFileSync(recordFiles(home)[0], 'utf8'));
-      assert.ok(Date.parse(kept.link_expires_at) > Date.now(), 'the new link is on record');
+      assert.ok(Date.parse(kept.link_expires_at) > Date.now(), 'and after it');
       assert.equal(resumedSignals.listenerCount('SIGINT'), 0);
     }
     // The owner approved meanwhile: the next run picks it up on the same receipt, with no new link.

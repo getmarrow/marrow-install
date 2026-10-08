@@ -1405,8 +1405,8 @@ async function waitForOwnerAnswer(options, gateReceiptId, pollAfterMs, deadline,
       if (Number.isFinite(status.pollAfterMs) && status.pollAfterMs > 0) pollMs = Math.max(minPoll, Math.min(status.pollAfterMs, APPROVAL_STATUS_MAX_POLL_MS));
       const remaining = deadline - Date.now();
       if (remaining <= 0) return { state: 'timeout' };
+      // A stop during the sleep aborts the next status read at once; the check above returns.
       await abortableSleep(Math.min(pollMs, remaining), stop.signal);
-      if (stop.signal.aborted) return { state: 'interrupted', signal: stop.reason };
     }
   } finally {
     stop.release();
@@ -1624,7 +1624,9 @@ async function resolveHold(options, hold, context) {
     ? 'Waiting for the owner\'s answer. Ctrl+C stops waiting; a later run of this command picks up the answer.'
     : 'Waiting for a person to approve it. Ctrl+C stops waiting; a later run of this command picks up the answer.');
   const answer = await waitForOwnerAnswer(options, hold.gateReceiptId, hold.pollAfterMs, Date.now() + wait, io);
-  return finishOwnerAnswer(answer, { hold, say, summary, refused, held, denial, records, holdKey: context.holdKey, linkDeadline, onApproved: () => remember() });
+  // The hold was recorded before the wait, so an approval found here is already on record for
+  // the next run if this one stops before the command starts.
+  return finishOwnerAnswer(answer, { hold, say, summary, refused, held, denial, records, holdKey: context.holdKey, linkDeadline });
 }
 
 // What the runner does with the owner's answer (in this run, or picked up by a later run).
@@ -1634,7 +1636,6 @@ async function finishOwnerAnswer(answer, ctx) {
     if (hold.kind === 'arbitration' && !answer.ownerApprovalReceiptId) {
       return refused('Marrow reported the arbitration as approved without an owner approval receipt, so nothing ran.', { state: 'approval_incomplete' });
     }
-    ctx.onApproved?.();
     say(hold.kind === 'arbitration' ? 'The account owner approved a proposal. Checking that it is this one.' : 'The action was approved. Running it.');
     return {
       approved: true,
