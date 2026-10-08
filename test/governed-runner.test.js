@@ -718,7 +718,8 @@ test('gateDecision extracts receipt and shouldBlock enforces owner approval', ()
   assert.equal(shouldBlock(decision, { policy: 'enforce', ownerApproval: '' }), true);
   // --owner-approved is inert: a caller-supplied reference never unblocks a hold.
   assert.equal(shouldBlock(decision, { policy: 'enforce', ownerApproval: 'buu-approved' }), true);
-  assert.equal(shouldBlock(decision, { policy: 'warn', ownerApproval: '' }), false);
+  // A local warn policy never loosens a hold Marrow enforces.
+  assert.equal(shouldBlock(decision, { policy: 'warn', ownerApproval: '' }), true);
 });
 
 test('governPanel presents harness selection without becoming a model host', () => {

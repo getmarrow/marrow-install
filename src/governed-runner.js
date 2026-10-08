@@ -129,11 +129,13 @@ Commands:
 Options:
   --agent <id>            Registered agent id. Defaults to MARROW_FLEET_AGENT_ID or MARROW_AGENT_ID.
                           When unset, Marrow uses the API key's bound agent or the plan's agent seat.
-  --session <id>          Session id. Defaults to marrow-run-<timestamp>
+  --session <id>          Session id. Default: one per agent, project directory, user, Marrow
+                          service and UTC day (marrow-run-<hash>), so reruns share it
   --type <type>           Action type. Inferred from action/command when omitted
   --action <text>         Human-readable action. Defaults to the redacted command
   --profile <name>        Policy profile label, such as dev, staging, or production
-  --policy <mode>         enforce, warn, or audit. Default: enforce
+  --policy <mode>         enforce, warn, or audit. Default: enforce. Reported to Marrow; a gate
+                          Marrow enforces (a block or a hold) stops the command under every mode
   --fail-open             For non-protected, low-risk actions only, run if Marrow is unreachable
   --fail-closed           If Marrow is unreachable, block the command
   --owner-approved <ref>  No longer used and has no effect: approvals happen in the host's own
@@ -153,7 +155,8 @@ Options:
   --key <key>             Marrow API key. Prefer MARROW_API_KEY
   --json                  Print machine-readable result after completion
   --interactive           Force interactive govern TUI when possible
-  --no-interactive        Print govern/fleet panel instead of opening the TUI
+  --no-interactive        run: never prompt (a hold waits for a person elsewhere);
+                          govern/fleet: print the panel instead of opening the TUI
 `;
 }
 
@@ -554,18 +557,30 @@ function dataOf(json) {
   return json && typeof json === 'object' && json.data && typeof json.data === 'object' ? json.data : json;
 }
 
-async function rawRequest(options, method, route, body, extraHeaders = {}, { timeoutMs } = {}) {
+async function rawRequest(options, method, route, body, extraHeaders = {}, { timeoutMs, signal } = {}) {
   if (!options.apiKey) throw new Error('MARROW_API_KEY is required. Use --fail-open only for non-production local commands.');
+  const requestSignal = requestAbortSignal(timeoutMs, signal);
   const response = await fetch(new URL(route, options.baseUrl.replace(/\/$/, '/')), {
     method,
     headers: { ...headers(options), ...extraHeaders },
     body: body === undefined ? undefined : JSON.stringify(body),
-    ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
+    ...(requestSignal ? { signal: requestSignal } : {}),
   });
   const text = await response.text();
   let json = {};
   try { json = text ? JSON.parse(text) : {}; } catch { json = { error: text.slice(0, 500) }; }
   return { response, json };
+}
+
+// The request's abort signal: its timeout, and an outside signal (a wait the operator stopped).
+function requestAbortSignal(timeoutMs, external) {
+  if (!external) return timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined;
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (external.aborted) abort();
+  else external.addEventListener('abort', abort, { once: true });
+  if (timeoutMs) setTimeout(abort, timeoutMs).unref?.();
+  return controller.signal;
 }
 
 function responseError(route, response, json) {
@@ -854,15 +869,16 @@ function gateDecision(runtime) {
   };
 }
 
-function shouldBlock(decision, options) {
+function shouldBlock(decision, _options = {}) {
   // Marrow withheld authorization (allow:false, or an observation-only answer): blocked under
   // every plan mode and local policy.
   if (decision.observationOnly || decision.allow === false) return true;
-  if (options.policy === 'audit') return false;
-  // An advisory plan (enforced:false) never blocks locally; the runner shows the warning.
+  // Only Marrow makes a gate advisory (enforced:false); the runner then shows the warning and
+  // runs. A local --policy warn|audit (or MARROW_GOVERN_POLICY) never loosens a gate Marrow
+  // enforces: a block or a hold stops the command under every local policy, even when the
+  // gate reports allow:true for a hold.
   if (decision.enforced === false) return false;
   if (decision.decision === 'block') return true;
-  if (options.policy === 'warn') return false;
   const approvalRequired = decision.ownerApprovalRequired
     || decision.decision === 'review_required'
     || decision.decision === 'owner_approval_required'
@@ -1352,9 +1368,9 @@ const LINK_FAILURE_TEXT = {
 };
 
 // One status read: the state, plus the approval fields the runner keeps.
-async function readHoldStatus(options, gateReceiptId) {
+async function readHoldStatus(options, gateReceiptId, signal = undefined) {
   try {
-    const { response, json } = await rawRequest(options, 'GET', gateReceiptRoute(gateReceiptId, 'owner-approval'), undefined, {}, { timeoutMs: 15_000 });
+    const { response, json } = await rawRequest(options, 'GET', gateReceiptRoute(gateReceiptId, 'owner-approval'), undefined, {}, { timeoutMs: 15_000, signal });
     if (response.status === 404) return { state: 'unknown' };
     if (!response.ok) return { state: 'unavailable' };
     const view = recordOf(dataOf(json));
@@ -1374,17 +1390,63 @@ async function readHoldStatus(options, gateReceiptId) {
 const WAITING_STATES = new Set(['pending', 'arbitration_review', 'unavailable']);
 
 // Waits on the status endpoint until the hold is answered, expires, or the deadline passes.
+// Ctrl+C (SIGINT) or SIGTERM (an agent host's tool timeout, for example) stops the wait. The
+// hold is recorded before any wait starts, so the run then exits held and a later run of the
+// command picks up the answer on the same receipt.
 async function waitForOwnerAnswer(options, gateReceiptId, pollAfterMs, deadline, io) {
   const minPoll = Number.isFinite(io.approvalPollMs) ? io.approvalPollMs : APPROVAL_STATUS_MIN_POLL_MS;
   let pollMs = Math.max(minPoll, Math.min(pollAfterMs, APPROVAL_STATUS_MAX_POLL_MS));
-  for (;;) {
-    const status = await readHoldStatus(options, gateReceiptId);
-    if (!WAITING_STATES.has(status.state)) return status;
-    if (Number.isFinite(status.pollAfterMs) && status.pollAfterMs > 0) pollMs = Math.max(minPoll, Math.min(status.pollAfterMs, APPROVAL_STATUS_MAX_POLL_MS));
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) return { state: 'timeout' };
-    await sleep(Math.min(pollMs, remaining));
+  const stop = waitInterruption(io);
+  try {
+    for (;;) {
+      const status = await readHoldStatus(options, gateReceiptId, stop.signal);
+      if (stop.signal.aborted) return { state: 'interrupted', signal: stop.reason };
+      if (!WAITING_STATES.has(status.state)) return status;
+      if (Number.isFinite(status.pollAfterMs) && status.pollAfterMs > 0) pollMs = Math.max(minPoll, Math.min(status.pollAfterMs, APPROVAL_STATUS_MAX_POLL_MS));
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return { state: 'timeout' };
+      await abortableSleep(Math.min(pollMs, remaining), stop.signal);
+      if (stop.signal.aborted) return { state: 'interrupted', signal: stop.reason };
+    }
+  } finally {
+    stop.release();
   }
+}
+
+// SIGINT and SIGTERM while a run waits: they stop the wait instead of killing the process.
+function waitInterruption(io = {}) {
+  const target = io.signals || process;
+  const controller = new AbortController();
+  const stop = { signal: controller.signal, reason: null, release: () => {} };
+  const handlers = ['SIGINT', 'SIGTERM'].map((name) => {
+    const handler = () => {
+      if (!stop.reason) stop.reason = name;
+      controller.abort();
+    };
+    target.on(name, handler);
+    return [name, handler];
+  });
+  stop.release = () => {
+    for (const [name, handler] of handlers) target.removeListener(name, handler);
+  };
+  return stop;
+}
+
+function abortableSleep(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    let timer = null;
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    };
+    timer = setTimeout(done, ms);
+    signal.addEventListener('abort', done, { once: true });
+  });
 }
 
 // A gate denial report closes trusted only with its receipt and no proof: there is no
@@ -1450,8 +1512,9 @@ async function resolveHold(options, hold, context) {
   });
   const remember = (extra = {}) => records?.write(context.holdKey, { ...recordBase(), state: 'waiting', ...extra });
   const refused = (message, extra = {}) => ({ approved: false, exitCode: 12, message, approval: summary(extra) });
+  const linkFields = () => (state.channel ? { link_sent_at: state.linkSentAt || new Date().toISOString(), link_expires_at: state.expiresAt } : {});
   const held = (message, extra = {}) => {
-    remember(state.channel ? { link_sent_at: new Date().toISOString(), link_expires_at: state.expiresAt } : {});
+    remember(linkFields());
     return refused(message, { state: 'held', ...extra });
   };
   const denial = async (message, outcome, declinedBy, extra) => {
@@ -1534,6 +1597,7 @@ async function resolveHold(options, hold, context) {
     const link = await requestOwnerLink(options, hold.gateReceiptId, decisionIds.decisionId, state, io);
     if (link.sent) {
       linkSent = true;
+      state.linkSentAt = new Date().toISOString();
       say(`An approval link was sent to the account owner (${state.channel}). It works once${state.expiresAt ? `, until ${state.expiresAt}` : ''}.`);
     } else if (!link.quiet) {
       remember();
@@ -1553,6 +1617,9 @@ async function resolveHold(options, hold, context) {
       ? 'It is held until the owner approves it, and nothing ran. Rerun this command after they answer; it picks up this hold.'
       : quietHoldText(hold, interactive), linkAvailable && !linkSent ? { link: 'not_sent' } : {});
   }
+  // Recorded before the wait: Ctrl+C, or a kill such as an agent host's tool timeout, leaves the
+  // hold for the next run, which reuses this receipt and this link (no new email).
+  remember(linkFields());
   say(linkSent
     ? 'Waiting for the owner\'s answer. Ctrl+C stops waiting; a later run of this command picks up the answer.'
     : 'Waiting for a person to approve it. Ctrl+C stops waiting; a later run of this command picks up the answer.');
@@ -1581,6 +1648,9 @@ async function finishOwnerAnswer(answer, ctx) {
     return denial(hold.kind === 'arbitration' ? 'The account owner approved none of the proposals. The action did not run.' : 'The approval was declined. The action did not run.',
       hold.kind === 'arbitration' ? 'Denied by Marrow pre-action gate: the account owner approved none of the proposals.' : 'Denied by Marrow pre-action gate: the account owner declined.',
       answer.answeredBy === 'account_owner' || hold.kind === 'arbitration' ? 'account_owner' : 'operator', { state: 'declined' });
+  }
+  if (answer.state === 'interrupted') {
+    return held('Stopped waiting. Nothing ran; it stays held, and a later run of this command picks up the answer on the same receipt.', { state: 'interrupted' });
   }
   if (answer.state === 'timeout') {
     return held(ctx.linkDeadline && Date.now() >= ctx.linkDeadline - 1000
@@ -1654,8 +1724,9 @@ async function resumeRecordedHold(options, records, holdKey, io = {}) {
   const summary = (extra = {}) => ({ gate_receipt_id: record.gate_receipt_id, resumed: true, link_requests: state.linkRequests, ...(state.channel ? { channel: state.channel, expires_at: state.expiresAt } : {}), ...extra });
   const refusedHere = (message, extra = {}) => ({ approved: false, exitCode: 12, message, approval: summary(extra) });
   const keep = (extra = {}) => records.write(holdKey, { ...record, ...extra });
+  const linkFieldsHere = () => (state.channel ? { link_sent_at: state.linkSentAt || new Date().toISOString(), link_expires_at: state.expiresAt } : {});
   const heldHere = (message, extra = {}) => {
-    keep(state.channel ? { link_sent_at: new Date().toISOString(), link_expires_at: state.expiresAt } : {});
+    keep(linkFieldsHere());
     return refusedHere(message, { state: 'held', ...extra });
   };
   const denialHere = async (message, outcome, declinedBy, extra) => {
@@ -1701,7 +1772,10 @@ async function resumeRecordedHold(options, records, holdKey, io = {}) {
   if (hold.linkAvailable && hold.linkReason !== 'unattended_owner_ping' && linkExpired) {
     state.source = 'owner_link';
     const link = await requestOwnerLink(holdOptions, record.gate_receipt_id, decisionIds.decisionId, state, io);
-    if (link.sent) say(`An approval link was sent to the account owner (${state.channel}). It works once${state.expiresAt ? `, until ${state.expiresAt}` : ''}.`);
+    if (link.sent) {
+      state.linkSentAt = new Date().toISOString();
+      say(`An approval link was sent to the account owner (${state.channel}). It works once${state.expiresAt ? `, until ${state.expiresAt}` : ''}.`);
+    }
   }
   const deadlineAt = state.expiresAt ? Date.parse(state.expiresAt) : record.link_expires_at ? Date.parse(record.link_expires_at) : null;
   const waitSeconds = options.approvalWaitSeconds;
@@ -1713,6 +1787,8 @@ async function resumeRecordedHold(options, records, holdKey, io = {}) {
       ? 'It is held until a person approves it, and nothing ran. Rerun this command in an interactive terminal to approve it there.'
       : 'It stays held until the account owner approves it, and nothing ran. Rerun this command after they answer.'));
   }
+  // A new link is recorded before the wait, so a stopped or killed run leaves it for the next.
+  if (state.channel) keep(linkFieldsHere());
   say('Waiting for the owner\'s answer. Ctrl+C stops waiting; a later run of this command picks up the answer.');
   const answer = await waitForOwnerAnswer(holdOptions, record.gate_receipt_id, 3_000, Date.now() + wait, io);
   ctx.linkDeadline = deadlineAt;

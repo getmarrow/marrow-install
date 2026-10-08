@@ -6,6 +6,7 @@ const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
+const { EventEmitter } = require('node:events');
 const test = require('node:test');
 const PINS = require('../src/pins');
 const installer = require('../src/installer');
@@ -750,6 +751,7 @@ function fakeMarrow(scenario) {
       statusIndex += 1;
       const view = typeof entry === 'string' ? { state: entry } : entry;
       if (view.state === 'http404') return Response.json({ error: 'Gate receipt not found.', details: { code: 'MARROW_GATE_RECEIPT_NOT_FOUND' } }, { status: 404 });
+      if (view.state === 'http503') return Response.json({ error: 'Approval state is unavailable.', details: { code: 'MARROW_OWNER_APPROVAL_STATE_UNAVAILABLE', retryable: true } }, { status: 503 });
       const approved = view.state === 'approved';
       return Response.json({ data: { gate_receipt_id: RECEIPT, approval_source: approved ? 'one_tap' : null, approval_answered_by: approved || view.state === 'declined' ? 'account_owner' : null, poll_after_ms: 20, exact_next_action: 'Dashboard o…@example.test', ...view } });
     }
@@ -1190,6 +1192,143 @@ test('runner: arbitration asks the owner by link, runs only with a permit for th
   assert.equal('proof' in noneCommit && noneCommit.proof !== undefined, false);
 });
 
+test('runner: Ctrl+C or SIGTERM while waiting stops only the wait; the hold is recorded first, and the next run reuses the receipt and link', async () => {
+  const owner = { host_approval_accepted: false, host_approval_refusal_reason: 'verified_approval_required', ...LINKED };
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    const home = freshHome();
+    const signals = new EventEmitter();
+    let output = '';
+    let recordAtWait = null;
+    const sink = {
+      isTTY: false,
+      write: (chunk) => {
+        output += String(chunk);
+        if (/Waiting for the owner's answer/.test(String(chunk))) {
+          // What a kill at this moment would leave behind.
+          const [file] = recordFiles(home);
+          recordAtWait = file ? JSON.parse(fs.readFileSync(file, 'utf8')) : null;
+          setTimeout(() => signals.emit(signal), 30);
+        }
+        return true;
+      },
+    };
+    const first = await runHeld({ runtime: holdRuntime(owner), statuses: ['pending'] }, ['--approval-wait', '600'], { home, signals, stderr: sink });
+    assert.equal(first.ran, false, signal);
+    assert.equal(first.result.exitCode, 12, signal);
+    assert.equal(first.result.approval.state, 'interrupted');
+    assert.match(first.result.message, /^Stopped waiting\. Nothing ran; it stays held, and a later run of this command picks up the answer on the same receipt\.$/);
+    assert.ok(recordAtWait, 'the hold was recorded before the wait started');
+    assert.equal(recordAtWait.state, 'waiting');
+    assert.equal(recordAtWait.gate_receipt_id, RECEIPT);
+    assert.ok(Date.parse(recordAtWait.link_sent_at) <= Date.now() && Date.parse(recordAtWait.link_expires_at) > Date.now(), 'with the link it already sent');
+    assert.equal(signals.listenerCount('SIGINT') + signals.listenerCount('SIGTERM'), 0, 'the wait gives the signals back');
+    assert.equal(routeCalls(first.calls, '/approval-link').length, 1);
+    assert.equal(routeCalls(first.calls, '/v1/agent/commit').length, 0, 'a stopped wait closes nothing');
+    if (signal === 'SIGINT') {
+      // A rerun whose link ran out asks for a new one and records it before it waits, so a
+      // stopped rerun leaves the new link for the run after it.
+      const [file] = recordFiles(home);
+      const stored = JSON.parse(fs.readFileSync(file, 'utf8'));
+      fs.writeFileSync(file, JSON.stringify({ ...stored, link_expires_at: new Date(Date.now() - 1_000).toISOString() }));
+      const resumedSignals = new EventEmitter();
+      const resumedSink = { isTTY: false, write: (chunk) => { if (/Waiting for the owner's answer/.test(String(chunk))) setTimeout(() => resumedSignals.emit('SIGINT'), 30); return true; } };
+      const resumed = await runHeld({ runtime: holdRuntime(owner), statuses: ['pending'] }, ['--approval-wait', '600'], { home, signals: resumedSignals, stderr: resumedSink });
+      assert.equal(routeCalls(resumed.calls, '/v1/agent/runtime').length, 0);
+      assert.equal(routeCalls(resumed.calls, '/approval-link').length, 1, 'the expired link is asked for again');
+      assert.equal(resumed.result.exitCode, 12);
+      assert.equal(resumed.result.approval.state, 'interrupted');
+      const kept = JSON.parse(fs.readFileSync(recordFiles(home)[0], 'utf8'));
+      assert.ok(Date.parse(kept.link_expires_at) > Date.now(), 'the new link is on record');
+      assert.equal(resumedSignals.listenerCount('SIGINT'), 0);
+    }
+    // The owner approved meanwhile: the next run picks it up on the same receipt, with no new link.
+    const next = await runHeld({ runtime: holdRuntime(owner), statuses: ['approved'] }, [], { home });
+    assert.equal(routeCalls(next.calls, '/v1/agent/runtime').length, 0, signal);
+    assert.equal(routeCalls(next.calls, '/approval-link').length, 0, signal);
+    assert.equal(next.ran, true, signal);
+    assert.equal(routeCalls(next.calls, '/v1/agent/commit')[0].body.gate_receipt_id, RECEIPT);
+    assert.deepEqual(recordFiles(home), []);
+    for (const pattern of FORBIDDEN_OUTPUT) assert.doesNotMatch(output, pattern);
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('runner: a resumed hold stays protected, an unreadable status never counts as waiting, and an arbitration approval needs its owner receipt', async () => {
+  // N02: a resumed hold of an action the runner would not protect still never degrades into running.
+  const plain = ['--type', 'general', '--action', 'tidy notes', '--fail-open'];
+  const approved = { state: 'approved', owner_approval_receipt_id: OWNER_RECEIPT, approval_source: 'one_tap', approval_answered_by: 'account_owner' };
+  const home = freshHome();
+  const first = await runHeld({ runtime: arbitrationRuntime(), statuses: ['arbitration_review'] }, plain, { home });
+  assert.equal(first.result.exitCode, 12);
+  assert.equal(recordFiles(home).length, 1);
+  const refused = await runHeld({ runtime: arbitrationRuntime(), statuses: [approved], permitRefused: true }, plain, { home });
+  assert.equal(routeCalls(refused.calls, '/v1/agent/runtime').length, 0, 'resumed');
+  assert.equal(refused.ran, false, 'a refused permit on a resumed hold never degrades into running');
+  assert.equal(refused.result.exitCode, 13);
+  assert.match(refused.result.message, /^Marrow refused the permit/);
+  fs.rmSync(home, { recursive: true, force: true });
+
+  // N11: a resumed hold whose status cannot be read is held, with no prompt and no report.
+  const unreadableHome = freshHome();
+  await runHeld({ runtime: holdRuntime(), statuses: ['pending'] }, [], { home: unreadableHome });
+  let prompted = 0;
+  const unreadable = await runHeld({ runtime: holdRuntime(), statuses: ['http503'] }, [], { home: unreadableHome, approvalPrompt: () => { prompted += 1; return 'y'; } });
+  assert.equal(unreadable.ran, false);
+  assert.equal(unreadable.result.exitCode, 12);
+  assert.equal(prompted, 0, 'no prompt when Marrow cannot say the hold is still waiting');
+  assert.equal(routeCalls(unreadable.calls, '/host-approval').length, 0);
+  assert.equal(unreadable.result.approval.state, 'state_unavailable');
+  assert.match(unreadable.result.message, /its approval state could not be read, so nothing ran/);
+  assert.equal(recordFiles(unreadableHome).length, 1, 'the hold is kept for a later run');
+  fs.rmSync(unreadableHome, { recursive: true, force: true });
+
+  // N16: an arbitration reported approved without the owner's approval receipt never asks for a permit.
+  const incomplete = await runHeld({ runtime: arbitrationRuntime(), statuses: [{ state: 'approved', approval_source: 'one_tap', approval_answered_by: 'account_owner' }] }, ['--approval-wait', '5']);
+  assert.equal(incomplete.ran, false);
+  assert.equal(incomplete.result.exitCode, 12);
+  assert.equal(incomplete.result.approval.state, 'approval_incomplete');
+  assert.match(incomplete.result.message, /approved without an owner approval receipt, so nothing ran/);
+  assert.equal(incomplete.calls.some((call) => call.pathname === '/v1/agent/enforcement'), false, 'no permit request');
+  assert.equal(routeCalls(incomplete.calls, '/v1/agent/commit').length, 0);
+});
+
+test('runner: --policy warn|audit and MARROW_GOVERN_POLICY never loosen a gate Marrow enforces; only an advisory gate runs', async () => {
+  for (const allow of [false, true, undefined]) {
+    const runtime = holdRuntime();
+    if (allow === undefined) delete runtime.risk_gate.allow;
+    else runtime.risk_gate.allow = allow;
+    for (const policy of ['audit', 'warn']) {
+      const plain = ['--type', 'general', '--action', 'tidy notes', '--policy', policy];
+      const run = await runHeld({ runtime }, plain);
+      assert.equal(run.ran, false, `${policy} allow ${allow}`);
+      assert.equal(run.result.exitCode, 12, `${policy} allow ${allow}`);
+      assert.equal(run.result.approval.state, 'held', `${policy} allow ${allow}`);
+    }
+  }
+  const enforcedBlock = runner.gateDecision({ risk_gate: { decision: 'block', enforced: true, allow: true } });
+  const enforcedHold = runner.gateDecision({ risk_gate: { decision: 'review_required', enforced: true, allow: true } });
+  const unreported = runner.gateDecision({ risk_gate: { decision: 'review_required', allow: true } });
+  const advisory = runner.gateDecision({ risk_gate: { decision: 'review_required', enforced: false, allow: true } });
+  for (const policy of ['enforce', 'warn', 'audit']) {
+    assert.equal(runner.shouldBlock(enforcedBlock, { policy }), true, `${policy} block`);
+    assert.equal(runner.shouldBlock(enforcedHold, { policy }), true, `${policy} hold`);
+    assert.equal(runner.shouldBlock(unreported, { policy }), true, `${policy} hold without enforcement reported`);
+    assert.equal(runner.shouldBlock(advisory, { policy }), false, `${policy} advisory`);
+  }
+  // The environment default the controller uses (MARROW_GOVERN_POLICY=warn) holds as well.
+  const previous = process.env.MARROW_GOVERN_POLICY;
+  process.env.MARROW_GOVERN_POLICY = 'warn';
+  try {
+    const run = await runHeld({ runtime: holdRuntime() }, ['--type', 'general', '--action', 'tidy notes']);
+    assert.equal(run.parsed.options.policy, 'warn');
+    assert.equal(run.ran, false);
+    assert.equal(run.result.exitCode, 12);
+  } finally {
+    if (previous === undefined) delete process.env.MARROW_GOVERN_POLICY;
+    else process.env.MARROW_GOVERN_POLICY = previous;
+  }
+});
+
 test('runner: an older Marrow service without terminal approvals holds and says so, with no prompt and no link', async () => {
   const legacy = holdRuntime();
   legacy.completion_contract.owner_approval = { mode: 'ordinary_non_arbitrated', dashboard_receipt_required: false, proof_path: null };
@@ -1317,6 +1456,73 @@ function runCli(args, env) {
     child.on('close', (code) => resolve({ code, output, stdout }));
   });
 }
+
+test('runner CLI waiting on the owner: SIGTERM exits 12 held, a kill leaves the hold, and the next run picks up the approval with no new link', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-ha-kill-'));
+  fs.chmodSync(dir, 0o700);
+  const key = `mrw_test_${crypto.randomBytes(16).toString('hex')}`;
+  const owner = { host_approval_accepted: false, host_approval_refusal_reason: 'verified_approval_required', ...LINKED };
+  let approvedNow = false;
+  try {
+    await withServer((url) => {
+      if (url === '/v1/agent/runtime') return { json: { data: holdRuntime(owner) } };
+      if (url === `/v1/agent/gate-receipts/${RECEIPT}/approval-link`) return { json: { data: { sent: true, state: 'sent', reason: 'owner_locked', approval_link: { channel: 'email', expires_at: new Date(Date.now() + 600_000).toISOString() } } } };
+      if (url === `/v1/agent/gate-receipts/${RECEIPT}/owner-approval`) return { json: { data: { state: approvedNow ? 'approved' : 'pending', approval_source: 'one_tap', approval_answered_by: 'account_owner', poll_after_ms: 1000 } } };
+      if (url === '/v1/agent/commit') return { json: { data: { committed: true } } };
+      return { json: { data: {} } };
+    }, async (baseUrl, seen) => {
+      const marker = path.join(dir, 'ran');
+      const env = { PATH: process.env.PATH, HOME: dir, MARROW_API_KEY: key, MARROW_BASE_URL: baseUrl };
+      const args = ['run', '--type', 'deploy', '--action', 'deploy production', '--approval-wait', '600', '--', process.execPath, '-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`];
+      const waitThenSignal = (signal) => new Promise((resolve) => {
+        const child = spawn(process.execPath, [BIN, ...args], { env, cwd: dir, stdio: ['pipe', 'pipe', 'pipe'] });
+        let output = '';
+        let sent = false;
+        const onData = (chunk) => {
+          output += chunk;
+          if (!sent && /Waiting for the owner's answer/.test(output)) {
+            sent = true;
+            setTimeout(() => child.kill(signal), 200);
+          }
+        };
+        child.stdout.on('data', onData);
+        child.stderr.on('data', onData);
+        child.stdin.end();
+        const guard = setTimeout(() => child.kill('SIGKILL'), 60_000);
+        child.on('close', (code, closedBy) => { clearTimeout(guard); resolve({ code, signal: closedBy, output, sent }); });
+      });
+      const records = () => fs.existsSync(path.join(dir, '.marrow', 'runner-holds'))
+        ? fs.readdirSync(path.join(dir, '.marrow', 'runner-holds')).filter((name) => name.endsWith('.json')) : [];
+
+      const term = await waitThenSignal('SIGTERM');
+      assert.equal(term.sent, true);
+      assert.equal(term.code, 12, term.output);
+      assert.match(term.output, /Stopped waiting\. Nothing ran; it stays held/);
+      assert.equal(fs.existsSync(marker), false);
+      assert.equal(records().length, 1);
+
+      const killed = await waitThenSignal('SIGKILL');
+      assert.equal(killed.signal, 'SIGKILL');
+      assert.equal(records().length, 1, 'a killed wait leaves the hold');
+      assert.equal(seen.filter((call) => call.url === '/v1/agent/runtime').length, 1, 'one receipt across all runs');
+      assert.equal(seen.filter((call) => call.url.endsWith('/approval-link')).length, 1, 'one link (one email) across all runs');
+
+      approvedNow = true;
+      const done = await runCli(args, env);
+      assert.equal(done.code, 0, done.output);
+      assert.equal(fs.existsSync(marker), true);
+      assert.equal(seen.filter((call) => call.url === '/v1/agent/runtime').length, 1);
+      assert.equal(seen.filter((call) => call.url.endsWith('/approval-link')).length, 1);
+      assert.equal(records().length, 0);
+      for (const run of [term, killed, done]) {
+        assert.equal(run.output.includes(key), false);
+        for (const pattern of FORBIDDEN_OUTPUT) assert.doesNotMatch(run.output, pattern);
+      }
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('runner CLI without a terminal: real processes hold quietly, pick the hold up on rerun, never prompt, and print no link, token or address', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-ha-cli-'));

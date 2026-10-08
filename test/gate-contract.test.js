@@ -155,7 +155,8 @@ test('gate normalization reads slim and expanded runtime answers identically (F-
   assert.equal(shouldBlock(enforced, { policy: 'enforce', ownerApproval: '' }), true);
   // A caller-supplied approval reference never unblocks a hold: only an approval Marrow recorded does.
   assert.equal(shouldBlock(enforced, { policy: 'enforce', ownerApproval: 'owner-approval-ref' }), true);
-  assert.equal(shouldBlock(enforced, { policy: 'audit', ownerApproval: '' }), false);
+  // A local audit policy never loosens a gate Marrow enforces.
+  assert.equal(shouldBlock(enforced, { policy: 'audit', ownerApproval: '' }), true);
 
   const notCreated = gateDecision({ ...SHAPES.slimAdvisory, decision_id: undefined, runtime_authorization: { id: 'gr_x', decision_state: 'not_created' } });
   assert.equal(notCreated.runtimeDecisionId, '');
