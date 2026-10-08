@@ -1,8 +1,8 @@
 # Changelog
 
-Release notes for `@getmarrow/install`, newest first. The README keeps only the notes for the current version; older notes live here as they were written at the time. Package integrity values are public npm registry metadata.
+Release notes for `@getmarrow/install`, newest first. The README describes only the current version.
 
-## Unreleased (the version is not bumped yet)
+## Unreleased (next version; the version number changes at release)
 
 - **Approvals in chat and terminal.** With MCP `3.9.99` or later, install and update add the approval hooks for Claude Code (`PermissionRequest`, `PostToolBatch`), Cursor (shell and MCP execution hooks with `failClosed` and a 15-second timeout, `sessionStart`, `beforeSubmitPrompt`; MCP calls stay gated in `preToolUse` for cloud agents, and Marrow's own tools pass a small guard at once) and Gemini CLI (`BeforeAgent`); Codex keeps its prompt hook. With MCP `3.9.98` the earlier layout stays as it was.
 - **Governed runner holds.** A held `run` asks the operator once at an interactive terminal. With nobody present (no terminal, `CI`, `--no-interactive`, or an agent's own terminal) it holds quietly and sends nothing, unless Marrow says the owner's one-tap link would be sent (owner-locked categories, arbitration, the owner's decline on request, or unattended pings the owner turned on). Reruns of the same command pick the hold up on the same gate receipt, with no new email; an approval that arrived later runs once. The hold is recorded before any wait, so Ctrl+C or a kill stops only the wait (exit 12). Declines stand for 30 minutes. Arbitration asks the owner by one-tap link and runs only on a permit for this exact action; arbitration links tell the service `person_present: true` only when a person at this terminal runs it, and a live link is waited on instead of sent again. `--owner-approved` no longer does anything.

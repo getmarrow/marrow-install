@@ -23,8 +23,12 @@ const governanceSignals = [
 test('npm entry point matches the product positioning contract', () => {
   assert.match(pkg.description, /governed runner/i);
   assert.ok(readme.includes(canonical));
-  assert.ok(readme.includes(`## What's New in v${pkg.version}`));
-  assert.equal((readme.match(/^## What's New in v/gm) || []).length, 1);
+  // One What's New: the published version's, or, while CHANGELOG.md starts with the
+  // unreleased entry, the next version's (named at release).
+  const whatsNewHeadings = readme.match(/^## What's New in .*$/gm) || [];
+  assert.equal(whatsNewHeadings.length, 1);
+  const unreleased = /^## Unreleased/m.test(fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8'));
+  assert.ok(whatsNewHeadings[0] === `## What's New in v${pkg.version}` || (unreleased && whatsNewHeadings[0] === "## What's New in the next version"), whatsNewHeadings[0]);
   assert.equal(pkg.marrow.category, 'agent_fleet_governance_and_control_layer');
   assert.equal(pkg.marrow.positioning, 'agent_fleet_governance_and_control_layer');
   assert.equal(pkg.marrow.operatorApprovalRequired, true);
@@ -84,11 +88,10 @@ test('README documents chat and terminal approvals and never makes a dashboard l
   assert.doesNotMatch(readme, /log in to the dashboard to approve|approve (?:it )?in the dashboard/i);
   // The What's New rule: only the current version is in the README; changes since then and every
   // older note are in CHANGELOG.md, which the README links (on GitHub, as npm does not ship it).
-  const whatsNewStart = readme.indexOf(`## What's New in v${pkg.version}`);
+  const whatsNewStart = readme.indexOf("## What's New in ");
   const whatsNew = readme.slice(whatsNewStart, readme.indexOf('\n## ', whatsNewStart + 1));
-  assert.doesNotMatch(whatsNew, /Next release|Previous release/);
-  assert.match(whatsNew, new RegExp(`### v${pkg.version.replaceAll('.', '\\.')}`));
-  assert.match(readme, /https:\/\/github\.com\/getmarrow\/marrow-install\/blob\/master\/CHANGELOG\.md/);
+  assert.doesNotMatch(whatsNew, /Previous release|^### v/m, 'one entry, no older versions');
+  assert.match(whatsNew, /https:\/\/github\.com\/getmarrow\/marrow-install\/blob\/master\/CHANGELOG\.md/);
   const changelog = fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8');
   assert.match(changelog, /^## Unreleased/m);
   assert.match(changelog, new RegExp(`^## v${pkg.version.replaceAll('.', '\\.')}$`, 'm'));
