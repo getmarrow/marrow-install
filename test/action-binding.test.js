@@ -637,3 +637,90 @@ test('security review: an unknown option is named only when it is a plain option
   assert.equal(argumentLabel(`--${S1.toUpperCase()}`), '(an option that is not known; not shown)');
   assert.equal(argumentLabel(S1), '(a value that is not an option; not shown)');
 });
+
+// Security re-review (round 4) N1-N6: multi-line values, secrets inside nested quoted commands,
+// many argv words, terminal control sequences, settings that only look like secrets, and quoted
+// headers with more after the value.
+test('security re-review N1: multi-line secret values are redacted whole', () => {
+  const lines = [1, 2, 3].map(() => `q${crypto.randomBytes(8).toString('hex')}`);
+  const none = (text) => assert.equal(lines.some((line) => text.includes(line)), false, 'a secret line survived');
+  // A key block (the marker is built here; any BEGIN/END block counts).
+  const begin = ['-----BEGIN', 'TEST', 'KEY-----'].join(' ');
+  const end = ['-----END', 'TEST', 'KEY-----'].join(' ');
+  const block = `${begin}\n${lines.join('\n')}\n${end}`;
+  for (const [text, mode, kept] of [
+    [`KEY="${block}" ./deploy --env prod`, 'script', './deploy --env prod'],
+    [`export TOKEN='${lines[0]}\n${lines[1]}' && deploy`, 'script', 'deploy'],
+    [`TOKEN="${lines[0]}\n${lines[1]}" deploy`, 'text', 'deploy'],
+    [`PRIVATE_KEY=${block}`, 'word', 'PRIVATE_KEY='],
+    [`SSH_KEY=${lines.join('\n')}==\n`, 'word', 'SSH_KEY='],
+    [`password: |\n  ${lines[0]}\n  ${lines[1]}\nenv: prod\n`, 'text', 'env: prod'],
+    [`password: >-\n    ${lines[0]}\n    ${lines[1]}\nhost: prod\n`, 'word', 'host: prod'],
+  ]) {
+    const out = runner.redact(text, mode);
+    none(out);
+    assert.ok(out.includes(kept), `${mode}: ${kept}`);
+  }
+  // A new setting on the next line still ends the value in an argv word.
+  assert.equal(runner.redact(`password: ${lines[0]}\nenv: production`, 'word'), 'password: [redacted]\nenv: production');
+  assert.equal(runner.redact(`TOKEN=${lines[0]}\nENV=prod`, 'word'), 'TOKEN=[redacted]\nENV=prod');
+  none(runner.redactedCommand(['env', `PRIVATE_KEY=${block}`, 'deploy']));
+  none(runner.redactedCommand(['kubectl', 'create', 'secret', 'generic', 'x', `--from-literal=key=${lines.join('\n')}`]));
+});
+
+test('security re-review N2: a secret inside a nested quoted command keeps that command visible', () => {
+  const pairs = [
+    [C('bash', '-c', `ssh host 'export TOKEN=${S1}; rm -rf /data'`), C('bash', '-c', `ssh host 'export TOKEN=${S1}; ls /data'`)],
+    [C('bash', '-c', `docker exec app sh -c "TOKEN=${S1} && kubectl delete ns prod"`), C('bash', '-c', `docker exec app sh -c "TOKEN=${S1} && kubectl get ns prod"`)],
+    [C('ssh', 'host', `export TOKEN=${S1}; rm -rf /data`), C('ssh', 'host', `export TOKEN=${S1}; ls /data`)],
+    [C('ssh', '-i', 'k', 'host', `TOKEN=${S1} deploy --prod`), C('ssh', '-i', 'k', 'host', `TOKEN=${S1} deploy --dev`)],
+    [C('su', '-c', `TOKEN=${S1}; reboot`), C('su', '-c', `TOKEN=${S1}; uptime`)],
+    [C('eval', `TOKEN=${S1}; rm -rf x`), C('eval', `TOKEN=${S1}; ls x`)],
+  ];
+  for (const [a, b] of pairs) {
+    const A = shape(a);
+    const B = shape(b);
+    assert.notEqual(A.holdKey, B.holdKey);
+    assert.equal(sameBinding(A, B), false, A.commandText);
+    assert.equal(secretCount(A.commandText + B.commandText), 0);
+  }
+  for (const [a, b] of [
+    [`bash -c 'export TOKEN=${S1}; kubectl delete ns prod'`, `bash -c 'export TOKEN=${S1}; kubectl get ns prod'`],
+    [`curl -H "X-Api-Key: ${S1}, env: prod" https://x`, `curl -H "X-Api-Key: ${S1}, env: staging" https://x`],
+  ]) {
+    assert.notEqual(runner.redact(a), runner.redact(b), a.replace(S1, '<S>'));
+    assert.equal(secretCount(runner.redact(a)), 0);
+  }
+  // A plain value with a space stays one value in an argv word that holds no command.
+  assert.equal(runner.redactedCommand(['docker', 'run', '-e', `DB_PASSWORD=${S1} ${S2}`, 'app']), "docker run -e 'DB_PASSWORD=[redacted]' app");
+});
+
+test('security re-review N3/N4: many argv words and control sequences stay fast', () => {
+  for (const argv of [Array.from({ length: 40000 }, () => 'a'), Array.from({ length: 4000 }, () => '-c'), ['bash', ...Array.from({ length: 20000 }, () => '-x'), '-c', 'TOKEN=x; ls']]) {
+    const started = process.hrtime.bigint();
+    runner.redactedCommand(argv);
+    const ms = Number(process.hrtime.bigint() - started) / 1e6;
+    assert.ok(ms < 3000, `${argv.length} words took ${Math.round(ms)} ms`);
+  }
+  for (const input of ['\u001b]'.repeat(131072), '\u009d'.repeat(262144), '\u001b[1m'.repeat(65536)]) {
+    const started = process.hrtime.bigint();
+    runner.redact(input);
+    const ms = Number(process.hrtime.bigint() - started) / 1e6;
+    assert.ok(ms < 2000, `control input took ${Math.round(ms)} ms`);
+  }
+});
+
+test('security re-review N5/N6 and residuals: settings that look like secrets, Digest, --token -X', () => {
+  assert.equal(runner.redactedCommand(['docker', 'run', '-u', '1000:0', 'app']), 'docker run -u 1000:0 app');
+  assert.notEqual(runner.redactedCommand(['docker', 'run', '-u', '1000:0', 'app']), runner.redactedCommand(['docker', 'run', '-u', '1000:1000', 'app']));
+  assert.equal(runner.redact('docker run -u 1000:0 app'), 'docker run -u 1000:0 app');
+  assert.equal(runner.redactedCommand(['gcloud', 'config', 'set', 'auth/disable_credentials', 'true']), 'gcloud config set auth/disable_credentials true');
+  assert.notEqual(runner.redact('gcloud config set auth/disable_credentials true'), runner.redact('gcloud config set auth/disable_credentials false'));
+  assert.equal(runner.redact(`curl -u deploy:${S1} https://x`), 'curl -u deploy:[redacted] https://x');
+  const digest = runner.redact(`curl -H 'Authorization: Digest username="u", response="${S1}"' https://x/prod`);
+  assert.equal(digest, "curl -H 'Authorization: Digest [redacted]' https://x/prod");
+  const dashed = `-${crypto.randomBytes(12).toString('hex')}Ab`;
+  assert.equal(runner.redact(`tool --token ${dashed} --env prod`), 'tool --token [redacted] --env prod');
+  assert.equal(runner.redactedCommand(['tool', '--token', dashed, '--env', 'prod']), 'tool --token [redacted] --env prod');
+  assert.equal(runner.redact('tool --token --dry-run'), 'tool --token --dry-run');
+});

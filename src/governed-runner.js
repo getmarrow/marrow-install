@@ -235,8 +235,9 @@ const aheadAt = (pattern, text, index) => {
   return pattern.test(text);
 };
 
-// Shell quoting in 'text' and 'script' modes: each closed quoted region on one line, as
-// [open, close] (close is the index of the closing quote). An unclosed quote is a literal.
+// Shell quoting in 'text' and 'script' modes: each closed quoted region, as [open, close]
+// (close is the index of the closing quote). As in the shell, a region may span lines; an
+// unclosed quote is a literal.
 function quoteRegions(text, mode) {
   const regions = [];
   if (mode === 'word') return regions;
@@ -249,7 +250,7 @@ function quoteRegions(text, mode) {
     }
     if (char === "'" || char === '"') {
       let at = index + 1;
-      while (at < text.length && text[at] !== char && text[at] !== '\n') at += char === '"' && text[at] === '\\' ? 2 : 1;
+      while (at < text.length && text[at] !== char) at += char === '"' && text[at] === '\\' ? 2 : 1;
       if (at < text.length && text[at] === char) {
         regions.push([index, at]);
         index = at + 1;
@@ -288,14 +289,49 @@ function regionFinder(regions) {
   };
 }
 
-// Where a value starting at `start` (outside quotes) ends.
-function valueEnd(text, start, mode, regions) {
+// A PEM block is one value from its BEGIN line through its END line, spaces and lines included.
+// END markers are found once per text, so many BEGIN lines stay linear.
+const PEM_BEGIN_RE = /-----BEGIN [A-Z0-9 ]{1,64}-----/y;
+let pemEndsCache = { text: null, ends: [] };
+function pemEnd(text, start, limit) {
+  if (!aheadAt(PEM_BEGIN_RE, text, start)) return -1;
+  if (pemEndsCache.text !== text) {
+    const ends = [];
+    const pattern = /-----END [A-Z0-9 ]{1,64}-----/g;
+    let match;
+    while ((match = pattern.exec(text)) !== null) ends.push(match.index + match[0].length);
+    pemEndsCache = { text, ends };
+  }
+  const { ends } = pemEndsCache;
+  let low = 0;
+  let high = ends.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (ends[middle] <= start + 11) low = middle + 1;
+    else high = middle;
+  }
+  return low < ends.length && ends[low] <= limit ? ends[low] : -1;
+}
+
+// In an argv word, a new line starts a new setting only when it reads like one (`name: ...`,
+// `- name: ...`, `name=value`); other lines (a key body, base64 with = padding) continue the value.
+const NEXT_LINE_SETTING_RE = /[ \t]*(?:-[ \t]+)?(?:[A-Za-z_][A-Za-z0-9_.-]*[ \t]*:(?=[ \t\r\n]|$)|[A-Za-z_][A-Za-z0-9_.-]*=(?=[^=\r\n]))/y;
+
+// Where a value starting at `start` ends, scanning no further than `limit` (the closing quote
+// when the value starts inside quotes).
+function valueEnd(text, start, mode, regions, limit = text.length) {
+  const pem = pemEnd(text, start, limit);
+  if (pem !== -1) return pem;
   let index = start;
-  while (index < text.length) {
+  while (index < limit) {
     const char = text[index];
     const next = index + 1;
-    if (char === '\n' || char === '\r') break;
     if (mode === 'word') {
+      if (char === '\n' || char === '\r') {
+        if (next >= limit || aheadAt(NEXT_LINE_SETTING_RE, text, next)) break;
+        index = next;
+        continue;
+      }
       if (/[\s&,#;|]/.test(char) && aheadAt(NAME_ASSIGNMENT_AHEAD, text, next)) break;
       index = next;
       continue;
@@ -303,10 +339,10 @@ function valueEnd(text, start, mode, regions) {
     if (/\s/.test(char)) break;
     if (char === "'" || char === '"') {
       const region = regions.opening(index);
-      index = region ? region[1] + 1 : next;
+      index = region && region[1] < limit ? region[1] + 1 : next;
       continue;
     }
-    if (char === '\\' && next < text.length && text[next] !== '\n') {
+    if (char === '\\' && next < limit && text[next] !== '\n') {
       index = next + 1;
       continue;
     }
@@ -315,7 +351,7 @@ function valueEnd(text, start, mode, regions) {
     if (char === ';' || char === '|' || char === '&') {
       if (mode === 'script') break;
       if (char !== ';' && text[next] === char) break;
-      if (next >= text.length || /\s/.test(text[next]) || aheadAt(NAME_ASSIGNMENT_AHEAD, text, next)) break;
+      if (next >= limit || /\s/.test(text[next]) || aheadAt(NAME_ASSIGNMENT_AHEAD, text, next)) break;
       if (char !== '&' && COMMAND_START.test(text[next])) break;
     }
     if ((char === '#' || char === ',') && aheadAt(NAME_ASSIGNMENT_AHEAD, text, next)) break;
@@ -324,18 +360,35 @@ function valueEnd(text, start, mode, regions) {
   return index;
 }
 
-// Where a value that starts inside a quoted region ends: at the closing quote (and on through
-// anything glued after it), or before another `name=`.
+// A value that starts inside a quoted region follows the same rules inside the quotes (a quoted
+// script `ssh host 'TOKEN=S; rm -rf /data'` keeps its commands visible); reaching the closing
+// quote, it runs on through anything glued after it.
 function quotedValueEnd(text, start, region, mode, regions) {
-  let index = start;
-  while (index < region[1]) {
-    if (/[\s&,#;|]/.test(text[index]) && aheadAt(NAME_ASSIGNMENT_AHEAD, text, index + 1)) return index;
-    index += 1;
-  }
+  const end = valueEnd(text, start, mode, regions, region[1]);
+  if (end < region[1]) return end;
   const after = region[1] + 1;
   if (after < text.length && !/[\s;|&)]/.test(text[after])) return valueEnd(text, after, mode, regions);
   return region[1];
 }
+
+// A YAML block scalar (`password: |` or `>`): the more-indented lines after it are the value.
+const YAML_BLOCK_RE = /[|>][-+0-9]{0,3}[ \t]*(?=\r?\n)/y;
+function yamlBlockEnd(text, keyIndex, start) {
+  if (!aheadAt(YAML_BLOCK_RE, text, start)) return -1;
+  const lineStart = text.lastIndexOf('\n', keyIndex) + 1;
+  const keyIndent = /^[ \t]*/.exec(text.slice(lineStart, lineStart + 256))[0].length;
+  let end = text.indexOf('\n', start);
+  while (end !== -1 && end < text.length) {
+    const lineEnd = text.indexOf('\n', end + 1) === -1 ? text.length : text.indexOf('\n', end + 1);
+    const line = text.slice(end + 1, lineEnd);
+    const indent = /^[ \t]*/.exec(line)[0].length;
+    if (line.trim() && indent <= keyIndent) break;
+    end = lineEnd === text.length ? text.length : lineEnd;
+    if (lineEnd === text.length) break;
+  }
+  return end === -1 ? -1 : end;
+}
+
 // A JSON value after a quoted name: a string, or an object or array (all of it), or a bare
 // literal.
 function jsonValueEnd(text, start) {
@@ -437,7 +490,10 @@ function redactAssignments(text, mode) {
     if (credentialName(name)
       && !(colon && !quote && /authorization$/i.test(name)) // the header pass did these
       && !(colon && !credentialColon(text, match.index, lead, quote, name, valueStart, lineIsBlankBefore))) {
-      value = secretValueAt(text, valueStart, mode, regions, Boolean(quote) && colon);
+      const block = colon ? yamlBlockEnd(text, match.index, valueStart) : -1;
+      value = block !== -1
+        ? { end: block, value: text.slice(valueStart, block), replacement: `${text[valueStart]} ${REDACTED}` }
+        : secretValueAt(text, valueStart, mode, regions, Boolean(quote) && colon);
       // `X-Token: Bearer [redacted]`: the scheme pass did this one.
       if (value && AUTH_SCHEME_RE.test(value.value) && text.startsWith(` ${REDACTED}`, value.end)) value = null;
     }
@@ -462,7 +518,7 @@ function redactAfter(text, pattern, mode, accept = () => true) {
   pattern.lastIndex = 0;
   while ((match = pattern.exec(text)) !== null) {
     const valueStart = match.index + match[0].length;
-    const value = accept(match) ? secretValueAt(text, valueStart, mode, regions) : null;
+    const value = accept(match, valueStart, text) ? secretValueAt(text, valueStart, mode, regions) : null;
     if (!value) {
       if (match[0].length === 0) pattern.lastIndex += 1;
       continue;
@@ -474,20 +530,35 @@ function redactAfter(text, pattern, mode, accept = () => true) {
   return out + text.slice(last);
 }
 
-const AUTH_HEADER_RE = /\b(?:proxy-)?authorization\s*:\s*(?:(?:bearer|basic|token|digest|bot|apikey|negotiate)\s+)?/gi;
-const SECRET_FLAG_TEXT_RE = /(?:^|\s)(--[A-Za-z][A-Za-z0-9_-]*)\s+(?!-)/g;
+const AUTH_HEADER_RE = /\b(?:proxy-)?authorization\s*:\s*(?:(?:bearer|basic|token|bot|apikey|negotiate)\s+)?(?!digest\s)/gi;
+// Digest credentials (username, nonce, response...) are one value, to the end of the header.
+const DIGEST_HEADER_RE = /\b(?:proxy-)?authorization\s*:\s*digest\s+/gi;
+const SECRET_FLAG_TEXT_RE = /(?:^|\s)(--[A-Za-z][A-Za-z0-9_-]*)\s+/g;
 const CONFIG_SET_RE = /\b(?:config|configure)\s+set\s+(\S+)\s+/g;
 const OPENSSL_PASS_RE = /(?:^|\s)-pass(?:in|out)?\s+pass:/g;
-const USER_FLAG_RE = /(?:^|\s)(?:-u|--user)\s+[^\s:'"]+:/g;
+// -u user:password for HTTP clients (docker run -u 1000:0 is a user and group, not a secret).
+const USER_FLAG_RE = /\b(?:curl|wget|http|https|xh|ab)\b[^\n;|&]{0,240}?\s(?:-u|--user)\s+[^\s:'"]+:/g;
+const HTTP_CLIENTS = ['curl', 'wget', 'http', 'https', 'xh', 'ab'];
+// A plain setting value (true, off, 3) under a credential-looking name is not a secret.
+const PLAIN_SETTING_RE = /(?:true|false|yes|no|on|off|\d{1,6})(?=\s|$)/iy;
+// A word after a secret flag that starts with a dash is a secret only when it looks like one.
+const WORD_AT_RE = /\S{1,512}/y;
+const wordAt = (text, index) => {
+  WORD_AT_RE.lastIndex = index;
+  const match = WORD_AT_RE.exec(text);
+  return match ? match[0] : '';
+};
+const looksSecret = (word) => word.length >= 16 && /[0-9]/.test(word) && /[A-Za-z]/.test(word) && !/^--?[a-z][a-z0-9-]*(?:=|$)/.test(word);
 // Short flags that take a secret in particular tools: docker/podman login -p, redis-cli -a,
 // sshpass -p, gh secret set --body/-b, and mysql's glued -pPASSWORD.
 const TOOL_SECRET_FLAGS = [
-  [/^(?:docker|podman|nerdctl)$/, 'login', '-p'],
-  [/^redis-cli$/, null, '-a'],
-  [/^sshpass$/, null, '-p'],
-  [/^gh$/, 'secret', '--body'],
-  [/^gh$/, 'secret', '-b'],
+  [['docker', 'podman', 'nerdctl'], 'login', '-p'],
+  [['redis-cli'], null, '-a'],
+  [['sshpass'], null, '-p'],
+  [['gh'], 'secret', '--body'],
+  [['gh'], 'secret', '-b'],
 ];
+const MYSQL_CLIENTS = ['mysql', 'mysqladmin', 'mysqldump'];
 const TOOL_FLAG_TEXT_RE = /\b(?:(?:docker|podman|nerdctl)\s+login\b[^\n;|&]{0,240}?\s-p|redis-cli\b[^\n;|&]{0,240}?\s-a|sshpass\b[^\n;|&]{0,240}?\s-p|gh\s+secret\s+set\b[^\n;|&]{0,240}?\s(?:--body|-b))\s+/g;
 const MYSQL_GLUED_RE = /\b(?:mysql|mysqladmin|mysqldump)\b[^\n;|&]{0,240}?\s-p(?=[^\s-])/g;
 const BARE_SCHEME_RE = /\b(bearer|basic)(\s+)([^\s'"]{8,})/gi;
@@ -507,9 +578,30 @@ const TOKEN_SHAPES = [
   /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}/g,
 ];
 
+function redactDigest(text, mode) {
+  const regions = regionFinder(quoteRegions(text, mode));
+  let out = '';
+  let last = 0;
+  let match;
+  DIGEST_HEADER_RE.lastIndex = 0;
+  while ((match = DIGEST_HEADER_RE.exec(text)) !== null) {
+    const valueStart = match.index + match[0].length;
+    const around = mode === 'word' ? null : regions.around(valueStart);
+    const newline = text.indexOf('\n', valueStart);
+    const lineEnd = newline === -1 ? text.length : newline;
+    const end = around ? Math.min(around[1], lineEnd) : lineEnd;
+    if (end <= valueStart || text.slice(valueStart, end) === REDACTED) continue;
+    out += `${text.slice(last, valueStart)}${REDACTED}`;
+    last = end;
+    DIGEST_HEADER_RE.lastIndex = end;
+  }
+  return out + text.slice(last);
+}
+
 function redact(value, mode = 'text') {
   // No control sequence may hide a credential name (TO<ESC>[0mKEN=...), and none is sent.
   let text = stripControls(String(value || ''));
+  text = redactDigest(text, mode);
   text = redactAfter(text, AUTH_HEADER_RE, mode);
   // Basic credentials are base64 with a digit, + / or = in practice; a plain word is prose.
   text = text.replace(BARE_SCHEME_RE, (match, scheme, space, credential) => {
@@ -521,8 +613,10 @@ function redact(value, mode = 'text') {
     // A user with no password is a name (git@, deploy@) unless it is token-like.
     return user.length >= 20 && /[0-9]/.test(user) ? `${scheme}${REDACTED}@` : match;
   });
-  text = redactAfter(text, SECRET_FLAG_TEXT_RE, mode, (match) => secretFlag(match[1]));
-  text = redactAfter(text, CONFIG_SET_RE, mode, (match) => credentialName(String(match[1]).split(/[:/]/).pop()));
+  text = redactAfter(text, SECRET_FLAG_TEXT_RE, mode, (match, at, source) => secretFlag(match[1])
+    && (source[at] !== '-' || looksSecret(wordAt(source, at))));
+  text = redactAfter(text, CONFIG_SET_RE, mode, (match, at, source) => credentialName(String(match[1]).split(/[:/]/).pop())
+    && !aheadAt(PLAIN_SETTING_RE, source, at));
   text = redactAfter(text, OPENSSL_PASS_RE, mode);
   text = redactAfter(text, USER_FLAG_RE, mode);
   text = redactAfter(text, TOOL_FLAG_TEXT_RE, mode);
@@ -538,36 +632,62 @@ function shellQuote(value) {
   return /^[A-Za-z0-9_./:@%+=,-]+$/.test(text) ? text : `'${text.replace(/'/g, "'\\''")}'`;
 }
 
-// Which argv words are shell scripts: the word after a -c flag (-c, -lc, -ec) of a shell.
-const SHELL_RE = /^(?:.*\/)?(?:sh|bash|zsh|dash|ksh|ash|mksh|fish)$/;
-function argvModes(command) {
-  return command.map((part, index) => {
-    if (index < 2 || !/^-[A-Za-z]*c[A-Za-z]*$/.test(String(command[index - 1]))) return 'word';
-    for (let at = index - 2; at >= 0; at -= 1) {
-      const word = String(command[at]);
-      if (SHELL_RE.test(word)) return 'script';
-      if (!word.startsWith('-')) return 'word';
+// Which argv words are shell scripts: the word after a -c flag (-c, -lc, -ec) of a shell or
+// su, the words after eval or watch, a remote command after ssh, and any word that holds a
+// command line (a space and a shell operator or substitution; a line break alone is a value's).
+const SHELL_NAMES = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'ash', 'mksh', 'fish', 'su', 'runuser']);
+const COMMAND_LINE_RE = /\s/;
+const SHELL_SYNTAX_RE = /[;|`]|&&|\$\(/;
+function argvModes(words, names) {
+  let sawSsh = false;
+  return words.map((word, index) => {
+    let mode = 'word';
+    if (index >= 2 && /^-[A-Za-z]*c[A-Za-z]*$/.test(words[index - 1])) {
+      // Back over the shell's own flags (at most 16) to the shell.
+      for (let at = index - 2, steps = 0; at >= 0 && steps < 16; at -= 1, steps += 1) {
+        if (SHELL_NAMES.has(names[at])) {
+          mode = 'script';
+          break;
+        }
+        if (!words[at].startsWith('-')) break;
+      }
     }
-    return 'word';
+    if (index >= 1 && (names[index - 1] === 'eval' || names[index - 1] === 'watch')) mode = 'script';
+    if (COMMAND_LINE_RE.test(word) && (sawSsh || SHELL_SYNTAX_RE.test(word))) mode = 'script';
+    if (names[index] === 'ssh') sawSsh = true;
+    return mode;
   });
 }
 
+// One argv word, redacted, given the words before it (`seen` holds the names of the words
+// before the previous one).
+function redactArgvWord(words, names, index, seen, mode) {
+  const previous = index > 0 ? words[index - 1] : '';
+  const word = words[index];
+  if (secretFlag(previous) && (!word.startsWith('-') || looksSecret(word))) return REDACTED;
+  // -u user:password for HTTP clients: the name stays.
+  if ((previous === '-u' || previous === '--user') && HTTP_CLIENTS.some((name) => seen.has(name)) && /^[^:]+:./.test(word)) {
+    return shellQuote(`${word.split(':')[0]}:${REDACTED}`);
+  }
+  if ((previous === '-passin' || previous === '-passout' || previous === '-pass') && word.startsWith('pass:')) return shellQuote(`pass:${REDACTED}`);
+  if (TOOL_SECRET_FLAGS.some(([tools, verb, flag]) => previous === flag && tools.some((name) => seen.has(name)) && (!verb || seen.has(verb)))) return REDACTED;
+  if (/^-p[^\s-]/.test(word) && MYSQL_CLIENTS.some((name) => seen.has(name) || names[index - 1] === name)) return '-p[redacted]';
+  if (index >= 3 && words[index - 2] === 'set' && /^(?:config|configure)$/.test(words[index - 3])
+    && credentialName(previous.split(/[:/]/).pop()) && !aheadAt(PLAIN_SETTING_RE, word, 0)) return REDACTED;
+  return shellQuote(redact(word, mode));
+}
+
 function redactedCommand(command) {
-  const modes = argvModes(command);
-  return command.map((part, index) => {
-    const previous = index > 0 ? String(command[index - 1] || '') : '';
-    const word = String(part || '');
-    if (secretFlag(previous) && !word.startsWith('-')) return REDACTED;
-    // -u user:password / --user user:password (curl and friends): the name stays.
-    if ((previous === '-u' || previous === '--user') && /^[^:]+:./.test(word)) return shellQuote(`${word.split(':')[0]}:${REDACTED}`);
-    if ((previous === '-passin' || previous === '-passout' || previous === '-pass') && word.startsWith('pass:')) return shellQuote(`pass:${REDACTED}`);
-    const tool = command.slice(0, index - 1).map((entry) => String(entry).split('/').pop());
-    if (TOOL_SECRET_FLAGS.some(([name, verb, flag]) => previous === flag && tool.some((entry) => name.test(entry)) && (!verb || tool.includes(verb)))) return REDACTED;
-    if (/^-p[^\s-]/.test(word) && tool.concat(previous.split('/').pop()).some((entry) => /^(?:mysql|mysqladmin|mysqldump)$/.test(entry))) return '-p[redacted]';
-    if (index >= 3 && String(command[index - 2]) === 'set' && /^(?:config|configure)$/.test(String(command[index - 3]))
-      && credentialName(previous.split(/[:/]/).pop())) return REDACTED;
-    return shellQuote(redact(word, modes[index]));
-  }).join(' ');
+  const words = command.map((part) => String(part ?? ''));
+  const names = words.map((word) => word.split('/').pop());
+  const modes = argvModes(words, names);
+  const seen = new Set();
+  const out = [];
+  for (let index = 0; index < words.length; index += 1) {
+    if (index >= 2) seen.add(names[index - 2]);
+    out.push(redactArgvWord(words, names, index, seen, modes[index]));
+  }
+  return out.join(' ');
 }
 
 // --action, --target and --type exactly as typed stay in this process: for local risk
@@ -680,8 +800,8 @@ function displayText(value, maxLength = 120) {
 // Terminal control sequences and control characters (tabs and line breaks stay).
 function stripControls(value) {
   return value
-    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, '')
-    .replace(/\u009d[^\u0007\u009c]*(?:\u0007|\u009c|\u001b\\)/g, '')
+    .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, '')
+    .replace(/\u009d[^\u0007\u009c\u009d\u001b]*(?:\u0007|\u009c|\u001b\\)/g, '')
     .replace(/[\u001b\u009b][[\]()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '')
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, '');
 }
