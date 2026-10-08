@@ -622,6 +622,12 @@ test('security review: quoted headers, indented YAML and more secret forms are r
   ]) assert.equal(runner.redactedCommand(argv), expected);
 });
 
+test('security review: a control sequence cannot hide a credential name, and none is sent', () => {
+  const out = runner.redact(`TO\u001b[0mKEN=${S1} deploy`);
+  assert.equal(out, 'TOKEN=[redacted] deploy');
+  assert.equal(runner.redactedCommand(['env', `API_\u001b[1mKEY=${S1}`, 'deploy']), "env 'API_KEY=[redacted]' deploy");
+});
+
 test('security review: an unknown option is named only when it is a plain option name', () => {
   const { argumentLabel } = require('../src/installer');
   assert.equal(argumentLabel('--tokn=abc'), '--tokn');
