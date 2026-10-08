@@ -380,6 +380,9 @@ test('the local runtime is installed only on write runs, and the switch keeps ho
     const calls = [];
     const preview = await install(installOptions(root, home, { yes: false, dryRun: true, mcpRuntimeInstall: fakeNpmInstall({ calls }) }));
     assert.deepEqual(calls, [], 'a dry run installs nothing');
+    await install(installOptions(root, home, { yes: true, dryRun: true, mcpRuntimeInstall: fakeNpmInstall({ calls }) }));
+    await install(installOptions(root, home, { yes: true, doctor: true, mcpRuntimeInstall: fakeNpmInstall({ calls }) }));
+    assert.deepEqual(calls, [], 'neither a dry run nor doctor installs, even with --yes');
     assert.equal(preview.mcp_runtime.hooks_start, 'npx');
     assert.equal(fs.existsSync(path.join(home, '.marrow', 'runtime')), false);
     await install(installOptions(root, home));

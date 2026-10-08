@@ -676,6 +676,8 @@ test('security re-review N2: a secret inside a nested quoted command keeps that 
     [C('ssh', '-i', 'k', 'host', `TOKEN=${S1} deploy --prod`), C('ssh', '-i', 'k', 'host', `TOKEN=${S1} deploy --dev`)],
     [C('su', '-c', `TOKEN=${S1}; reboot`), C('su', '-c', `TOKEN=${S1}; uptime`)],
     [C('eval', `TOKEN=${S1}; rm -rf x`), C('eval', `TOKEN=${S1}; ls x`)],
+    [C('eval', `TOKEN=${S1} deploy --prod`), C('eval', `TOKEN=${S1} deploy --dev`)],
+    [C('watch', `TOKEN=${S1} kubectl delete pod x`), C('watch', `TOKEN=${S1} kubectl get pod x`)],
   ];
   for (const [a, b] of pairs) {
     const A = shape(a);
