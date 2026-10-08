@@ -760,7 +760,8 @@ test('self-test writes stop at their time limits instead of hanging the install'
 
 function runBin(args, { cwd, env, input } = {}) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [BIN, ...args], { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+    // These runs stay offline: the local MCP runtime (an npm install) is tested on its own.
+    const child = spawn(process.execPath, [BIN, ...args], { cwd, env: { MARROW_LOCAL_RUNTIME: '0', ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (chunk) => { stdout += chunk; });
@@ -970,7 +971,9 @@ test('day one: SDK files and advice only where the SDK is used, AGENTS.md only f
     assert.equal(fs.existsSync(path.join(root, '.marrow', 'env.example')), false);
 
     // An AGENTS.md that already carries Marrow's block keeps it current.
-    fs.writeFileSync(path.join(root, 'AGENTS.md'), '# Notes\n\n<!-- marrow:passive-start -->\nold\n<!-- marrow:passive-end -->\n');
+    // Only the Marrow block (no owner text, so not a Codex signal): it is still kept current.
+    fs.writeFileSync(path.join(root, 'AGENTS.md'), '<!-- marrow:passive-start -->\nold\n<!-- marrow:passive-end -->\n');
+    assert.equal(detectEnvironment(root, { HOME: home, PATH: process.env.PATH }).codex, false);
     let plan = buildPlan(detectEnvironment(root, { HOME: home, PATH: process.env.PATH }), { mode: 'auto' });
     assert.ok(plan.writes.some((write) => write.label === 'Agent instructions'));
     fs.rmSync(path.join(root, 'AGENTS.md'));

@@ -21,6 +21,14 @@ const {
 } = require('./hermes-config');
 const { ensureOwnerApiKey, readOwnerApiKey } = require('./owner-env');
 const {
+  delocalizeHookCommand,
+  ensureMcpRuntime,
+  localizeHookSettingsText,
+  mapHookCommands,
+  removeMcpRuntime,
+  verifyMcpRuntime,
+} = require('./mcp-runtime');
+const {
   MCP_ADAPTER_VERSION,
   MCP_ADAPTER_SOURCE_SHA,
   MCP_ADAPTER_INTEGRITY,
@@ -838,6 +846,9 @@ function parseArgs(argv, env = process.env) {
     json: false,
     activate: false,
     controller: true,
+    // Hooks start a verified local copy of the pinned MCP (installed on write runs) instead of
+    // npx. MARROW_LOCAL_RUNTIME=0 or --no-local-runtime keeps them on npx.
+    mcpLocalRuntime: env.MARROW_LOCAL_RUNTIME !== '0',
   };
   let explicitOperation = false;
 
@@ -879,6 +890,7 @@ function parseArgs(argv, env = process.env) {
       options.selfTestExplicitlyDisabled = true;
     }
     else if (arg === '--no-controller') options.controller = false;
+    else if (arg === '--no-local-runtime') options.mcpLocalRuntime = false;
     else if (arg === '--self-test') options.selfTest = true;
     else if (arg === '--cwd') options.cwd = path.resolve(argv[++i] || options.cwd);
     else if (arg === '--mode') {
@@ -963,6 +975,7 @@ Options:
   --base-url <url>   Marrow API base URL
   --agent-id <id>    Agent/fleet id for self-test headers
   --no-controller    Do not start the local background controller during install/repair
+  --no-local-runtime Keep hooks on npx instead of the verified local MCP copy in ~/.marrow/runtime
   --no-self-test     Skip API smoke/self-test
   --verbose          Print the full report instead of the one-line summary and log file
   uninstall          Preview removing only Marrow's own hooks, MCP server entries and instructions;
@@ -1330,6 +1343,9 @@ MARROW_PASSIVE_TOKEN_USAGE=true
 `;
 }
 
+// Hook files are read with Marrow's hook commands in their canonical (npx) form, whether they
+// start through npx or the local runtime, so every check and merge sees one spelling; writes
+// switch them to the local runtime again when it is verified.
 function parseJsonObject(filePath) {
   const raw = safeRead(filePath).trim();
   if (!raw) return {};
@@ -1337,7 +1353,7 @@ function parseJsonObject(filePath) {
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new Error(`Expected JSON object in ${filePath}`);
   }
-  return parsed;
+  return mapHookCommands(parsed, delocalizeHookCommand);
 }
 
 function canonicalJsonValue(value) {
@@ -2785,6 +2801,9 @@ function buildPlan(detection, options) {
     return write;
   };
   const mcpTargetVersion = executableMcpTarget(options).version;
+  // Hooks start the verified local MCP runtime for this exact version when there is one.
+  const runtimeVersion = options.mcpRuntime && options.mcpRuntime.version === mcpTargetVersion ? mcpTargetVersion : null;
+  const localize = (text) => (runtimeVersion ? localizeHookSettingsText(text, runtimeVersion) : text);
   const retarget = (value) => retargetMcpPackageSpec(value, mcpTargetVersion);
   // The host-approval hook layout only for an MCP that answers those hooks.
   const hostApprovals = hostApprovalHooksSupported(mcpTargetVersion);
@@ -2815,7 +2834,7 @@ function buildPlan(detection, options) {
         type: 'json-transform',
         path: detection.paths.claudeSettings,
         label: 'Claude Code MCP passive hooks',
-        transform: (filePath) => retarget(upsertClaudeHooks(filePath, { hostApprovals })),
+        transform: (filePath) => localize(retarget(upsertClaudeHooks(filePath, { hostApprovals }))),
       });
     }
     if (detection.codex) {
@@ -2823,7 +2842,7 @@ function buildPlan(detection, options) {
         type: 'json-transform',
         path: detection.paths.codexHooks,
         label: 'Codex native hooks',
-        transform: (filePath) => retarget(upsertCodexHooks(filePath)),
+        transform: (filePath) => localize(retarget(upsertCodexHooks(filePath))),
       });
     }
     if (detection.cline) {
@@ -2843,7 +2862,7 @@ function buildPlan(detection, options) {
         type: 'json-transform',
         path: detection.paths.windsurfHooks,
         label: 'Windsurf native hooks',
-        transform: (filePath) => retarget(upsertWindsurfHooks(filePath)),
+        transform: (filePath) => localize(retarget(upsertWindsurfHooks(filePath))),
       });
     }
     if (detection.gemini) {
@@ -2851,7 +2870,7 @@ function buildPlan(detection, options) {
         type: 'json-transform',
         path: detection.paths.geminiSettings,
         label: 'Gemini CLI native hooks',
-        transform: (filePath) => retarget(upsertGeminiHooks(filePath, { hostApprovals })),
+        transform: (filePath) => localize(retarget(upsertGeminiHooks(filePath, { hostApprovals }))),
       });
     }
     if (detection.grok) {
@@ -2862,7 +2881,7 @@ function buildPlan(detection, options) {
         label: 'Grok native hooks',
         isManaged: managedGrokHooksFile,
         conflict_fix: 'Preserve or move the unmanaged owner Grok hook file after owner review, then rerun npx @getmarrow/install update.',
-        transform: (filePath) => retarget(upsertGrokHooks(filePath)),
+        transform: (filePath) => localize(retarget(upsertGrokHooks(filePath))),
       });
     }
     writes.push(mcpConfigWrite(detection.paths.mcpJson, 'Project MCP server config'));
@@ -2886,7 +2905,7 @@ function buildPlan(detection, options) {
         type: 'json-transform',
         path: detection.paths.cursorHooks,
         label: 'Cursor native hooks',
-        transform: (filePath) => retarget(upsertCursorHooks(filePath, { hostApprovals })),
+        transform: (filePath) => localize(retarget(upsertCursorHooks(filePath, { hostApprovals }))),
       });
       writes.push(mcpConfigWrite(detection.paths.cursorMcp, 'Cursor MCP server config'));
     }
@@ -3353,6 +3372,8 @@ async function uninstall(options = {}) {
     hermesEntry = false;
   }
   if (hermesEntry) kept.push({ path: detection.paths.hermesConfig, reason: 'remove mcp_servers.marrow by hand; uninstall never rewrites the Hermes config, which holds other servers\' settings' });
+  // The local MCP runtime (~/.marrow/runtime) goes too; hooks elsewhere then start through npx.
+  const runtime = removeMcpRuntime(options.home || detection.home, { dryRun: !apply });
   const removedEntries = changes.reduce((sum, change) => sum + change.removed_entries, 0);
   return {
     uninstall: {
@@ -3362,10 +3383,11 @@ async function uninstall(options = {}) {
       controller,
       changes,
       kept,
+      runtime: runtime.removed || runtime.would_remove ? runtime : null,
       removed_entries: removedEntries,
       next_step: apply
         ? 'Restart the agent hosts so they stop loading the removed hooks and MCP server.'
-        : removedEntries > 0
+        : removedEntries > 0 || runtime.would_remove
         ? 'Nothing was changed. Run npx @getmarrow/install uninstall --yes to remove these Marrow entries.'
         : 'Nothing to remove.',
     },
@@ -3384,6 +3406,7 @@ function printUninstallReport(report, sink = (text) => process.stdout.write(text
     else if (change.action === 'kept' || change.action === 'skipped') sink(`- ${where(change.path)}: left unchanged (${change.reason}).\n`);
   }
   for (const entry of result.kept) sink(`- ${where(entry.path)}: left in place; ${entry.reason}.\n`);
+  if (result.runtime) sink(`- ${result.runtime.path}: ${result.applied ? 'removed' : 'would remove'} Marrow's local MCP runtime (other projects' hooks start through npx until the next install there).\n`);
   if (result.controller?.stopped) sink(`Stopped ${result.controller.stopped} Marrow controller${result.controller.stopped === 1 ? '' : 's'} for this project.\n`);
   sink(`${result.next_step}\n`);
 }
@@ -4080,6 +4103,13 @@ function printReport(report, sink) {
     }
   }
 
+  if (report.mcp_runtime) {
+    const runtime = report.mcp_runtime;
+    out('\nMCP local runtime:\n');
+    out(`- hooks start: ${runtime.hooks_start === 'local_runtime' ? `the verified local copy of @getmarrow/mcp@${runtime.version} (${runtime.path})` : 'through npx'}\n`);
+    out(`- state: ${runtime.state}${runtime.reason ? ` (${runtime.reason})` : ''}\n`);
+    if (runtime.removed_versions?.length) out(`- removed older versions: ${runtime.removed_versions.join(', ')}\n`);
+  }
   out('\nLocal session loop guard:\n');
   out(`- configured: ${report.loop_guard_configured ? 'yes' : 'no'}\n`);
   out(`- isolated self-test passed: ${report.loop_guard_self_tested ? 'yes' : 'no'}\n`);
@@ -4338,6 +4368,41 @@ function hermesWiringReport(detection, changes, options, planMode) {
   };
 }
 
+// The local MCP runtime for the target version: installed (or kept) on a write run of the
+// command, otherwise only an existing verified copy is used. `mcpLocalRuntime: false` (or
+// MARROW_LOCAL_RUNTIME=0, --no-local-runtime) leaves every hook on npx.
+function resolveMcpRuntime(detection, options, mcpTarget) {
+  const home = options.home || detection.home;
+  if (options.mcpLocalRuntime === false) return { state: 'disabled' };
+  const version = mcpTarget.version;
+  const integrity = mcpTarget.integrity || (version === MCP_ADAPTER_VERSION ? MCP_ADAPTER_INTEGRITY : null);
+  if (!integrity) return { state: 'skipped', reason: 'no_verified_integrity', version };
+  const install = options.mcpLocalRuntime === true && options.yes && !options.dryRun && !options.doctor && options.maintenance !== true;
+  if (install) {
+    return ensureMcpRuntime({
+      home,
+      version,
+      integrity,
+      sdk: { version: SDK_ADAPTER_VERSION, integrity: SDK_ADAPTER_INTEGRITY },
+      ...(typeof options.mcpRuntimeInstall === 'function' ? { npmInstall: options.mcpRuntimeInstall } : {}),
+      ...(options.mcpRuntimeNode ? { nodePath: options.mcpRuntimeNode } : {}),
+    });
+  }
+  return verifyMcpRuntime(home, version, integrity) || { state: 'absent', version };
+}
+
+function mcpRuntimeReport(runtime) {
+  if (!runtime) return null;
+  return {
+    state: runtime.state,
+    version: runtime.version || null,
+    path: runtime.directory || null,
+    ...(runtime.reason ? { reason: runtime.reason } : {}),
+    ...(runtime.removed_versions?.length ? { removed_versions: runtime.removed_versions } : {}),
+    hooks_start: runtime.directory && ['present', 'installed', 'verified'].includes(runtime.state) ? 'local_runtime' : 'npx',
+  };
+}
+
 function localControllerAgentId(root, client, configuredAgentId = '') {
   return String(configuredAgentId || '').trim() || stableAgentId(root, client);
 }
@@ -4384,6 +4449,8 @@ async function install(options) {
   });
   options.mcpTarget = mcpTarget;
   options.mcpTargetVersion = mcpTarget.version;
+  const mcpRuntime = resolveMcpRuntime(detection, options, mcpTarget);
+  options.mcpRuntime = mcpRuntime.version && ['present', 'installed', 'verified'].includes(mcpRuntime.state) ? mcpRuntime : null;
   const plan = buildPlan(detection, options);
   const writeMode = options.doctor ? 'doctor' : options.dryRun ? 'dry-run' : options.repair ? 'repair' : options.yes ? 'write' : 'dry-run';
   const changes = applyPlan(plan, options);
@@ -4643,6 +4710,7 @@ async function install(options) {
     harnessReload,
     firstCapture: firstCapturePath(detection),
     hermes,
+    mcp_runtime: mcpRuntimeReport(mcpRuntime),
     changes,
     doctor: {
       active: Boolean(!selfTest.skipped && selfTest.active),
