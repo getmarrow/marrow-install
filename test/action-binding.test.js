@@ -755,6 +755,17 @@ test('security re-review X1-X6: flags after flags, spaced field values, crafted 
     [C('aws', 'ssm', 'send-command', '--parameters', `commands=export TOKEN=${S1}\n  rm -rf /data`), C('aws', 'ssm', 'send-command', '--parameters', `commands=export TOKEN=${S1}\n  ls /data`)],
     [C('aws', 'ssm', 'send-command', '--parameters', `commands=export TOKEN=${S1}\nreboot`), C('aws', 'ssm', 'send-command', '--parameters', `commands=export TOKEN=${S1}\nuptime`)],
   ]) assert.equal(sameBinding(shape(a), shape(b)), false, shape(a).commandText);
+  // Each layer on its own: a long path made only of key characters is still a command in an
+  // unquoted script; a short command word between markers, or a command line after key data, is
+  // not key data in free text.
+  const longPath = `/opt/${'a'.repeat(48)}`;
+  for (const [a, b, mode] of [
+    [`TOKEN=${begin}\n${longPath}/reboot\n${end}`, `TOKEN=${begin}\n${longPath}/uptime\n${end}`, 'script'],
+    [`TOKEN=${begin}\nreboot\n${end}`, `TOKEN=${begin}\nuptime\n${end}`, 'text'],
+    [`TOKEN=${begin}\n${'A'.repeat(64)}\nrm -rf /data\n${end}`, `TOKEN=${begin}\n${'A'.repeat(64)}\nls /data\n${end}`, 'text'],
+  ]) assert.notEqual(runner.redact(a, mode), runner.redact(b, mode), `${mode}: ${a.slice(0, 40)}`);
+  // A setting line made of key characters still ends an argv-word value.
+  assert.equal(runner.redact(`TOKEN=${S1}\nMODE=production12345`, 'word'), 'TOKEN=[redacted]\nMODE=production12345');
   // A quoted value is a string, whatever it holds: these differ only in the secret, and nothing in
   // them runs, so they may match.
   const quotedA = shape(C('bash', '-c', `export TOKEN="${begin}\nreboot\n${end}"`));
