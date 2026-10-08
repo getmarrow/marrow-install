@@ -1446,9 +1446,9 @@ async function withServer(handler, fn) {
   }
 }
 
-function runCli(args, env) {
+function runCli(args, env, cwd = undefined) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [BIN, ...args], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [BIN, ...args], { env, cwd, stdio: ['pipe', 'pipe', 'pipe'] });
     let output = '';
     let stdout = '';
     child.stdout.on('data', (chunk) => { output += chunk; stdout += chunk; });
@@ -1508,7 +1508,8 @@ test('runner CLI waiting on the owner: SIGTERM exits 12 held, a kill leaves the 
       assert.equal(seen.filter((call) => call.url.endsWith('/approval-link')).length, 1, 'one link (one email) across all runs');
 
       approvedNow = true;
-      const done = await runCli(args, env);
+      // The same command in the same project directory (the hold record is per directory).
+      const done = await runCli(args, env, dir);
       assert.equal(done.code, 0, done.output);
       assert.equal(fs.existsSync(marker), true);
       assert.equal(seen.filter((call) => call.url === '/v1/agent/runtime').length, 1);
