@@ -88,14 +88,25 @@ test('collision C4: a bare #fragment after a token is redacted with it; the hold
   const A = shape(C('curl', `https://ops.example/deploy?token=${S1}#prod`));
   const B = shape(C('curl', `https://ops.example/deploy?token=${S1}#staging`));
   assert.notEqual(A.holdKey, B.holdKey);
-  assert.equal(A.commandText, "curl 'https://ops.example/deploy?token=[redacted]'");
+  // A value that holds # may hide a separator: it is the ambiguous marker, which Marrow never binds.
+  assert.equal(A.commandText, "curl 'https://ops.example/deploy?token=[REDACTED_AMBIGUOUS]'");
   assert.equal(secretCount(JSON.stringify([A.commandText, A.action, A.target, A.binding, A.holdKey, B.commandText, B.action, B.target, B.binding, B.holdKey])), 0);
+});
+
+// Round 5 (MEDIUM-R4-2): a whole-word NAME=value in free text runs to the end of its word, so a
+// secret holding `&x=` stays hidden. Two such actions that differ after the `&` carry the
+// ambiguous marker, which Marrow never binds to an approval; the hold key still differs.
+test('collision C14: a whole-word secret in --action text is hidden whole, ambiguous, and never bindable', () => {
+  const A = shape(C('deploy'), { action: `deploy with KEY=${S1}&env=production` });
+  const B = shape(C('deploy'), { action: `deploy with KEY=${S1}&env=staging` });
+  assert.notEqual(A.holdKey, B.holdKey);
+  assert.equal(A.action, 'deploy with KEY=[REDACTED_AMBIGUOUS]');
+  assert.equal(secretCount(A.action + B.action), 0);
 });
 
 test('collision: --target, --action and --type are part of the hold key and the permit binding, redacted', () => {
   const rows = [
     ['C13 --target after secret', { target: `https://ops.example/deploy?token=${S1}&env=production` }, { target: `https://ops.example/deploy?token=${S1}&env=staging` }],
-    ['C14 --action after secret', { action: `deploy with KEY=${S1}&env=production` }, { action: `deploy with KEY=${S1}&env=staging` }],
     ['--type', { type: 'deploy' }, { type: 'general' }],
     ['prose colon is not a secret', { action: 'rotate the key: production first' }, { action: 'rotate the key: staging first' }],
   ];
@@ -127,11 +138,11 @@ test('collision: actions that differ only in the secret value may share a permit
 // Security review (round 4): credential names are matched by containment, with an explicit
 // list of non-secret names; values end only before `name=` or a shell operator.
 test('redaction: names that contain a credential word are credentials; the listed non-secret names are not', () => {
-  for (const name of ['SECRET_KEY_BASE', 'GITHUB_TOKEN_V2', 'X_API_KEY_ID', 'MYTOKEN', 'DB_PASS', 'MYSQL_PWD', 'SLACK_WEBHOOK', 'apiKeyValue', 'OAUTH_TOKEN', 'basic_auth', 'client-secret', 'x.api_key', 'PGPASSWORD', 'Authorization']) {
+  for (const name of ['SECRET_KEY_BASE', 'GITHUB_TOKEN_V2', 'X_API_KEY_ID', 'MYTOKEN', 'DB_PASS', 'MYSQL_PWD', 'SLACK_WEBHOOK', 'apiKeyValue', 'SECRET_URL', 'TOKEN_URL', 'API_KEY_URL', 'SLACK_WEBHOOK_URL', 'AUTH_URL', 'AUTH_HOST', 'TOKEN_ENDPOINT', 'OAUTH_TOKEN', 'basic_auth', 'client-secret', 'x.api_key', 'PGPASSWORD', 'Authorization']) {
     const out = runner.redact(`${name}=${S1} next=1`);
     assert.equal(out, `${name}=[redacted] next=1`, name);
   }
-  for (const name of ['keyspace', 'max_tokens', 'maxTokens', 'tokenizer', 'monkey', 'author', 'oauth', 'token_count', 'auth_method', 'public_key', 'primary_key', 'env', 'replicas', 'DB_PASSWORD_FILE', '--key-file', 'AUTH_URL', 'KEY_VAULT_NAME', 'bypass', 'PWD']) {
+  for (const name of ['keyspace', 'max_tokens', 'maxTokens', 'tokenizer', 'monkey', 'author', 'oauth', 'token_count', 'auth_method', 'public_key', 'primary_key', 'env', 'replicas', 'DB_PASSWORD_FILE', '--key-file', 'KEY_VAULT_NAME', 'bypass', 'PWD']) {
     assert.equal(runner.redact(`${name}=prod-value next=1`), `${name}=prod-value next=1`, name);
   }
 });
@@ -142,17 +153,16 @@ test('redaction: a secret containing # & , ; or | is redacted whole, and what fo
     const tail = `9${crypto.randomBytes(6).toString('hex')}`;
     const secret = `${head}${separator}${tail}`;
     const cases = [
-      [`PASSWORD=${secret} ENV=prod`, 'PASSWORD=[redacted] ENV=prod'],
-      [`PASSWORD=${secret}`, 'PASSWORD=[redacted]'],
-      [`https://ops.example/q?token=${secret}&env=prod`, 'https://ops.example/q?token=[redacted]&env=prod'],
-      [`api_key=${secret}&sql=DROP`, 'api_key=[redacted]&sql=DROP'],
-      [`--creds=password=${secret},env=production`, '--creds=password=[redacted],env=production'],
-      [`TF_TOKEN=${secret}&&terraform apply`, 'TF_TOKEN=[redacted]&&terraform apply'],
-      [`API_KEY=${secret};kubectl delete ns prod`, 'API_KEY=[redacted];kubectl delete ns prod'],
-      [`SECRET=${secret}|kubectl delete -f prod.yaml`, 'SECRET=[redacted]|kubectl delete -f prod.yaml'],
-      [`--password ${secret} --env prod`, '--password [redacted] --env prod'],
-      [`{"password":"${secret}","env":"prod"}`, '{"password":"[redacted]","env":"prod"}'],
-      [`password: ${secret}\nenv: prod`, 'password: [redacted]\nenv: prod'],
+      [`PASSWORD=${secret} ENV=prod`, 'PASSWORD=[REDACTED_AMBIGUOUS] ENV=prod'],
+      [`PASSWORD=${secret}`, 'PASSWORD=[REDACTED_AMBIGUOUS]'],
+      [`https://ops.example/q?token=${secret}&env=prod`, 'https://ops.example/q?token=[REDACTED_AMBIGUOUS]&env=prod'],
+      [`--creds=password=${secret},env=production`, '--creds=password=[REDACTED_AMBIGUOUS],env=production'],
+      [`TF_TOKEN=${secret}&&terraform apply`, 'TF_TOKEN=[REDACTED_AMBIGUOUS]&&terraform apply'],
+      [`API_KEY=${secret};kubectl delete ns prod`, 'API_KEY=[REDACTED_AMBIGUOUS];kubectl delete ns prod'],
+      [`SECRET=${secret}|kubectl delete -f prod.yaml`, 'SECRET=[REDACTED_AMBIGUOUS]|kubectl delete -f prod.yaml'],
+      [`--password ${secret} --env prod`, '--password [REDACTED_AMBIGUOUS] --env prod'],
+      [`{"password":"${secret}","env":"prod"}`, '{"password":"[REDACTED_AMBIGUOUS]","env":"prod"}'],
+      [`password: ${secret}\nenv: prod`, 'password: [REDACTED_AMBIGUOUS]\nenv: prod'],
     ];
     for (const [input, expected] of cases) {
       const output = runner.redact(input);
@@ -180,11 +190,12 @@ test('redaction: replaces only the secret value in headers, URLs, JSON, YAML, en
     [`{"password":"${S1}","refresh_token":"${S2}","env":"prod"}`, '{"password":"[redacted]","refresh_token":"[redacted]","env":"prod"}'],
     [`{"apiKey": "${S1}", "access_token": "${S2}"}`, '{"apiKey": "[redacted]", "access_token": "[redacted]"}'],
     [`private_key: ${S1}\nclient_secret: '${S2}'\nenv: prod`, "private_key: [redacted]\nclient_secret: '[redacted]'\nenv: prod"],
-    [`authorization=${S1}&next=1`, 'authorization=[redacted]&next=1'],
+    [`https://x.example/q?authorization=${S1}&next=1`, 'https://x.example/q?authorization=[redacted]&next=1'],
+    [`authorization=${S1}&next=1`, 'authorization=[REDACTED_AMBIGUOUS]'],
     [`TF_TOKEN=${S1}&&terraform apply`, 'TF_TOKEN=[redacted]&&terraform apply'],
     [`--token ${S1} --env prod`, '--token [redacted] --env prod'],
     [`basic_auth=${S1}`, 'basic_auth=[redacted]'],
-    [`token="${S1}`, 'token=[redacted]'],
+    [`token="${S1}`, 'token=[REDACTED_AMBIGUOUS]'],
     ['x?keyspace=prod&max_tokens=5&oauth=github', 'x?keyspace=prod&max_tokens=5&oauth=github'],
     ['rotate the key: production first', 'rotate the key: production first'],
     ['ssh://git@github.com/o/r', 'ssh://git@github.com/o/r'],
@@ -253,7 +264,7 @@ test('risk: a secret that hides the command from the redacted text is still clas
   // name (PASSWD) is not a risk word itself. Both the risk verdict and the type must hold.
   const removal = runner.governedInputs(runner.withRedactedInputs({ ...BASE, action: `PASSWD="${S1} && rm -rf /srv/data"` }), C('true'));
   assert.equal(secretCount(removal.action), 0);
-  assert.equal(removal.action, 'PASSWD="[redacted]"');
+  assert.equal(removal.action, 'PASSWD="[REDACTED_AMBIGUOUS]"');
   assert.equal(runner.isRisky(`${removal.action} ${removal.commandText}`, 'general'), false, 'the redacted text alone looks harmless');
   assert.equal(removal.risky, true);
   const publish = runner.governedInputs(runner.withRedactedInputs({ ...BASE, action: `PASSWD="${S1} && npm publish"` }), C('true'));
@@ -527,7 +538,7 @@ test('security review: shell quoting glued to a secret is redacted whole, in tex
     ['env', `PASSPHRASE=${head} ${tail}`, 'gpg'],
     ['bash', '-c', `export TOKEN='${head}'"'"'${tail}' && deploy`],
   ]) none(runner.redactedCommand(argv));
-  assert.equal(runner.redactedCommand(['env', `PASSWORD=${head}'${tail}`, 'psql']), "env 'PASSWORD=[redacted]' psql");
+  assert.equal(runner.redactedCommand(['env', `PASSWORD=${head}'${tail}`, 'psql']), "env 'PASSWORD=[REDACTED_AMBIGUOUS]' psql");
   // A secret inside a quoted header or form stays inside its quotes; what follows stays visible.
   assert.equal(runner.redact(`curl -H "Authorization: Bearer ${head}" -d "x=1" https://ops.example/prod`), 'curl -H "Authorization: Bearer [redacted]" -d "x=1" https://ops.example/prod');
   assert.equal(runner.redact(`curl -d 'token=${head}&env=prod' https://x.example`), "curl -d 'token=[redacted]&env=prod' https://x.example");
@@ -556,9 +567,12 @@ test('security review: commands after a secret stay visible, so they never share
   }
 });
 
-test('security review: names that say where a secret is (file, URL, name, region) keep their values', () => {
+test('security review: names that say where a secret is (file, name, region) keep their values; a secret URL does not', () => {
+  // Round 5 (MEDIUM-R4-3): a URL, endpoint or host under a credential name is the secret itself.
+  for (const name of ['SECRET_URL', 'TOKEN_URL', 'API_KEY_URL', 'SLACK_WEBHOOK_URL', 'AUTH_URL']) {
+    assert.equal(secretCount(runner.redact(`${name}=https://hooks.example/${S1} notify`)), 0, name);
+  }
   for (const [a, b] of [
-    ['AUTH_URL=https://auth.prod.example.com ./migrate.sh', 'AUTH_URL=https://auth.staging.example.com ./migrate.sh'],
     ['gcloud auth activate-service-account --key-file=/keys/prod.json', 'gcloud auth activate-service-account --key-file=/keys/dev.json'],
     ['KEY_VAULT_NAME=prod-vault az keyvault purge', 'KEY_VAULT_NAME=dev-vault az keyvault purge'],
     ['--token-file=/run/prod.token deploy', '--token-file=/run/dev.token deploy'],
@@ -591,7 +605,7 @@ test('security review: quoted headers, indented YAML and more secret forms are r
     [`SLACK_WEBHOOK=https://hooks.example/services/${S1} notify`, 'SLACK_WEBHOOK=[redacted] notify'],
     [`curl -u sk_live_${S1}: https://x.example`, 'curl -u [redacted]: https://x.example'],
     [`PASSWORD={${S1}} run`, 'PASSWORD=[redacted] run'],
-    [`{"tokens":["${S1}","${S2}"],"env":"prod"}`, '{"tokens":[redacted],"env":"prod"}'],
+    [`{"tokens":["${S1}","${S2}"],"env":"prod"}`, '{"tokens":[REDACTED_AMBIGUOUS],"env":"prod"}'],
     [`https://u:${S1}@${S2}@host.example/x`, 'https://u:[redacted]@host.example/x'],
     [`docker login -u ci -p ${S1} registry.example`, 'docker login -u ci -p [redacted] registry.example'],
     [`redis-cli -h prod -a ${S1} FLUSHALL`, 'redis-cli -h prod -a [redacted] FLUSHALL'],
@@ -663,7 +677,8 @@ test('security re-review N1: multi-line secret values are redacted whole', () =>
   }
   // A new setting on the next line still ends the value in an argv word.
   assert.equal(runner.redact(`password: ${lines[0]}\nenv: production`, 'word'), 'password: [redacted]\nenv: production');
-  assert.equal(runner.redact(`TOKEN=${lines[0]}\nENV=prod`, 'word'), 'TOKEN=[redacted]\nENV=prod');
+  // A whole-word NAME=value runs to the end of its word (round 5), line breaks included.
+  assert.equal(runner.redact(`TOKEN=${lines[0]}\nENV=prod`, 'word'), 'TOKEN=[REDACTED_AMBIGUOUS]');
   none(runner.redactedCommand(['env', `PRIVATE_KEY=${block}`, 'deploy']));
   none(runner.redactedCommand(['kubectl', 'create', 'secret', 'generic', 'x', `--from-literal=key=${lines.join('\n')}`]));
 });
@@ -694,7 +709,7 @@ test('security re-review N2: a secret inside a nested quoted command keeps that 
     assert.equal(secretCount(runner.redact(a)), 0);
   }
   // A plain value with a space stays one value in an argv word that holds no command.
-  assert.equal(runner.redactedCommand(['docker', 'run', '-e', `DB_PASSWORD=${S1} ${S2}`, 'app']), "docker run -e 'DB_PASSWORD=[redacted]' app");
+  assert.equal(runner.redactedCommand(['docker', 'run', '-e', `DB_PASSWORD=${S1} ${S2}`, 'app']), "docker run -e 'DB_PASSWORD=[REDACTED_AMBIGUOUS]' app");
 });
 
 test('security re-review N3/N4: many argv words and control sequences stay fast', () => {
@@ -720,7 +735,7 @@ test('security re-review N5/N6 and residuals: settings that look like secrets, D
   assert.notEqual(runner.redact('gcloud config set auth/disable_credentials true'), runner.redact('gcloud config set auth/disable_credentials false'));
   assert.equal(runner.redact(`curl -u deploy:${S1} https://x`), 'curl -u deploy:[redacted] https://x');
   const digest = runner.redact(`curl -H 'Authorization: Digest username="u", response="${S1}"' https://x/prod`);
-  assert.equal(digest, "curl -H 'Authorization: Digest [redacted]' https://x/prod");
+  assert.equal(digest, "curl -H 'Authorization: Digest [REDACTED_AMBIGUOUS]' https://x/prod");
   const dashed = `-${crypto.randomBytes(12).toString('hex')}Ab`;
   assert.equal(runner.redact(`tool --token ${dashed} --env prod`), 'tool --token [redacted] --env prod');
   assert.equal(runner.redactedCommand(['tool', '--token', dashed, '--env', 'prod']), 'tool --token [redacted] --env prod');
@@ -740,7 +755,7 @@ test('security re-review X1-X6: flags after flags, spaced field values, crafted 
     assert.equal(secretCount(runner.redact(text)), 0);
     assert.equal(secretCount(runner.redactedCommand(['bash', '-c', text])), 0);
   }
-  assert.equal(runner.redact(`curl --data 'token=${S1} ${S2}&env=prod' https://x`), "curl --data 'token=[redacted]&env=prod' https://x");
+  assert.equal(runner.redact(`curl --data 'token=${S1} ${S2}&env=prod' https://x`), "curl --data 'token=[REDACTED_AMBIGUOUS]&env=prod' https://x");
   // X3: markers around commands are not a key block, and a script's trailing | is not YAML.
   const begin = ['-----BEGIN', 'A-----'].join(' ');
   const end = ['-----END', 'A-----'].join(' ');
@@ -765,7 +780,7 @@ test('security re-review X1-X6: flags after flags, spaced field values, crafted 
     [`TOKEN=${begin}\n${'A'.repeat(64)}\nrm -rf /data\n${end}`, `TOKEN=${begin}\n${'A'.repeat(64)}\nls /data\n${end}`, 'text'],
   ]) assert.notEqual(runner.redact(a, mode), runner.redact(b, mode), `${mode}: ${a.slice(0, 40)}`);
   // A setting line made of key characters still ends an argv-word value.
-  assert.equal(runner.redact(`TOKEN=${S1}\nMODE=production12345`, 'word'), 'TOKEN=[redacted]\nMODE=production12345');
+  assert.equal(runner.redact(`--creds=token=${S1}\nMODE=production12345`, 'word'), '--creds=token=[redacted]\nMODE=production12345');
   // A quoted value is a string, whatever it holds: these differ only in the secret, and nothing in
   // them runs, so they may match.
   const quotedA = shape(C('bash', '-c', `export TOKEN="${begin}\nreboot\n${end}"`));
@@ -794,4 +809,60 @@ test('security re-review X1-X6: flags after flags, spaced field values, crafted 
   assert.notEqual(digest, runner.redact(`curl -H Authorization: Digest response=${S1} && kubectl get ns prod`));
   // A numeric value under a credential name is redacted (only switches like true/off are kept).
   assert.equal(runner.redactedCommand(['npm', 'config', 'set', '//registry.example/:_authToken', '482913']), 'npm config set //registry.example/:_authToken [redacted]');
+});
+
+// Round 5 (HIGH-R4-1): a hidden span that holds blanks, quotes or shell operators is Marrow's
+// ambiguous marker, which Marrow never binds to an approval; the DROP keeps its migration type.
+test('round 5 F6b-F6e: a SELECT approval can never carry a DROP hidden in the same secret span', () => {
+  const url = 'https://db.example/query';
+  const pairs = [
+    ['F6b quoted value in -d', (v) => C('curl', '-d', `token="${S1}; ${v}"`, url)],
+    ['F6c JSON value', (v) => C('curl', '-d', `{"token":"${S1}; ${v}"}`, url)],
+    ['F6d -u user:secret', (v) => C('curl', '-u', `user:${S1}; ${v}`, url)],
+    ['F6e --password word', (v) => C('tool', '--password', `${S1}; ${v}`, url)],
+    ['F6f env word', (v) => C('env', `TOKEN=${S1}; ${v}`, 'run')],
+  ];
+  for (const [name, make] of pairs) {
+    const select = shape(make('SELECT 2'));
+    const drop = shape(make('DROP TABLE x'));
+    assert.notEqual(select.holdKey, drop.holdKey, name);
+    for (const side of [select, drop]) {
+      assert.ok(side.commandText.includes('[REDACTED_AMBIGUOUS]'), `${name}: ${side.commandText}`);
+      assert.equal(secretCount(JSON.stringify([side.commandText, side.action, side.target, side.binding])), 0, name);
+    }
+    assert.equal(drop.risky, true, name);
+    assert.equal(drop.type, 'migration', `${name}: the DROP keeps its type`);
+  }
+  // The marker is Marrow's own text exactly, and a value with nothing ambiguous stays plain.
+  assert.equal(runner.redact(`TOKEN=${S1} deploy`), 'TOKEN=[redacted] deploy');
+  assert.equal(runner.redact(`TOKEN="${S1} x" deploy`), 'TOKEN="[REDACTED_AMBIGUOUS]" deploy');
+  assert.equal(runner.redact(runner.redact(`TOKEN="${S1} x" deploy`)), 'TOKEN="[REDACTED_AMBIGUOUS]" deploy');
+  // A variable reference names a secret and stays visible.
+  assert.equal(runner.redact('TOKEN=$DEPLOY_TOKEN deploy'), 'TOKEN=$DEPLOY_TOKEN deploy');
+});
+
+test('round 5 MEDIUM-R4-2: a whole-word NAME=value keeps its tail hidden; field lists keep their fields', () => {
+  const head = `q${crypto.randomBytes(5).toString('hex')}`;
+  const tail = `q${crypto.randomBytes(5).toString('hex')}`;
+  const none = (text) => assert.equal(text.includes(head) || text.includes(tail), false, text.replaceAll(head, '<A>').replaceAll(tail, '<B>'));
+  none(runner.redactedCommand(['docker', 'run', '-e', `DB_PASSWORD=${head}&w=${tail}`, 'app']));
+  none(runner.redactedCommand(['docker', 'build', '--build-arg', `NPM_TOKEN=${head}&x=${tail}`, '.']));
+  none(runner.redactedCommand(['docker', 'run', `--env=API_KEY=${head},x=${tail}`, 'app']));
+  none(runner.redactedCommand(['env', `PASSWORD=${head}&x=${tail}`, 'deploy']));
+  none(runner.redact(`login password=${head}&x=${tail}`));
+  // URL queries, HTTP form fields and shell text keep separate fields (the field after is not secret).
+  assert.ok(runner.redactedCommand(['curl', '-d', `password=${head}&x=${tail}`, 'https://x/login']).includes(`&x=${tail}`));
+  assert.ok(runner.redactedCommand(['curl', `https://x/y?token=${head}&x=${tail}`]).includes(`&x=${tail}`));
+  assert.ok(runner.redactedCommand(['bash', '-c', `PASSWORD=${head}&x=${tail} ./run`]).includes(`&x=${tail}`));
+  assert.ok(runner.redact(`curl -d password=${head}&x=${tail} https://x/login`).includes(`&x=${tail}`));
+  for (const text of [runner.redactedCommand(['curl', '-d', `password=${head}&x=${tail}`, 'https://x/login']), runner.redact(`curl -d password=${head}&x=${tail} https://x/login`)]) {
+    assert.equal(text.includes(head), false);
+  }
+});
+
+test('round 5: --target and --action are redacted on the options themselves', () => {
+  const options = runner.withRedactedInputs({ ...BASE, target: `https://x/deploy?token=${S1}&env=prod`, action: `deploy KEY=${S2}` });
+  assert.equal(options.target, 'https://x/deploy?token=[redacted]&env=prod');
+  assert.equal(options.action, 'deploy KEY=[redacted]');
+  assert.equal(secretCount(JSON.stringify(options)), 0);
 });

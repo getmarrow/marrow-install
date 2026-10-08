@@ -176,6 +176,16 @@ Options:
 //   quotes and spaces are part of the value; it ends only before another `name=`, or at a
 //   new line.
 const REDACTED = '[redacted]';
+// Marrow's own marker for a hidden value that may also hide command text: a value holding a
+// blank, a quote, a shell operator or a separator (; & | < > ( ) ` # , ? $( ...). Marrow never binds
+// an action that carries it to an approval (no learned, task or fleet reuse), so two actions that
+// differ only inside such a value can never share one. The text must match Marrow's exactly.
+const AMBIGUOUS = '[REDACTED_AMBIGUOUS]';
+const AMBIGUOUS_SPAN_RE = /[\s'"`;&|<>()#,?]|\$[({A-Za-z_]/;
+const MARKERS = new Set([REDACTED, AMBIGUOUS]);
+const hiddenAs = (span) => (AMBIGUOUS_SPAN_RE.test(String(span)) ? AMBIGUOUS : REDACTED);
+// A shell variable reference ($NAME, ${NAME}) names a secret; it is not one, and stays visible.
+const REFERENCE_RE = /^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$/;
 
 // A credential name CONTAINS one of these words in one of its segments (split at _ . - and
 // camelCase): TF_TOKEN, PGPASSWORD, SECRET_KEY_BASE, GITHUB_TOKEN_V2, X_API_KEY_ID, apiKey,
@@ -198,10 +208,11 @@ const NON_SECRET_NAMES = new Set([
   'key_type', 'key_size', 'key_length', 'key_algorithm', 'public_key', 'primary_key', 'foreign_key', 'sort_key',
   'partition_key', 'hash_key', 'range_key', 'cache_key', 'idempotency_key', 'pwd',
 ]);
-// A name whose last segment says what kind of thing the value is (a file, a URL, a host, a
-// name, a region) names where a secret is, not the secret: --key-file, AUTH_URL, KEY_VAULT_NAME.
+// A name whose last segment says what kind of thing the value is (a file, a name, a region)
+// names where a secret is, not the secret: --key-file, KEY_VAULT_NAME. A URL, URI, endpoint,
+// domain or host under a credential name (SECRET_URL, TOKEN_URL, a webhook) is the secret itself.
 const NON_SECRET_LAST_SEGMENTS = new Set([
-  'file', 'files', 'path', 'paths', 'dir', 'url', 'uri', 'endpoint', 'domain', 'host', 'hostname', 'arn', 'alias', 'name',
+  'file', 'files', 'path', 'paths', 'dir', 'arn', 'alias', 'name',
   'region', 'sock', 'socket', 'type', 'mode', 'method', 'version', 'count', 'limit', 'ttl', 'size', 'length', 'format',
 ]);
 
@@ -352,7 +363,10 @@ const NEXT_LINE_CONTINUES_RE = /[A-Za-z0-9+/=]{16,128}[ \t]*(?:\r?\n|$)/y;
 
 // Where a value starting at `start` ends, scanning no further than `limit` (the closing quote
 // when the value starts inside quotes).
-function valueEnd(text, start, mode, regions, limit = text.length) {
+// `field` is true where a value is one field of a list (a URL query, an HTTP client's form or
+// header argument, a field inside a longer word): there it also ends before another `name=` after
+// & , #. In a whole-word NAME=value it does not, so a secret holding `&x=` stays hidden.
+function valueEnd(text, start, mode, regions, limit = text.length, field = true) {
   // In a script, a key block counts only inside quotes (limit is then the closing quote).
   const pem = mode === 'script' && limit === text.length ? -1 : pemEnd(text, start, limit);
   if (pem !== -1) return pem;
@@ -370,7 +384,7 @@ function valueEnd(text, start, mode, regions, limit = text.length) {
         index = next;
         continue;
       }
-      if (/[\s&,#;|]/.test(char) && aheadAt(NAME_ASSIGNMENT_AHEAD, text, next)) break;
+      if (field && /[\s&,#;|]/.test(char) && aheadAt(NAME_ASSIGNMENT_AHEAD, text, next)) break;
       // A JSON string list of commands (["export TOKEN=...","rm -rf x"]): the secret ends with its string.
       if ((char === '"' || char === "'") && /[,\]}]/.test(text[next] || '')) break;
       index = next;
@@ -391,13 +405,27 @@ function valueEnd(text, start, mode, regions, limit = text.length) {
     if (char === ';' || char === '|' || char === '&') {
       if (mode === 'script') break;
       if (char !== ';' && text[next] === char) break;
-      if (next >= limit || /\s/.test(text[next]) || aheadAt(NAME_ASSIGNMENT_AHEAD, text, next)) break;
+      if (next >= limit || /\s/.test(text[next])) break;
+      if ((char !== '&' || field) && aheadAt(NAME_ASSIGNMENT_AHEAD, text, next)) break;
       if (char !== '&' && COMMAND_START.test(text[next])) break;
     }
-    if ((char === '#' || char === ',') && aheadAt(NAME_ASSIGNMENT_AHEAD, text, next)) break;
+    if (field && (char === '#' || char === ',') && aheadAt(NAME_ASSIGNMENT_AHEAD, text, next)) break;
     index = next;
   }
   return index;
+}
+
+// Whether the value at `start` is one field of a list: inside a URL (a ? or :// earlier in the
+// same word), or the unquoted form or header argument of an HTTP client.
+function fieldValue(text, start, regions) {
+  let wordStart = start;
+  const floor = Math.max(0, start - 512);
+  while (wordStart > floor && !/[\s'"]/.test(text[wordStart - 1])) wordStart -= 1;
+  const before = text.slice(wordStart, start);
+  if (/[?]|:\/\//.test(before)) return true;
+  if (!FIELD_ARGUMENT_RE.test(text.slice(Math.max(0, wordStart - 24), wordStart))) return false;
+  const commandStart = regions.commandStart(wordStart);
+  return HTTP_CLIENT_COMMAND_RE.test(text.slice(commandStart, Math.min(wordStart, commandStart + 256)));
 }
 
 // A value that starts inside a quoted region follows the same rules inside the quotes (a quoted
@@ -426,7 +454,7 @@ function quotedValueEnd(text, start, region, mode, regions) {
         break;
       }
     }
-  } else end = valueEnd(text, start, mode, regions, region[1]);
+  } else end = valueEnd(text, start, mode, regions, region[1], true);
   if (end < region[1]) return end;
   const after = region[1] + 1;
   if (after < text.length && !/[\s;|&)]/.test(text[after])) return valueEnd(text, after, mode, regions);
@@ -481,12 +509,12 @@ function jsonValueEnd(text, start) {
 const ESCAPED_QUOTED_RE = /\\"((?:[^"\\]|\\[^"])*)\\"/y;
 const DOUBLE_QUOTED_RE = /"((?:[^"\\]|\\.)*)"/y;
 const SINGLE_QUOTED_RE = /'([^']*)'/y;
-function secretValueAt(text, start, mode, regions, jsonName = false) {
+function secretValueAt(text, start, mode, regions, jsonName = false, wholeWord = false) {
   if (start >= text.length) return null;
   const sticky = (pattern, open) => {
     pattern.lastIndex = start;
     const match = pattern.exec(text);
-    return match ? { end: start + match[0].length, value: match[1], replacement: `${open}${REDACTED}${open}` } : null;
+    return match ? { end: start + match[0].length, value: match[1], replacement: `${open}${hiddenAs(match[1])}${open}` } : null;
   };
   let found = null;
   if (text.startsWith('\\"', start)) found = sticky(ESCAPED_QUOTED_RE, '\\"');
@@ -494,18 +522,23 @@ function secretValueAt(text, start, mode, regions, jsonName = false) {
   else if (jsonName && text[start] === "'") found = sticky(SINGLE_QUOTED_RE, "'");
   else if (jsonName) {
     const end = jsonValueEnd(text, start);
-    found = { end, value: text.slice(start, end), replacement: REDACTED };
+    found = { end, value: text.slice(start, end), replacement: hiddenAs(text.slice(start, end)) };
   }
   if (!found) {
     const around = mode === 'word' ? null : regions.around(start);
-    const end = around ? quotedValueEnd(text, start, around, mode, regions) : valueEnd(text, start, mode, regions);
+    let end;
+    if (around) end = quotedValueEnd(text, start, around, mode, regions);
+    else if (mode === 'word' && wholeWord) end = text.length;
+    else end = valueEnd(text, start, mode, regions, text.length, mode === 'word' ? true : !wholeWord || fieldValue(text, start, regions));
     const value = text.slice(start, end);
-    // One quoted piece keeps its quotes; anything else is replaced whole.
+    // One quoted piece keeps its quotes; anything else is replaced whole. A value that may also
+    // hide command text or a separator becomes the ambiguous marker.
     const piece = !around && mode !== 'word' ? regions.opening(start) : null;
     const single = Boolean(piece) && piece[1] + 1 === end;
-    found = { end, value: single ? value.slice(1, -1) : value, replacement: single ? `${value[0]}${REDACTED}${value[0]}` : REDACTED };
+    const inner = single ? value.slice(1, -1) : value;
+    found = { end, value: inner, replacement: single ? `${value[0]}${hiddenAs(inner)}${value[0]}` : hiddenAs(value) };
   }
-  if (!found.value || found.value === REDACTED) return null;
+  if (!found.value || MARKERS.has(found.value) || REFERENCE_RE.test(found.value)) return null;
   return found;
 }
 
@@ -537,7 +570,10 @@ function blankLineTracker(text) {
 
 const AUTH_SCHEME_RE = /^(?:bearer|basic|token|digest|bot|apikey|negotiate)$/i;
 const ASSIGNMENT_PREFIX_SOURCE = '(^|[^A-Za-z0-9_.-])(\\\\?["\']?)([A-Za-z0-9_.-]+)\\2(\\s*[:=]\\s*)';
-function redactAssignments(text, mode) {
+// A whole-word NAME=value (the name starts its word, or follows --env= or --build-arg=) whose
+// value runs to the end of the word, unless the word is a field list (`field`).
+const WHOLE_WORD_PREFIX_RE = /^(?:-{1,2}(?:env|build-arg|e)=)?$/;
+function redactAssignments(text, mode, field = false) {
   const pattern = new RegExp(ASSIGNMENT_PREFIX_SOURCE, 'g');
   const regions = regionFinder(quoteRegions(text, mode), text);
   const lineIsBlankBefore = blankLineTracker(text);
@@ -553,11 +589,20 @@ function redactAssignments(text, mode) {
       && !(colon && !quote && /authorization$/i.test(name)) // the header pass did these
       && !(colon && !credentialColon(text, match.index, lead, quote, name, valueStart, lineIsBlankBefore))) {
       const block = colon && (mode !== 'script' || regions.around(valueStart)) ? yamlBlockEnd(text, match.index, valueStart) : -1;
+      const nameStart = match.index + lead.length + quote.length;
+      let wholeWord = false;
+      if (!colon && !quote && !field) {
+        if (mode === 'word') wholeWord = WHOLE_WORD_PREFIX_RE.test(text.slice(0, nameStart));
+        else {
+          // In free text and scripts: the name starts its word.
+          wholeWord = nameStart === 0 || /[\s'"]/.test(text[nameStart - 1]);
+        }
+      }
       value = block !== -1
-        ? { end: block, value: text.slice(valueStart, block), replacement: `${text[valueStart]} ${REDACTED}` }
-        : secretValueAt(text, valueStart, mode, regions, Boolean(quote) && colon);
+        ? { end: block, value: text.slice(valueStart, block), replacement: `${text[valueStart]} ${AMBIGUOUS}` }
+        : secretValueAt(text, valueStart, mode, regions, Boolean(quote) && colon, wholeWord);
       // `X-Token: Bearer [redacted]`: the scheme pass did this one.
-      if (value && AUTH_SCHEME_RE.test(value.value) && text.startsWith(` ${REDACTED}`, value.end)) value = null;
+      if (value && AUTH_SCHEME_RE.test(value.value) && /^ \[(?:redacted|REDACTED_AMBIGUOUS)\]/.test(text.slice(value.end, value.end + 24))) value = null;
     }
     if (!value) {
       // Scan again from the next character: a rejected match must not hide a secret inside it.
@@ -666,15 +711,15 @@ function redactDigest(text, mode) {
         }
       }
     }
-    if (end <= valueStart || text.slice(valueStart, end) === REDACTED) continue;
-    out += `${text.slice(last, valueStart)}${REDACTED}`;
+    if (end <= valueStart || MARKERS.has(text.slice(valueStart, end))) continue;
+    out += `${text.slice(last, valueStart)}${hiddenAs(text.slice(valueStart, end))}`;
     last = end;
     DIGEST_HEADER_RE.lastIndex = end;
   }
   return out + text.slice(last);
 }
 
-function redact(value, mode = 'text') {
+function redact(value, mode = 'text', { field = false } = {}) {
   // No control sequence may hide a credential name (TO<ESC>[0mKEN=...), and none is sent.
   let text = stripControls(String(value || ''));
   text = redactDigest(text, mode);
@@ -682,12 +727,12 @@ function redact(value, mode = 'text') {
   // Basic credentials are base64 with a digit, + / or = in practice; a plain word is prose.
   text = text.replace(BARE_SCHEME_RE, (match, scheme, space, credential) => {
     const prose = /^basic$/i.test(scheme) && !(/^[A-Za-z0-9+/]+={0,2}$/.test(credential) && /[0-9+/=]/.test(credential));
-    return credential === REDACTED || prose ? match : `${scheme}${space}${REDACTED}`;
+    return MARKERS.has(credential) || prose ? match : `${scheme}${space}${hiddenAs(credential)}`;
   });
   text = text.replace(URL_USERINFO_RE, (match, scheme, user, password) => {
-    if (password !== undefined) return password ? `${scheme}${user}:${REDACTED}@` : match;
+    if (password !== undefined) return password && !MARKERS.has(password) ? `${scheme}${user}:${hiddenAs(password)}@` : match;
     // A user with no password is a name (git@, deploy@) unless it is token-like.
-    return user.length >= 20 && /[0-9]/.test(user) ? `${scheme}${REDACTED}@` : match;
+    return user.length >= 20 && /[0-9]/.test(user) && !MARKERS.has(user) ? `${scheme}${hiddenAs(user)}@` : match;
   });
   text = redactAfter(text, SECRET_FLAG_TEXT_RE, mode, (match, at, source) => secretFlag(match[1])
     && (source[at] !== '-' || looksSecret(wordAt(source, at))));
@@ -697,7 +742,7 @@ function redact(value, mode = 'text') {
   text = redactAfter(text, USER_FLAG_RE, mode);
   text = redactAfter(text, TOOL_FLAG_TEXT_RE, mode);
   text = redactAfter(text, MYSQL_GLUED_RE, mode);
-  text = redactAssignments(text, mode);
+  text = redactAssignments(text, mode, field);
   for (const shape of TOKEN_SHAPES) text = text.replace(shape, REDACTED);
   return text;
 }
@@ -714,9 +759,17 @@ function shellQuote(value) {
 const SHELL_NAMES = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'ash', 'mksh', 'fish', 'su', 'runuser']);
 const COMMAND_LINE_RE = /\s/;
 const SHELL_SYNTAX_RE = /[;|`]|&&|\$\(/;
+const ASSIGNMENT_WORD_RE = /^[A-Za-z_][A-Za-z0-9_]*=/;
+const ENV_FLAG_WORDS = new Set(['-e', '--env', '--build-arg', '--set-env-vars']);
 function argvModes(words, names) {
   let sawSsh = false;
+  let envAssignments = false;
   return words.map((word, index) => {
+    // An environment setting (after env, -e, --env, --build-arg) is one value, whatever it holds.
+    const setting = ASSIGNMENT_WORD_RE.test(word) && (envAssignments || (index > 0 && ENV_FLAG_WORDS.has(words[index - 1])));
+    if (names[index] === 'env') envAssignments = true;
+    else if (!ASSIGNMENT_WORD_RE.test(word) && !word.startsWith('-')) envAssignments = false;
+    if (setting) return 'word';
     let mode = 'word';
     if (index >= 2 && /^-[A-Za-z]*c[A-Za-z]*$/.test(words[index - 1])) {
       // Back over the shell's own flags (at most 16) to the shell.
@@ -740,17 +793,19 @@ function argvModes(words, names) {
 function redactArgvWord(words, names, index, seen, mode) {
   const previous = index > 0 ? words[index - 1] : '';
   const word = words[index];
-  if (secretFlag(previous) && (!word.startsWith('-') || looksSecret(word))) return REDACTED;
+  if (secretFlag(previous) && (!word.startsWith('-') || looksSecret(word))) return hiddenAs(word);
   // -u user:password for HTTP clients: the name stays.
   if ((previous === '-u' || previous === '--user') && HTTP_CLIENTS.some((name) => seen.has(name)) && /^[^:]+:./.test(word)) {
-    return shellQuote(`${word.split(':')[0]}:${REDACTED}`);
+    return shellQuote(`${word.split(':')[0]}:${hiddenAs(word.slice(word.indexOf(':') + 1))}`);
   }
-  if ((previous === '-passin' || previous === '-passout' || previous === '-pass') && word.startsWith('pass:')) return shellQuote(`pass:${REDACTED}`);
-  if (TOOL_SECRET_FLAGS.some(([tools, verb, flag]) => previous === flag && tools.some((name) => seen.has(name)) && (!verb || seen.has(verb)))) return REDACTED;
-  if (/^-p[^\s-]/.test(word) && MYSQL_CLIENTS.some((name) => seen.has(name) || names[index - 1] === name)) return '-p[redacted]';
+  if ((previous === '-passin' || previous === '-passout' || previous === '-pass') && word.startsWith('pass:')) return shellQuote(`pass:${hiddenAs(word.slice(5))}`);
+  if (TOOL_SECRET_FLAGS.some(([tools, verb, flag]) => previous === flag && tools.some((name) => seen.has(name)) && (!verb || seen.has(verb)))) return hiddenAs(word);
+  if (/^-p[^\s-]/.test(word) && MYSQL_CLIENTS.some((name) => seen.has(name) || names[index - 1] === name)) return `-p${hiddenAs(word.slice(2))}`;
   if (index >= 3 && words[index - 2] === 'set' && /^(?:config|configure)$/.test(words[index - 3])
-    && credentialName(previous.split(/[:/]/).pop()) && !aheadAt(PLAIN_SETTING_RE, word, 0)) return REDACTED;
-  return shellQuote(redact(word, mode));
+    && credentialName(previous.split(/[:/]/).pop()) && !aheadAt(PLAIN_SETTING_RE, word, 0)) return hiddenAs(word);
+  // The form or header argument of an HTTP client is a field list: its fields stay apart.
+  const field = mode === 'word' && FIELD_ARGUMENT_RE.test(` ${previous} `) && HTTP_CLIENTS.some((name) => seen.has(name));
+  return shellQuote(redact(word, mode, { field }));
 }
 
 function redactedCommand(command) {
@@ -791,7 +846,8 @@ function rawInputs(options) {
   return { action: String(options?.action || ''), target: String(options?.target || ''), type: String(options?.type || '') };
 }
 
-// Of two inferred types, the one that is protected; if both or neither are, the first.
+// Of two inferred types, the one that is protected; if both or neither are, the first (the type
+// of the command as typed, so a DROP behind a secret stays migration, not security).
 function stricterType(first, second) {
   if (PROTECTED_ACTION_TYPES.has(first) || !PROTECTED_ACTION_TYPES.has(second)) return first;
   return second;
@@ -811,7 +867,7 @@ function governedInputs(options, childCommand = null, surfacesFrom = 'command') 
   const rawAction = raw.action || rawCommand;
   const rawRisk = `${rawAction} ${rawCommand} ${raw.target}`;
   const redactedRisk = `${action} ${commandText} ${sentTarget}`;
-  const type = options.type ? redact(options.type) : stricterType(inferType(redactedRisk), inferType(rawRisk));
+  const type = options.type ? redact(options.type) : stricterType(inferType(rawRisk), inferType(redactedRisk));
   const risky = isRisky(redactedRisk, type) || isRisky(rawRisk, type);
   let surfaceText = [commandText || action, rawCommand || rawAction];
   if (surfacesFrom === 'target') surfaceText = [sentTarget || action, raw.target || rawAction];

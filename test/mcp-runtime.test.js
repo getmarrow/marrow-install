@@ -408,6 +408,9 @@ test('the local runtime is installed only on write runs, and the switch keeps ho
       fs.rmSync(other.home, { recursive: true, force: true });
     }
     await install(installOptions(root, home));
+    // A maintenance pass keeps a local-runtime project on the local runtime (M4a).
+    await install(installOptions(root, home, { maintenance: true }));
+    assert.equal(fs.readFileSync(claude, 'utf8').includes('/.marrow/runtime/'), true, 'maintenance kept the local form');
     // A maintenance pass (the controller) uses a verified copy but never installs one.
     assert.equal(installer.maintenanceMcpRuntime(detectEnvironment(root, { HOME: home, PATH: process.env.PATH })).version, PIN);
     assert.equal(installer.maintenanceMcpRuntime(detectEnvironment(root, { HOME: home, PATH: process.env.PATH }), { mcpLocalRuntime: false }), null);
