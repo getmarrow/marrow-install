@@ -230,7 +230,7 @@ Runtime, think and commit calls retry HTTP 429/502/503/504, timed-out attempts a
 
 `gate` prints the decision with its mode (enforced or advisory). It exits 0 when the action may proceed, 12 when an enforced gate blocks it or needs owner approval, and 13 when no gate decision is available, so `gate ... && deploy` stops on a block. When the gate creates a decision, it prints the exact `proof` command, with `--session` and `--gate-receipt`, that records the outcome afterwards. `proof` exits non-zero unless Marrow returns `committed: true`.
 
-When a gate needs owner approval the run stops. The account owner approves in their own chat or terminal, never the agent that asked, and the run is repeated with `--owner-approved <reference>`; Marrow's server decides whether the reference is accepted. The dashboard shows receipts and reports; it is not where approvals happen.
+When a gate needs owner approval the run stops (`gate` exits 12). The account owner approves it in Marrow, never the agent that asked, and the run is repeated with `--owner-approved <reference>`; Marrow's server decides whether the reference is accepted.
 
 Useful commands:
 
