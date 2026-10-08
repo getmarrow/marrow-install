@@ -404,7 +404,7 @@ function valueEnd(text, start, mode, regions, limit = text.length) {
 // script `ssh host 'TOKEN=S; rm -rf /data'` keeps its commands visible); reaching the closing
 // quote, it runs on through anything glued after it.
 const FIELD_ARGUMENT_RE = /(?:^|\s)(?:-d|-H|-F|--data(?:-raw|-binary|-urlencode|-ascii)?|--json|--form(?:-string)?|--header)(?:\s+|=)$/;
-const HTTP_CLIENT_COMMAND_RE = /^\s*(?:(?:sudo|env|command|exec|time)\s+|[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:\S*\/)?(?:curl|wget|http|https|xh)\s/;
+const HTTP_CLIENT_COMMAND_RE = /^\s*(?:(?:sudo|env|command|exec|time|nice|nohup)(?:\s+-[A-Za-z-]+)*\s+|[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:\S*\/)?(?:curl|wget|http|https|xh)\s/;
 // Whether the quoted region at `open` is a field or header argument of an HTTP client: the
 // simple command it belongs to (back to the last unquoted ; | & ( or line break) starts with
 // curl, wget, http, https or xh. `watch -d` or `tmux new -d` run their payload instead.

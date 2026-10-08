@@ -736,7 +736,7 @@ test('security re-review X1-X6: flags after flags, spaced field values, crafted 
   }
   assert.equal(runner.redactedCommand(['bash', '-c', `vault login --no-print --token ${S1}`]), "bash -c 'vault login --no-print --token [redacted]'");
   // X2: a field or header value with a space inside its quotes stays whole.
-  for (const text of [`curl -d "password=${S1} ${S2}" https://x`, `curl -H "X-Api-Key: ${S1} ${S2}" https://x`, `curl --data 'token=${S1} ${S2}&env=prod' https://x`]) {
+  for (const text of [`curl -d "password=${S1} ${S2}" https://x`, `curl -H "X-Api-Key: ${S1} ${S2}" https://x`, `curl --data 'token=${S1} ${S2}&env=prod' https://x`, `sudo -E curl -d "password=${S1} ${S2}" https://x`]) {
     assert.equal(secretCount(runner.redact(text)), 0);
     assert.equal(secretCount(runner.redactedCommand(['bash', '-c', text])), 0);
   }
