@@ -166,12 +166,23 @@ Options:
 // Redaction replaces a secret VALUE and nothing else. Everything around it stays visible,
 // because the redacted text is what Marrow sees, what the owner approves and what an action
 // permit is bound to: two actions that differ anywhere outside a secret must stay different.
+//
+// Three kinds of text:
+// - 'text': free text (--action, --target, displayed lines). A value is one shell word:
+//   adjacent quoted and unquoted pieces belong to it, and it ends at unquoted whitespace.
+// - 'script': a shell script (the word after `sh -c`, `bash -lc`, ...). As 'text', and an
+//   unquoted ; | & always ends the value, because the shell splits there.
+// - 'word': one argv word that is not a script. The shell already removed its quoting, so
+//   quotes and spaces are part of the value; it ends only before another `name=`, or at a
+//   new line.
 const REDACTED = '[redacted]';
 
 // A credential name CONTAINS one of these words in one of its segments (split at _ . - and
 // camelCase): TF_TOKEN, PGPASSWORD, SECRET_KEY_BASE, GITHUB_TOKEN_V2, X_API_KEY_ID, apiKey,
-// client_secret, basic_auth, Authorization.
-const CREDENTIAL_WORD_RE = /token|secret|password|passwd|passphrase|key|credential|auth/;
+// client_secret, basic_auth, Authorization, SLACK_WEBHOOK. `pass` and `pwd` count only as a
+// whole segment (DB_PASS, MYSQL_PWD; not bypass or compass).
+const CREDENTIAL_WORD_RE = /token|secret|password|passwd|passphrase|key|credential|auth|webhook/;
+const CREDENTIAL_SEGMENTS = new Set(['pass', 'pwd']);
 // Segments that contain such a word but name no secret.
 const NON_SECRET_WORDS = new Set([
   'keyspace', 'keyspaces', 'keyboard', 'keyboards', 'keyword', 'keywords', 'keymap', 'keymaps', 'keyframe', 'keyframes',
@@ -185,35 +196,127 @@ const NON_SECRET_NAMES = new Set([
   'token_count', 'token_limit', 'token_budget', 'token_type', 'token_usage', 'tokens_used',
   'auth_type', 'auth_method', 'auth_mode', 'auth_provider', 'auth_scheme',
   'key_type', 'key_size', 'key_length', 'key_algorithm', 'public_key', 'primary_key', 'foreign_key', 'sort_key',
-  'partition_key', 'hash_key', 'range_key', 'cache_key', 'idempotency_key',
+  'partition_key', 'hash_key', 'range_key', 'cache_key', 'idempotency_key', 'pwd',
+]);
+// A name whose last segment says what kind of thing the value is (a file, a URL, a host, a
+// name, a region) names where a secret is, not the secret: --key-file, AUTH_URL, KEY_VAULT_NAME.
+const NON_SECRET_LAST_SEGMENTS = new Set([
+  'file', 'files', 'path', 'paths', 'dir', 'url', 'uri', 'endpoint', 'domain', 'host', 'hostname', 'arn', 'alias', 'name',
+  'region', 'sock', 'socket', 'type', 'mode', 'method', 'version', 'count', 'limit', 'ttl', 'size', 'length', 'format',
 ]);
 
-function credentialName(name) {
-  const normalized = String(name || '').replace(/^-+/, '').replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase().replace(/[.-]/g, '_');
-  if (!normalized || NON_SECRET_NAMES.has(normalized)) return false;
-  return normalized.split('_').some((segment) => CREDENTIAL_WORD_RE.test(segment) && !NON_SECRET_WORDS.has(segment));
+function nameSegments(name) {
+  return String(name || '').replace(/^-+/, '').replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase().replace(/[.-]/g, '_')
+    .split('_').filter(Boolean);
 }
 
-// An unquoted value runs to whitespace or a quote. Inside it, & ; | end it only before
-// another `name=` or as a shell operator (&&, ||, & or | or ; before a space or the end, ; or |
-// before a command with arguments or a subshell, where a shell would split it too); # and ,
-// end it only before `name=`. Anything else, to the end, is the secret.
-const NAME_ASSIGNMENT_AHEAD = /[A-Za-z_][A-Za-z0-9_.-]*=/y;
-const COMMAND_AHEAD = /(?:[({]|[A-Za-z_./$][A-Za-z0-9_./$=-]*(?:\s|&&|\|\||[;|)]))/y;
+function credentialName(name) {
+  const segments = nameSegments(name);
+  if (!segments.length || NON_SECRET_NAMES.has(segments.join('_'))) return false;
+  if (segments.length > 1 && NON_SECRET_LAST_SEGMENTS.has(segments[segments.length - 1])) return false;
+  return segments.some((segment) => CREDENTIAL_SEGMENTS.has(segment)
+    || (CREDENTIAL_WORD_RE.test(segment) && !NON_SECRET_WORDS.has(segment)));
+}
+
+// A flag whose next word is a secret: its last segment is a credential word (--token,
+// --github-token, --db-password, --secret-key, --api-key, --key). `--skip-auth` is not.
+const FLAG_SECRET_LAST = new Set(['token', 'password', 'passwd', 'passphrase', 'pass', 'pwd', 'secret', 'key', 'apikey', 'credential', 'credentials']);
+function secretFlag(flag) {
+  const text = String(flag || '');
+  if (!/^--[A-Za-z][A-Za-z0-9_-]*$/.test(text)) return false;
+  const segments = nameSegments(text);
+  return FLAG_SECRET_LAST.has(segments[segments.length - 1]) && credentialName(text);
+}
+
+const NAME_ASSIGNMENT_AHEAD = /(?:[A-Za-z_][A-Za-z0-9_.-]*=|"[A-Za-z_][A-Za-z0-9_.-]*"\s*:)/y;
+const COMMAND_START = /[A-Za-z_./$({`~!]/;
 const aheadAt = (pattern, text, index) => {
   pattern.lastIndex = index;
   return pattern.test(text);
 };
-function unquotedValueEnd(text, start) {
+
+// Shell quoting in 'text' and 'script' modes: each closed quoted region on one line, as
+// [open, close] (close is the index of the closing quote). An unclosed quote is a literal.
+function quoteRegions(text, mode) {
+  const regions = [];
+  if (mode === 'word') return regions;
+  let index = 0;
+  while (index < text.length) {
+    const char = text[index];
+    if (char === '\\') {
+      index += 2;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      let at = index + 1;
+      while (at < text.length && text[at] !== char && text[at] !== '\n') at += char === '"' && text[at] === '\\' ? 2 : 1;
+      if (at < text.length && text[at] === char) {
+        regions.push([index, at]);
+        index = at + 1;
+        continue;
+      }
+    }
+    index += 1;
+  }
+  return regions;
+}
+
+// Finds the quoted region that opens at, or contains, a position (binary search).
+function regionFinder(regions) {
+  const last = (position) => {
+    let low = 0;
+    let high = regions.length - 1;
+    let found = -1;
+    while (low <= high) {
+      const middle = (low + high) >> 1;
+      if (regions[middle][0] <= position) {
+        found = middle;
+        low = middle + 1;
+      } else high = middle - 1;
+    }
+    return found === -1 ? null : regions[found];
+  };
+  return {
+    opening(position) {
+      const region = last(position);
+      return region && region[0] === position ? region : null;
+    },
+    around(position) {
+      const region = last(position - 1);
+      return region && region[0] < position && position <= region[1] ? region : null;
+    },
+  };
+}
+
+// Where a value starting at `start` (outside quotes) ends.
+function valueEnd(text, start, mode, regions) {
   let index = start;
   while (index < text.length) {
     const char = text[index];
-    if (/\s/.test(char) || char === '"' || char === "'") break;
     const next = index + 1;
-    if (char === '&' || char === '|' || char === ';') {
-      if ((char === '&' || char === '|') && text[next] === char) break;
+    if (char === '\n' || char === '\r') break;
+    if (mode === 'word') {
+      if (/[\s&,#;|]/.test(char) && aheadAt(NAME_ASSIGNMENT_AHEAD, text, next)) break;
+      index = next;
+      continue;
+    }
+    if (/\s/.test(char)) break;
+    if (char === "'" || char === '"') {
+      const region = regions.opening(index);
+      index = region ? region[1] + 1 : next;
+      continue;
+    }
+    if (char === '\\' && next < text.length && text[next] !== '\n') {
+      index = next + 1;
+      continue;
+    }
+    // Command substitution is never part of a literal secret.
+    if (char === '`' || (char === '$' && text[next] === '(')) break;
+    if (char === ';' || char === '|' || char === '&') {
+      if (mode === 'script') break;
+      if (char !== ';' && text[next] === char) break;
       if (next >= text.length || /\s/.test(text[next]) || aheadAt(NAME_ASSIGNMENT_AHEAD, text, next)) break;
-      if (char !== '&' && aheadAt(COMMAND_AHEAD, text, next)) break;
+      if (char !== '&' && COMMAND_START.test(text[next])) break;
     }
     if ((char === '#' || char === ',') && aheadAt(NAME_ASSIGNMENT_AHEAD, text, next)) break;
     index = next;
@@ -221,48 +324,108 @@ function unquotedValueEnd(text, start) {
   return index;
 }
 
-// The value at `start`: its end and its redacted form, or null when there is none to redact.
+// Where a value that starts inside a quoted region ends: at the closing quote (and on through
+// anything glued after it), or before another `name=`.
+function quotedValueEnd(text, start, region, mode, regions) {
+  let index = start;
+  while (index < region[1]) {
+    if (/[\s&,#;|]/.test(text[index]) && aheadAt(NAME_ASSIGNMENT_AHEAD, text, index + 1)) return index;
+    index += 1;
+  }
+  const after = region[1] + 1;
+  if (after < text.length && !/[\s;|&)]/.test(text[after])) return valueEnd(text, after, mode, regions);
+  return region[1];
+}
+// A JSON value after a quoted name: a string, or an object or array (all of it), or a bare
+// literal.
+function jsonValueEnd(text, start) {
+  const open = text[start];
+  if (open === '{' || open === '[') {
+    let depth = 0;
+    let index = start;
+    while (index < text.length) {
+      const char = text[index];
+      if (char === '"') {
+        index += 1;
+        while (index < text.length && text[index] !== '"') index += text[index] === '\\' ? 2 : 1;
+      } else if (char === '{' || char === '[') depth += 1;
+      else if (char === '}' || char === ']') {
+        depth -= 1;
+        if (depth === 0) return index + 1;
+      }
+      index += 1;
+    }
+    return text.length;
+  }
+  let index = start;
+  while (index < text.length && !/[\s,}\]]/.test(text[index])) index += 1;
+  return index;
+}
+
+// The value at `start`: its end and its redacted form, or null when there is nothing to redact.
 const ESCAPED_QUOTED_RE = /\\"((?:[^"\\]|\\[^"])*)\\"/y;
 const DOUBLE_QUOTED_RE = /"((?:[^"\\]|\\.)*)"/y;
 const SINGLE_QUOTED_RE = /'([^']*)'/y;
-function secretValueAt(text, start) {
-  const quoted = (pattern, open, close) => {
+function secretValueAt(text, start, mode, regions, jsonName = false) {
+  if (start >= text.length) return null;
+  const sticky = (pattern, open) => {
     pattern.lastIndex = start;
     const match = pattern.exec(text);
-    if (match) return { end: start + match[0].length, value: match[1], replacement: `${open}${REDACTED}${close}` };
-    // An unclosed quote: the rest of the line is the value.
-    const lineEnd = text.indexOf('\n', start);
-    const end = lineEnd === -1 ? text.length : lineEnd;
-    return { end, value: text.slice(start + open.length, end), replacement: `${open}${REDACTED}` };
+    return match ? { end: start + match[0].length, value: match[1], replacement: `${open}${REDACTED}${open}` } : null;
   };
-  let found;
-  if (text.startsWith('\\"', start)) found = quoted(ESCAPED_QUOTED_RE, '\\"', '\\"');
-  else if (text[start] === '"') found = quoted(DOUBLE_QUOTED_RE, '"', '"');
-  else if (text[start] === "'") found = quoted(SINGLE_QUOTED_RE, "'", "'");
-  else if (text[start] === '{' || text[start] === '[') return null; // nested JSON: its own keys are checked
-  else {
-    const end = unquotedValueEnd(text, start);
+  let found = null;
+  if (text.startsWith('\\"', start)) found = sticky(ESCAPED_QUOTED_RE, '\\"');
+  else if (jsonName && text[start] === '"') found = sticky(DOUBLE_QUOTED_RE, '"');
+  else if (jsonName && text[start] === "'") found = sticky(SINGLE_QUOTED_RE, "'");
+  else if (jsonName) {
+    const end = jsonValueEnd(text, start);
     found = { end, value: text.slice(start, end), replacement: REDACTED };
+  }
+  if (!found) {
+    const around = mode === 'word' ? null : regions.around(start);
+    const end = around ? quotedValueEnd(text, start, around, mode, regions) : valueEnd(text, start, mode, regions);
+    const value = text.slice(start, end);
+    // One quoted piece keeps its quotes; anything else is replaced whole.
+    const piece = !around && mode !== 'word' ? regions.opening(start) : null;
+    const single = Boolean(piece) && piece[1] + 1 === end;
+    found = { end, value: single ? value.slice(1, -1) : value, replacement: single ? `${value[0]}${REDACTED}${value[0]}` : REDACTED };
   }
   if (!found.value || found.value === REDACTED) return null;
   return found;
 }
 
-// `name: value` with a plain word mid-sentence ("rotate the key: production first") is prose,
-// a `host:port` or `name:/path` is not a credential; JSON, YAML lines, headers and env-style
-// names are.
-function credentialColon(text, index, lead, quote, name, valueStart) {
+// `name: value` with a plain word mid-sentence ("rotate the key: production first") is prose;
+// a `host:port` or `name:/path` is not a credential. JSON, headers ("apikey: ..."), YAML lines
+// (indented too) and env-style names are credentials.
+function credentialColon(text, index, lead, quote, name, valueStart, lineIsBlankBefore) {
   if (text[valueStart] === '/' || (lead === '/' && text[index - 1] === '/')) return false;
-  if (name.includes('.') && /^\d+(?:[/?#]|$)/.test(text.slice(valueStart))) return false;
-  if (quote) return true;
-  if (lead === '' || /[\n{[,]/.test(lead)) return true;
+  if (name.includes('.') && /^\d+(?:[/?#]|$)/.test(text.slice(valueStart, valueStart + 12))) return false;
+  if (quote || lead === '' || /[\n{[,"'=]/.test(lead)) return true;
+  if (/[ \t]/.test(lead) && lineIsBlankBefore(index + 1)) return true;
   return !/^(?:[a-z]+|[A-Z][a-z]+)$/.test(name);
+}
+
+// Whether only blanks (and a YAML list dash) come before a position on its line. Positions are
+// asked in increasing order, so the scan is linear.
+function blankLineTracker(text) {
+  let at = 0;
+  let blank = true;
+  return (position) => {
+    for (; at < position; at += 1) {
+      const char = text[at];
+      if (char === '\n') blank = true;
+      else if (char !== ' ' && char !== '\t' && char !== '-') blank = false;
+    }
+    return blank;
+  };
 }
 
 const AUTH_SCHEME_RE = /^(?:bearer|basic|token|digest|bot|apikey|negotiate)$/i;
 const ASSIGNMENT_PREFIX_SOURCE = '(^|[^A-Za-z0-9_.-])(\\\\?["\']?)([A-Za-z0-9_.-]+)\\2(\\s*[:=]\\s*)';
-function redactAssignments(text) {
+function redactAssignments(text, mode) {
   const pattern = new RegExp(ASSIGNMENT_PREFIX_SOURCE, 'g');
+  const regions = regionFinder(quoteRegions(text, mode));
+  const lineIsBlankBefore = blankLineTracker(text);
   let out = '';
   let last = 0;
   let match;
@@ -273,8 +436,8 @@ function redactAssignments(text) {
     let value = null;
     if (credentialName(name)
       && !(colon && !quote && /authorization$/i.test(name)) // the header pass did these
-      && !(colon && !credentialColon(text, match.index, lead, quote, name, valueStart))) {
-      value = secretValueAt(text, valueStart);
+      && !(colon && !credentialColon(text, match.index, lead, quote, name, valueStart, lineIsBlankBefore))) {
+      value = secretValueAt(text, valueStart, mode, regions, Boolean(quote) && colon);
       // `X-Token: Bearer [redacted]`: the scheme pass did this one.
       if (value && AUTH_SCHEME_RE.test(value.value) && text.startsWith(` ${REDACTED}`, value.end)) value = null;
     }
@@ -290,18 +453,20 @@ function redactAssignments(text) {
   return out + text.slice(last);
 }
 
-// Secret flags whose value is the next word: --token VALUE, --password VALUE.
-const SECRET_FLAG_SOURCE = '--(?:token|password|passwd|passphrase|secret|api-?key|api-token|access-token|auth-token|refresh-token|client-secret)';
-const SECRET_FLAG_RE = new RegExp(`^${SECRET_FLAG_SOURCE}$`, 'i');
-function redactSecretFlags(text) {
-  const pattern = new RegExp(`(^|\\s)(${SECRET_FLAG_SOURCE})(\\s+)(?!-)`, 'gi');
+// A prefix (a header, a flag, `config set NAME`) followed by a secret value.
+function redactAfter(text, pattern, mode, accept = () => true) {
+  const regions = regionFinder(quoteRegions(text, mode));
   let out = '';
   let last = 0;
   let match;
+  pattern.lastIndex = 0;
   while ((match = pattern.exec(text)) !== null) {
     const valueStart = match.index + match[0].length;
-    const value = secretValueAt(text, valueStart);
-    if (!value) continue;
+    const value = accept(match) ? secretValueAt(text, valueStart, mode, regions) : null;
+    if (!value) {
+      if (match[0].length === 0) pattern.lastIndex += 1;
+      continue;
+    }
     out += `${text.slice(last, valueStart)}${value.replacement}`;
     last = value.end;
     pattern.lastIndex = value.end;
@@ -309,9 +474,25 @@ function redactSecretFlags(text) {
   return out + text.slice(last);
 }
 
-const AUTH_HEADER_RE = /\b((?:proxy-)?authorization\s*:\s*)(?:(bearer|basic|token|digest|bot|apikey|negotiate)\s+)?([^\s'"]+)/gi;
+const AUTH_HEADER_RE = /\b(?:proxy-)?authorization\s*:\s*(?:(?:bearer|basic|token|digest|bot|apikey|negotiate)\s+)?/gi;
+const SECRET_FLAG_TEXT_RE = /(?:^|\s)(--[A-Za-z][A-Za-z0-9_-]*)\s+(?!-)/g;
+const CONFIG_SET_RE = /\b(?:config|configure)\s+set\s+(\S+)\s+/g;
+const OPENSSL_PASS_RE = /(?:^|\s)-pass(?:in|out)?\s+pass:/g;
+const USER_FLAG_RE = /(?:^|\s)(?:-u|--user)\s+[^\s:'"]+:/g;
+// Short flags that take a secret in particular tools: docker/podman login -p, redis-cli -a,
+// sshpass -p, gh secret set --body/-b, and mysql's glued -pPASSWORD.
+const TOOL_SECRET_FLAGS = [
+  [/^(?:docker|podman|nerdctl)$/, 'login', '-p'],
+  [/^redis-cli$/, null, '-a'],
+  [/^sshpass$/, null, '-p'],
+  [/^gh$/, 'secret', '--body'],
+  [/^gh$/, 'secret', '-b'],
+];
+const TOOL_FLAG_TEXT_RE = /\b(?:(?:docker|podman|nerdctl)\s+login\b[^\n;|&]{0,240}?\s-p|redis-cli\b[^\n;|&]{0,240}?\s-a|sshpass\b[^\n;|&]{0,240}?\s-p|gh\s+secret\s+set\b[^\n;|&]{0,240}?\s(?:--body|-b))\s+/g;
+const MYSQL_GLUED_RE = /\b(?:mysql|mysqladmin|mysqldump)\b[^\n;|&]{0,240}?\s-p(?=[^\s-])/g;
 const BARE_SCHEME_RE = /\b(bearer|basic)(\s+)([^\s'"]{8,})/gi;
-const URL_USERINFO_RE = /\b([a-z][a-z0-9+.-]*:\/\/)([^\s'"/?#@:]+)(?::([^\s'"/?#@]*))?@/gi;
+// Linear: the scheme cannot start inside a longer run of scheme characters.
+const URL_USERINFO_RE = /(?<![A-Za-z0-9+.-])([A-Za-z][A-Za-z0-9+.-]{0,31}:\/\/)([^\s'"/?#@:]+)(?::([^\s'"/?#]*))?@/g;
 const TOKEN_SHAPES = [
   /\bmrw_(?:live|test)_[A-Za-z0-9._-]+/g,
   /\bnpm_[A-Za-z0-9._-]+/g,
@@ -319,16 +500,17 @@ const TOKEN_SHAPES = [
   /\bgithub_pat_[A-Za-z0-9._-]+/g,
   /\bglpat-[A-Za-z0-9._-]+/g,
   /\bsk-[A-Za-z0-9._-]+/g,
+  /\b[sr]k_(?:live|test)_[A-Za-z0-9]+/g,
+  /\bwhsec_[A-Za-z0-9]+/g,
   /\bxox[abposr]-[A-Za-z0-9._-]+/g,
   /\bAKIA[0-9A-Z]{16}\b/g,
-  /\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}/g,
+  /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}/g,
 ];
 
-function redact(value) {
-  let text = String(value || '');
-  text = text.replace(AUTH_HEADER_RE, (match, prefix, scheme, credential) => (
-    credential === REDACTED ? match : `${prefix}${scheme ? `${scheme} ` : ''}${REDACTED}`
-  ));
+function redact(value, mode = 'text') {
+  // No control sequence may hide a credential name (TO<ESC>[0mKEN=...), and none is sent.
+  let text = stripControls(String(value || ''));
+  text = redactAfter(text, AUTH_HEADER_RE, mode);
   // Basic credentials are base64 with a digit, + / or = in practice; a plain word is prose.
   text = text.replace(BARE_SCHEME_RE, (match, scheme, space, credential) => {
     const prose = /^basic$/i.test(scheme) && !(/^[A-Za-z0-9+/]+={0,2}$/.test(credential) && /[0-9+/=]/.test(credential));
@@ -339,8 +521,13 @@ function redact(value) {
     // A user with no password is a name (git@, deploy@) unless it is token-like.
     return user.length >= 20 && /[0-9]/.test(user) ? `${scheme}${REDACTED}@` : match;
   });
-  text = redactSecretFlags(text);
-  text = redactAssignments(text);
+  text = redactAfter(text, SECRET_FLAG_TEXT_RE, mode, (match) => secretFlag(match[1]));
+  text = redactAfter(text, CONFIG_SET_RE, mode, (match) => credentialName(String(match[1]).split(/[:/]/).pop()));
+  text = redactAfter(text, OPENSSL_PASS_RE, mode);
+  text = redactAfter(text, USER_FLAG_RE, mode);
+  text = redactAfter(text, TOOL_FLAG_TEXT_RE, mode);
+  text = redactAfter(text, MYSQL_GLUED_RE, mode);
+  text = redactAssignments(text, mode);
   for (const shape of TOKEN_SHAPES) text = text.replace(shape, REDACTED);
   return text;
 }
@@ -351,12 +538,36 @@ function shellQuote(value) {
   return /^[A-Za-z0-9_./:@%+=,-]+$/.test(text) ? text : `'${text.replace(/'/g, "'\\''")}'`;
 }
 
+// Which argv words are shell scripts: the word after a -c flag (-c, -lc, -ec) of a shell.
+const SHELL_RE = /^(?:.*\/)?(?:sh|bash|zsh|dash|ksh|ash|mksh|fish)$/;
+function argvModes(command) {
+  return command.map((part, index) => {
+    if (index < 2 || !/^-[A-Za-z]*c[A-Za-z]*$/.test(String(command[index - 1]))) return 'word';
+    for (let at = index - 2; at >= 0; at -= 1) {
+      const word = String(command[at]);
+      if (SHELL_RE.test(word)) return 'script';
+      if (!word.startsWith('-')) return 'word';
+    }
+    return 'word';
+  });
+}
+
 function redactedCommand(command) {
-  return command.map((part, index) => (
-    index > 0 && SECRET_FLAG_RE.test(String(command[index - 1] || '')) && !String(part || '').startsWith('-')
-      ? REDACTED
-      : shellQuote(redact(part))
-  )).join(' ');
+  const modes = argvModes(command);
+  return command.map((part, index) => {
+    const previous = index > 0 ? String(command[index - 1] || '') : '';
+    const word = String(part || '');
+    if (secretFlag(previous) && !word.startsWith('-')) return REDACTED;
+    // -u user:password / --user user:password (curl and friends): the name stays.
+    if ((previous === '-u' || previous === '--user') && /^[^:]+:./.test(word)) return shellQuote(`${word.split(':')[0]}:${REDACTED}`);
+    if ((previous === '-passin' || previous === '-passout' || previous === '-pass') && word.startsWith('pass:')) return shellQuote(`pass:${REDACTED}`);
+    const tool = command.slice(0, index - 1).map((entry) => String(entry).split('/').pop());
+    if (TOOL_SECRET_FLAGS.some(([name, verb, flag]) => previous === flag && tool.some((entry) => name.test(entry)) && (!verb || tool.includes(verb)))) return REDACTED;
+    if (/^-p[^\s-]/.test(word) && tool.concat(previous.split('/').pop()).some((entry) => /^(?:mysql|mysqladmin|mysqldump)$/.test(entry))) return '-p[redacted]';
+    if (index >= 3 && String(command[index - 2]) === 'set' && /^(?:config|configure)$/.test(String(command[index - 3]))
+      && credentialName(previous.split(/[:/]/).pop())) return REDACTED;
+    return shellQuote(redact(word, modes[index]));
+  }).join(' ');
 }
 
 // --action, --target and --type exactly as typed stay in this process: for local risk
@@ -461,13 +672,18 @@ function sourceClient(value) {
 }
 
 function displayText(value, maxLength = 120) {
-  const text = redact(String(value || ''))
+  // redact() drops control sequences first, so one cannot split a credential name.
+  const text = redact(String(value || '')).replace(/[\t\r\n]+/g, ' ');
+  return text.length > maxLength ? `${text.slice(0, maxLength - 3)}...` : text;
+}
+
+// Terminal control sequences and control characters (tabs and line breaks stay).
+function stripControls(value) {
+  return value
     .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, '')
     .replace(/\u009d[^\u0007\u009c]*(?:\u0007|\u009c|\u001b\\)/g, '')
     .replace(/[\u001b\u009b][[\]()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '')
-    .replace(/[\t\r\n]+/g, ' ')
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, '');
-  return text.length > maxLength ? `${text.slice(0, maxLength - 3)}...` : text;
 }
 
 function shellQuoteDisplay(value) {
@@ -1438,8 +1654,13 @@ function defaultRunnerSession(options, now = new Date()) {
 // key (as its binding), ids, states and times, never the command.
 function runnerHoldKey(options, material, salt) {
   const uid = typeof process.getuid === 'function' ? String(process.getuid()) : os.userInfo().username;
-  return crypto.createHmac('sha256', salt || crypto.randomBytes(32)).update(JSON.stringify([
-    'runner-hold-v2', baseUrlOrigin(options.baseUrl), String(options.agentId || ''), realCwd(), uid,
+  const key = salt || crypto.randomBytes(32);
+  // Which API key runs it (as its own HMAC, never the key) and the profile and policy it runs
+  // under: an approval under one is never picked up under another.
+  const apiKeyMark = options.apiKey ? crypto.createHmac('sha256', key).update(`api-key\0${options.apiKey}`).digest('hex') : '';
+  return crypto.createHmac('sha256', key).update(JSON.stringify([
+    'runner-hold-v2', baseUrlOrigin(options.baseUrl), String(options.agentId || ''), apiKeyMark,
+    String(options.profile || ''), String(options.policy || ''), realCwd(), uid,
     Array.isArray(material?.argv) ? material.argv.map(String) : [],
     String(material?.action || ''), String(material?.target || ''), String(material?.type || ''),
   ])).digest('hex');

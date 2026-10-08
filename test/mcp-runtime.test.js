@@ -385,15 +385,25 @@ test('the local runtime is installed only on write runs, and the switch keeps ho
     await install(installOptions(root, home));
     const claude = hookFiles(root, home).claude;
     assert.ok(fs.readFileSync(claude, 'utf8').includes('/.marrow/runtime/'));
-    // Switched off: every hook goes back to npx and the local copy is removed, so the
-    // controller's maintenance cannot move hooks back onto it. A dry run removes nothing.
-    await install(installOptions(root, home, { mcpLocalRuntime: false, yes: false, dryRun: true }));
-    assert.equal(fs.existsSync(path.join(home, '.marrow', 'runtime')), true);
+    // Switched off: every hook of this project goes back to npx. The machine's local copy stays
+    // (other projects use it), and the controller's maintenance keeps this project on npx.
     const off = await install(installOptions(root, home, { mcpLocalRuntime: false }));
     assert.equal(off.mcp_runtime.state, 'disabled');
     assert.equal(fs.readFileSync(claude, 'utf8').includes('/.marrow/runtime/'), false);
-    assert.equal(fs.existsSync(path.join(home, '.marrow', 'runtime')), false);
+    assert.ok(verifyMcpRuntime(home, PIN, PINS.MCP_ADAPTER_INTEGRITY), 'the copy stays for other projects');
     assert.equal(installer.maintenanceMcpRuntime(detectEnvironment(root, { HOME: home, PATH: process.env.PATH })), null);
+    const other = allHostsProject();
+    try {
+      // Another project's default install on the same machine does not move this one back.
+      await install(installOptions(other.root, home));
+      assert.equal(installer.maintenanceMcpRuntime(detectEnvironment(root, { HOME: home, PATH: process.env.PATH })), null);
+      assert.equal(installer.maintenanceMcpRuntime(detectEnvironment(other.root, { HOME: home, PATH: process.env.PATH })).version, PIN);
+      await install(installOptions(root, home, { maintenance: true }));
+      assert.equal(fs.readFileSync(claude, 'utf8').includes('/.marrow/runtime/'), false, 'maintenance kept this project on npx');
+    } finally {
+      fs.rmSync(other.root, { recursive: true, force: true });
+      fs.rmSync(other.home, { recursive: true, force: true });
+    }
     await install(installOptions(root, home));
     // A maintenance pass (the controller) uses a verified copy but never installs one.
     assert.equal(installer.maintenanceMcpRuntime(detectEnvironment(root, { HOME: home, PATH: process.env.PATH })).version, PIN);

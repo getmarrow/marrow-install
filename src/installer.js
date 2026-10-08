@@ -828,10 +828,14 @@ function sourceClient() {
 }
 
 // What an error may print of an argument it does not know: an option's name (the text before
-// `=`, never its value), or a short plain word. Anything else may be a pasted key and is not shown.
+// `=`, never its value) when it looks like one (--lower-case-name, or one letter after one dash),
+// or a short plain word. Anything else may be a pasted key (-pPASSWORD) and is not shown.
 function argumentLabel(arg) {
   const text = String(arg ?? '');
-  if (text.startsWith('-')) return text.split('=')[0].slice(0, 64);
+  if (text.startsWith('-')) {
+    const name = text.split('=')[0];
+    return /^(?:--[a-z][a-z0-9-]{0,40}|-[A-Za-z])$/.test(name) ? name : '(an option that is not known; not shown)';
+  }
   return /^[a-z][a-z-]{0,23}$/.test(text) ? text : '(a value that is not an option; not shown)';
 }
 
@@ -4388,15 +4392,10 @@ function hermesWiringReport(detection, changes, options, planMode) {
 
 // The local MCP runtime for the target version: installed (or kept) on a write run of the
 // command, otherwise only an existing verified copy is used. `mcpLocalRuntime: false` (or
-// MARROW_LOCAL_RUNTIME=0, --no-local-runtime) leaves every hook on npx, and a write run then
-// removes the local copy, so the controller's maintenance cannot move hooks back onto it.
+// MARROW_LOCAL_RUNTIME=0, --no-local-runtime) leaves every hook of this project on npx.
 function resolveMcpRuntime(detection, options, mcpTarget) {
   const home = options.home || detection.home;
-  if (options.mcpLocalRuntime === false) {
-    const write = options.yes && !options.dryRun && !options.doctor && options.maintenance !== true;
-    const removal = write && home ? removeMcpRuntime(home) : null;
-    return { state: 'disabled', ...(removal?.removed ? { removed: true } : {}) };
-  }
+  if (options.mcpLocalRuntime === false) return { state: 'disabled' };
   const version = mcpTarget.version;
   const integrity = mcpTarget.integrity || (version === MCP_ADAPTER_VERSION ? MCP_ADAPTER_INTEGRITY : null);
   if (!integrity) return { state: 'skipped', reason: 'no_verified_integrity', version };
@@ -4417,10 +4416,20 @@ function resolveMcpRuntime(detection, options, mcpTarget) {
   return verifyMcpRuntime(home, version, integrity) || { state: 'absent', version };
 }
 
-// The controller's maintenance rewrites managed hooks for the pinned MCP. It uses the verified
-// local runtime for that version when there is one (verify only: maintenance never installs),
-// so it keeps hooks on the runtime instead of rewriting them back to npx.
+// Whether this project's managed hooks start the local runtime now, as its install chose.
+function projectHooksUseLocalRuntime(detection) {
+  const paths = detection.paths || {};
+  return [paths.claudeSettings, paths.codexHooks, paths.cursorHooks, paths.windsurfHooks, paths.geminiSettings]
+    .some((filePath) => filePath && safeRead(filePath).includes('/.marrow/runtime/mcp/'));
+}
+
+// The controller's maintenance rewrites managed hooks for the pinned MCP and keeps each project
+// in the form its install chose: on the verified local runtime for that version when the
+// project's hooks start it (verify only: maintenance never installs), on npx otherwise. A
+// project installed with --no-local-runtime stays on npx even when another project's install
+// put a runtime on this machine.
 function maintenanceMcpRuntime(detection, options = {}) {
+  if (options.mcpLocalRuntime === false || !projectHooksUseLocalRuntime(detection)) return null;
   const runtime = resolveMcpRuntime(detection, { ...options, maintenance: true, yes: false }, executableMcpTarget(options));
   return runtime.version && ['present', 'installed', 'verified'].includes(runtime.state) ? runtime : null;
 }
@@ -4483,7 +4492,10 @@ async function install(options) {
   });
   options.mcpTarget = mcpTarget;
   options.mcpTargetVersion = mcpTarget.version;
-  const mcpRuntime = resolveMcpRuntime(detection, options, mcpTarget);
+  // A maintenance pass keeps the project's hooks in the form its install chose.
+  const mcpRuntime = options.maintenance === true
+    ? maintenanceMcpRuntime(detection, options) || { state: options.mcpLocalRuntime === false ? 'disabled' : 'absent', version: mcpTarget.version }
+    : resolveMcpRuntime(detection, options, mcpTarget);
   options.mcpRuntime = mcpRuntime.version && ['present', 'installed', 'verified'].includes(mcpRuntime.state) ? mcpRuntime : null;
   const plan = buildPlan(detection, options);
   const writeMode = options.doctor ? 'doctor' : options.dryRun ? 'dry-run' : options.repair ? 'repair' : options.yes ? 'write' : 'dry-run';

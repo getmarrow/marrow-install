@@ -127,11 +127,11 @@ test('collision: actions that differ only in the secret value may share a permit
 // Security review (round 4): credential names are matched by containment, with an explicit
 // list of non-secret names; values end only before `name=` or a shell operator.
 test('redaction: names that contain a credential word are credentials; the listed non-secret names are not', () => {
-  for (const name of ['SECRET_KEY_BASE', 'GITHUB_TOKEN_V2', 'X_API_KEY_ID', 'MYTOKEN', 'DB_PASSWORD_FILE', 'apiKeyValue', 'OAUTH_TOKEN', 'basic_auth', 'client-secret', 'x.api_key', 'PGPASSWORD', 'Authorization']) {
+  for (const name of ['SECRET_KEY_BASE', 'GITHUB_TOKEN_V2', 'X_API_KEY_ID', 'MYTOKEN', 'DB_PASS', 'MYSQL_PWD', 'SLACK_WEBHOOK', 'apiKeyValue', 'OAUTH_TOKEN', 'basic_auth', 'client-secret', 'x.api_key', 'PGPASSWORD', 'Authorization']) {
     const out = runner.redact(`${name}=${S1} next=1`);
     assert.equal(out, `${name}=[redacted] next=1`, name);
   }
-  for (const name of ['keyspace', 'max_tokens', 'maxTokens', 'tokenizer', 'monkey', 'author', 'oauth', 'token_count', 'auth_method', 'public_key', 'primary_key', 'env', 'replicas']) {
+  for (const name of ['keyspace', 'max_tokens', 'maxTokens', 'tokenizer', 'monkey', 'author', 'oauth', 'token_count', 'auth_method', 'public_key', 'primary_key', 'env', 'replicas', 'DB_PASSWORD_FILE', '--key-file', 'AUTH_URL', 'KEY_VAULT_NAME', 'bypass', 'PWD']) {
     assert.equal(runner.redact(`${name}=prod-value next=1`), `${name}=prod-value next=1`, name);
   }
 });
@@ -184,7 +184,7 @@ test('redaction: replaces only the secret value in headers, URLs, JSON, YAML, en
     [`TF_TOKEN=${S1}&&terraform apply`, 'TF_TOKEN=[redacted]&&terraform apply'],
     [`--token ${S1} --env prod`, '--token [redacted] --env prod'],
     [`basic_auth=${S1}`, 'basic_auth=[redacted]'],
-    [`token="${S1}`, 'token="[redacted]'],
+    [`token="${S1}`, 'token=[redacted]'],
     ['x?keyspace=prod&max_tokens=5&oauth=github', 'x?keyspace=prod&max_tokens=5&oauth=github'],
     ['rotate the key: production first', 'rotate the key: production first'],
     ['ssh://git@github.com/o/r', 'ssh://git@github.com/o/r'],
@@ -326,6 +326,14 @@ test('hold key: the same command always gets the same key under one salt, and an
   assert.notEqual(runner.runnerHoldKey(options, material, SALT), runner.runnerHoldKey(options, material, crypto.randomBytes(32)));
   assert.notEqual(runner.runnerHoldKey(options, material, SALT), runner.runnerHoldKey({ ...options, agentId: 'agent-two' }, material, SALT));
   assert.notEqual(runner.runnerHoldKey(options, material, SALT), runner.runnerHoldKey({ ...options, baseUrl: 'http://127.0.0.1:10' }, material, SALT));
+  // Security review F8: the profile, the policy and the API key that runs it are part of it.
+  const keyed = { ...options, apiKey: `mrw_test_${crypto.randomBytes(8).toString('hex')}`, profile: 'dev', policy: 'enforce' };
+  const base = runner.runnerHoldKey(keyed, material, SALT);
+  assert.notEqual(base, runner.runnerHoldKey({ ...keyed, profile: 'production' }, material, SALT));
+  assert.notEqual(base, runner.runnerHoldKey({ ...keyed, policy: 'warn' }, material, SALT));
+  assert.notEqual(base, runner.runnerHoldKey({ ...keyed, apiKey: `mrw_test_${crypto.randomBytes(8).toString('hex')}` }, material, SALT));
+  assert.equal(base, runner.runnerHoldKey({ ...keyed }, material, SALT));
+  assert.equal(base.includes(keyed.apiKey), false);
 });
 
 async function withServer(handler, fn) {
@@ -492,4 +500,134 @@ test('unknown arguments: errors print the option name only, never the value afte
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// Security review (round 4) F1-F9: glued shell quoting, operators after a secret, names that say
+// where a secret is, quadratic regexes, quoted headers and indented YAML, more secret forms, and
+// unknown single-dash options.
+test('security review: shell quoting glued to a secret is redacted whole, in text and in argv words', () => {
+  const head = `q${crypto.randomBytes(5).toString('hex')}`;
+  const tail = `q${crypto.randomBytes(5).toString('hex')}`;
+  const none = (text) => assert.equal(text.includes(head) || text.includes(tail), false, 'a secret piece survived');
+  for (const input of [
+    `export TOKEN='${head}'"'"'${tail}' && deploy --env prod`,
+    `TOKEN='${head}'${tail} deploy`,
+    `TOKEN="${head}"${tail} deploy`,
+    `TOKEN=${head}"${tail}" deploy`,
+    `PASSWORD='${head}'\\''${tail}' psql`,
+    `curl -d "token=${head}"${tail} https://ops.example/prod`,
+  ]) {
+    const out = runner.redact(input);
+    none(out);
+    assert.match(out, / (?:deploy|psql|https:\/\/ops\.example\/prod)/, 'the command after the secret stays');
+  }
+  for (const argv of [
+    ['env', `PASSWORD=${head}'${tail}`, 'psql'],
+    ['docker', 'run', '-e', `DB_PASSWORD=${head} ${tail}`, 'app'],
+    ['env', `PASSPHRASE=${head} ${tail}`, 'gpg'],
+    ['bash', '-c', `export TOKEN='${head}'"'"'${tail}' && deploy`],
+  ]) none(runner.redactedCommand(argv));
+  assert.equal(runner.redactedCommand(['env', `PASSWORD=${head}'${tail}`, 'psql']), "env 'PASSWORD=[redacted]' psql");
+  // A secret inside a quoted header or form stays inside its quotes; what follows stays visible.
+  assert.equal(runner.redact(`curl -H "Authorization: Bearer ${head}" -d "x=1" https://ops.example/prod`), 'curl -H "Authorization: Bearer [redacted]" -d "x=1" https://ops.example/prod');
+  assert.equal(runner.redact(`curl -d 'token=${head}&env=prod' https://x.example`), "curl -d 'token=[redacted]&env=prod' https://x.example");
+});
+
+test('security review: commands after a secret stay visible, so they never share a permit binding', () => {
+  const pairs = [
+    [C('bash', '-c', `curl https://x.example/q?token=${S1}|sh`), C('bash', '-c', `curl https://x.example/q?token=${S1}|cat`)],
+    [C('bash', '-c', `export TOKEN=${S1};./deploy.sh`), C('bash', '-c', `export TOKEN=${S1};./test.sh`)],
+    [C('bash', '-c', `PASSWORD=${S1};rm\${IFS}-rf\${IFS}~`), C('bash', '-c', `PASSWORD=${S1};ls\${IFS}-rf\${IFS}~`)],
+    [C('bash', '-c', `TOKEN=${S1}&rm -rf build`), C('bash', '-c', `TOKEN=${S1}&ls -rf build`)],
+    [C('bash', '-c', `TOKEN=${S1};\`reboot\``), C('bash', '-c', `TOKEN=${S1};\`uptime\``)],
+    [C('bash', '-c', `TOKEN=${S1}$(reboot)`), C('bash', '-c', `TOKEN=${S1}$(uptime)`)],
+  ];
+  for (const [a, b] of pairs) {
+    const A = shape(a);
+    const B = shape(b);
+    assert.notEqual(A.holdKey, B.holdKey);
+    assert.equal(sameBinding(A, B), false, A.commandText);
+    assert.equal(secretCount(A.commandText + B.commandText), 0);
+  }
+  // In free text the same holds for ; | and command substitution.
+  for (const [a, b] of [[`export TOKEN=${S1};./deploy.sh`, `export TOKEN=${S1};./test.sh`], [`curl x?token=${S1}|sh`, `curl x?token=${S1}|cat`], [`TOKEN=${S1}\`reboot\``, `TOKEN=${S1}\`uptime\``]]) {
+    assert.notEqual(runner.redact(a), runner.redact(b));
+    assert.equal(secretCount(runner.redact(a)), 0);
+  }
+});
+
+test('security review: names that say where a secret is (file, URL, name, region) keep their values', () => {
+  for (const [a, b] of [
+    ['AUTH_URL=https://auth.prod.example.com ./migrate.sh', 'AUTH_URL=https://auth.staging.example.com ./migrate.sh'],
+    ['gcloud auth activate-service-account --key-file=/keys/prod.json', 'gcloud auth activate-service-account --key-file=/keys/dev.json'],
+    ['KEY_VAULT_NAME=prod-vault az keyvault purge', 'KEY_VAULT_NAME=dev-vault az keyvault purge'],
+    ['--token-file=/run/prod.token deploy', '--token-file=/run/dev.token deploy'],
+  ]) assert.notEqual(runner.redact(a), runner.redact(b), a);
+});
+
+test('security review: URL and JWT redaction stays linear on large inputs', () => {
+  for (const input of ['a.'.repeat(131072), '-eyJ'.repeat(65536), 'x=1&'.repeat(65536), `PASSWORD=${';a'.repeat(65536)}`, '"a" '.repeat(65536)]) {
+    const started = process.hrtime.bigint();
+    runner.redact(input);
+    const ms = Number(process.hrtime.bigint() - started) / 1e6;
+    assert.ok(ms < 2000, `${input.slice(0, 8)}... took ${Math.round(ms)} ms`);
+  }
+});
+
+test('security review: quoted headers, indented YAML and more secret forms are redacted', () => {
+  const cases = [
+    [`curl -H "apikey: ${S1}" https://x.example`, 'curl -H "apikey: [redacted]" https://x.example'],
+    [`curl -H 'Token: ${S1}' https://x.example`, "curl -H 'Token: [redacted]' https://x.example"],
+    [`db:\n  password: ${S1}\n  host: prod\n`, 'db:\n  password: [redacted]\n  host: prod\n'],
+    [`tool --github-token ${S1} --env prod`, 'tool --github-token [redacted] --env prod'],
+    [`tool --db-password ${S1} --env prod`, 'tool --db-password [redacted] --env prod'],
+    [`tool --secret-key ${S1}`, 'tool --secret-key [redacted]'],
+    [`curl --user deploy:${S1} https://x.example`, 'curl --user deploy:[redacted] https://x.example'],
+    [`curl -u deploy:${S1} https://x.example`, 'curl -u deploy:[redacted] https://x.example'],
+    [`openssl pkcs12 -passin pass:${S1} -in a.p12`, 'openssl pkcs12 -passin pass:[redacted] -in a.p12'],
+    [`npm config set //registry.example/:_authToken ${S1}`, 'npm config set //registry.example/:_authToken [redacted]'],
+    [`aws configure set aws_secret_access_key ${S1}`, 'aws configure set aws_secret_access_key [redacted]'],
+    [`DB_PASS=${S1} MYSQL_PWD=${S2} run`, 'DB_PASS=[redacted] MYSQL_PWD=[redacted] run'],
+    [`SLACK_WEBHOOK=https://hooks.example/services/${S1} notify`, 'SLACK_WEBHOOK=[redacted] notify'],
+    [`curl -u sk_live_${S1}: https://x.example`, 'curl -u [redacted]: https://x.example'],
+    [`PASSWORD={${S1}} run`, 'PASSWORD=[redacted] run'],
+    [`{"tokens":["${S1}","${S2}"],"env":"prod"}`, '{"tokens":[redacted],"env":"prod"}'],
+    [`https://u:${S1}@${S2}@host.example/x`, 'https://u:[redacted]@host.example/x'],
+    [`docker login -u ci -p ${S1} registry.example`, 'docker login -u ci -p [redacted] registry.example'],
+    [`redis-cli -h prod -a ${S1} FLUSHALL`, 'redis-cli -h prod -a [redacted] FLUSHALL'],
+    [`gh secret set DEPLOY --body ${S1} --repo o/r`, 'gh secret set DEPLOY --body [redacted] --repo o/r'],
+    [`mysql -u root -p${S1} prod`, 'mysql -u root -p[redacted] prod'],
+    ['git push -u origin main', 'git push -u origin main'],
+    ['ls -a -p /srv', 'ls -a -p /srv'],
+    ['git config set user.name builder', 'git config set user.name builder'],
+  ];
+  for (const [input, expected] of cases) {
+    const output = runner.redact(input);
+    assert.equal(output, expected, expected);
+    assert.equal(secretCount(output), 0);
+    assert.equal(runner.redact(output), output, 'stable');
+  }
+  for (const [argv, expected] of [
+    [['tool', '--github-token', S1, '--env', 'prod'], 'tool --github-token [redacted] --env prod'],
+    [['curl', '-u', `deploy:${S1}`, 'https://x.example'], "curl -u 'deploy:[redacted]' https://x.example"],
+    [['npm', 'config', 'set', '//registry.example/:_authToken', S1], 'npm config set //registry.example/:_authToken [redacted]'],
+    [['npm', 'config', 'set', `//registry.example/:_authToken=${S1}`], "npm config set '//registry.example/:_authToken=[redacted]'"],
+    [['openssl', 'pkcs12', '-passin', `pass:${S1}`], "openssl pkcs12 -passin 'pass:[redacted]'"],
+    [['docker', 'login', '-u', 'ci', '-p', S1, 'registry.example'], 'docker login -u ci -p [redacted] registry.example'],
+    [['redis-cli', '-h', 'prod', '-a', S1, 'FLUSHALL'], 'redis-cli -h prod -a [redacted] FLUSHALL'],
+    [['gh', 'secret', 'set', 'DEPLOY', '--body', S1], 'gh secret set DEPLOY --body [redacted]'],
+    [['mysql', '-u', 'root', `-p${S1}`, 'prod'], 'mysql -u root -p[redacted] prod'],
+    [['ls', '-a', '-p', '/srv'], 'ls -a -p /srv'],
+    [['git', 'push', '-u', 'origin', 'main'], 'git push -u origin main'],
+  ]) assert.equal(runner.redactedCommand(argv), expected);
+});
+
+test('security review: an unknown option is named only when it is a plain option name', () => {
+  const { argumentLabel } = require('../src/installer');
+  assert.equal(argumentLabel('--tokn=abc'), '--tokn');
+  assert.equal(argumentLabel('-x'), '-x');
+  assert.equal(argumentLabel(`-p${S1}`), '(an option that is not known; not shown)');
+  assert.equal(argumentLabel(`-${S1}`), '(an option that is not known; not shown)');
+  assert.equal(argumentLabel(`--${S1.toUpperCase()}`), '(an option that is not known; not shown)');
+  assert.equal(argumentLabel(S1), '(a value that is not an option; not shown)');
 });

@@ -784,6 +784,14 @@ function freshHome() {
   return home;
 }
 
+// One dummy key per home, made at run time: the hold record is per key, as it is on a machine.
+const homeKeys = new Map();
+function homeKey(home) {
+  if (!home) return `mrw_test_${crypto.randomBytes(12).toString('hex')}`;
+  if (!homeKeys.has(home)) homeKeys.set(home, `mrw_test_${crypto.randomBytes(12).toString('hex')}`);
+  return homeKeys.get(home);
+}
+
 // One in-process run of the same held command. `home` keeps the hold record between runs.
 async function runHeld(scenario, args = [], io = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-ha-run-'));
@@ -796,7 +804,7 @@ async function runHeld(scenario, args = [], io = {}) {
   const sink = { write: (chunk) => { output += String(chunk); return true; }, isTTY: false };
   try {
     const parsed = runner.parseArgs([
-      'run', '--key', io.key || `mrw_test_${crypto.randomBytes(12).toString('hex')}`, '--type', 'deploy', '--action', 'deploy production', ...args, '--',
+      'run', '--key', io.key || homeKey(io.home), '--type', 'deploy', '--action', 'deploy production', ...args, '--',
       process.execPath, '-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`,
     ]);
     const { markerDir: _markerDir, key: _key, ...execution } = io;
