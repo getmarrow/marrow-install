@@ -1141,3 +1141,27 @@ test('first install runs the self-test and prints one summary line with the full
     for (const directory of [home, project, fakeBin]) fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+// Day one (round-3 audit mutants DD7, DD10): an earlier Marrow SDK runtime in the project keeps
+// SDK mode, and --both always writes AGENTS.md, even in a Claude-Code-only project.
+test('day one: an existing Marrow SDK runtime keeps SDK mode, and --both writes AGENTS.md', () => {
+  const project = tempDir();
+  const home = tempDir('marrow-0166-home-');
+  try {
+    fs.writeFileSync(path.join(project, 'CLAUDE.md'), '# Claude\n');
+    const env = { HOME: home, PATH: process.env.PATH };
+    let detection = detectEnvironment(project, env);
+    const writesAgentsMd = (plan) => plan.writes.some((write) => write.path === detection.paths.agentsMd);
+    const auto = buildPlan(detection, { mode: 'auto' });
+    assert.equal(auto.mode, 'mcp');
+    assert.equal(writesAgentsMd(auto), false);
+    assert.equal(writesAgentsMd(buildPlan(detection, { mode: 'both' })), true);
+    fs.mkdirSync(path.dirname(detection.paths.passiveRuntime), { recursive: true });
+    fs.writeFileSync(detection.paths.passiveRuntime, '// Marrow passive runtime\n');
+    detection = detectEnvironment(project, env);
+    assert.equal(buildPlan(detection, { mode: 'auto' }).mode, 'both');
+  } finally {
+    fs.rmSync(project, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});

@@ -171,6 +171,9 @@ test('redaction: replaces only the secret value in headers, URLs, JSON, YAML, en
   const cases = [
     [`https://ops.example/deploy?token=${S1}&env=staging`, 'https://ops.example/deploy?token=[redacted]&env=staging'],
     [`Authorization: Bearer ${S1}`, 'Authorization: Bearer [redacted]'],
+    [`Authorization: ${S1}`, 'Authorization: [redacted]'],
+    [`authorization: Token ${S1} next`, 'authorization: Token [redacted] next'],
+    [`curl -d "token=${S1}" https://ops.example/prod`, 'curl -d "token=[redacted]" https://ops.example/prod'],
     [`proxy-authorization: Basic ${S1}`, 'proxy-authorization: Basic [redacted]'],
     [`x Bearer ${S1} y`, 'x Bearer [redacted] y'],
     [`https://user:${S1}@host.example/x`, 'https://user:[redacted]@host.example/x'],
@@ -438,6 +441,18 @@ test('runner CLI: an approval for one command is never picked up by a command th
       assert.equal(again.code, 0, again.output);
       assert.equal(fs.existsSync(staging.marker), true, 'the approved command picks its approval up');
       assert.equal(runtimeCalls(), 2);
+
+      // The key is made with this machine's private salt: under another salt the same command
+      // finds no record and asks Marrow again.
+      approved.clear();
+      fs.rmSync(staging.marker);
+      assert.equal((await runCli(staging.args, env, dir)).code, 12);
+      assert.equal(runtimeCalls(), 3);
+      const saltFile = path.join(dir, '.marrow', 'runner-holds', '.salt');
+      assert.equal(fs.statSync(saltFile).mode & 0o777, 0o600);
+      fs.writeFileSync(saltFile, `${crypto.randomBytes(32).toString('hex')}\n`, { mode: 0o600 });
+      assert.equal((await runCli(staging.args, env, dir)).code, 12);
+      assert.equal(runtimeCalls(), 4, 'another salt, another key: the record is not picked up');
 
       // MARROW_ACTION_TARGET, gate and permit send redacted text too.
       await runCli(['gate', '--type', 'deploy', `deploy with token=${S1}&env=production`], { ...env, MARROW_ACTION_TARGET: `https://ops.example/x?api_key=${S2}&env=production` }, dir);

@@ -139,6 +139,9 @@ test('every host\'s Marrow hook command maps to the local runtime and back exact
         assert.notEqual(local, command, `${host}: ${command.slice(0, 80)}`);
         assert.ok(local.includes(`$HOME/.marrow/runtime/mcp/${PIN}/`), host);
         assert.equal(delocalizeHookCommand(local), command, host);
+        // A local form whose runtime path and package name different versions is not Marrow's own.
+        const mismatched = local.split(`/.marrow/runtime/mcp/${PIN}/`).join(`/.marrow/runtime/mcp/${AHEAD}/`);
+        if (mismatched !== local && !/node"; \[ -x/.test(local)) assert.equal(delocalizeHookCommand(mismatched), mismatched, `${host}: mismatched versions`);
         assert.equal(localizeHookCommand(command, AHEAD), command, 'only the runtime\'s own version is switched');
         assert.doesNotMatch(local, /^(?:node|npx|sh) /, 'nothing at the start of the command needs PATH');
         count += 1;
@@ -400,6 +403,8 @@ test('the local runtime is installed only on write runs, and the switch keeps ho
     const maintenanceCalls = [];
     await install(installOptions(root, home, { maintenance: true, mcpRuntimeInstall: fakeNpmInstall({ calls: maintenanceCalls }) }));
     assert.deepEqual(maintenanceCalls, []);
+    // With no verified copy, hooks are never pointed at the runtime.
+    assert.equal(fs.readFileSync(claude, 'utf8').includes('/.marrow/runtime/'), false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
     fs.rmSync(home, { recursive: true, force: true });
