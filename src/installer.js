@@ -978,8 +978,9 @@ Options:
   --no-local-runtime Keep hooks on npx instead of the verified local MCP copy in ~/.marrow/runtime
   --no-self-test     Skip API smoke/self-test
   --verbose          Print the full report instead of the one-line summary and log file
-  uninstall          Preview removing only Marrow's own hooks, MCP server entries and instructions;
-                     add --yes to remove them. Your own hooks and settings are kept.
+  uninstall          Preview removing only Marrow's own hooks, MCP server entries, instructions and
+                     the local MCP runtime; add --yes to remove them. Your own hooks and settings
+                     are kept.
 
 The API key comes from MARROW_API_KEY, or from the owner-only ~/.marrow/env when unset.
 
