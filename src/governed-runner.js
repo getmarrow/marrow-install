@@ -14,6 +14,7 @@ const {
   verifyActionPermit,
 } = require('./enforcement-client');
 const { startGovernanceSidecar } = require('./governance-sidecar');
+const { readOwnerApiKey } = require('./owner-env');
 const {
   controllerStatus,
   ensureCurrentGovernanceController,
@@ -359,7 +360,9 @@ function isRisky(text, type) {
 
 function parseBaseOptions(argv, startIndex = 0) {
   const options = {
-    apiKey: process.env.MARROW_API_KEY || process.env.MARROW_KEY || '',
+    // The key from this terminal, or the owner-only ~/.marrow/env the installer stores, so a run
+    // started from an agent opened outside the install terminal still finds it.
+    apiKey: process.env.MARROW_API_KEY || process.env.MARROW_KEY || ownerEnvApiKey(),
     baseUrl: process.env.MARROW_BASE_URL || DEFAULT_BASE_URL,
     // A local username is never a registered agent. With no configured id, the server
     // resolves the key-bound agent or the plan seat instead.
@@ -558,7 +561,7 @@ function dataOf(json) {
 }
 
 async function rawRequest(options, method, route, body, extraHeaders = {}, { timeoutMs, signal } = {}) {
-  if (!options.apiKey) throw new Error('MARROW_API_KEY is required. Use --fail-open only for non-production local commands.');
+  if (!options.apiKey) throw new Error(NO_KEY_TEXT);
   const requestSignal = requestAbortSignal(timeoutMs, signal);
   const response = await fetch(new URL(route, options.baseUrl.replace(/\/$/, '/')), {
     method,
@@ -962,6 +965,9 @@ function heldApproval(runtime, decision) {
       arbitrationDecisionId: safeId(arbitration.decision_id),
       linkAvailable: true,
       linkReason: 'owner_locked',
+      // Marrow sends an arbitration link only when a person at this session asks for it
+      // (person_present: true) or the owner turned on unattended pings.
+      personPresentLinks: guidance.approval_link_person_present === true,
       expiresAt,
       pollAfterMs,
     };
@@ -1034,6 +1040,18 @@ function errorCode(json) {
   const details = recordOf(json?.details);
   const code = typeof details.code === 'string' ? details.code : typeof json?.code === 'string' ? json.code : '';
   return /^[A-Z0-9_]{1,80}$/.test(code) ? code : '';
+}
+
+
+// Where a run that has no key points the person: one command, in a terminal on this machine.
+const NO_KEY_TEXT = 'Marrow can\'t find your key: run `npx @getmarrow/install` once in this machine\'s terminal.';
+
+function ownerEnvApiKey() {
+  try {
+    return readOwnerApiKey(process.env.HOME || process.env.USERPROFILE || os.homedir()).apiKey || '';
+  } catch {
+    return '';
+  }
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -1187,7 +1205,7 @@ function runnerHoldKey(options, binding) {
 const HOLD_RECORD_KEYS = new Set([
   'version', 'kind', 'state', 'gate_receipt_id', 'decision_id', 'runtime_decision_id', 'arbitration_receipt_id',
   'session_id', 'declined_by', 'declined_at', 'receipt_expires_at', 'approvable_here', 'link_reason',
-  'link_sent_at', 'link_expires_at', 'denial_committed', 'created_at', 'updated_at',
+  'link_sent_at', 'link_expires_at', 'link_person_present', 'denial_committed', 'created_at', 'updated_at',
 ]);
 
 function holdRecordStore(io = {}) {
@@ -1329,17 +1347,27 @@ async function reportRunnerVerdict(options, gateReceiptId, verdict, times, decis
 // Asks Marrow to send the owner a one-tap link. A 200 answer that says it was not sent (the owner
 // has not turned on unattended pings) is a quiet hold, not an error. Keeps only the channel and
 // expiry: the response never contains the link, and its recipient hint is dropped here.
-async function requestOwnerLink(options, gateReceiptId, decisionId, state, io) {
+// `personPresent` is sent (as true) only for a hold whose service asks for it, and only when a
+// person at this terminal runs the command; never for an unattended or agent-terminal run.
+async function requestOwnerLink(options, gateReceiptId, decisionId, state, io, { personPresent = false } = {}) {
   while (state.linkRequests < APPROVAL_LINK_MAX_REQUESTS) {
     state.linkRequests += 1;
-    const result = await holdPostOnce(options, gateReceiptRoute(gateReceiptId, 'approval-link'),
-      decisionId && DECISION_ID_RE.test(decisionId) ? { decision_id: decisionId } : {});
+    const body = decisionId && DECISION_ID_RE.test(decisionId) ? { decision_id: decisionId } : {};
+    if (personPresent === true) body.person_present = true;
+    const result = await holdPostOnce(options, gateReceiptRoute(gateReceiptId, 'approval-link'), body);
     if (result.ok) {
       const data = recordOf(result.data);
+      const link = recordOf(data.approval_link);
+      // The owner already has a live link for this hold: no new email; wait on its answer.
+      if (data.state === 'already_sent' || data.reason === 'link_live') {
+        if (!Object.keys(link).length) return { sent: false, code: 'MARROW_APPROVAL_LINK_ANSWER_INVALID' };
+        state.channel = APPROVAL_LINK_CHANNELS.has(link.channel) ? link.channel : 'owner channel';
+        state.expiresAt = isoTime(link.expires_at);
+        return { sent: true, alreadyLive: true };
+      }
       if (data.sent === false || data.state === 'not_sent') {
         return { sent: false, quiet: true, reason: typeof data.reason === 'string' ? data.reason.slice(0, 40) : 'not_sent' };
       }
-      const link = recordOf(data.approval_link);
       if (!Object.keys(link).length) return { sent: false, code: 'MARROW_APPROVAL_LINK_ANSWER_INVALID' };
       state.channel = APPROVAL_LINK_CHANNELS.has(link.channel) ? link.channel : 'owner channel';
       state.expiresAt = isoTime(link.expires_at);
@@ -1354,6 +1382,13 @@ async function requestOwnerLink(options, gateReceiptId, decisionId, state, io) {
     }
   }
   return { sent: false, code: 'MARROW_APPROVAL_LINK_REQUESTS_EXHAUSTED' };
+}
+
+function linkSentText(state, alreadyLive) {
+  const until = state.expiresAt ? `, until ${state.expiresAt}` : '';
+  return alreadyLive
+    ? `The account owner already has a one-tap approval link for this action (${state.channel})${until}; no new link was sent.`
+    : `An approval link was sent to the account owner (${state.channel}). It works once${until}.`;
 }
 
 const LINK_FAILURE_TEXT = {
@@ -1478,6 +1513,9 @@ function quietHoldText(hold, interactive) {
   if (hold.kind === 'ordinary' && hold.accepted && !interactive) {
     return 'It is held until a person approves it, and nothing ran. Rerun this command in an interactive terminal to approve it there; that run picks up this hold.';
   }
+  if (hold.kind === 'arbitration' && hold.personPresentLinks && !interactive) {
+    return 'It is held for the account owner\'s review, and nothing ran. Rerun this command in an interactive terminal to send the owner a one-tap link; that run picks up this hold.';
+  }
   return 'It stays held until the account owner approves it, and nothing ran. Rerun this command to check; a later run picks up this hold.';
 }
 
@@ -1509,6 +1547,7 @@ async function resolveHold(options, hold, context) {
     receipt_expires_at: hold.expiresAt,
     approvable_here: hold.kind === 'ordinary' && hold.accepted && !hold.operatorOnly,
     link_reason: hold.linkReason,
+    link_person_present: hold.personPresentLinks === true ? true : undefined,
   });
   const remember = (extra = {}) => records?.write(context.holdKey, { ...recordBase(), state: 'waiting', ...extra });
   const refused = (message, extra = {}) => ({ approved: false, exitCode: 12, message, approval: summary(extra) });
@@ -1594,11 +1633,12 @@ async function resolveHold(options, hold, context) {
   let linkSent = false;
   if (linkAvailable) {
     state.source = 'owner_link';
-    const link = await requestOwnerLink(options, hold.gateReceiptId, decisionIds.decisionId, state, io);
+    const link = await requestOwnerLink(options, hold.gateReceiptId, decisionIds.decisionId, state, io,
+      { personPresent: Boolean(hold.personPresentLinks && interactive) });
     if (link.sent) {
       linkSent = true;
       state.linkSentAt = new Date().toISOString();
-      say(`An approval link was sent to the account owner (${state.channel}). It works once${state.expiresAt ? `, until ${state.expiresAt}` : ''}.`);
+      say(linkSentText(state, link.alreadyLive));
     } else if (!link.quiet) {
       remember();
       return refused(`No approval link was sent: ${LINK_FAILURE_TEXT[link.code] || `Marrow answered ${link.code}`}. Nothing ran.`, { state: 'link_not_sent', code: link.code });
@@ -1683,6 +1723,7 @@ async function resumeRecordedHold(options, records, holdKey, io = {}) {
     refusal: null,
     linkAvailable: Boolean(record.link_reason),
     linkReason: record.link_reason || null,
+    personPresentLinks: record.link_person_present === true,
     expiresAt: record.receipt_expires_at || null,
     pollAfterMs: 3_000,
   };
@@ -1772,10 +1813,11 @@ async function resumeRecordedHold(options, records, holdKey, io = {}) {
   const linkExpired = !record.link_expires_at || Date.parse(record.link_expires_at) <= now;
   if (hold.linkAvailable && hold.linkReason !== 'unattended_owner_ping' && linkExpired) {
     state.source = 'owner_link';
-    const link = await requestOwnerLink(holdOptions, record.gate_receipt_id, decisionIds.decisionId, state, io);
+    const link = await requestOwnerLink(holdOptions, record.gate_receipt_id, decisionIds.decisionId, state, io,
+      { personPresent: Boolean(hold.personPresentLinks && interactive) });
     if (link.sent) {
       state.linkSentAt = new Date().toISOString();
-      say(`An approval link was sent to the account owner (${state.channel}). It works once${state.expiresAt ? `, until ${state.expiresAt}` : ''}.`);
+      say(linkSentText(state, link.alreadyLive));
     }
   }
   const deadlineAt = state.expiresAt ? Date.parse(state.expiresAt) : record.link_expires_at ? Date.parse(record.link_expires_at) : null;

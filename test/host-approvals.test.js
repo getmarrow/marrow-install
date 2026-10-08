@@ -703,7 +703,7 @@ function holdRuntime(guidance = {}, extra = {}) {
 
 const LINKED = { approval_link_available: true, approval_link_reason: 'owner_locked', approval_link_endpoint: `/v1/agent/gate-receipts/${RECEIPT}/approval-link` };
 
-function arbitrationRuntime() {
+function arbitrationRuntime({ personPresentLinks = false } = {}) {
   const runtime = holdRuntime();
   runtime.arbitration = { receipt_id: ARBITRATION, decision_id: DECISION, resolution: 'review_required', owner_approval_required: true };
   runtime.completion_contract.owner_approval = {
@@ -713,6 +713,7 @@ function arbitrationRuntime() {
     approval_status_poll_after_ms: 20,
     ...LINKED,
     approval_status_endpoint: `/v1/agent/gate-receipts/${RECEIPT}/owner-approval`,
+    ...(personPresentLinks ? { approval_link_person_present: true } : {}),
   };
   runtime.completion_contract.arbitration_receipt_id = ARBITRATION;
   return runtime;
@@ -736,6 +737,8 @@ function fakeMarrow(scenario) {
     if (route === `/v1/agent/gate-receipts/${RECEIPT}/approval-link`) {
       const reply = typeof scenario.link === 'function' ? scenario.link(calls) : scenario.link;
       if (reply === 'not_sent') return Response.json({ data: { sent: false, state: 'not_sent', reason: 'owner_ping_off', approval_link: null, exact_next_action: 'No link was sent to o…@example.test.' } });
+      if (reply === 'not_sent_no_person') return Response.json({ data: { sent: false, state: 'not_sent', reason: 'no_person_present', approval_link: null, exact_next_action: 'No link was sent.' } });
+      if (reply === 'already_sent') return Response.json({ data: { sent: false, state: 'already_sent', reason: 'link_live', approval_link: { id: 'link_1', gate_receipt_id: RECEIPT, channel: 'email', expires_at: new Date(Date.now() + 600_000).toISOString(), delivered_at: new Date().toISOString() }, exact_next_action: 'The account owner already has a live one-tap link https://api.getmarrow.ai/x' } });
       if (reply?.error) return Response.json({ error: 'No approval link was sent.', code: 'CONFLICT', details: { code: reply.error, retryable: reply.retryable === true, exact_next_action: 'Retry. Owner o…@example.test.' } }, { status: reply.status || 409 });
       return Response.json({ data: {
         sent: true,
@@ -1340,6 +1343,62 @@ test('runner: --policy warn|audit and MARROW_GOVERN_POLICY never loosen a gate M
   }
 });
 
+test('runner, arbitration links (backend round 6): person_present only for a person at this terminal, and a live link is waited on', async () => {
+  const approved = { state: 'approved', owner_approval_receipt_id: OWNER_RECEIPT, approval_source: 'one_tap', approval_answered_by: 'account_owner' };
+  const quietUnlessPerson = (calls) => (routeCalls(calls, '/approval-link').at(-1).body.person_present === true ? undefined : 'not_sent_no_person');
+  const linkBodies = (calls) => routeCalls(calls, '/approval-link').map((call) => call.body);
+
+  // A person at this terminal: person_present is sent, the link goes out, and the run waits for the owner.
+  let prompted = 0;
+  const person = await runHeld({ runtime: arbitrationRuntime({ personPresentLinks: true }), statuses: ['arbitration_review', approved], link: quietUnlessPerson }, [], { approvalPrompt: () => { prompted += 1; return 'y'; } });
+  assert.deepEqual(linkBodies(person.calls), [{ decision_id: DECISION, person_present: true }]);
+  assert.equal(prompted, 0, 'arbitration never prompts');
+  assert.equal(person.ran, true);
+
+  // Nobody present, and an agent's terminal: no person_present; Marrow sends nothing and the run holds quietly.
+  const home = freshHome();
+  const unattended = await runHeld({ runtime: arbitrationRuntime({ personPresentLinks: true }), statuses: ['arbitration_review'], link: quietUnlessPerson }, [], { home });
+  assert.deepEqual(linkBodies(unattended.calls), [{ decision_id: DECISION }]);
+  assert.equal(unattended.ran, false);
+  assert.equal(unattended.result.exitCode, 12);
+  assert.match(unattended.result.message, /Rerun this command in an interactive terminal to send the owner a one-tap link; that run picks up this hold\./);
+  const agentPty = await runHeld({ runtime: arbitrationRuntime({ personPresentLinks: true }), statuses: ['arbitration_review'], link: quietUnlessPerson }, [], { env: { CLAUDECODE: '1' }, approvalPrompt: () => 'y' });
+  assert.deepEqual(linkBodies(agentPty.calls), [{ decision_id: DECISION }]);
+  assert.equal(agentPty.ran, false);
+
+  // The person's own terminal later: the recorded hold asks again with person_present, on the same receipt.
+  const later = await runHeld({ runtime: arbitrationRuntime({ personPresentLinks: true }), statuses: ['arbitration_review', approved], link: quietUnlessPerson }, [], { home, approvalPrompt: () => 'y' });
+  assert.equal(routeCalls(later.calls, '/v1/agent/runtime').length, 0, 'the hold was picked up');
+  assert.deepEqual(linkBodies(later.calls), [{ decision_id: DECISION, person_present: true }]);
+  assert.equal(later.ran, true);
+  fs.rmSync(home, { recursive: true, force: true });
+
+  // A service before round 6 does not take person_present: it is never sent there.
+  const older = await runHeld({ runtime: arbitrationRuntime(), statuses: ['arbitration_review', approved] }, [], { approvalPrompt: () => 'y' });
+  assert.deepEqual(linkBodies(older.calls), [{ decision_id: DECISION }]);
+  assert.equal(older.ran, true);
+
+  // already_sent / link_live: the owner already has a link; the run waits on the status (a person
+  // here) or holds with that link on record (nobody here), and never says no link was sent.
+  const live = await runHeld({ runtime: arbitrationRuntime({ personPresentLinks: true }), statuses: ['arbitration_review', approved], link: 'already_sent' }, [], { approvalPrompt: () => 'y' });
+  assert.equal(live.ran, true);
+  assert.equal(routeCalls(live.calls, '/approval-link').length, 1);
+  assert.ok(routeCalls(live.calls, '/owner-approval').length >= 2, 'it waited on the status endpoint');
+  const liveHome = freshHome();
+  const liveQuiet = await runHeld({ runtime: arbitrationRuntime({ personPresentLinks: true }), statuses: ['arbitration_review'], link: 'already_sent' }, [], { home: liveHome });
+  assert.equal(liveQuiet.ran, false);
+  assert.equal(liveQuiet.result.exitCode, 12);
+  assert.equal(liveQuiet.result.approval.state, 'held');
+  assert.equal(liveQuiet.result.approval.channel, 'email');
+  assert.doesNotMatch(`${liveQuiet.output}\n${liveQuiet.result.message}`, /No approval link was sent/);
+  assert.match(liveQuiet.output, /The account owner already has a one-tap approval link for this action \(email\), until \d{4}-[^;]*; no new link was sent\./);
+  const record = JSON.parse(fs.readFileSync(recordFiles(liveHome)[0], 'utf8'));
+  assert.ok(Date.parse(record.link_expires_at) > Date.now(), 'the live link is on record for the next run');
+  assert.equal(record.link_person_present, true);
+  for (const run of [person, unattended, agentPty, later, older, live, liveQuiet]) assertCleanOutput(run.output, run.result);
+  fs.rmSync(liveHome, { recursive: true, force: true });
+});
+
 test('runner: an older Marrow service without terminal approvals holds and says so, with no prompt and no link', async () => {
   const legacy = holdRuntime();
   legacy.completion_contract.owner_approval = { mode: 'ordinary_non_arbitrated', dashboard_receipt_required: false, proof_path: null };
@@ -1444,7 +1503,7 @@ async function withServer(handler, fn) {
     let raw = '';
     for await (const chunk of req) raw += chunk;
     const body = raw ? JSON.parse(raw) : null;
-    seen.push({ method: req.method, url: req.url, body, session: req.headers['x-marrow-session-id'] });
+    seen.push({ method: req.method, url: req.url, body, session: req.headers['x-marrow-session-id'], auth: req.headers.authorization || req.headers['x-api-key'] || '' });
     const reply = handler(req.url, body, seen);
     res.writeHead(reply.status || 200, { 'content-type': 'application/json' });
     res.end(JSON.stringify(reply.json));
@@ -1467,6 +1526,34 @@ function runCli(args, env, cwd = undefined) {
     child.on('close', (code) => resolve({ code, output, stdout }));
   });
 }
+
+test('runner CLI without MARROW_API_KEY: reads the owner-only ~/.marrow/env, and with no key says how to fix it in one line', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-ha-nokey-'));
+  fs.chmodSync(dir, 0o700);
+  const key = `mrw_test_${crypto.randomBytes(16).toString('hex')}`;
+  try {
+    const marker = path.join(dir, 'ran');
+    const args = ['run', '--type', 'deploy', '--action', 'deploy production', '--', process.execPath, '-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`];
+    await withServer((url) => (url === '/v1/agent/runtime' ? { json: { data: holdRuntime() } } : { json: { data: {} } }), async (baseUrl, seen) => {
+      const none = await runCli(args, { PATH: process.env.PATH, HOME: dir, MARROW_BASE_URL: baseUrl }, dir);
+      assert.notEqual(none.code, 0);
+      assert.equal(fs.existsSync(marker), false);
+      assert.match(none.output, /Marrow can't find your key: run `npx @getmarrow\/install` once in this machine's terminal\./);
+      assert.equal(seen.length, 0, 'nothing is sent without a key');
+
+      fs.mkdirSync(path.join(dir, '.marrow'), { mode: 0o700 });
+      fs.writeFileSync(path.join(dir, '.marrow', 'env'), `MARROW_API_KEY=${key}\n`, { mode: 0o600 });
+      const stored = await runCli(args, { PATH: process.env.PATH, HOME: dir, MARROW_BASE_URL: baseUrl }, dir);
+      assert.equal(stored.code, 12, stored.output);
+      assert.match(stored.output, /held until a person approves it/);
+      assert.equal(seen.filter((call) => call.url === '/v1/agent/runtime').length, 1);
+      assert.equal(seen.every((call) => call.auth.includes(key)), true, 'the stored key was used');
+      assert.equal(stored.output.includes(key), false);
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('runner CLI waiting on the owner: SIGTERM exits 12 held, a kill leaves the hold, and the next run picks up the approval with no new link', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-ha-kill-'));

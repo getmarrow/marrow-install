@@ -13,7 +13,7 @@ module.exports = Object.freeze({
   // answer those hooks and Cursor shell and MCP calls would then go ungated. Set this to the
   // version the host-approvals MCP is published as when the release re-pins the MCP above.
   MCP_HOST_APPROVAL_HOOKS_SINCE: '3.9.99',
-  // Planned next SDK pin: 3.7.65 (the backend's parity re-pin). Change version and integrity together.
-  SDK_ADAPTER_VERSION: '3.7.64',
-  SDK_ADAPTER_INTEGRITY: 'sha512-8qJj/8ouHEz1NnZkmujtFxUm/fWldqR/rHv62/sqabaxT0H90xCCHxodLOkV0SVxDscAtnahioZakqkeGNUwyA==',
+  // The SDK pin, at the backend's parity version. Change version and integrity together.
+  SDK_ADAPTER_VERSION: '3.7.65',
+  SDK_ADAPTER_INTEGRITY: 'sha512-U+rxqEBs7uIHaGbx+ADGl09RvXSMeqxQZXTuJHxwx6P8EhOEB6SSLcot0OAhAu3gfGuZ+020ch0Y0WieqjxtYw==',
 });

@@ -601,7 +601,8 @@ test('the self-test never sends a derived id and activates the server-resolved s
   const unbound = await selfTest({ status: { identity: { agent_id: null, bound_agent_ids: [] } } });
   assert.equal(unbound.result.activation_identity_unresolved, true);
   assert.equal(unbound.result.activation_verified, false);
-  assert.match(unbound.result.activation_exact_fix, /not bound to one agent/);
+  // Nothing to fix: Marrow resolves the agent per call, so no homework line is produced.
+  assert.equal(unbound.result.activation_exact_fix, null);
   const unboundFirstValue = unbound.calls.find((call) => call.href.endsWith('/v1/agent/first-value')).body;
   assert.equal(Object.hasOwn(unboundFirstValue, 'activation'), false);
   assert.equal(Object.hasOwn(unboundFirstValue, 'agent_id'), false);
@@ -819,6 +820,113 @@ function startStubApi(handler) {
   });
 }
 
+test('day one: an unbound key gets no homework; an identity Marrow refuses gets one runnable command', () => {
+  const healthy = installSummaryLines({
+    selfTest: { skipped: false, active: true, decision_id: 'dec_day1', decision_committed: true },
+    activation: { agent_id: null, agent_id_source: 'unresolved', exact_fix: null },
+  }, {}).lines;
+  assert.equal(healthy[0], `Marrow ${INSTALLER_VERSION}: healthy. Self-test decision dec_day1 committed.`);
+  assert.equal(healthy.some((line) => /Activation:|not bound|POST \/v1\/agents|MARROW_AGENT_ID/.test(line)), false);
+
+  const configured = installSummaryLines({
+    selfTest: { skipped: false, active: false, error: 'HTTP 409: AGENT_NOT_REGISTERED' },
+    activation: { agent_id: 'my-agent', agent_id_source: 'configured' },
+    doctor: { recommendedFix: null },
+  }, {});
+  assert.equal(configured.lines[0], `Marrow ${INSTALLER_VERSION}: self-test failed: HTTP 409: AGENT_NOT_REGISTERED. Fix: unset MARROW_AGENT_ID MARROW_FLEET_AGENT_ID && npx -y @getmarrow/install@latest`);
+  const unbound = installSummaryLines({
+    selfTest: { skipped: false, active: false, error: 'HTTP 403: wrong_agent_id' },
+    activation: { agent_id: null, agent_id_source: 'unresolved' },
+    doctor: { recommendedFix: null },
+  }, {});
+  assert.match(unbound.lines[0], /Fix: MARROW_API_KEY=<a key for one agent from your Marrow account> npx -y @getmarrow\/install@latest$/);
+});
+
+test('day one: Claude Code is found from the user\'s installation, gets project hooks, and the restart line names it', () => {
+  const { harnessReloadPlan } = require('../src/first-hour');
+  for (const source of ['home', 'home-json', 'path']) {
+    const root = tempDir('marrow-day1-claude-');
+    const home = tempDir('marrow-day1-home-');
+    const bin = tempDir('marrow-day1-bin-');
+    try {
+      fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
+      if (source === 'home') fs.mkdirSync(path.join(home, '.claude'));
+      if (source === 'home-json') fs.writeFileSync(path.join(home, '.claude.json'), '{}\n');
+      if (source === 'path') fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+      const env = { HOME: home, PATH: source === 'path' ? `${bin}${path.delimiter}${process.env.PATH}` : process.env.PATH };
+      const detection = detectEnvironment(root, env);
+      assert.equal(detection.claudeCode, true, source);
+      assert.equal(detection.claudeCodeProject, false, source);
+      assert.equal(detection.claudeCodeSource, source === 'path' ? 'path' : 'home', source);
+      assert.equal(detectedClient(detection), 'claude-code');
+      const plan = buildPlan(detection, { mode: 'auto' });
+      const changes = applyPlan(plan, { yes: true, dryRun: false, doctor: false });
+      assert.match(fs.readFileSync(path.join(root, '.claude', 'settings.json'), 'utf8'), /claude-pre-action-hook/);
+      // Only what Claude Code uses: no AGENTS.md and no SDK files in a Claude-Code-only repo.
+      assert.equal(fs.existsSync(path.join(root, 'AGENTS.md')), false, source);
+      assert.equal(fs.existsSync(path.join(root, '.marrow')), false, source);
+      assert.deepEqual(changes.map((change) => change.label).sort(), ['Claude Code MCP passive hooks', 'Project MCP server config']);
+      const reload = harnessReloadPlan(detection, changes);
+      assert.match(reload.instruction, /^Restart Claude Code/);
+      assert.doesNotMatch(reload.instruction, /owning MCP host/);
+    } finally {
+      for (const directory of [root, home, bin]) fs.rmSync(directory, { recursive: true, force: true });
+    }
+  }
+  // A project marker still outranks the user's Claude Code installation.
+  const cursorRoot = tempDir('marrow-day1-cursor-');
+  const cursorHome = tempDir('marrow-day1-home-');
+  try {
+    fs.mkdirSync(path.join(cursorRoot, '.cursor'));
+    fs.mkdirSync(path.join(cursorHome, '.claude'));
+    assert.equal(detectedClient(detectEnvironment(cursorRoot, { HOME: cursorHome, PATH: process.env.PATH })), 'cursor');
+  } finally {
+    for (const directory of [cursorRoot, cursorHome]) fs.rmSync(directory, { recursive: true, force: true });
+  }
+  // Nothing detected: plain words, not "the owning MCP host".
+  const none = harnessReloadPlan({}, []);
+  assert.equal(none.instruction, 'Restart the app your agent runs in so it loads Marrow.');
+});
+
+test('day one: SDK files and advice only where the SDK is used, AGENTS.md only for hosts that read it, and the SDK pin is 3.7.65', async () => {
+  assert.equal(PINS.SDK_ADAPTER_VERSION, '3.7.65');
+  const root = tempDir('marrow-day1-sdk-');
+  const home = tempDir('marrow-day1-home-');
+  try {
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ dependencies: { express: '^4.0.0' } }));
+    fs.mkdirSync(path.join(home, '.claude'));
+    const report = await install({ cwd: root, home, mode: 'auto', yes: true, dryRun: false, selfTest: false, loopGuardSelfTest: false, controller: false, apiKey: '', baseUrl: 'https://api.getmarrow.ai', agentId: '' });
+    assert.equal(report.mode, 'mcp');
+    assert.equal(report.sdkDependency.required, false);
+    assert.equal(report.sdkDependency.install_command, null);
+    let printed = '';
+    printReport(report, (text) => { printed += text; });
+    assert.doesNotMatch(printed, /@getmarrow\/sdk/);
+    assert.equal(fs.existsSync(path.join(root, 'AGENTS.md')), false);
+    assert.equal(fs.existsSync(path.join(root, '.marrow', 'passive-runtime.mjs')), false);
+    assert.equal(fs.existsSync(path.join(root, '.marrow', 'env.example')), false);
+
+    // An AGENTS.md that already carries Marrow's block keeps it current.
+    fs.writeFileSync(path.join(root, 'AGENTS.md'), '# Notes\n\n<!-- marrow:passive-start -->\nold\n<!-- marrow:passive-end -->\n');
+    let plan = buildPlan(detectEnvironment(root, { HOME: home, PATH: process.env.PATH }), { mode: 'auto' });
+    assert.ok(plan.writes.some((write) => write.label === 'Agent instructions'));
+    fs.rmSync(path.join(root, 'AGENTS.md'));
+    // A host that reads AGENTS.md (Codex) gets it.
+    fs.mkdirSync(path.join(root, '.codex'));
+    fs.writeFileSync(path.join(root, '.codex', 'config.toml'), '# owner\n');
+    plan = buildPlan(detectEnvironment(root, { HOME: home, PATH: process.env.PATH }), { mode: 'auto' });
+    assert.ok(plan.writes.some((write) => write.label === 'Agent instructions'));
+    // The SDK in use: the passive runtime and the advice, at the 3.7.65 pin.
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ dependencies: { '@getmarrow/sdk': '^3.7.0' } }));
+    const sdkReport = await install({ cwd: root, home, mode: 'auto', yes: false, dryRun: true, selfTest: false, loopGuardSelfTest: false, controller: false, apiKey: '', baseUrl: 'https://api.getmarrow.ai', agentId: '' });
+    assert.equal(sdkReport.mode, 'both');
+    assert.equal(sdkReport.sdkDependency.required, true);
+    assert.equal(sdkReport.sdkDependency.install_command, 'npm install @getmarrow/sdk@3.7.65');
+  } finally {
+    for (const directory of [root, home]) fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('first install runs the self-test and prints one summary line with the full report in a private log', async () => {
   const home = tempDir('marrow-0166-summary-home-');
   const project = tempDir();
@@ -880,6 +988,17 @@ test('first install runs the self-test and prints one summary line with the full
     assert.match(log, /decision_id: dec_summary/);
     assert.ok(lines.length <= 4, result.stdout);
     assert.doesNotMatch(`${result.stdout}${result.stderr}${log}`, new RegExp(key));
+    // Day one: the key from this terminal is stored owner-only for Claude Code opened elsewhere.
+    const envFile = path.join(home, '.marrow', 'env');
+    assert.ok(lines.includes(`Saved your API key in ${envFile} (only you can read it), so Claude Code finds it when opened from the desktop app, an IDE or a new terminal.`), result.stdout);
+    assert.equal(fs.statSync(envFile).mode & 0o777, 0o600);
+    assert.equal(fs.statSync(path.dirname(envFile)).mode & 0o777, 0o700);
+    assert.equal(readOwnerApiKey(home).apiKey === key, true, 'the stored key is the one from the environment');
+    assert.doesNotMatch(lines.join('\n'), /Activation:|not bound to one agent|POST \/v1\/agents/);
+    const again = await runBin(['--no-controller'], { cwd: project, env });
+    assert.equal(again.status, 0, again.stderr);
+    assert.doesNotMatch(again.stdout, /Saved your API key/, 'stored once');
+    assert.doesNotMatch(`${again.stdout}${again.stderr}`, new RegExp(key));
     assert.equal(api.requests.every((request) => request.headers['x-marrow-agent-id'] === undefined), true);
     const closure = api.requests.find((request) => request.pathname === '/v1/agent/commit' && request.body.decision_id === 'rtdec_summary');
     assert.equal(closure.body.gate_receipt_id, 'gr_summary');

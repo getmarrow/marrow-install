@@ -15,12 +15,33 @@ for (const name of ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_CHILD_S
   'CODEX_SANDBOX_NETWORK_DISABLED', 'CODEX_MANAGED_BY_NPM', 'CODEX_THREAD_ID', 'CURSOR_AGENT', 'OPENCODE', 'CI']) {
   delete process.env[name];
 }
-// A harness executable on the operator's PATH (for example `hermes`) is a detection signal.
-// Tests must not depend on what this machine has installed, so those PATH entries are removed.
-const HARNESS_EXECUTABLES = ['hermes'];
-process.env.PATH = String(process.env.PATH || '').split(path.delimiter).filter((directory) => (
-  !HARNESS_EXECUTABLES.some((name) => fs.existsSync(path.join(directory, name)))
-)).join(path.delimiter);
+// A harness executable on the operator's PATH (`hermes`, `claude`) is a detection signal. Tests
+// must not depend on what this machine has installed. A PATH directory holding one is replaced
+// by a directory of links to everything else in it, because node, npm and npx often live next
+// to `claude`.
+const HARNESS_EXECUTABLES = ['hermes', 'claude'];
+const pathShimRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-install-test-path-'));
+process.env.PATH = String(process.env.PATH || '').split(path.delimiter).map((directory, index) => {
+  if (!directory || !HARNESS_EXECUTABLES.some((name) => fs.existsSync(path.join(directory, name)))) return directory;
+  const shim = path.join(pathShimRoot, String(index));
+  fs.mkdirSync(shim);
+  let entries = [];
+  try {
+    entries = fs.readdirSync(directory);
+  } catch {
+    entries = [];
+  }
+  for (const entry of entries) {
+    if (HARNESS_EXECUTABLES.includes(entry)) continue;
+    try {
+      fs.symlinkSync(path.join(directory, entry), path.join(shim, entry));
+    } catch {
+      // An entry that cannot be linked is left out.
+    }
+  }
+  return shim;
+}).join(path.delimiter);
+process.once('exit', () => fs.rmSync(pathShimRoot, { recursive: true, force: true }));
 process.env.HOME = isolatedHome;
 process.env.USERPROFILE = isolatedHome;
 process.once('exit', () => fs.rmSync(isolatedHome, { recursive: true, force: true }));

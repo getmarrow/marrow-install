@@ -984,13 +984,14 @@ function stableAgentId(root, client = sourceClient()) {
 function detectedClient(detection) {
   if (sourceClient() !== 'custom') return sourceClient();
   if (detection.openclaw) return 'openclaw';
-  if (detection.claudeCode) return 'claude-code';
+  if (detection.claudeCodeProject ?? detection.claudeCode) return 'claude-code';
   if (detection.cursor) return 'cursor';
   if (detection.cline) return 'cline';
   if (detection.windsurf) return 'windsurf';
   if (detection.gemini) return 'gemini';
   if (detection.codexProject) return 'codex';
   // Home-level harnesses rank below project markers; a shared AGENTS.md is a weaker signal.
+  if (detection.claudeCode) return 'claude-code';
   if (detection.hermes) return 'hermes';
   if (detection.codex) return 'codex';
   return 'custom';
@@ -1143,6 +1144,14 @@ function detectEnvironment(cwd = process.cwd(), env = process.env) {
   };
   const homeHarnesses = detectHomeHarnesses(home, env);
   const codexProject = codexDirectoryIsOwnerConfigured(path.join(root, '.codex'));
+  // Claude Code is detected from the project (CLAUDE.md, .claude/settings.json) or, for a repo
+  // that has neither yet, from the user's installation: ~/.claude/, ~/.claude.json or `claude`
+  // on PATH. Either way the project gets .claude/settings.json.
+  const claudeCodeProject = exists(paths.claudeSettings) || exists(paths.claudeMd);
+  const claudeCodeSource = claudeCodeProject ? 'project'
+    : exists(path.join(home, '.claude')) || exists(path.join(home, '.claude.json')) ? 'home'
+    : executableOnPath('claude', env) ? 'path'
+    : null;
 
   return {
     root,
@@ -1150,7 +1159,9 @@ function detectEnvironment(cwd = process.cwd(), env = process.env) {
     paths,
     node: exists(paths.packageJson),
     python: exists(paths.pyproject) || exists(paths.requirements) || exists(paths.setupPy),
-    claudeCode: exists(paths.claudeSettings) || exists(paths.claudeMd),
+    claudeCode: Boolean(claudeCodeSource),
+    claudeCodeProject,
+    claudeCodeSource,
     cursor: exists(path.join(root, '.cursor')),
     cline: exists(path.join(root, '.clinerules')),
     windsurf: exists(path.join(root, '.windsurf')),
@@ -2176,7 +2187,7 @@ function clineNativeHookFingerprint(detection) {
 function activationProfile(detection, plan, changes, client) {
   const registry = HARNESS_CAPABILITY_REGISTRY.find((entry) => entry.client === client)
     || HARNESS_CAPABILITY_REGISTRY.find((entry) => entry.client === 'custom');
-  const sdkDependency = inspectSdkDependency(detection);
+  const sdkDependency = inspectSdkDependency(detection, { sdkMode: plan.mode === 'sdk' || plan.mode === 'both' });
   const capabilityLevel = client === 'custom' && (plan.mode === 'sdk' || plan.mode === 'both')
     ? 'sdk_passive_runtime'
     : registry.capability_level;
@@ -2472,8 +2483,9 @@ function upsertMcpServerConfig(filePath, options = {}) {
   return JSON.stringify(config, null, 2) + '\n';
 }
 
-function inspectSdkDependency(detection) {
-  if (!detection.node) {
+function inspectSdkDependency(detection, { sdkMode = false } = {}) {
+  // No SDK advice unless this project uses the SDK or the owner asked for the SDK runtime.
+  if (!sdkMode && !sdkUseDetected(detection)) {
     return { required: false, present: false, install_command: null };
   }
 
@@ -2721,6 +2733,32 @@ function derivedAgentIdsFor(root) {
   return [...SOURCE_CLIENTS].map((candidate) => stableAgentId(root, candidate));
 }
 
+// SDK use in this project: the SDK is a declared or installed dependency, or an earlier install
+// already wrote Marrow's passive runtime here. Without it, no SDK file or SDK advice is written.
+function sdkUseDetected(detection) {
+  if (exists(detection.paths.passiveRuntime)) return true;
+  if (!detection.node) return false;
+  if (findUp(detection.root, [path.join('node_modules', '@getmarrow', 'sdk', 'package.json')])) return true;
+  const raw = safeRead(detection.paths.packageJson);
+  if (!raw) return false;
+  // A package.json Marrow cannot parse is checked by hand (the SDK check says so).
+  try {
+    JSON.parse(raw);
+  } catch {
+    return /@getmarrow\/sdk/.test(raw);
+  }
+  return /"@getmarrow\/sdk"/.test(raw) || /@getmarrow\/sdk@/.test(raw);
+}
+
+// Hosts that read AGENTS.md. Claude Code reads CLAUDE.md and Cursor gets its own rule file, so
+// a project with only those gets no AGENTS.md unless it already holds Marrow's block.
+const AGENTS_MD_READERS = Object.freeze(['codex', 'windsurf', 'gemini', 'cline', 'grok', 'hermes', 'openclaw']);
+
+function agentsMdWanted(detection) {
+  if (AGENTS_MD_READERS.some((name) => detection[name])) return true;
+  return Boolean(marrowManagedBlockInText(safeRead(detection.paths.agentsMd)));
+}
+
 function buildPlan(detection, options) {
   const client = options.client || detectedClient(detection);
   // Server-facing configuration carries only a configured agent id. Without one, the MCP
@@ -2751,7 +2789,7 @@ function buildPlan(detection, options) {
   // The host-approval hook layout only for an MCP that answers those hooks.
   const hostApprovals = hostApprovalHooksSupported(mcpTargetVersion);
   const mode = options.mode === 'auto'
-    ? detection.node ? 'both' : 'mcp'
+    ? sdkUseDetected(detection) ? 'both' : 'mcp'
     : options.mode;
   const writes = [];
 
@@ -2854,7 +2892,9 @@ function buildPlan(detection, options) {
     }
   }
 
-  if (mode === 'md' || mode === 'both' || mode === 'mcp') {
+  // AGENTS.md only for a host that reads it, an explicit --md or --both, or a file that already
+  // carries Marrow's block (so its pins stay current).
+  if (mode === 'md' || (options.mode === 'both') || ((mode === 'both' || mode === 'mcp') && agentsMdWanted(detection))) {
     writes.push({
       type: 'md-block',
       path: detection.paths.agentsMd,
@@ -3521,7 +3561,15 @@ function runtimeGateVerified(runtime) {
   return ['allow', 'warn', 'review_required', 'block'].includes(decision);
 }
 
-const ACTIVATION_UNBOUND_KEY_FIX = 'This API key is not bound to one agent, so Marrow cannot confirm activation for a specific agent. Bind the key to one agent in the Marrow dashboard, or register the agent with POST /v1/agents and set MARROW_AGENT_ID to its id, then run npx -y @getmarrow/install@latest doctor --self-test.';
+// When Marrow refuses this machine's agent identity, the one command that fixes it. A key that
+// is simply not bound to one agent needs nothing: Marrow resolves the agent on each call.
+const IDENTITY_REFUSED_RE = /AGENT_NOT_REGISTERED|wrong_agent_id|MARROW_AGENT_SCOPE_MISMATCH|Agent-bound key cannot access another agent/i;
+function identityRefusalFix(message, configuredAgentId = '') {
+  if (!IDENTITY_REFUSED_RE.test(String(message || ''))) return null;
+  return configuredAgentId
+    ? 'unset MARROW_AGENT_ID MARROW_FLEET_AGENT_ID && npx -y @getmarrow/install@latest'
+    : 'MARROW_API_KEY=<a key for one agent from your Marrow account> npx -y @getmarrow/install@latest';
+}
 
 // The agent Marrow resolved for this key: its single bound agent or the Free plan seat. An
 // unbound key has no single agent, and a locally derived id is never substituted for it.
@@ -3836,7 +3884,8 @@ async function runSelfTest(options) {
     bound_agent_ids: serverIdentity.bound_agent_ids,
     activation_verified: activationVerified,
     activation_identity_unresolved: activationIdentityUnresolved,
-    activation_exact_fix: activationIdentityUnresolved ? ACTIVATION_UNBOUND_KEY_FIX : null,
+    // An unbound key is fine: Marrow resolves the agent on each call, so there is nothing to fix.
+    activation_exact_fix: null,
     activation_scope: options.activation ? 'server_self_test_only' : null,
     coverage_verified: false,
     passive_live: false,
@@ -4384,7 +4433,7 @@ async function install(options) {
     intervention_verified: false,
     closure_verified: false,
   } : null;
-  const sdkDependency = inspectSdkDependency(detection);
+  const sdkDependency = inspectSdkDependency(detection, { sdkMode: plan.mode === 'sdk' || plan.mode === 'both' });
   const envHints = options.apiKey ? [] : findLikelyEnvFiles(detection);
   const mcpProcesses = inspectMcpProcesses({
     commands: options.processCommands,
@@ -4644,11 +4693,8 @@ async function install(options) {
   };
 }
 
-function activationFailureFix(message) {
-  if (/Agent-bound key cannot access another agent|MARROW_AGENT_SCOPE_MISMATCH/i.test(message)) {
-    return `unset MARROW_AGENT_ID and MARROW_FLEET_AGENT_ID so Marrow uses the key's own agent, then rerun ${INSTALLER_UPDATE_COMMAND}`;
-  }
-  return INSTALLER_DOCTOR_COMMAND;
+function activationFailureFix(message, configuredAgentId = '') {
+  return identityRefusalFix(message, configuredAgentId) || INSTALLER_DOCTOR_COMMAND;
 }
 
 function installCommandFor(options) {
@@ -4668,12 +4714,13 @@ function installSummaryLines(report, options) {
   } else if (untrusted) {
     lines.push(`Marrow ${INSTALLER_ADAPTER_VERSION}: self-test decision ${selfTest.decision_id} was recorded without trusted closure (committed was not true). Fix: ${INSTALLER_DOCTOR_COMMAND}`);
   } else if (selfTestFailed) {
-    const fix = report.doctor?.recommendedFix || INSTALLER_DOCTOR_COMMAND;
+    const fix = identityRefusalFix(selfTest.error, activation.agent_id_source === 'configured' ? activation.agent_id : '')
+      || report.doctor?.recommendedFix || INSTALLER_DOCTOR_COMMAND;
     lines.push(`Marrow ${INSTALLER_ADAPTER_VERSION}: self-test failed: ${selfTest.error || 'Marrow reported this account as inactive'}. Fix: ${fix}`);
   } else {
     const agent = activation.agent_id
       ? `; agent ${activation.agent_id} (${activation.agent_id_source === 'configured' ? 'configured' : 'resolved by Marrow'})`
-      : '; this key is not bound to one agent';
+      : '';
     lines.push(`Marrow ${INSTALLER_ADAPTER_VERSION}: healthy. Self-test decision ${selfTest.decision_id} committed${agent}.`);
   }
   if (activation.exact_fix) lines.push(`Activation: ${activation.exact_fix}`);
@@ -4699,6 +4746,14 @@ function installSummaryLines(report, options) {
     lines.push('Hermes: the Marrow MCP server is already configured.');
   } else if (hermes.state === 'refused' || hermes.state === 'config_not_found' || hermes.state === 'preserved_unverified_ahead') {
     lines.push(`Hermes: ${hermes.config_path || 'config.yaml'} was not changed. The exact block to add is in the full report.`);
+  }
+  const ownerKey = report.owner_key_storage || {};
+  if (ownerKey.state === 'written') {
+    lines.push(`Saved your API key in ${ownerKey.path} (only you can read it), so Claude Code finds it when opened from the desktop app, an IDE or a new terminal.`);
+  } else if (ownerKey.state === 'different_key_present') {
+    lines.push(`Note: ${ownerKey.path} holds a different Marrow key, and Claude Code uses that one when opened outside this terminal. To use this key there, remove that key from the file and run npx @getmarrow/install again.`);
+  } else if (ownerKey.state && !['present', 'no_key'].includes(ownerKey.state)) {
+    lines.push(`Note: your API key was not saved for Claude Code opened outside this terminal (${ownerKey.path || '~/.marrow/env'} is not a private owner-only file).`);
   }
   if (hermes.owner_key_storage?.state === 'written') {
     lines.push('Stored your API key in ~/.marrow/env (mode 600) so the Hermes MCP server can read it; Hermes passes no other environment to MCP servers.');
@@ -4768,7 +4823,7 @@ async function runCli(argv) {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (!oneCommand || options.json || !/^Marrow activation failed/.test(message)) throw error;
-    process.stderr.write(`Marrow ${INSTALLER_ADAPTER_VERSION}: ${message}. Fix: ${activationFailureFix(message)}\n`);
+    process.stderr.write(`Marrow ${INSTALLER_ADAPTER_VERSION}: ${message}. Fix: ${activationFailureFix(message, String(options.agentId || '').trim())}\n`);
     process.exitCode = 1;
     return;
   }
@@ -4781,6 +4836,18 @@ async function runCli(argv) {
     return;
   }
   report.api_key = keyInfo;
+  // Claude Code opened from the desktop app, an IDE or a new terminal has no MARROW_API_KEY.
+  // The MCP server and hooks read ~/.marrow/env, so a first install stores a key that came
+  // from the environment there (owner-only), once the self-test showed the key works.
+  const keyWorked = report.selfTest && !report.selfTest.skipped && !report.selfTest.error && report.selfTest.active;
+  if (options.activate && !options.update && keyInfo.source === 'environment' && !options.keyFromArg && keyWorked) {
+    try {
+      const stored = ensureOwnerApiKey(options.home, options.apiKey);
+      report.owner_key_storage = { state: stored.state, path: stored.path };
+    } catch {
+      report.owner_key_storage = { state: 'not_written', path: null };
+    }
+  }
   const { lines, selfTestFailed } = installSummaryLines(report, options);
   let full = '';
   printReport(report, (text) => { full += text; });

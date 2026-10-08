@@ -58,7 +58,7 @@ function harnessReloadPlan(detection = {}, changes = []) {
   if (clients.length === 0) {
     clients.push({
       client: 'mcp',
-      restart: 'Restart the owning MCP host so marrow-mcp loads.',
+      restart: 'Restart the app your agent runs in so it loads Marrow.',
     });
   }
   const required = wroteHarnessConfig(changes);

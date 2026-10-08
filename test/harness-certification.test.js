@@ -80,16 +80,22 @@ function writeSdkLock(root, declaredSpec = `^${PINS.SDK_ADAPTER_VERSION}`) {
   }));
 }
 
-test('default auto install uses MCP plus SDK passive runtime on Node workspaces', () => {
+test('default auto install adds the SDK passive runtime only to Node workspaces that use the SDK', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-default-passive-'));
   try {
+    // A Node project without the SDK: MCP only, no SDK files, and no AGENTS.md without a reader.
     fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
-    const detection = detectEnvironment(root, { ...process.env, HOME: root });
-    const plan = buildPlan(detection, { mode: 'auto' });
+    let plan = buildPlan(detectEnvironment(root, { ...process.env, HOME: root }), { mode: 'auto' });
+    assert.equal(plan.mode, 'mcp');
+    assert.equal(plan.writes.some((item) => item.label === 'SDK passive runtime preload' || item.label === 'Marrow passive env example'), false);
+    assert.ok(plan.writes.some((item) => item.label === 'Project MCP server config'));
+    assert.equal(plan.writes.some((item) => item.label === 'Agent instructions'), false);
+    // The SDK declared: the passive runtime is added.
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ dependencies: { '@getmarrow/sdk': `^${PINS.SDK_ADAPTER_VERSION}` } }));
+    plan = buildPlan(detectEnvironment(root, { ...process.env, HOME: root }), { mode: 'auto' });
     assert.equal(plan.mode, 'both');
     assert.ok(plan.writes.some((item) => item.label === 'SDK passive runtime preload'));
     assert.ok(plan.writes.some((item) => item.label === 'Project MCP server config'));
-    assert.ok(plan.writes.some((item) => item.label === 'Agent instructions'));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -162,7 +168,8 @@ test('detected Cursor workspaces receive Cursor hooks and MCP config', () => {
     assert.ok(plan.writes.some((item) => item.label === 'Cursor native hooks'));
     assert.ok(plan.writes.some((item) => item.label === 'Cursor MCP server config'));
     assert.ok(plan.writes.some((item) => item.label === 'Project MCP server config'));
-    assert.ok(plan.writes.some((item) => item.label === 'SDK passive runtime preload'));
+    // No SDK use in this project, so no SDK files.
+    assert.equal(plan.writes.some((item) => item.label === 'SDK passive runtime preload'), false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

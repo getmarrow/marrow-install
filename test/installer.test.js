@@ -480,6 +480,9 @@ test('verified registry latest retargets update and repair plans with an exact p
 
   const root = tempDir();
   fs.writeFileSync(path.join(root, 'package.json'), '{}\n');
+  // A Codex project, so AGENTS.md (which Codex reads) is written and retargeted too.
+  fs.mkdirSync(path.join(root, '.codex'));
+  fs.writeFileSync(path.join(root, '.codex', 'config.toml'), '# owner\n');
   try {
     const detection = detectEnvironment(root, { ...process.env, HOME: root });
     const plan = buildPlan(detection, {
@@ -1316,13 +1319,17 @@ test('detectEnvironment finds Node, Claude, Codex, Cursor, and MCP targets', () 
   assert.equal(detected.mcpConfig, true);
 });
 
-test('buildPlan chooses both mode for Node agent projects', () => {
+test('buildPlan chooses both mode for Node agent projects that use the SDK, and mcp otherwise', () => {
   const dir = tempDir();
   fs.writeFileSync(path.join(dir, 'package.json'), '{}');
   fs.writeFileSync(path.join(dir, 'AGENTS.md'), '# Agents\n');
-  const detected = detectEnvironment(dir, {});
-  const plan = buildPlan(detected, { mode: 'auto' });
+  let plan = buildPlan(detectEnvironment(dir, {}), { mode: 'auto' });
+  assert.equal(plan.mode, 'mcp');
+  assert.equal(plan.writes.some((w) => w.path.endsWith('.marrow/passive-runtime.mjs')), false);
+  assert.ok(plan.writes.some((w) => w.path.endsWith('AGENTS.md')), 'owner AGENTS.md content means Codex, which reads it');
 
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ devDependencies: { '@getmarrow/sdk': '3.7.65' } }));
+  plan = buildPlan(detectEnvironment(dir, {}), { mode: 'auto' });
   assert.equal(plan.mode, 'both');
   assert.ok(plan.writes.some((w) => w.path.endsWith('.marrow/passive-runtime.mjs')));
   assert.ok(plan.writes.some((w) => w.path.endsWith('AGENTS.md')));
