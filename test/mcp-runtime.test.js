@@ -13,6 +13,7 @@ const {
   buildPlan,
   detectEnvironment,
   install,
+  parseArgs,
   resolveMcpTargetVersion,
   uninstall,
 } = require('../src/installer');
@@ -248,6 +249,18 @@ test('a failed integrity check keeps hooks on npx; a changed or missing copy fal
     // The next install replaces the changed copy.
     assert.equal((await install(installOptions(root, home))).mcp_runtime.state, 'installed');
 
+    // The node binary captured at install is gone: the run script starts npx instead.
+    const nodeDir = tempDir('marrow-runtime-node-');
+    fs.symlinkSync(process.execPath, path.join(nodeDir, 'node'));
+    fs.rmSync(path.join(home, '.marrow', 'runtime'), { recursive: true, force: true });
+    assert.equal(ensureMcpRuntime({ home, version: PIN, integrity: PINS.MCP_ADAPTER_INTEGRITY, nodePath: path.join(nodeDir, 'node'), npmInstall: fakeNpmInstall() }).state, 'installed');
+    fs.rmSync(nodeDir, { recursive: true, force: true });
+    fs.rmSync(path.join(home, 'npx-claude-pre-action-hook'), { force: true });
+    const noNode = runHook(preAction, { HOME: home, PATH: `${shimDir}:/usr/bin:/bin` });
+    assert.equal(noNode.status, 0, noNode.stderr);
+    assert.equal(noNode.stdout, '{"via":"npx"}');
+    assert.equal(fs.existsSync(path.join(home, 'npx-claude-pre-action-hook')), true);
+
     // The copy is gone: npx again, from every kind of command.
     fs.rmSync(path.join(home, '.marrow', 'runtime'), { recursive: true, force: true });
     for (const host of ['claude', 'gemini', 'windsurf', 'cursor']) {
@@ -349,5 +362,34 @@ test('the default installer path runs npm with --ignore-scripts and verifies wha
     process.env.PATH = previous;
     fs.rmSync(home, { recursive: true, force: true });
     fs.rmSync(bin, { recursive: true, force: true });
+  }
+});
+
+test('the local runtime is installed only on write runs, and the switch keeps hooks on npx', async () => {
+  assert.equal(parseArgs([], {}).mcpLocalRuntime, true);
+  assert.equal(parseArgs([], { MARROW_LOCAL_RUNTIME: '0' }).mcpLocalRuntime, false);
+  assert.equal(parseArgs(['--no-local-runtime'], {}).mcpLocalRuntime, false);
+  const { root, home } = allHostsProject();
+  try {
+    const calls = [];
+    const preview = await install(installOptions(root, home, { yes: false, dryRun: true, mcpRuntimeInstall: fakeNpmInstall({ calls }) }));
+    assert.deepEqual(calls, [], 'a dry run installs nothing');
+    assert.equal(preview.mcp_runtime.hooks_start, 'npx');
+    assert.equal(fs.existsSync(path.join(home, '.marrow', 'runtime')), false);
+    await install(installOptions(root, home));
+    const claude = hookFiles(root, home).claude;
+    assert.ok(fs.readFileSync(claude, 'utf8').includes('/.marrow/runtime/'));
+    // Switched off: the runtime is left alone and every hook goes back to npx.
+    const off = await install(installOptions(root, home, { mcpLocalRuntime: false }));
+    assert.equal(off.mcp_runtime.state, 'disabled');
+    assert.equal(fs.readFileSync(claude, 'utf8').includes('/.marrow/runtime/'), false);
+    // A maintenance pass (the controller) uses a verified copy but never installs one.
+    fs.rmSync(path.join(home, '.marrow', 'runtime'), { recursive: true, force: true });
+    const maintenanceCalls = [];
+    await install(installOptions(root, home, { maintenance: true, mcpRuntimeInstall: fakeNpmInstall({ calls: maintenanceCalls }) }));
+    assert.deepEqual(maintenanceCalls, []);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
   }
 });
