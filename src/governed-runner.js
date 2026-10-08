@@ -262,8 +262,10 @@ function quoteRegions(text, mode) {
   return regions;
 }
 
-// Finds the quoted region that opens at, or contains, a position (binary search).
-function regionFinder(regions) {
+// Finds the quoted region that opens at, or contains, a position (binary search), and where
+// the simple command around a position starts (after the last unquoted ; | & ( or line break).
+function regionFinder(regions, text = '') {
+  let separators = null;
   const last = (position) => {
     let low = 0;
     let high = regions.length - 1;
@@ -286,6 +288,28 @@ function regionFinder(regions) {
       const region = last(position - 1);
       return region && region[0] < position && position <= region[1] ? region : null;
     },
+    commandStart(position) {
+      if (!separators) {
+        separators = [];
+        let next = 0;
+        for (let index = 0; index < text.length; index += 1) {
+          while (next < regions.length && regions[next][1] < index) next += 1;
+          if (next < regions.length && regions[next][0] <= index && index <= regions[next][1]) {
+            index = regions[next][1];
+            continue;
+          }
+          if (/[;|&\n(]/.test(text[index])) separators.push(index);
+        }
+      }
+      let low = 0;
+      let high = separators.length;
+      while (low < high) {
+        const middle = (low + high) >> 1;
+        if (separators[middle] < position) low = middle + 1;
+        else high = middle;
+      }
+      return low === 0 ? 0 : separators[low - 1] + 1;
+    },
   };
 }
 
@@ -298,28 +322,39 @@ const PEM_END_LINE_RE = /^-----END [A-Z0-9 ]{1,64}-----/;
 function pemEnd(text, start, limit) {
   if (!aheadAt(PEM_BEGIN_RE, text, start)) return -1;
   let lineStart = PEM_BEGIN_RE.lastIndex;
+  // Key data lines are long (64 base64 characters); only the last may be short, so a command
+  // word between two markers is not taken for key data.
+  let longLines = 0;
+  let shortLines = 0;
   while (lineStart < limit) {
     const newline = text.indexOf('\n', lineStart);
     const lineEnd = newline === -1 || newline > limit ? limit : newline;
     const line = text.slice(lineStart, Math.min(lineEnd, lineStart + 200));
     const end = PEM_END_LINE_RE.exec(line);
-    if (end) return lineStart + end[0].length;
+    if (end) return longLines > 0 && shortLines <= 1 ? lineStart + end[0].length : -1;
     if (lineEnd - lineStart > 200 || !PEM_BODY_LINE_RE.test(line)) return -1;
+    const data = /^[A-Za-z0-9+/=]+/.exec(line.trim());
+    if (data && !/^(?:Proc-Type|DEK-Info):/.test(line)) {
+      if (shortLines > 0) return -1;
+      if (data[0].length >= 40) longLines += 1;
+      else shortLines += 1;
+    }
     lineStart = lineEnd + 1;
   }
   return -1;
 }
 
-// In an argv word, a value continues on the next line only when that line is a key body (base64,
-// = padding included) or more indented, and does not start a new setting (`name: ...`,
-// `- name: ...`, `name=value`). A line that starts a command or a sentence ends it.
+// In an argv word, a value continues on the next line only when that line is key data (16 to
+// 128 base64 characters, = padding included) and does not start a new setting (`name: ...`,
+// `- name: ...`, `name=value`). A line that holds a command or a sentence ends it.
 const NEXT_LINE_SETTING_RE = /[ \t]*(?:-[ \t]+)?(?:[A-Za-z_][A-Za-z0-9_.-]*[ \t]*:(?=[ \t\r\n]|$)|[A-Za-z_][A-Za-z0-9_.-]*=(?=[^=\r\n]))/y;
-const NEXT_LINE_CONTINUES_RE = /(?:[A-Za-z0-9+/=]{1,128}[ \t]*(?:\r?\n|$)|[ \t]+\S)/y;
+const NEXT_LINE_CONTINUES_RE = /[A-Za-z0-9+/=]{16,128}[ \t]*(?:\r?\n|$)/y;
 
 // Where a value starting at `start` ends, scanning no further than `limit` (the closing quote
 // when the value starts inside quotes).
 function valueEnd(text, start, mode, regions, limit = text.length) {
-  const pem = pemEnd(text, start, limit);
+  // In a script, a key block counts only inside quotes (limit is then the closing quote).
+  const pem = mode === 'script' && limit === text.length ? -1 : pemEnd(text, start, limit);
   if (pem !== -1) return pem;
   let index = start;
   while (index < limit) {
@@ -369,12 +404,21 @@ function valueEnd(text, start, mode, regions, limit = text.length) {
 // script `ssh host 'TOKEN=S; rm -rf /data'` keeps its commands visible); reaching the closing
 // quote, it runs on through anything glued after it.
 const FIELD_ARGUMENT_RE = /(?:^|\s)(?:-d|-H|-F|--data(?:-raw|-binary|-urlencode|-ascii)?|--json|--form(?:-string)?|--header)(?:\s+|=)$/;
+const HTTP_CLIENT_COMMAND_RE = /^\s*(?:(?:sudo|env|command|exec|time)\s+|[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:\S*\/)?(?:curl|wget|http|https|xh)\s/;
+// Whether the quoted region at `open` is a field or header argument of an HTTP client: the
+// simple command it belongs to (back to the last unquoted ; | & ( or line break) starts with
+// curl, wget, http, https or xh. `watch -d` or `tmux new -d` run their payload instead.
+function httpFieldArgument(text, open, regions) {
+  if (!FIELD_ARGUMENT_RE.test(text.slice(Math.max(0, open - 24), open))) return false;
+  const start = regions.commandStart(open);
+  return HTTP_CLIENT_COMMAND_RE.test(text.slice(start, Math.min(open, start + 256)));
+}
 const HEADER_LIST_AHEAD = /,\s*[A-Za-z_][A-Za-z0-9_.-]*\s*:/y;
 function quotedValueEnd(text, start, region, mode, regions) {
   // The quoted argument of -d/--data/--json/-F/--form/-H/--header is one field or header: its
   // value runs to the closing quote (spaces included), or to the next field or header in it.
   let end = region[1];
-  if (FIELD_ARGUMENT_RE.test(text.slice(Math.max(0, region[0] - 24), region[0]))) {
+  if (httpFieldArgument(text, region[0], regions)) {
     for (let index = start; index < region[1]; index += 1) {
       if ((/[\s&,#;|]/.test(text[index]) && aheadAt(NAME_ASSIGNMENT_AHEAD, text, index + 1))
         || (text[index] === ',' && aheadAt(HEADER_LIST_AHEAD, text, index))) {
@@ -495,7 +539,7 @@ const AUTH_SCHEME_RE = /^(?:bearer|basic|token|digest|bot|apikey|negotiate)$/i;
 const ASSIGNMENT_PREFIX_SOURCE = '(^|[^A-Za-z0-9_.-])(\\\\?["\']?)([A-Za-z0-9_.-]+)\\2(\\s*[:=]\\s*)';
 function redactAssignments(text, mode) {
   const pattern = new RegExp(ASSIGNMENT_PREFIX_SOURCE, 'g');
-  const regions = regionFinder(quoteRegions(text, mode));
+  const regions = regionFinder(quoteRegions(text, mode), text);
   const lineIsBlankBefore = blankLineTracker(text);
   let out = '';
   let last = 0;
@@ -529,7 +573,7 @@ function redactAssignments(text, mode) {
 
 // A prefix (a header, a flag, `config set NAME`) followed by a secret value.
 function redactAfter(text, pattern, mode, accept = () => true) {
-  const regions = regionFinder(quoteRegions(text, mode));
+  const regions = regionFinder(quoteRegions(text, mode), text);
   let out = '';
   let last = 0;
   let match;
@@ -598,7 +642,7 @@ const TOKEN_SHAPES = [
 ];
 
 function redactDigest(text, mode) {
-  const regions = regionFinder(quoteRegions(text, mode));
+  const regions = regionFinder(quoteRegions(text, mode), text);
   let out = '';
   let last = 0;
   let match;

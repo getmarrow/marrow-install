@@ -749,9 +749,19 @@ test('security re-review X1-X6: flags after flags, spaced field values, crafted 
     [C('bash', '-c', `TOKEN=${begin}\nrm -rf /data\n${end}`), C('bash', '-c', `TOKEN=${begin}\nls /data\n${end}`)],
     [C('ssh', 'host', `TOKEN=${begin} && rm -rf /data && ${end}`), C('ssh', 'host', `TOKEN=${begin} && ls /data && ${end}`)],
     [C('bash', '-c', 'echo api_key: |\n  rm -rf /data'), C('bash', '-c', 'echo api_key: |\n  ls /data')],
+    [C('bash', '-c', `TOKEN=${begin}\n/sbin/reboot\n${end}`), C('bash', '-c', `TOKEN=${begin}\n/bin/true\n${end}`)],
+    [C('bash', '-c', `watch -d "TOKEN=${S1}; rm -rf /data"`), C('bash', '-c', `watch -d "TOKEN=${S1}; ls /data"`)],
+    [C('bash', '-c', `tmux new-session -d "TOKEN=${S1}; kubectl delete ns prod"`), C('bash', '-c', `tmux new-session -d "TOKEN=${S1}; kubectl get ns prod"`)],
+    [C('aws', 'ssm', 'send-command', '--parameters', `commands=export TOKEN=${S1}\n  rm -rf /data`), C('aws', 'ssm', 'send-command', '--parameters', `commands=export TOKEN=${S1}\n  ls /data`)],
+    [C('aws', 'ssm', 'send-command', '--parameters', `commands=export TOKEN=${S1}\nreboot`), C('aws', 'ssm', 'send-command', '--parameters', `commands=export TOKEN=${S1}\nuptime`)],
   ]) assert.equal(sameBinding(shape(a), shape(b)), false, shape(a).commandText);
+  // A quoted value is a string, whatever it holds: these differ only in the secret, and nothing in
+  // them runs, so they may match.
+  const quotedA = shape(C('bash', '-c', `export TOKEN="${begin}\nreboot\n${end}"`));
+  assert.equal(secretCount(quotedA.commandText), 0);
+  assert.equal(quotedA.commandText.includes('reboot'), false);
   // A real key block (with legacy encryption headers) is still one value.
-  const body = [crypto.randomBytes(24).toString('base64'), crypto.randomBytes(24).toString('base64')];
+  const body = [crypto.randomBytes(48).toString('base64'), crypto.randomBytes(12).toString('base64')];
   const legacy = `${begin}\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,00\n\n${body.join('\n')}\n${end}`;
   for (const mode of ['text', 'word']) {
     const out = runner.redact(`PRIVATE_KEY=${legacy}`, mode);
