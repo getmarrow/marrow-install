@@ -724,3 +724,51 @@ test('security re-review N5/N6 and residuals: settings that look like secrets, D
   assert.equal(runner.redactedCommand(['tool', '--token', dashed, '--env', 'prod']), 'tool --token [redacted] --env prod');
   assert.equal(runner.redact('tool --token --dry-run'), 'tool --token --dry-run');
 });
+
+// Security re-review (round 4, third pass) X1-X6.
+test('security re-review X1-X6: flags after flags, spaced field values, crafted key blocks, argv payloads, -u in URLs, unquoted Digest', () => {
+  // X1: a secret flag right after another flag.
+  for (const text of [`tool --verbose --token ${S1}`, `gh-tool --insecure --github-token ${S1} --env prod`]) {
+    const out = runner.redact(text);
+    assert.equal(secretCount(out), 0, text.replace(S1, '<S>'));
+  }
+  assert.equal(runner.redactedCommand(['bash', '-c', `vault login --no-print --token ${S1}`]), "bash -c 'vault login --no-print --token [redacted]'");
+  // X2: a field or header value with a space inside its quotes stays whole.
+  for (const text of [`curl -d "password=${S1} ${S2}" https://x`, `curl -H "X-Api-Key: ${S1} ${S2}" https://x`, `curl --data 'token=${S1} ${S2}&env=prod' https://x`]) {
+    assert.equal(secretCount(runner.redact(text)), 0);
+    assert.equal(secretCount(runner.redactedCommand(['bash', '-c', text])), 0);
+  }
+  assert.equal(runner.redact(`curl --data 'token=${S1} ${S2}&env=prod' https://x`), "curl --data 'token=[redacted]&env=prod' https://x");
+  // X3: markers around commands are not a key block, and a script's trailing | is not YAML.
+  const begin = ['-----BEGIN', 'A-----'].join(' ');
+  const end = ['-----END', 'A-----'].join(' ');
+  for (const [a, b] of [
+    [C('bash', '-c', `TOKEN=${begin}; rm -rf /data; echo ${end}`), C('bash', '-c', `TOKEN=${begin}; ls /data; echo ${end}`)],
+    [C('bash', '-c', `TOKEN=${begin}\nrm -rf /data\n${end}`), C('bash', '-c', `TOKEN=${begin}\nls /data\n${end}`)],
+    [C('ssh', 'host', `TOKEN=${begin} && rm -rf /data && ${end}`), C('ssh', 'host', `TOKEN=${begin} && ls /data && ${end}`)],
+    [C('bash', '-c', 'echo api_key: |\n  rm -rf /data'), C('bash', '-c', 'echo api_key: |\n  ls /data')],
+  ]) assert.equal(sameBinding(shape(a), shape(b)), false, shape(a).commandText);
+  // A real key block (with legacy encryption headers) is still one value.
+  const body = [crypto.randomBytes(24).toString('base64'), crypto.randomBytes(24).toString('base64')];
+  const legacy = `${begin}\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,00\n\n${body.join('\n')}\n${end}`;
+  for (const mode of ['text', 'word']) {
+    const out = runner.redact(`PRIVATE_KEY=${legacy}`, mode);
+    assert.equal(body.some((line) => out.includes(line)), false, mode);
+  }
+  // X4: an argv payload with a newline or a JSON list keeps the commands after a secret.
+  for (const [a, b] of [
+    [C('aws', 'ssm', 'send-command', '--parameters', `commands=export TOKEN=${S1}\nrm -rf /data`), C('aws', 'ssm', 'send-command', '--parameters', `commands=export TOKEN=${S1}\nls /data`)],
+    [C('aws', 'ssm', 'send-command', '--parameters', `commands=["export TOKEN=${S1}","rm -rf /data"]`), C('aws', 'ssm', 'send-command', '--parameters', `commands=["export TOKEN=${S1}","ls /data"]`)],
+  ]) {
+    assert.equal(sameBinding(shape(a), shape(b)), false, shape(a).commandText);
+    assert.equal(secretCount(shape(a).commandText), 0);
+  }
+  // X5: -u in a URL's https is not an HTTP client.
+  assert.notEqual(runner.redact('docker run -e U=https://x -u 1000:0 img'), runner.redact('docker run -e U=https://x -u 1000:1000 img'));
+  // X6: an unquoted Digest header ends at a shell operator.
+  const digest = runner.redact(`curl -H Authorization: Digest response=${S1} && kubectl delete ns prod`);
+  assert.equal(secretCount(digest), 0);
+  assert.notEqual(digest, runner.redact(`curl -H Authorization: Digest response=${S1} && kubectl get ns prod`));
+  // A numeric value under a credential name is redacted (only switches like true/off are kept).
+  assert.equal(runner.redactedCommand(['npm', 'config', 'set', '//registry.example/:_authToken', '482913']), 'npm config set //registry.example/:_authToken [redacted]');
+});

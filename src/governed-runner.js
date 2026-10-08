@@ -289,33 +289,32 @@ function regionFinder(regions) {
   };
 }
 
-// A PEM block is one value from its BEGIN line through its END line, spaces and lines included.
-// END markers are found once per text, so many BEGIN lines stay linear.
-const PEM_BEGIN_RE = /-----BEGIN [A-Z0-9 ]{1,64}-----/y;
-let pemEndsCache = { text: null, ends: [] };
+// A PEM block is one value from its BEGIN line through its END line, when it is shaped like
+// one: BEGIN ends its line and every line up to END is base64, blank, or a Proc-Type/DEK-Info
+// header. Anything else between the markers (commands) is not swallowed.
+const PEM_BEGIN_RE = /-----BEGIN [A-Z0-9 ]{1,64}-----[ \t]*\r?\n/y;
+const PEM_BODY_LINE_RE = /^(?:[A-Za-z0-9+/=]{0,128}|(?:Proc-Type|DEK-Info):[ -~]{0,128})[ \t]*\r?$/;
+const PEM_END_LINE_RE = /^-----END [A-Z0-9 ]{1,64}-----/;
 function pemEnd(text, start, limit) {
   if (!aheadAt(PEM_BEGIN_RE, text, start)) return -1;
-  if (pemEndsCache.text !== text) {
-    const ends = [];
-    const pattern = /-----END [A-Z0-9 ]{1,64}-----/g;
-    let match;
-    while ((match = pattern.exec(text)) !== null) ends.push(match.index + match[0].length);
-    pemEndsCache = { text, ends };
+  let lineStart = PEM_BEGIN_RE.lastIndex;
+  while (lineStart < limit) {
+    const newline = text.indexOf('\n', lineStart);
+    const lineEnd = newline === -1 || newline > limit ? limit : newline;
+    const line = text.slice(lineStart, Math.min(lineEnd, lineStart + 200));
+    const end = PEM_END_LINE_RE.exec(line);
+    if (end) return lineStart + end[0].length;
+    if (lineEnd - lineStart > 200 || !PEM_BODY_LINE_RE.test(line)) return -1;
+    lineStart = lineEnd + 1;
   }
-  const { ends } = pemEndsCache;
-  let low = 0;
-  let high = ends.length;
-  while (low < high) {
-    const middle = (low + high) >> 1;
-    if (ends[middle] <= start + 11) low = middle + 1;
-    else high = middle;
-  }
-  return low < ends.length && ends[low] <= limit ? ends[low] : -1;
+  return -1;
 }
 
-// In an argv word, a new line starts a new setting only when it reads like one (`name: ...`,
-// `- name: ...`, `name=value`); other lines (a key body, base64 with = padding) continue the value.
+// In an argv word, a value continues on the next line only when that line is a key body (base64,
+// = padding included) or more indented, and does not start a new setting (`name: ...`,
+// `- name: ...`, `name=value`). A line that starts a command or a sentence ends it.
 const NEXT_LINE_SETTING_RE = /[ \t]*(?:-[ \t]+)?(?:[A-Za-z_][A-Za-z0-9_.-]*[ \t]*:(?=[ \t\r\n]|$)|[A-Za-z_][A-Za-z0-9_.-]*=(?=[^=\r\n]))/y;
+const NEXT_LINE_CONTINUES_RE = /(?:[A-Za-z0-9+/=]{1,128}[ \t]*(?:\r?\n|$)|[ \t]+\S)/y;
 
 // Where a value starting at `start` ends, scanning no further than `limit` (the closing quote
 // when the value starts inside quotes).
@@ -328,11 +327,17 @@ function valueEnd(text, start, mode, regions, limit = text.length) {
     const next = index + 1;
     if (mode === 'word') {
       if (char === '\n' || char === '\r') {
-        if (next >= limit || aheadAt(NEXT_LINE_SETTING_RE, text, next)) break;
+        if (char === '\r' && text[next] === '\n') {
+          index = next;
+          continue;
+        }
+        if (next >= limit || aheadAt(NEXT_LINE_SETTING_RE, text, next) || !aheadAt(NEXT_LINE_CONTINUES_RE, text, next)) break;
         index = next;
         continue;
       }
       if (/[\s&,#;|]/.test(char) && aheadAt(NAME_ASSIGNMENT_AHEAD, text, next)) break;
+      // A JSON string list of commands (["export TOKEN=...","rm -rf x"]): the secret ends with its string.
+      if ((char === '"' || char === "'") && /[,\]}]/.test(text[next] || '')) break;
       index = next;
       continue;
     }
@@ -363,8 +368,21 @@ function valueEnd(text, start, mode, regions, limit = text.length) {
 // A value that starts inside a quoted region follows the same rules inside the quotes (a quoted
 // script `ssh host 'TOKEN=S; rm -rf /data'` keeps its commands visible); reaching the closing
 // quote, it runs on through anything glued after it.
+const FIELD_ARGUMENT_RE = /(?:^|\s)(?:-d|-H|-F|--data(?:-raw|-binary|-urlencode|-ascii)?|--json|--form(?:-string)?|--header)(?:\s+|=)$/;
+const HEADER_LIST_AHEAD = /,\s*[A-Za-z_][A-Za-z0-9_.-]*\s*:/y;
 function quotedValueEnd(text, start, region, mode, regions) {
-  const end = valueEnd(text, start, mode, regions, region[1]);
+  // The quoted argument of -d/--data/--json/-F/--form/-H/--header is one field or header: its
+  // value runs to the closing quote (spaces included), or to the next field or header in it.
+  let end = region[1];
+  if (FIELD_ARGUMENT_RE.test(text.slice(Math.max(0, region[0] - 24), region[0]))) {
+    for (let index = start; index < region[1]; index += 1) {
+      if ((/[\s&,#;|]/.test(text[index]) && aheadAt(NAME_ASSIGNMENT_AHEAD, text, index + 1))
+        || (text[index] === ',' && aheadAt(HEADER_LIST_AHEAD, text, index))) {
+        end = index;
+        break;
+      }
+    }
+  } else end = valueEnd(text, start, mode, regions, region[1]);
   if (end < region[1]) return end;
   const after = region[1] + 1;
   if (after < text.length && !/[\s;|&)]/.test(text[after])) return valueEnd(text, after, mode, regions);
@@ -490,7 +508,7 @@ function redactAssignments(text, mode) {
     if (credentialName(name)
       && !(colon && !quote && /authorization$/i.test(name)) // the header pass did these
       && !(colon && !credentialColon(text, match.index, lead, quote, name, valueStart, lineIsBlankBefore))) {
-      const block = colon ? yamlBlockEnd(text, match.index, valueStart) : -1;
+      const block = colon && (mode !== 'script' || regions.around(valueStart)) ? yamlBlockEnd(text, match.index, valueStart) : -1;
       value = block !== -1
         ? { end: block, value: text.slice(valueStart, block), replacement: `${text[valueStart]} ${REDACTED}` }
         : secretValueAt(text, valueStart, mode, regions, Boolean(quote) && colon);
@@ -520,7 +538,8 @@ function redactAfter(text, pattern, mode, accept = () => true) {
     const valueStart = match.index + match[0].length;
     const value = accept(match, valueStart, text) ? secretValueAt(text, valueStart, mode, regions) : null;
     if (!value) {
-      if (match[0].length === 0) pattern.lastIndex += 1;
+      // Scan again from the next character: a rejected match must not hide the next one.
+      pattern.lastIndex = match.index + 1;
       continue;
     }
     out += `${text.slice(last, valueStart)}${value.replacement}`;
@@ -530,17 +549,17 @@ function redactAfter(text, pattern, mode, accept = () => true) {
   return out + text.slice(last);
 }
 
-const AUTH_HEADER_RE = /\b(?:proxy-)?authorization\s*:\s*(?:(?:bearer|basic|token|bot|apikey|negotiate)\s+)?(?!digest\s)/gi;
+const AUTH_HEADER_RE = /\b(?:proxy-)?authorization\s*:(?!\s*digest\s)\s*(?:(?:bearer|basic|token|bot|apikey|negotiate)\s+)?/gi;
 // Digest credentials (username, nonce, response...) are one value, to the end of the header.
 const DIGEST_HEADER_RE = /\b(?:proxy-)?authorization\s*:\s*digest\s+/gi;
-const SECRET_FLAG_TEXT_RE = /(?:^|\s)(--[A-Za-z][A-Za-z0-9_-]*)\s+/g;
+const SECRET_FLAG_TEXT_RE = /(?<!\S)(--[A-Za-z][A-Za-z0-9_-]*)\s+/g;
 const CONFIG_SET_RE = /\b(?:config|configure)\s+set\s+(\S+)\s+/g;
-const OPENSSL_PASS_RE = /(?:^|\s)-pass(?:in|out)?\s+pass:/g;
+const OPENSSL_PASS_RE = /(?<!\S)-pass(?:in|out)?\s+pass:/g;
 // -u user:password for HTTP clients (docker run -u 1000:0 is a user and group, not a secret).
-const USER_FLAG_RE = /\b(?:curl|wget|http|https|xh|ab)\b[^\n;|&]{0,240}?\s(?:-u|--user)\s+[^\s:'"]+:/g;
+const USER_FLAG_RE = /(?<![^\s;|&(])(?:curl|wget|http|https|xh|ab)(?=\s)[^\n;|&]{0,240}?\s(?:-u|--user)\s+[^\s:'"]+:/g;
 const HTTP_CLIENTS = ['curl', 'wget', 'http', 'https', 'xh', 'ab'];
-// A plain setting value (true, off, 3) under a credential-looking name is not a secret.
-const PLAIN_SETTING_RE = /(?:true|false|yes|no|on|off|\d{1,6})(?=\s|$)/iy;
+// A plain switch (true, off) under a credential-looking name is not a secret; a number may be.
+const PLAIN_SETTING_RE = /(?:true|false|yes|no|on|off)(?=\s|$)/iy;
 // A word after a secret flag that starts with a dash is a secret only when it looks like one.
 const WORD_AT_RE = /\S{1,512}/y;
 const wordAt = (text, index) => {
@@ -589,7 +608,20 @@ function redactDigest(text, mode) {
     const around = mode === 'word' ? null : regions.around(valueStart);
     const newline = text.indexOf('\n', valueStart);
     const lineEnd = newline === -1 ? text.length : newline;
-    const end = around ? Math.min(around[1], lineEnd) : lineEnd;
+    let end = around ? Math.min(around[1], lineEnd) : lineEnd;
+    if (!around && mode !== 'word') {
+      // Unquoted: up to a shell operator outside the header's own quoted parameters.
+      let quoted = false;
+      for (let index = valueStart; index < end; index += 1) {
+        const char = text[index];
+        if (char === '"') quoted = !quoted;
+        else if (!quoted && (char === ';' || char === '|' || (char === '&' && text[index + 1] === '&'))) {
+          end = index;
+          while (end > valueStart && /\s/.test(text[end - 1])) end -= 1;
+          break;
+        }
+      }
+    }
     if (end <= valueStart || text.slice(valueStart, end) === REDACTED) continue;
     out += `${text.slice(last, valueStart)}${REDACTED}`;
     last = end;
