@@ -1494,6 +1494,9 @@ async function resolveHold(options, hold, context) {
     }
     if (report.verdict === 'approved') {
       say('Marrow recorded your approval (client-attested).');
+      // Remembered before the run starts: if Marrow is unavailable before the command starts,
+      // the next run picks this approval up instead of asking again.
+      remember();
       return { approved: true, approval: summary({ state: 'approved', answered_by: report.answeredBy }) };
     }
     if (report.code === 'MARROW_VERIFIED_OWNER_APPROVAL_REQUIRED') {
@@ -1554,7 +1557,7 @@ async function resolveHold(options, hold, context) {
     ? 'Waiting for the owner\'s answer. Ctrl+C stops waiting; a later run of this command picks up the answer.'
     : 'Waiting for a person to approve it. Ctrl+C stops waiting; a later run of this command picks up the answer.');
   const answer = await waitForOwnerAnswer(options, hold.gateReceiptId, hold.pollAfterMs, Date.now() + wait, io);
-  return finishOwnerAnswer(answer, { hold, say, summary, refused, held, denial, records, holdKey: context.holdKey, linkDeadline });
+  return finishOwnerAnswer(answer, { hold, say, summary, refused, held, denial, records, holdKey: context.holdKey, linkDeadline, onApproved: () => remember() });
 }
 
 // What the runner does with the owner's answer (in this run, or picked up by a later run).
@@ -1564,6 +1567,7 @@ async function finishOwnerAnswer(answer, ctx) {
     if (hold.kind === 'arbitration' && !answer.ownerApprovalReceiptId) {
       return refused('Marrow reported the arbitration as approved without an owner approval receipt, so nothing ran.', { state: 'approval_incomplete' });
     }
+    ctx.onApproved?.();
     say(hold.kind === 'arbitration' ? 'The account owner approved a proposal. Checking that it is this one.' : 'The action was approved. Running it.');
     return {
       approved: true,
