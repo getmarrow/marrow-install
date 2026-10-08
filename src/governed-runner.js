@@ -1992,7 +1992,9 @@ async function runGoverned(parsed, execution = {}) {
         if (arbitrationApproved) {
           const code = permitErrorCode(error);
           if (PERMIT_REFUSAL_STATUSES.has(error.status)) {
-            throw new Error(`Marrow refused the permit for this command on the owner's arbitration approval (${code}), so it did not run. Marrow issues it only when the proposal the owner approved is this exact action.`);
+            const refused = new Error(`Marrow refused the permit for this command on the owner's arbitration approval (${code}), so it did not run. Marrow issues it only when the proposal the owner approved is this exact action.`);
+            refused.status = error.status;
+            throw refused;
           }
           const unavailable = new Error(`Marrow could not issue the permit for the owner's arbitration approval right now (${code}), so it did not run. Rerun the command; it picks up the approval.`);
           unavailable.status = error.status;
