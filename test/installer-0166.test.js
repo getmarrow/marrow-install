@@ -826,8 +826,11 @@ test('day one: the key is stored only after a working self-test, never from --ke
   fs.writeFileSync(path.join(fakeBin, 'npx'), `#!/bin/sh\nprintf '%s' '${JSON.stringify({ pass: true, isolated: true, live_hook_observed: false, repeat_denied: true, mutation_reset: true, owner_disabled_bypass: true })}'\n`, { mode: 0o755 });
   const key = `mrw_test_${crypto.randomBytes(12).toString('hex')}`;
   let healthy = false;
+  let inactive = false;
   const api = await startStubApi((request) => {
     if (!healthy) return [503, { error: 'store timeout' }];
+    // An unbound key on an inactive account: the install completes, the self-test fails.
+    if (inactive && request.pathname === '/v1/agent/status') return [200, { ok: false, enabled: false, health: 'inactive', identity: { agent_id: null, bound_agent_ids: [] } }];
     switch (request.pathname) {
       case '/v1/agent/think': return [200, { decision_id: 'dec_day1' }];
       case '/v1/agent/commit': return [200, { committed: true, decision_id: request.body.decision_id }];
@@ -858,6 +861,13 @@ test('day one: the key is stored only after a working self-test, never from --ke
     assert.notEqual(failed.result.status, 0);
     assert.equal(fs.existsSync(path.join(failed.home, '.marrow', 'env')), false);
     healthy = true;
+    // The self-test answers, but Marrow reports the account inactive: nothing is stored.
+    inactive = true;
+    const inactiveRun = await run([], { MARROW_API_KEY: key });
+    cleanup.push(inactiveRun.home, inactiveRun.project);
+    assert.notEqual(inactiveRun.result.status, 0, inactiveRun.result.stdout);
+    assert.equal(fs.existsSync(path.join(inactiveRun.home, '.marrow', 'env')), false);
+    inactive = false;
     // A key passed with --key is not stored.
     const fromArg = await run(['--key', key], {});
     cleanup.push(fromArg.home, fromArg.project);
