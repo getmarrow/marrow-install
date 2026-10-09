@@ -2,7 +2,9 @@
 
 Release notes for `@getmarrow/install`, newest first. The README describes only the current version.
 
-## Unreleased (next version; the version number changes at release)
+## v0.1.68
+
+v0.1.68 installs MCP `3.9.100` (source `dfe8ca59b7862c481443876f5b1d0f453d244a44`, packed integrity `sha512-6YfkDSrYhDwjTUBAo7toJ808R1pzxefjX5Dk3fq8hVfr8FrR+DMLbZTHOM0vU1uhPOp8H5GFIniTWTNh2/5Sig==`). SDK is `3.7.65`. Update once, restart the owning harness, review hook trust and run `doctor --self-test`.
 
 - **Approvals in chat and terminal.** With MCP `3.9.99` or later, install and update add the approval hooks for Claude Code (`PermissionRequest`, `PostToolBatch`), Cursor (shell and MCP execution hooks with `failClosed` and a 15-second timeout, `sessionStart`, `beforeSubmitPrompt`; MCP calls stay gated in `preToolUse` for cloud agents, and Marrow's own tools pass a small guard at once) and Gemini CLI (`BeforeAgent`); Codex keeps its prompt hook. With MCP `3.9.98` the earlier layout stays as it was.
 - **Governed runner holds.** A held `run` asks the operator once at an interactive terminal. With nobody present (no terminal, `CI`, `--no-interactive`, or an agent's own terminal) it holds quietly and sends nothing, unless Marrow says the owner's one-tap link would be sent (owner-locked categories, arbitration, the owner's decline on request, or unattended pings the owner turned on). Reruns of the same command pick the hold up on the same gate receipt, with no new email; an approval that arrived later runs once. The hold is recorded before any wait, so Ctrl+C or a kill stops only the wait (exit 12). Declines stand for 30 minutes. Arbitration asks the owner by one-tap link and runs only on a permit for this exact action; arbitration links tell the service `person_present: true` only when a person at this terminal runs it, and a live link is waited on instead of sent again. `--owner-approved` no longer does anything.

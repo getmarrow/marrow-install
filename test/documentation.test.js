@@ -93,7 +93,7 @@ test('README documents chat and terminal approvals and never makes a dashboard l
   assert.doesNotMatch(whatsNew, /Previous release|^### v/m, 'one entry, no older versions');
   assert.match(whatsNew, /https:\/\/github\.com\/getmarrow\/marrow-install\/blob\/master\/CHANGELOG\.md/);
   const changelog = fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8');
-  assert.match(changelog, /^## Unreleased/m);
+  assert.match(changelog.split('\n').find((line) => line.startsWith('## ')), new RegExp(`^## v${pkg.version.replaceAll('.', '\\.')}$`), 'the newest entry is this version');
   assert.match(changelog, new RegExp(`^## v${pkg.version.replaceAll('.', '\\.')}$`, 'm'));
   // Approval hooks are tied to the MCP version that answers them, not to this published version.
   assert.match(readme, /These hooks are written with MCP `3\.9\.99` and later/);

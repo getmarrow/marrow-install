@@ -772,7 +772,7 @@ Historical owner example: \`npx -y --package=@getmarrow/mcp@3.9.79 marrow-mcp\`.
   const before = inspectMcpConfigurations({}, { paths: configurationPaths });
   assert.equal(before.healthy, false);
   assert.equal(before.mixed_versions, true);
-  assert.deepEqual(before.configured_versions, ['3.9.79', PINS.MCP_ADAPTER_VERSION]);
+  assert.deepEqual([...before.configured_versions].sort(), ['3.9.79', PINS.MCP_ADAPTER_VERSION].sort());
   assert.equal(before.exact_fix, 'npx -y @getmarrow/install@latest update');
 
   const registryMetadata = {
@@ -1486,7 +1486,7 @@ test('a stale MCP pin hidden in an earlier duplicate JSON key is still repaired 
     assert.equal(doctor.already_present, false);
     const repaired = applyPlan(plan, { yes: true, dryRun: false, doctor: false }).find((change) => change.path === mcpPath);
     assert.equal(repaired.applied, true);
-    assert.doesNotMatch(fs.readFileSync(mcpPath, 'utf8'), /@getmarrow\/mcp@3\.9\.10/);
+    assert.doesNotMatch(fs.readFileSync(mcpPath, 'utf8'), /@getmarrow\/mcp@3\.9\.10(?![0-9])/);
     assert.deepEqual(inspectMcpConfigurations(detection, { paths: [mcpPath] }).stale_versions, []);
     assert.equal(applyPlan(plan, { doctor: true }).find((change) => change.path === mcpPath).already_present, true);
   } finally {
@@ -2204,8 +2204,8 @@ test('self-test returns first five-minute value signal and proof', async () => {
       agentId: 'installer-test',
     });
     assert.equal(requestHeaders['x-marrow-package'], '@getmarrow/install');
-    assert.equal(requestHeaders['x-marrow-package-version'], '0.1.67');
-    assert.equal(requestHeaders['x-marrow-install-version'], '0.1.67');
+    assert.equal(requestHeaders['x-marrow-package-version'], '0.1.68');
+    assert.equal(requestHeaders['x-marrow-install-version'], '0.1.68');
     assert.equal(requestHeaders['x-marrow-sdk-version'], PINS.SDK_ADAPTER_VERSION);
     assert.equal(requestHeaders['x-marrow-mcp-version'], PINS.MCP_ADAPTER_VERSION);
     assert.equal(result.mcp_tool_profile.configured_profile, 'unset');

@@ -132,18 +132,19 @@ Persistent controller lifecycle is currently Linux-only. On macOS or Windows, ac
 
 The controller is not a boot service. After a host restart, or any exit that skips its shutdown handler, doctor reports it as `stale` until the next install, update, or `controller ensure`. Local control can be inspected and changed with `npx @getmarrow/install control status|disable --yes|enable`. While local control is disabled, the controller is not started, and doctor reports a stopped or stale controller as not required instead of recommending `controller ensure`; missing state means enabled, and an explicit owner disable is preserved. Unsafe controller state or an unverified or unresponsive controller process keeps its exact fix.
 
-## What's New in the next version
+## What's New in v0.1.68
 
-Not released yet; the version number changes at release. Changes since v0.1.67, in short (the full entry is in the [CHANGELOG](https://github.com/getmarrow/marrow-install/blob/master/CHANGELOG.md)):
+v0.1.68 installs MCP `3.9.100`. In short (the full entry is in the [CHANGELOG](https://github.com/getmarrow/marrow-install/blob/master/CHANGELOG.md)):
 
 - **Approvals in chat and terminal.** A held action is approved where people work: in the host's own prompt, at the runner's terminal, or by the account owner's one-tap link for owner-only holds and arbitration. See [Approvals in Chat and Terminal](#approvals-in-chat-and-terminal).
+- **Local policy never loosens a gate.** `--policy warn` and `--policy audit` (and `MARROW_GOVERN_POLICY`) no longer let a command run when Marrow enforces the gate. Only a gate Marrow marks advisory runs with a warning.
 - **Key storage.** A first install stores a key from `MARROW_API_KEY` in the owner-only `~/.marrow/env` once the self-test passes, and the runner reads it there.
 - **Local MCP runtime.** Hooks start a verified local copy of the pinned MCP instead of `npx`. See [Local MCP runtime](#local-mcp-runtime).
 - **Governed runner.** Only secret values are redacted, so commands that differ after a secret stay different actions; held commands are picked up on rerun by exactly the same command.
 - **Day one.** Claude Code is detected from your installation too, and only detected hosts get files.
 - **Uninstall.** `uninstall --yes` removes only Marrow's own entries. See [Uninstall](#uninstall).
 
-v0.1.67 and earlier release notes are in the [CHANGELOG](https://github.com/getmarrow/marrow-install/blob/master/CHANGELOG.md).
+Earlier release notes are in the [CHANGELOG](https://github.com/getmarrow/marrow-install/blob/master/CHANGELOG.md).
 
 ## What It Detects
 
@@ -285,7 +286,7 @@ Never connect an agent to the email inbox that receives Marrow approval mail. An
 
 ### Hooks the installer writes
 
-These hooks are written with MCP `3.9.99` and later (`MCP_HOST_APPROVAL_HOOKS_SINCE` in `src/pins.js`); the published v0.1.67, pinned to MCP `3.9.98`, keeps the earlier layout. They take effect once the installer is re-pinned to that MCP, or when `update` resolves a registry-verified MCP at or above it.
+These hooks are written with MCP `3.9.99` and later (`MCP_HOST_APPROVAL_HOOKS_SINCE` in `src/pins.js`). v0.1.68 installs MCP `3.9.100`, so `install` and `update` write them; with an older MCP the earlier layout stays. `update` also uses a registry-verified MCP at or above that version.
 
 | Host | Hooks for approvals | How the operator answers |
 | --- | --- | --- |
