@@ -2,9 +2,9 @@
 // This is the only place they are set: a release changes the MCP version, source SHA and
 // integrity here together (and the SDK pair together), and the tests read them from here.
 module.exports = Object.freeze({
-  MCP_ADAPTER_VERSION: '3.9.98',
-  MCP_ADAPTER_SOURCE_SHA: 'e40d3cb40479456fd937bce0b9488eb0c3f10863',
-  MCP_ADAPTER_INTEGRITY: 'sha512-AmDT3afwdm7+Dc555zDs+yGIG4RyC/YbaQm+9O1mThlC6g/9EujTr7y7UvRMEtYDvVWAAaG6CFM7/u/ytjKhwQ==',
+  MCP_ADAPTER_VERSION: '3.9.100',
+  MCP_ADAPTER_SOURCE_SHA: 'dfe8ca59b7862c481443876f5b1d0f453d244a44',
+  MCP_ADAPTER_INTEGRITY: 'sha512-6YfkDSrYhDwjTUBAo7toJ808R1pzxefjX5Dk3fq8hVfr8FrR+DMLbZTHOM0vU1uhPOp8H5GFIniTWTNh2/5Sig==',
   // The first MCP version that ships the host-approval hook entrypoints
   // (claude-permission-request-hook, cursor-context-hook, gemini-context-hook) and reads Cursor's
   // shell/MCP execution events and Gemini's BeforeAgent prompt. The installer writes the
