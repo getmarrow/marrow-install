@@ -184,8 +184,10 @@ const AMBIGUOUS = '[REDACTED_AMBIGUOUS]';
 const AMBIGUOUS_SPAN_RE = /[\s'"`;&|<>()#,?]|\$[({A-Za-z_]/;
 const MARKERS = new Set([REDACTED, AMBIGUOUS]);
 const hiddenAs = (span) => (AMBIGUOUS_SPAN_RE.test(String(span)) ? AMBIGUOUS : REDACTED);
-// A shell variable reference ($NAME, ${NAME}) names a secret; it is not one, and stays visible.
-const REFERENCE_RE = /^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$/;
+// A shell variable reference ($NAME in capitals, ${name}) names a secret; it is not one, and stays
+// visible in shell text and free text (Marrow's own rule). In an argv word the shell has already
+// expanded variables, so `$ecret1`-shaped text there is literal data and stays hidden.
+const REFERENCE_RE = /^\$(?:[A-Z_][A-Z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$/;
 
 // A credential name CONTAINS one of these words in one of its segments (split at _ . - and
 // camelCase): TF_TOKEN, PGPASSWORD, SECRET_KEY_BASE, GITHUB_TOKEN_V2, X_API_KEY_ID, apiKey,
@@ -538,7 +540,7 @@ function secretValueAt(text, start, mode, regions, jsonName = false, wholeWord =
     const inner = single ? value.slice(1, -1) : value;
     found = { end, value: inner, replacement: single ? `${value[0]}${hiddenAs(inner)}${value[0]}` : hiddenAs(value) };
   }
-  if (!found.value || MARKERS.has(found.value) || REFERENCE_RE.test(found.value)) return null;
+  if (!found.value || MARKERS.has(found.value) || (mode !== 'word' && REFERENCE_RE.test(found.value))) return null;
   return found;
 }
 
@@ -874,8 +876,12 @@ function governedInputs(options, childCommand = null, surfacesFrom = 'command') 
   else if (surfacesFrom === 'action') surfaceText = [action, rawAction];
   // Surfaces are fixed labels, so the raw text can add some without anything raw leaving.
   const surfaces = inferSurfaces(surfaceText.join(' '));
+  // Marrow decides whether an approval may be reused from the action text alone: an ambiguous
+  // hidden value in the target or the type is carried into the action, so it is never bound.
+  const sentAction = (target.includes(AMBIGUOUS) || String(type).includes(AMBIGUOUS)) && !action.includes(AMBIGUOUS)
+    ? `${action} ${AMBIGUOUS}` : action;
   return {
-    commandText, action, target, type, risky, surfaces,
+    commandText, action: sentAction, target, type, risky, surfaces,
     // Local only, for the hold key: the command and inputs exactly as typed.
     holdMaterial: { argv: Array.isArray(childCommand) ? childCommand.map(String) : [], action: raw.action, target: raw.target, type: raw.type },
   };

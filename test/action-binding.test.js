@@ -837,7 +837,7 @@ test('round 5 F6b-F6e: a SELECT approval can never carry a DROP hidden in the sa
   assert.equal(runner.redact(`TOKEN=${S1} deploy`), 'TOKEN=[redacted] deploy');
   assert.equal(runner.redact(`TOKEN="${S1} x" deploy`), 'TOKEN="[REDACTED_AMBIGUOUS]" deploy');
   assert.equal(runner.redact(runner.redact(`TOKEN="${S1} x" deploy`)), 'TOKEN="[REDACTED_AMBIGUOUS]" deploy');
-  // A variable reference names a secret and stays visible.
+  // A variable reference names a secret and stays visible in shell and free text.
   assert.equal(runner.redact('TOKEN=$DEPLOY_TOKEN deploy'), 'TOKEN=$DEPLOY_TOKEN deploy');
 });
 
@@ -865,4 +865,37 @@ test('round 5: --target and --action are redacted on the options themselves', ()
   assert.equal(options.target, 'https://x/deploy?token=[redacted]&env=prod');
   assert.equal(options.action, 'deploy KEY=[redacted]');
   assert.equal(secretCount(JSON.stringify(options)), 0);
+});
+
+// Round 6 (F7 / MEDIUM-R5-1): in an argv word the shell has already expanded variables, so a
+// `$name`-shaped value there is literal data; a bare reference is $ and capitals (Marrow's rule).
+test('round 6 F7: a $name-shaped literal is hidden in argv words and free text; a shell reference stays', () => {
+  const literal = `$u${crypto.randomBytes(6).toString('hex')}`;
+  const braced = `\${p${crypto.randomBytes(6).toString('hex')}}`;
+  const none = (text) => assert.equal(text.includes(literal) || text.includes(braced), false, 'a literal reached the sent text');
+  none(runner.redactedCommand(['env', `PASSWORD=${literal}`, 'tool', 'go']));
+  none(runner.redactedCommand(['docker', 'run', '-e', `DB_PASSWORD=${literal}`, 'img']));
+  none(runner.redactedCommand(['env', `PASSWORD=${braced}`, 'tool']));
+  none(runner.redactedCommand(['tool', '--password', literal]));
+  none(runner.governedInputs(runner.withRedactedInputs({ ...BASE, action: `login PASSWORD=${literal}` }), C('true')).action);
+  assert.equal(runner.redactedCommand(['bash', '-c', 'PASSWORD=$DB_PASSWORD ./migrate']), "bash -c 'PASSWORD=$DB_PASSWORD ./migrate'");
+  assert.equal(runner.redact('export TOKEN=${deploy_token} && deploy'), 'export TOKEN=${deploy_token} && deploy');
+});
+
+// Round 6 (F8 / MEDIUM-R5-2): Marrow decides reuse from the action text alone, so an ambiguous
+// hidden value in --target or --type is carried into the action text: never bound.
+test('round 6 F8: ambiguity only in --target makes the action text unbindable too', () => {
+  const child = C('curl', '-X', 'POST', 'https://ops.example/deploy');
+  const A = shape(child, { target: `https://ops.example/q?token="${S1}; env=production"` });
+  const B = shape(child, { target: `https://ops.example/q?token="${S1}; env=staging"` });
+  assert.notEqual(A.holdKey, B.holdKey);
+  for (const side of [A, B]) {
+    assert.ok(side.target.includes('[REDACTED_AMBIGUOUS]'), side.target);
+    assert.ok(side.action.includes('[REDACTED_AMBIGUOUS]'), side.action);
+    assert.equal(secretCount(JSON.stringify([side.action, side.target, side.binding])), 0);
+  }
+  // A plain target leaves the action as it is.
+  const plain = shape(child, { target: `https://ops.example/q?token=${S1}&env=production` });
+  assert.equal(plain.action.includes('[REDACTED_AMBIGUOUS]'), false);
+  assert.equal(plain.action, "curl -X POST https://ops.example/deploy");
 });
