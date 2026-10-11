@@ -19,9 +19,8 @@
 function runtimeCore() {
   const fs = require('node:fs');
   const path = require('node:path');
-  const os = require('node:os');
   const crypto = require('node:crypto');
-  const cp = require('node:child_process');
+  const cp = () => require('node:child_process');
   const SCHEMA = 'marrow-mcp-runtime.v2';
   const VERSION_RE = /^\d+\.\d+\.\d+$/;
   const INTEGRITY_RE = /^sha512-[A-Za-z0-9+/]{86}==$/;
@@ -159,7 +158,7 @@ function runtimeCore() {
     const npm = npmInvocation(options);
     if (!npm) return false;
     const timeout = Math.max(1000, Math.min(NPM_TIMEOUT_MS, Number((options && options.timeout) || NPM_TIMEOUT_MS)));
-    const result = cp.spawnSync(npm.file, [...npm.args, 'install', '--no-audit', '--no-fund', '--ignore-scripts', '--no-bin-links', '--loglevel=error', '--prefix=' + stage, ...specs], {
+    const result = cp().spawnSync(npm.file, [...npm.args, 'install', '--no-audit', '--no-fund', '--ignore-scripts', '--no-bin-links', '--loglevel=error', '--prefix=' + stage, ...specs], {
       cwd: stage,
       env: npmEnvironment((options && options.env) || process.env),
       stdio: 'ignore',
@@ -329,7 +328,7 @@ function runtimeCore() {
     if (!lockBusy(lock)) {
       if (started - failedAt(mark) < RETRY_MS) return null;
       try {
-        const child = cp.spawn(process.execPath, ['-e', loader, '--', '--marrow-heal', '--package=@getmarrow/mcp@' + cfg.version, 'marrow-mcp'], { cwd: home, detached: true, stdio: 'ignore', windowsHide: true });
+        const child = cp().spawn(process.execPath, ['-e', loader, '--', '--marrow-heal', '--package=@getmarrow/mcp@' + cfg.version, 'marrow-mcp'], { cwd: home, detached: true, stdio: 'ignore', windowsHide: true });
         child.on('error', () => {});
         child.unref();
       } catch {
@@ -349,7 +348,7 @@ function runtimeCore() {
     const args = process.argv.slice(1);
     const pre = args.some((arg) => PRE_RE.test(String(arg)));
     const spec = '--package=@getmarrow/mcp@' + cfg.version;
-    const home = os.homedir();
+    const home = process.platform !== 'win32' && process.env.HOME ? process.env.HOME : require('node:os').homedir();
     if (args[0] === '--marrow-heal') {
       const result = args.length === 3 && args[1] === spec && args[2] === 'marrow-mcp' ? heal(cfg, home) : { state: 'skipped' };
       process.exitCode = result.state === 'installed' || result.state === 'present' ? 0 : 1;
