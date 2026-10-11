@@ -2,6 +2,15 @@
 
 Release notes for `@getmarrow/install`, newest first. The README describes only the current version.
 
+## v0.1.69
+
+v0.1.69 installs MCP `3.9.101` (source `53a63889f94712a81c18afe00393ad4f16cde72b`). SDK is `3.7.65`. Update once, restart the owning harness, review hook trust and run `doctor --self-test`.
+
+- **No key, no half install.** With no API key, `activate` and every `--yes` run now stop, write nothing and print how to get a key. Before, they wrote hooks that blocked every commit.
+- **A blank key no longer hides a saved one.** An empty `MARROW_API_KEY` value no longer hides a valid key saved in `~/.marrow/env`.
+- **`MARROW_KEY` works on its own.** It is used when `MARROW_API_KEY` is absent.
+- **Key-file steps.** They now include `chmod 700 ~/.marrow` along with `chmod 600 ~/.marrow/env`, because a hand-made `~/.marrow` on Ubuntu is group-writable and Marrow rejects a key file in such a folder.
+
 ## v0.1.68
 
 v0.1.68 installs MCP `3.9.100` (source `dfe8ca59b7862c481443876f5b1d0f453d244a44`, packed integrity `sha512-6YfkDSrYhDwjTUBAo7toJ808R1pzxefjX5Dk3fq8hVfr8FrR+DMLbZTHOM0vU1uhPOp8H5GFIniTWTNh2/5Sig==`). SDK is `3.7.65`. Update once, restart the owning harness, review hook trust and run `doctor --self-test`.

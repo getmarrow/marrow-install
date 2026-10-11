@@ -1480,7 +1480,7 @@ async function recommendGovernanceMode(options, project = detectProjectSignals()
       skipped: true,
       reason: 'MARROW_API_KEY missing',
       project,
-      exact_fix: 'Put MARROW_API_KEY=<your_key> in ~/.marrow/env (chmod 600), then run npx @getmarrow/install govern. Fallback: MARROW_API_KEY=<your_key> npx @getmarrow/install govern',
+      exact_fix: 'Put MARROW_API_KEY=<your_key> in ~/.marrow/env (run chmod 700 ~/.marrow && chmod 600 ~/.marrow/env), then run npx @getmarrow/install govern. Fallback: MARROW_API_KEY=<your_key> npx @getmarrow/install govern',
     };
   }
   const action = 'configure Marrow governance mode for this project';
@@ -3582,7 +3582,7 @@ async function fleetSnapshot(options) {
         data: {
           enabled: false,
           missed_hooks: ['api_key'],
-          recommended_fix: 'Put MARROW_API_KEY=<your_key> in ~/.marrow/env (chmod 600), then run npx @getmarrow/install fleet. Fallback: MARROW_API_KEY=<your_key> npx @getmarrow/install fleet',
+          recommended_fix: 'Put MARROW_API_KEY=<your_key> in ~/.marrow/env (run chmod 700 ~/.marrow && chmod 600 ~/.marrow/env), then run npx @getmarrow/install fleet. Fallback: MARROW_API_KEY=<your_key> npx @getmarrow/install fleet',
         },
       },
       capacity: { ok: false, error: 'MARROW_API_KEY missing', data: {} },
@@ -3647,7 +3647,7 @@ function fleetPanel(snapshot) {
 // Governed commands never name an invented agent id. MARROW_AGENT_ID, when set, is a registered
 // agent; otherwise Marrow resolves the key's bound agent or the plan seat.
 // Commands read the key from ~/.marrow/env; the env-prefixed form is the labelled fallback.
-const KEY_FILE_SETUP = 'Put MARROW_API_KEY=<your_key> in ~/.marrow/env and run chmod 600 ~/.marrow/env.';
+const KEY_FILE_SETUP = 'Put MARROW_API_KEY=<your_key> in ~/.marrow/env, then run chmod 700 ~/.marrow && chmod 600 ~/.marrow/env.';
 const KEY_ENV_FALLBACK_PREFIX = 'MARROW_API_KEY=<your_key> ';
 const isRunnableCommand = (command) => String(command).startsWith('npx ');
 
