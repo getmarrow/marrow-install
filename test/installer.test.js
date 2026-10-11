@@ -2052,7 +2052,8 @@ test('doctor reports likely env files when MARROW_API_KEY is not loaded', async 
   });
 
   assert.equal(report.selfTest.skipped, true);
-  assert.match(report.selfTest.exact_fix, /--repair/);
+  assert.match(report.selfTest.exact_fix, /getmarrow\.ai\/signup.*install@latest activate$/);
+  assert.doesNotMatch(report.selfTest.exact_fix, /--repair|mrw_live/);
   assert.ok(report.doctor.envHints.some((hint) => hint.endsWith(path.join('.marrow', 'env'))));
   assert.match(report.doctor.recommendedFix, /trusted secret storage/);
   assert.doesNotMatch(report.doctor.recommendedFix, /set -a;\s*\./);

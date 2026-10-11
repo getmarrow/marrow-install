@@ -970,6 +970,7 @@ function usage() {
   npx @getmarrow/install --repair
   npx @getmarrow/install update
   npx @getmarrow/install doctor
+  npx @getmarrow/install doctor --self-test
   npx @getmarrow/install --mcp --yes
   npx @getmarrow/install --sdk --yes
   npx @getmarrow/install uninstall [--yes]
@@ -979,11 +980,11 @@ Options:
   activate           Detect, install, self-test, and return a server-confirmed activation receipt
   --dry-run          Print planned changes without writing
   --doctor           Check install health without writing
+  doctor --self-test Same check, plus the server self-test: run it after restarting the harness
   --repair           Write missing hooks/config, then run self-test and status check
   update             Same as --repair: refresh exact MCP/SDK/install package pins after owner approval
-  --yes, -y          Write detected config files
+  --yes, -y          Write detected config files (needs your API key; stops before writing without one)
   --mode <mode>      auto, mcp, sdk, both, or md
-  --key <key>        Marrow API key for self-test. Prefer MARROW_API_KEY because CLI args can appear in process listings.
   --base-url <url>   Marrow API base URL
   --agent-id <id>    Agent/fleet id for self-test headers
   --no-controller    Do not start the local background controller during install/repair
@@ -994,7 +995,9 @@ Options:
                      the local MCP runtime; add --yes to remove them. Your own hooks and settings
                      are kept.
 
-The API key comes from MARROW_API_KEY, or from the owner-only ~/.marrow/env when unset.
+Get a key at https://getmarrow.ai/signup. Put it in the owner-only ~/.marrow/env (mode 600) as
+MARROW_API_KEY=your_key, or export MARROW_API_KEY. Keep it off the command line: command-line
+arguments land in shell history and process listings.
 
 Environment:
   MARROW_TOOL_PROFILE  Leave unset for primary (17 tools), or explicitly set primary, core, or full.
@@ -1192,7 +1195,8 @@ function detectEnvironment(cwd = process.cwd(), env = process.env) {
     cline: exists(path.join(root, '.clinerules')),
     windsurf: exists(path.join(root, '.windsurf')),
     gemini: exists(path.join(root, '.gemini')),
-    grok: exists(path.join(home, '.grok')) || exists(path.join(root, '.grok')),
+    // Grok hooks are written to the global ~/.grok/hooks, so only a user-level ~/.grok counts.
+    grok: exists(path.join(home, '.grok')),
     codexProject,
     codex: codexProject || agentsMdHasOwnerContent(paths.agentsMd),
     hermes: homeHarnesses.hermes === true,
@@ -3605,8 +3609,8 @@ const IDENTITY_REFUSED_RE = /AGENT_NOT_REGISTERED|wrong_agent_id|MARROW_AGENT_SC
 function identityRefusalFix(message, configuredAgentId = '') {
   if (!IDENTITY_REFUSED_RE.test(String(message || ''))) return null;
   return configuredAgentId
-    ? 'unset MARROW_AGENT_ID MARROW_FLEET_AGENT_ID && npx -y @getmarrow/install@latest'
-    : 'MARROW_API_KEY=your_agent_key npx -y @getmarrow/install@latest  (replace your_agent_key with a key for one agent from your Marrow account)';
+    ? 'unset MARROW_AGENT_ID MARROW_FLEET_AGENT_ID && npx -y @getmarrow/install@latest activate'
+    : 'npx -y @getmarrow/install@latest activate  (with a key for one agent from your Marrow account saved in ~/.marrow/env, or exported as MARROW_API_KEY)';
 }
 
 // The agent Marrow resolved for this key: its single bound agent or the Free plan seat. An
@@ -3669,7 +3673,7 @@ async function runSelfTest(options) {
     return {
       skipped: true,
       reason: 'missing MARROW_API_KEY',
-      exact_fix: 'export MARROW_API_KEY=mrw_live_... && npx @getmarrow/install --repair',
+      exact_fix: 'Create a key at https://getmarrow.ai/signup, save it as MARROW_API_KEY=your_key in the owner-only ~/.marrow/env (mode 600), then run npx -y @getmarrow/install@latest activate',
       mcp_tool_profile: initialProfile,
     };
   }
@@ -4812,7 +4816,14 @@ function activationFailureFix(message, configuredAgentId = '') {
 }
 
 function installCommandFor(options) {
-  return options.update ? INSTALLER_UPDATE_COMMAND : 'npx -y @getmarrow/install@latest';
+  return options.update ? INSTALLER_UPDATE_COMMAND : 'npx -y @getmarrow/install@latest activate';
+}
+
+// Static text: it never echoes a key, a command line or a path. The stored-file form comes first
+// because a key typed on a command line lands in shell history.
+function missingKeyMessage(options) {
+  const command = installCommandFor(options);
+  return `Marrow needs your API key. Nothing was written. Create a key at https://getmarrow.ai/signup, save it as MARROW_API_KEY=your_key in the owner-only file ~/.marrow/env (mode 600), then run: ${command}  (fallback: MARROW_API_KEY=your_key ${command})`;
 }
 
 // One summary for the one-command paths (first install and update). The full report goes to a
@@ -4925,7 +4936,11 @@ async function runCli(argv) {
     keyInfo.path = stored.source;
   }
   const oneCommand = Boolean((options.activate || options.update) && !options.dryRun && !options.doctor);
-  if (oneCommand && !options.apiKey) {
+  // Any write run without a key stops here, before anything is written: hooks installed with no
+  // key would deny protected actions on the next harness start. Previews, doctor and uninstall
+  // are not write runs.
+  const writeRun = Boolean(options.yes && !options.dryRun && !options.doctor);
+  if ((oneCommand || writeRun) && !options.apiKey) {
     // An update aimed at an unmanaged directory is refused first; it needs no key to answer.
     if (options.update) {
       assertUpdateTargetsManagedRoot(detectEnvironment(options.cwd, {
@@ -4934,7 +4949,7 @@ async function runCli(argv) {
         USERPROFILE: options.home || options.cwd,
       }));
     }
-    process.stdout.write(`Marrow needs your API key. Run: MARROW_API_KEY=your_key ${installCommandFor(options)}  (replace your_key with your key; create one at https://getmarrow.ai)\n`);
+    process.stdout.write(`${missingKeyMessage(options)}\n`);
     process.exitCode = 2;
     return;
   }

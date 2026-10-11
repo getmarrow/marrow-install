@@ -1174,7 +1174,7 @@ test('govern TUI render shows passive and governed commands', () => {
     reasons: ['Cloudflare Worker detected', 'No owner approval policy configured yet'],
   };
   const passiveCommand = commandForSelection(state, options);
-  assert.match(passiveCommand, /npx @getmarrow\/install --yes/);
+  assert.match(passiveCommand, /^npx -y @getmarrow\/install@latest activate$/);
 
   state.modeIndex = 2;
   const governedCommand = commandForSelection(state, options);

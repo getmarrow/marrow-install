@@ -782,6 +782,22 @@ test('self-test writes stop at their time limits instead of hanging the install'
   assert.ok(Date.now() - started < 2_000);
 });
 
+const KEYLESS_MESSAGE_ACTIVATE = 'Marrow needs your API key. Nothing was written. Create a key at https://getmarrow.ai/signup, save it as MARROW_API_KEY=your_key in the owner-only file ~/.marrow/env (mode 600), then run: npx -y @getmarrow/install@latest activate  (fallback: MARROW_API_KEY=your_key npx -y @getmarrow/install@latest activate)\n';
+
+function snapshotTree(root) {
+  const out = [];
+  const walk = (directory) => {
+    for (const name of fs.readdirSync(directory).sort()) {
+      const full = path.join(directory, name);
+      const stat = fs.lstatSync(full);
+      out.push(`${path.relative(root, full)}:${stat.isDirectory() ? 'dir' : fs.readFileSync(full, 'utf8')}`);
+      if (stat.isDirectory()) walk(full);
+    }
+  };
+  walk(root);
+  return out;
+}
+
 function runBin(args, { cwd, env, input } = {}) {
   return new Promise((resolve) => {
     // These runs stay offline: the local MCP runtime (an npm install) is tested on its own.
@@ -803,7 +819,7 @@ test('the one command stops with one line when no API key is available, and read
     const env = { PATH: process.env.PATH, HOME: home };
     const bare = await runBin([], { cwd: project, env });
     assert.equal(bare.status, 2);
-    assert.equal(bare.stdout, 'Marrow needs your API key. Run: MARROW_API_KEY=your_key npx -y @getmarrow/install@latest  (replace your_key with your key; create one at https://getmarrow.ai)\n');
+    assert.equal(bare.stdout, KEYLESS_MESSAGE_ACTIVATE);
     // Paste-safe: no < or > that a shell would read as a redirect.
     assert.doesNotMatch(bare.stdout, /[<>]/);
     assert.deepEqual(fs.readdirSync(project), ['package.json']);
@@ -812,7 +828,7 @@ test('the one command stops with one line when no API key is available, and read
     fs.writeFileSync(path.join(project, 'AGENTS.md'), '<!-- marrow:passive-start -->\nx\n<!-- marrow:passive-end -->\n');
     const update = await runBin(['update'], { cwd: project, env });
     assert.equal(update.status, 2);
-    assert.match(update.stdout, /^Marrow needs your API key\. Run: MARROW_API_KEY=your_key npx -y @getmarrow\/install@latest update /);
+    assert.equal(update.stdout, KEYLESS_MESSAGE_ACTIVATE.split('run: ')[0] + 'run: npx -y @getmarrow/install@latest update  (fallback: MARROW_API_KEY=your_key npx -y @getmarrow/install@latest update)\n');
 
     fs.mkdirSync(path.join(home, '.marrow'), { mode: 0o700 });
     fs.writeFileSync(path.join(home, '.marrow', 'env'), 'MARROW_API_KEY=mrw_fixture_stored_key\n', { mode: 0o644 });
@@ -952,13 +968,13 @@ test('day one: an unbound key gets no homework; an identity Marrow refuses gets 
     activation: { agent_id: 'my-agent', agent_id_source: 'configured' },
     doctor: { recommendedFix: null },
   }, {});
-  assert.equal(configured.lines[0], `Marrow ${INSTALLER_VERSION}: self-test failed: HTTP 409: AGENT_NOT_REGISTERED. Fix: unset MARROW_AGENT_ID MARROW_FLEET_AGENT_ID && npx -y @getmarrow/install@latest`);
+  assert.equal(configured.lines[0], `Marrow ${INSTALLER_VERSION}: self-test failed: HTTP 409: AGENT_NOT_REGISTERED. Fix: unset MARROW_AGENT_ID MARROW_FLEET_AGENT_ID && npx -y @getmarrow/install@latest activate`);
   const unbound = installSummaryLines({
     selfTest: { skipped: false, active: false, error: 'HTTP 403: wrong_agent_id' },
     activation: { agent_id: null, agent_id_source: 'unresolved' },
     doctor: { recommendedFix: null },
   }, {});
-  assert.match(unbound.lines[0], /Fix: MARROW_API_KEY=your_agent_key npx -y @getmarrow\/install@latest  \(replace your_agent_key with a key for one agent from your Marrow account\)$/);
+  assert.match(unbound.lines[0], /Fix: npx -y @getmarrow\/install@latest activate  \(with a key for one agent from your Marrow account saved in ~\/\.marrow\/env, or exported as MARROW_API_KEY\)$/);
 });
 
 test('day one: Claude Code is found from the user\'s installation, gets project hooks, and the restart line names it', () => {
@@ -1163,5 +1179,109 @@ test('day one: an existing Marrow SDK runtime keeps SDK mode, and --both writes 
   } finally {
     fs.rmSync(project, { recursive: true, force: true });
     fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('keyless --yes (and --mcp/--sdk --yes) prints the activate message, exits 2 and writes zero files', async () => {
+  for (const marker of [null, '.claude', '.codex', '.cursor', '.grok']) {
+    const home = tempDir('marrow-yes-nokey-home-');
+    const project = tempDir('marrow-yes-nokey-proj-');
+    try {
+      fs.writeFileSync(path.join(project, 'package.json'), '{}\n');
+      if (marker) fs.mkdirSync(path.join(project, marker));
+      fs.mkdirSync(path.join(home, '.claude'));
+      fs.mkdirSync(path.join(home, '.grok'));
+      const env = { PATH: process.env.PATH, HOME: home };
+      const beforeHome = snapshotTree(home);
+      const beforeProject = snapshotTree(project);
+      for (const args of [['--yes'], ['-y'], ['--mcp', '--yes'], ['--sdk', '--yes'], ['--yes', '--json']]) {
+        const run = await runBin(args, { cwd: project, env });
+        assert.equal(run.status, 2, args.join(' '));
+        assert.equal(run.stdout, KEYLESS_MESSAGE_ACTIVATE, args.join(' '));
+        assert.equal(run.stderr, '');
+      }
+      assert.deepEqual(snapshotTree(home), beforeHome);
+      assert.deepEqual(snapshotTree(project), beforeProject);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(project, { recursive: true, force: true });
+    }
+  }
+});
+
+test('keyless --yes stops the same way when hooks already exist, and --dry-run and doctor still run', async () => {
+  const home = tempDir('marrow-yes-nokey-home-');
+  const project = tempDir('marrow-yes-nokey-proj-');
+  try {
+    fs.mkdirSync(path.join(project, '.claude'));
+    const settings = path.join(project, '.claude', 'settings.json');
+    const existing = '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo owner"}]}]}}\n';
+    fs.writeFileSync(settings, existing);
+    const env = { PATH: process.env.PATH, HOME: home };
+    const before = snapshotTree(project);
+    const run = await runBin(['--yes'], { cwd: project, env });
+    assert.equal(run.status, 2);
+    assert.equal(run.stdout, KEYLESS_MESSAGE_ACTIVATE);
+    assert.deepEqual(snapshotTree(project), before);
+    // The message is static: it holds no path, no command and no stored key.
+    assert.doesNotMatch(run.stdout, new RegExp(project.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    // Previews and the read-only health check are not write runs.
+    const dry = await runBin(['--dry-run', '--yes'], { cwd: project, env });
+    assert.equal(dry.status, 0);
+    assert.notEqual(dry.stdout, KEYLESS_MESSAGE_ACTIVATE);
+    const doctor = await runBin(['doctor'], { cwd: project, env });
+    assert.notEqual(doctor.stdout, KEYLESS_MESSAGE_ACTIVATE);
+    assert.deepEqual(snapshotTree(project), before);
+    // The repair path keeps its own keyless answer and also writes nothing.
+    const repair = await runBin(['--repair'], { cwd: project, env });
+    assert.equal(repair.status, 2);
+    assert.match(repair.stdout, /^Marrow needs your API key\. Nothing was written\./);
+    assert.deepEqual(snapshotTree(project), before);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('with a key, --yes still writes hooks as before (offline: self-test skipped, no controller)', async () => {
+  const home = tempDir('marrow-yes-key-home-');
+  const project = tempDir('marrow-yes-key-proj-');
+  try {
+    fs.mkdirSync(path.join(project, '.claude'));
+    fs.writeFileSync(path.join(project, '.claude', 'settings.json'), '{}\n');
+    const dummyKey = `mrw_dummy_${require('node:crypto').randomBytes(12).toString('hex')}`;
+    const env = { PATH: process.env.PATH, HOME: home, MARROW_API_KEY: dummyKey };
+    const run = await runBin(['--yes', '--no-self-test', '--no-controller'], { cwd: project, env });
+    assert.equal(run.status, 0, run.stderr);
+    assert.notEqual(run.stdout, KEYLESS_MESSAGE_ACTIVATE);
+    assert.match(fs.readFileSync(path.join(project, '.claude', 'settings.json'), 'utf8'), /claude-pre-action-hook/);
+    assert.equal(fs.existsSync(path.join(project, '.mcp.json')), true);
+    assert.doesNotMatch(`${run.stdout}${run.stderr}`, new RegExp(dummyKey));
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('Grok hooks are written only when ~/.grok exists, never for a project-only .grok or for Claude/Codex/Cursor users', () => {
+  const grokPath = (home) => path.join(home, '.grok', 'hooks', 'marrow.json');
+  for (const layout of ['none', 'project-grok', 'home-grok']) {
+    const root = tempDir('marrow-grok-proj-');
+    const home = tempDir('marrow-grok-home-');
+    try {
+      fs.mkdirSync(path.join(root, '.claude'));
+      fs.writeFileSync(path.join(root, '.claude', 'settings.json'), '{}\n');
+      if (layout === 'project-grok') fs.mkdirSync(path.join(root, '.grok'), { mode: 0o700 });
+      if (layout === 'home-grok') fs.mkdirSync(path.join(home, '.grok'), { mode: 0o700 });
+      const detection = detectEnvironment(root, { HOME: home, PATH: process.env.PATH });
+      assert.equal(detection.grok, layout === 'home-grok', layout);
+      applyPlan(buildPlan(detection, { mode: 'auto' }), { yes: true, dryRun: false, doctor: false });
+      assert.equal(fs.existsSync(grokPath(home)), layout === 'home-grok', layout);
+      if (layout !== 'home-grok') assert.equal(fs.existsSync(path.join(home, '.grok')), false, layout);
+      // Claude hooks are unaffected in every layout.
+      assert.match(fs.readFileSync(path.join(root, '.claude', 'settings.json'), 'utf8'), /claude-pre-action-hook/);
+    } finally {
+      for (const directory of [root, home]) fs.rmSync(directory, { recursive: true, force: true });
+    }
   }
 });

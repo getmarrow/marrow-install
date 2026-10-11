@@ -3988,7 +3988,7 @@ function commandForSelection(state, options) {
   const harness = state.harnesses[state.harnessIndex] || state.harnesses[0];
   const mode = state.modes[state.modeIndex] || state.modes[0];
   if (mode.id === 'passive') {
-    return 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install --yes';
+    return 'npx -y @getmarrow/install@latest activate';
   }
   const command = harness.command === '<your-agent-command>' ? '<your-command>' : harness.command;
   const renderedCommand = command.split(/\s+/).filter(Boolean).map(shellQuote).join(' ');
