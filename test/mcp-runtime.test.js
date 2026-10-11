@@ -325,7 +325,9 @@ function assertEveryPreActionWarnsLikeFailedNpx(root, home, env) {
 test('without a verified copy every pre-action hook holds with the fixed repair text, and npx or a planted copy never runs', async () => {
   const { root, home } = allHostsProject();
   const shimDir = plantProject(root);
-  const env = { HOME: home, PATH: `${shimDir}:${root}:.:${path.dirname(process.execPath)}:/usr/bin:/bin`, npm_config_registry: 'http://127.0.0.1:9/', npm_config_prefix: root };
+  // The owner's own dead registry (~/.npmrc, no retries): an env registry would make npm read no
+  // owner config (FU-1), so it would retry with npm's defaults; X1 covers a dead env registry.
+  const env = { HOME: home, PATH: `${shimDir}:${root}:.:${path.dirname(process.execPath)}:/usr/bin:/bin`, npm_config_prefix: root };
   try {
     // The registry's tarball does not match the pin: no runtime. Hooks are still written in the
     // local form and hold until a repair installs a verified copy.
@@ -486,7 +488,8 @@ function fakeNpmCli(binDir, { windows = false } = {}) {
   const argsLog = path.join(binDir, 'args.json');
   fs.writeFileSync(path.join(cliDir, 'npm-cli.js'), [
     "const fs = require('fs'); const path = require('path');",
-    `fs.writeFileSync(${JSON.stringify(argsLog)}, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd(), npm_env: Object.keys(process.env).filter((k) => /^npm_/i.test(k)).sort(), ignore: process.env.npm_config_ignore_scripts }));`,
+    "if (process.argv[2] === 'config') { process.stdout.write('registry=http://127.0.0.1:9/\\nproxy=' + (process.env.MARROW_TEST_PROXY || 'null') + '\\n'); process.exit(process.env.MARROW_TEST_CONFIG_FAIL ? 1 : 0); }",
+    `fs.writeFileSync(${JSON.stringify(argsLog)}, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd(), npm_env: Object.keys(process.env).filter((k) => /^npm_/i.test(k)).sort(), ignore: process.env.npm_config_ignore_scripts, configs: process.argv.slice(2).filter((a) => /^--(user|global)config=/.test(a)).map((a) => { const file = a.slice(a.indexOf('=') + 1); const stat = fs.statSync(file); return { flag: a.slice(0, a.indexOf('=')), file, size: stat.size, mode: stat.mode & 0o777 }; }) }));`,
     "const stage = process.cwd();",
     "const version = process.argv.find((a) => a.startsWith('@getmarrow/mcp@')).slice('@getmarrow/mcp@'.length);",
     "const mcp = path.join(stage, 'node_modules', '@getmarrow', 'mcp'); const sdk = path.join(stage, 'node_modules', '@getmarrow', 'sdk');",
@@ -519,6 +522,10 @@ test('the default installer path runs node + npm-cli.js (no shell, no npm on PAT
     assert.ok(log.args.includes(`--prefix=${log.cwd}`), 'npm installs into the private stage');
     assert.ok(log.cwd.startsWith(path.join(home, '.marrow', 'runtime', 'mcp', '.stage-')), log.cwd);
     assert.deepEqual(log.npm_env, ['npm_config_audit', 'npm_config_fund', 'npm_config_ignore_scripts', 'npm_config_registry', 'npm_config_update_notifier'], 'prefix and userconfig overrides are removed; the registry (a network setting) is kept (B1)');
+    // FU-1: the registry came from env, so npm reads no owner config at all: an empty private user
+    // and global config next to the stage, deleted after.
+    assert.deepEqual(log.configs, [{ flag: '--userconfig', file: `${log.cwd}-npmrc/user`, size: 0, mode: 0o600 }, { flag: '--globalconfig', file: `${log.cwd}-npmrc/global`, size: 0, mode: 0o600 }]);
+    assert.equal(fs.existsSync(`${log.cwd}-npmrc`), false, 'the empty configs are removed');
     assert.equal(log.ignore, 'true');
     assert.equal(fs.existsSync(path.join(home, 'shim-npm')) || fs.existsSync(path.join(home, 'shim-npx')), false);
     assert.notEqual(verifyMcpRuntime(home, PIN, PINS.MCP_ADAPTER_INTEGRITY), null);
@@ -531,6 +538,67 @@ test('the default installer path runs node + npm-cli.js (no shell, no npm on PAT
     fs.rmSync(home, { recursive: true, force: true });
     fs.rmSync(path.dirname(bin), { recursive: true, force: true });
     fs.rmSync(shimDir, { recursive: true, force: true });
+  }
+});
+
+test('FU-1: with any network setting from outside the owner\'s ~/.npmrc, npm gets empty private user and global configs (deleted after); with none, exactly the owner\'s ~/.npmrc; never the project .npmrc', () => {
+  const home = deadRegistryHome(tempDir('marrow-runtime-fu1-home-'));
+  const bin = path.join(tempDir('marrow-runtime-fu1-prefix-'), 'bin');
+  fs.mkdirSync(bin);
+  const { node, argsLog } = fakeNpmCli(bin);
+  const base = { HOME: home, PATH: `${path.dirname(process.execPath)}:/usr/bin:/bin` };
+  const run = (env) => {
+    fs.rmSync(runtimeDir(home, PIN), { recursive: true, force: true });
+    const result = ensureMcpRuntime({ home, version: PIN, integrity: PINS.MCP_ADAPTER_INTEGRITY, sdk: { version: PINS.SDK_ADAPTER_VERSION, integrity: PINS.SDK_ADAPTER_INTEGRITY }, npmExecPath: node, env: { ...base, ...env } });
+    assert.equal(result.state, 'installed', JSON.stringify(result));
+    return JSON.parse(fs.readFileSync(argsLog, 'utf8'));
+  };
+  try {
+    const owner = run({});
+    assert.deepEqual(owner.configs, [], 'legit: npm picks the owner\'s own config exactly as before');
+    assert.deepEqual(owner.npm_env, ['npm_config_audit', 'npm_config_fund', 'npm_config_ignore_scripts', 'npm_config_update_notifier']);
+    // Triggers: an env network setting (passed, or refused as unparseable), a variable npm or node
+    // reads, a network setting npm resolves differently under the hook env than under a bare one
+    // (here a ~/.npmrc proxy=${MARROW_TEST_PROXY}), and npm failing to answer at all.
+    const triggers = [{ npm_config_proxy: 'http://127.0.0.1:9\r' }, { npm_config_registry: 'http://127.0.0.1:9/${NPM_TOKEN}' }, { npm_config_registry: 'http://127.0.0.1:9/' }, { 'NPM_CONFIG_HTTPS-PROXY': 'http://127.0.0.1:9' }, { npm_config_proxy: 'http://127.0.0.1:9' }, { npm_config_cafile: '/tmp/x' }, { npm_config_ca: 'x' }, { npm_config_noproxy: 'x' }, { 'npm_config_@getmarrow:registry': 'http://127.0.0.1:9/' }, { HTTP_PROXY: 'http://127.0.0.1:9' }, { https_proxy: 'http://127.0.0.1:9' }, { Proxy: 'http://127.0.0.1:9' }, { NO_PROXY: '*' }, { NODE_EXTRA_CA_CERTS: '/tmp/x' }, { NODE_TLS_REJECT_UNAUTHORIZED: '0' }, { NODE_OPTIONS: '--use-openssl-ca' }, { SSL_CERT_FILE: '/tmp/x' }, { PREFIX: '/tmp' }, { DESTDIR: '/tmp' }, { MARROW_TEST_PROXY: 'http://127.0.0.1:9' }, { MARROW_TEST_CONFIG_FAIL: '1' }];
+    for (const env of triggers) {
+      const log = run(env);
+      assert.deepEqual(log.configs, [{ flag: '--userconfig', file: `${log.cwd}-npmrc/user`, size: 0, mode: 0o600 }, { flag: '--globalconfig', file: `${log.cwd}-npmrc/global`, size: 0, mode: 0o600 }], JSON.stringify(env));
+      assert.equal(fs.existsSync(`${log.cwd}-npmrc`), false, 'removed after');
+      assert.equal(log.cwd.startsWith(path.join(home, '.marrow', 'runtime', 'mcp', '.stage-')), true, 'run from its own private stage, never the project');
+    }
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(path.dirname(bin), { recursive: true, force: true });
+  }
+});
+
+test('FU-1 consumers: every host\'s Marrow hook, the Cline scripts and the MCP server entry carry the core with the npm auth guard', () => {
+  const zlib = require('node:zlib');
+  const { mcpServerLaunch } = require('../src/mcp-runtime');
+  const { root, home } = allHostsProject();
+  try {
+    applyPlan(buildPlan(detectEnvironment(root, { HOME: home, PATH: process.env.PATH }), { mode: 'mcp' }), { yes: true, dryRun: false, doctor: false });
+    fs.mkdirSync(path.join(root, '.clinerules'));
+    applyPlan(buildPlan(detectEnvironment(root, { HOME: home, PATH: process.env.PATH }), { mode: 'mcp', client: 'cline' }), { yes: true, dryRun: false, doctor: false });
+    const texts = Object.values(hookFiles(root, home)).map((file) => fs.readFileSync(file, 'utf8'));
+    for (const name of ['PreToolUse', 'PostToolUse', 'TaskStart']) {
+      const file = path.join(root, '.clinerules', 'hooks', name);
+      if (fs.existsSync(file)) texts.push(fs.readFileSync(file, 'utf8'));
+    }
+    texts.push(JSON.stringify(mcpServerLaunch(PIN, { platform: 'linux', integrity: PINS.MCP_ADAPTER_INTEGRITY, sdk: { version: PINS.SDK_ADAPTER_VERSION, integrity: PINS.SDK_ADAPTER_INTEGRITY } })));
+    let loaders = 0;
+    for (const text of texts) {
+      for (const packed of text.match(/brotliDecompressSync\(Buffer\.from\(\/([A-Za-z0-9_-]+)\/\.source/g) || []) {
+        const source = zlib.brotliDecompressSync(Buffer.from(packed.match(/\/([A-Za-z0-9_-]+)\//)[1], 'base64url')).toString();
+        assert.ok(source.includes('npmOutside(source) || npmConfigMoves(npm, stage, env, timeout)') && source.includes("'--globalconfig=' + path.join(blank, 'global')"), 'the loader carries the FU-1 guard');
+        loaders += 1;
+      }
+    }
+    assert.ok(loaders >= 9, String(loaders));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
   }
 });
 

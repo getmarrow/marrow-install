@@ -17,6 +17,12 @@
 // pinned sha512 integrity, version and entry checked before the stage is renamed into place. When
 // a network setting is passed, the install must be exactly the pinned MCP and SDK, each with its
 // pinned integrity, so the registry it names can only serve the pinned bytes.
+// npm auth (FU-1): the owner's npm config, and so their auth, is used only when no network
+// setting comes from outside it: none passed from env, none refused as unparseable, no proxy, CA,
+// TLS, DNS, OpenSSL or PREFIX variable that npm or node reads, and npm resolving the same network
+// settings under the hook env as under a bare one (no env-expanded value). Otherwise npm reads
+// empty private user and global configs (removed after), so no auth is sent: the pinned public
+// tarballs need none. A project npm config is never read (the stage is the prefix and working dir).
 // Self-heal: one lock per version (a directory created atomically), a detached child that does
 // the install so a host timeout cannot kill it half way, a bounded wait in the hook, and a
 // failure record per project (keyed by the sha256 of the project's real path) so an offline
@@ -40,6 +46,9 @@ function runtimeCore() {
   const RETRY_MS = 300000;
   const ATTEMPT_MS = 30000;
   const NETWORK_KEYS = ['registry', '@getmarrow:registry', 'proxy', 'https_proxy', 'noproxy', 'cafile', 'ca'];
+  const CONFIG_KEYS = ['registry', '@getmarrow:registry', 'proxy', 'https-proxy', 'noproxy', 'cafile', 'ca', 'strict-ssl', 'local-address', 'replace-registry-host', 'userconfig', 'globalconfig'];
+  const BASE_ENV = ['path', 'home', 'userprofile', 'appdata', 'localappdata', 'systemroot', 'systemdrive', 'windir', 'comspec', 'pathext', 'temp', 'tmp', 'tmpdir'];
+  const OUTSIDE_ENV = ['http_proxy', 'https_proxy', 'proxy', 'no_proxy', 'all_proxy', 'node_extra_ca_certs', 'node_tls_reject_unauthorized', 'node_options', 'node_use_env_proxy', 'ssl_cert_file', 'ssl_cert_dir', 'openssl_conf', 'openssl_modules', 'hostaliases', 'localdomain', 'res_options', 'prefix', 'destdir'];
   const PRE_RE = /-pre-action-hook$/;
   const REPAIR = 'The owner can repair it by running npx -y @getmarrow/install@latest --repair --cwd <project folder> from a terminal outside the project.';
   const HOLD = 'Marrow held this action: its verified local runtime could not start. ' + REPAIR;
@@ -197,10 +206,25 @@ function runtimeCore() {
       if (!match) continue;
       const name = match[1].toLowerCase().replace(/-/g, '_');
       const value = env[key];
-      if (!NETWORK_KEYS.includes(name) || typeof value !== 'string' || !value || value.length > 2048 || /[\n\r\0]/.test(value)) continue;
+      if (!NETWORK_KEYS.includes(name) || typeof value !== 'string' || !value || value.length > 2048 || /[\n\r\0]|\$\{/.test(value)) continue;
       out['npm_config_' + name] = value;
     }
     return out;
+  }
+  function npmOutside(source) {
+    const env = source || process.env;
+    return Object.keys(env).some((key) => {
+      const match = /^npm_config_(.+)$/i.exec(key);
+      return OUTSIDE_ENV.includes(key.toLowerCase()) || Boolean(match && NETWORK_KEYS.includes(match[1].toLowerCase().replace(/-/g, '_')) && !Object.keys(npmNetwork({ [key]: env[key] })).length);
+    });
+  }
+  function npmConfigMoves(npm, stage, env, timeout) {
+    const base = { npm_config_update_notifier: 'false' };
+    for (const key of Object.keys(env)) if (BASE_ENV.includes(key.toLowerCase())) base[key] = env[key];
+    const read = (vars) => cp().spawnSync(npm.file, [...npm.args, 'config', 'get', ...CONFIG_KEYS, '--prefix=' + stage], { cwd: stage, env: npm.path ? { ...vars, PATH: npm.path } : vars, stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 1 << 20, timeout: Math.min(timeout, 10000), windowsHide: true, shell: false });
+    const full = read(env);
+    const plain = read(base);
+    return full.status !== 0 || plain.status !== 0 || String(full.stdout) !== String(plain.stdout);
   }
   function npmEnvironment(source, network) {
     const env = {};
@@ -214,16 +238,28 @@ function runtimeCore() {
     const npm = npmInvocation(options);
     if (!npm) return 'npm_unavailable';
     const timeout = Math.max(1000, Math.min(NPM_TIMEOUT_MS, Number((options && options.timeout) || NPM_TIMEOUT_MS)));
-    const env = npmEnvironment((options && options.env) || process.env, options && options.network);
-    const result = cp().spawnSync(npm.file, [...npm.args, 'install', '--no-audit', '--no-fund', '--ignore-scripts', '--no-bin-links', '--loglevel=error', '--prefix=' + stage, ...specs], {
-      cwd: stage,
-      env: npm.path ? { ...env, PATH: npm.path } : env,
-      stdio: ['ignore', 'ignore', 'pipe'],
-      maxBuffer: 1 << 20,
-      timeout,
-      windowsHide: true,
-      shell: false,
-    });
+    const source = (options && options.env) || process.env;
+    const env = npmEnvironment(source, options && options.network);
+    const blank = Object.keys((options && options.network) || {}).length > 0 || npmOutside(source) || npmConfigMoves(npm, stage, env, timeout) ? stage + '-npmrc' : null;
+    let result;
+    try {
+      if (blank) {
+        fs.mkdirSync(blank, { mode: 0o700 });
+        for (const name of ['user', 'global']) fs.writeFileSync(path.join(blank, name), '', { mode: 0o600, flag: 'wx' });
+      }
+      const config = blank ? ['--userconfig=' + path.join(blank, 'user'), '--globalconfig=' + path.join(blank, 'global')] : [];
+      result = cp().spawnSync(npm.file, [...npm.args, 'install', '--no-audit', '--no-fund', '--ignore-scripts', '--no-bin-links', '--loglevel=error', '--prefix=' + stage, ...config, ...specs], {
+        cwd: stage,
+        env: npm.path ? { ...env, PATH: npm.path } : env,
+        stdio: ['ignore', 'ignore', 'pipe'],
+        maxBuffer: 1 << 20,
+        timeout,
+        windowsHide: true,
+        shell: false,
+      });
+    } finally {
+      if (blank) removeQuietly(blank);
+    }
     if (result.status === 0) return true;
     return /EINTEGRITY/.test(String(result.stderr || '')) ? 'integrity_mismatch' : false;
   }
@@ -483,7 +519,7 @@ function runtimeCore() {
     process.argv = [process.argv[0], runtime.bin, ...args.slice(2)];
     require(runtime.bin);
   }
-  return { SCHEMA, HOLD, UNAVAILABLE, WARN, OUTAGE, NPM_TIMEOUT_MS, LOCK_STALE_MS, RETRY_MS, ATTEMPT_MS, NETWORK_KEYS, configOf, verify, ensure, heal, npmInvocation, npmNetwork, npmEnvironment, npmInstall, removeOtherRuntimes, budgetFor, healPaths, projectKey, main };
+  return { SCHEMA, HOLD, UNAVAILABLE, WARN, OUTAGE, NPM_TIMEOUT_MS, LOCK_STALE_MS, RETRY_MS, ATTEMPT_MS, NETWORK_KEYS, configOf, verify, ensure, heal, npmInvocation, npmNetwork, npmOutside, npmConfigMoves, npmEnvironment, npmInstall, removeOtherRuntimes, budgetFor, healPaths, projectKey, main };
 }
 
 module.exports = { runtimeCore };
