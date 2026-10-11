@@ -177,7 +177,9 @@ function managedHomeWithStaleClaudeHooks() {
     yes: true, dryRun: false, doctor: false,
   });
   const settingsPath = path.join(home, '.claude', 'settings.json');
-  fs.writeFileSync(settingsPath, fs.readFileSync(settingsPath, 'utf8').replaceAll(`@getmarrow/mcp@${PINS.MCP_ADAPTER_VERSION}`, '@getmarrow/mcp@3.9.95'));
+  // Stale hooks as an older installer wrote them: the npx layout for an older pin.
+  const stale = `${JSON.stringify(require('./support/fake-runtime').canonicalHooks(fs.readFileSync(settingsPath, 'utf8')), null, 2)}\n`;
+  fs.writeFileSync(settingsPath, stale.replaceAll(`@getmarrow/mcp@${PINS.MCP_ADAPTER_VERSION}`, '@getmarrow/mcp@3.9.95'));
   return home;
 }
 
