@@ -9,7 +9,9 @@
 //   ~/.marrow/runtime/mcp/<version>/node_modules/...   the package, installed with --ignore-scripts
 //   ~/.marrow/runtime/mcp/<version>/.verified          integrity record (0600)
 //   ~/.marrow/runtime/mcp/<version>/node               link to the node binary captured at install
-//   ~/.marrow/runtime/mcp/.heal-<version>.lock|.failed  a hook's self-heal in progress / last failure
+//   ~/.marrow/runtime/mcp/.heal-<version>.lock          a hook's self-heal in progress (one per user)
+//   ~/.marrow/runtime/mcp/.heal-<version>-<sha256 of the project's real path>.failed|.tried
+//                                                       that project's last failed heal / last heal start
 // (On Windows there is no node link.)
 //
 // Every hook command carries the runtime loader inline (runtime-core.js, compressed): it checks
@@ -74,8 +76,8 @@ function npmInvocation(options = {}) {
   return core.npmInvocation(options);
 }
 
-function npmEnvironment(source = process.env) {
-  return core.npmEnvironment(source);
+function npmEnvironment(source = process.env, network = null) {
+  return core.npmEnvironment(source, network);
 }
 
 // The shared runtime serves every project on this machine, so a project uninstall keeps it;
@@ -397,18 +399,26 @@ function localizeHookSettingsText(text, version, { platform = process.platform, 
 // A hook script (Cline) with each canonical entrypoint switched to the inline loader for
 // `version`. Without node the line fails, and each script already treats that as no decision
 // (the pre-action script then cancels the call).
+// The Cline pre-action script checks the runtime's answer with node: written scripts run that
+// check on the node the same search picks (never a node on PATH inside the project); no node
+// gives no decision, so the script cancels.
+const CANONICAL_VALIDATOR_RE = /\| NODE_OPTIONS= node -e '([^'\n]*)' 2>\/dev\/null\)"/g;
+const localValidator = (version, body) => `| { ${nodeSearch({ version }, `[ -n "$N" ] || exit 1; NODE_OPTIONS= "$N" -e '${body}'; }`)} 2>/dev/null)"`;
+const VALIDATOR_RE = new RegExp(localValidator('0.0.0', '\u0000').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  .replace('0\\.0\\.0', '(\\d+\\.\\d+\\.\\d+)').replace('\u0000', "([^'\\n]*)"), 'g');
+
 function localizeHookScriptText(text, version, { integrity, sdk } = {}) {
   if (typeof text !== 'string' || !VERSION_RE.test(String(version || ''))) return text;
   const cfg = runtimeConfig(version, { integrity, sdk });
   return text.replace(CANONICAL_INNER_RE, (match, specVersion, sub) => (
     specVersion === version ? localInner(version, sub, cfg) : match
-  ));
+  )).replace(CANONICAL_VALIDATOR_RE, (match, body) => localValidator(version, body));
 }
 
 // Earlier Cline script lines ("$HOME/.marrow/runtime/mcp/<v>/run" ...) back to the canonical form.
 function delocalizeHookScriptText(text) {
   if (typeof text !== 'string') return text;
-  return text.replace(INNER_RE, (match, ...rest) => {
+  return text.replace(VALIDATOR_RE, (match, version, body) => `| NODE_OPTIONS= node -e '${body}' 2>/dev/null)"`).replace(INNER_RE, (match, ...rest) => {
     const { v: version, s: sub, l: loader } = rest[rest.length - 1];
     const cfg = commandConfig([loader]);
     return cfg && cfg.version === version && localInner(version, sub, cfg) === withCanonicalLoaders(match, cfg) ? canonicalEntrypoint(version, sub) : match;

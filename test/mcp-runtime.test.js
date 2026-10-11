@@ -343,7 +343,7 @@ test('without a verified copy every pre-action hook holds with the fixed repair 
     // A recorded integrity mismatch (an attack signal, not an outage) holds every one of them.
     const mcpRoot = path.join(home, '.marrow', 'runtime', 'mcp');
     for (const deadline = Date.now() + 60_000; Date.now() < deadline && fs.readdirSync(mcpRoot).some((name) => name.endsWith('.lock'));) await new Promise((resolve) => setTimeout(resolve, 100));
-    const mark = path.join(mcpRoot, `.heal-${PIN}.failed`);
+    const mark = require('../src/mcp-runtime').runtimeCore.healPaths(home, PIN, root).mark;
     fs.rmSync(mark, { force: true });
     fs.writeFileSync(mark, JSON.stringify({ at: Date.now(), reason: 'integrity_mismatch' }), { mode: 0o600 });
     assertEveryPreActionHolds(root, home, env);
@@ -518,7 +518,7 @@ test('the default installer path runs node + npm-cli.js (no shell, no npm on PAT
     assert.ok(log.args.includes('install') && log.args.includes('--ignore-scripts') && log.args.includes(`@getmarrow/mcp@${PIN}`), log.args.join(' '));
     assert.ok(log.args.includes(`--prefix=${log.cwd}`), 'npm installs into the private stage');
     assert.ok(log.cwd.startsWith(path.join(home, '.marrow', 'runtime', 'mcp', '.stage-')), log.cwd);
-    assert.deepEqual(log.npm_env, ['npm_config_audit', 'npm_config_fund', 'npm_config_ignore_scripts', 'npm_config_update_notifier'], 'registry, prefix and userconfig overrides are removed');
+    assert.deepEqual(log.npm_env, ['npm_config_audit', 'npm_config_fund', 'npm_config_ignore_scripts', 'npm_config_registry', 'npm_config_update_notifier'], 'prefix and userconfig overrides are removed; the registry (a network setting) is kept (B1)');
     assert.equal(log.ignore, 'true');
     assert.equal(fs.existsSync(path.join(home, 'shim-npm')) || fs.existsSync(path.join(home, 'shim-npx')), false);
     assert.notEqual(verifyMcpRuntime(home, PIN, PINS.MCP_ADAPTER_INTEGRITY), null);
@@ -810,7 +810,7 @@ test('the runtime install waits at most 30 seconds for npm and says so first (LO
     });
     assert.equal(result.state, 'installed');
     assert.equal(events[0][0], 'progress', 'the line comes before npm runs');
-    assert.match(events[0][1], /^Installing a local copy of @getmarrow\/mcp@\d+\.\d+\.\d+ for Marrow's hooks \(up to 30 s; until it is installed, hooks install it themselves or hold protected actions\)\.\.\.\n$/);
+    assert.match(events[0][1], /^Installing a local copy of @getmarrow\/mcp@\d+\.\d+\.\d+ for Marrow's hooks \(up to 30 s; until it is installed, hooks install it themselves, warn and let actions run when npm or the registry cannot be reached, and hold actions on any other failure\)\.\.\.\n$/);
     assert.equal(events[1][0], 'npm');
     // A present copy: no line, no npm.
     events.length = 0;
@@ -993,9 +993,13 @@ test('a hook\'s self-heal never removes another version\'s runtime (another proj
     // A failed heal records why (no path, no key), and a later success clears it.
     const failed = runtimeCore.heal(runtimeConfig(AHEAD, { integrity: fakeIntegrity('ahead'), sdk: null }), home, { npmInstall: () => false });
     assert.equal(failed.reason, 'npm_install_failed');
-    const mark = path.join(home, '.marrow', 'runtime', 'mcp', `.heal-${AHEAD}.failed`);
+    const { mark, tried } = runtimeCore.healPaths(home, AHEAD, process.env.PWD || process.cwd());
     assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(mark, 'utf8'))).sort(), ['at', 'reason']);
     assert.equal(fs.statSync(mark).mode & 0o777, 0o600);
+    // B2: at most one heal attempt per 30 s per project: a second heal right away runs no npm.
+    assert.equal(runtimeCore.heal(runtimeConfig(AHEAD, { integrity: fakeIntegrity('ahead'), sdk: null }), home, { npmInstall: () => assert.fail('rate-limited heal ran npm') }).state, 'busy');
+    assert.equal(fs.statSync(tried).mode & 0o777, 0o600);
+    fs.rmSync(tried);
     assert.equal(runtimeCore.heal(runtimeConfig(AHEAD, { integrity: fakeIntegrity('ahead'), sdk: null }), home, { npmInstall: fakeNpmInstall({ integrity: fakeIntegrity('ahead') }) }).state, 'installed');
     assert.equal(fs.existsSync(mark), false);
   } finally {

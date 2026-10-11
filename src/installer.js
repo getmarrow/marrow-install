@@ -4172,7 +4172,7 @@ function printReport(report, sink) {
   if (report.mcp_runtime) {
     const runtime = report.mcp_runtime;
     out('\nMCP local runtime:\n');
-    out(`- hooks start: ${runtime.hooks_start === 'local_runtime' ? `the verified local copy of @getmarrow/mcp@${runtime.version} (${runtime.path})` : 'no verified local copy yet: Marrow hooks install the pinned copy on their next start, and hold protected actions only if that fails'}\n`);
+    out(`- hooks start: ${runtime.hooks_start === 'local_runtime' ? `the verified local copy of @getmarrow/mcp@${runtime.version} (${runtime.path})` : 'no verified local copy yet: Marrow hooks install the pinned copy on their next start; if npm or the registry cannot be reached they warn and let the action run, and any other failure holds it'}\n`);
     for (const filePath of runtime.legacy_npx_hooks || []) out(`- needs repair: ${filePath} still starts @getmarrow/mcp through npx\n`);
     if (runtime.needs_repair) out('- repair: run npx -y @getmarrow/install@latest --repair (from a terminal outside the project, with --cwd <project folder>)\n');
     if (runtime.local_runtime_switch === 'ignored') out('- note: MARROW_LOCAL_RUNTIME=0 / --no-local-runtime are ignored; hooks never start npx\n');

@@ -121,6 +121,9 @@ const canonical = (sub, version = PIN) => `npx -y --package=@getmarrow/mcp@${ver
 // The hook a project file carries, for the stand-in package's integrity (no SDK pin: the stub
 // serves only @getmarrow/mcp).
 const hook = (integrity, sub = 'claude-pre-action-hook', platform = 'linux') => localizeHookCommand(canonical(sub), PIN, { platform, integrity, sdk: null });
+// The failure record (.mark) and heal-start stamp (.tried) of the project a hook runs in.
+const healOf = (home, root, version = PIN) => runtimeCore.healPaths(home, version, root);
+const healFiles = (home, root) => [path.basename(healOf(home, root).mark), path.basename(healOf(home, root).tried)].sort();
 
 function nothingPlantedRan(home, root) {
   const ran = [...fs.readdirSync(home), ...fs.readdirSync(root)].filter((name) => name.startsWith('planted-') || name.startsWith('shim-'));
@@ -195,7 +198,7 @@ test('offline with no copy: the pre-action hook warns and lets the call run (exi
     assert.equal(held.status, 1, held.stdout);
     assert.equal(held.stdout, '');
     assert.equal(held.stderr, `${WARN_TEXT}\n`);
-    const mark = JSON.parse(fs.readFileSync(path.join(home, '.marrow', 'runtime', 'mcp', `.heal-${PIN}.failed`), 'utf8'));
+    const mark = JSON.parse(fs.readFileSync(healOf(home, root).mark, 'utf8'));
     assert.equal(mark.reason, 'npm_install_failed');
     const again = runHook(hook(genuine.integrity), root, hookEnv(home, root));
     assert.equal(again.status, 1);
@@ -232,8 +235,8 @@ test('a registry that serves another tarball (integrity mismatch) never gets a c
     assert.ok(registry.requests().some((line) => line.includes('.tgz')), 'npm fetched the tarball');
     await waitForHeal(home);
     const mcpRoot = path.join(home, '.marrow', 'runtime', 'mcp');
-    assert.deepEqual(fs.readdirSync(mcpRoot), [`.heal-${PIN}.failed`]);
-    assert.equal(JSON.parse(fs.readFileSync(path.join(mcpRoot, `.heal-${PIN}.failed`), 'utf8')).reason, 'integrity_mismatch');
+    assert.deepEqual(fs.readdirSync(mcpRoot).sort(), healFiles(home, root));
+    assert.equal(JSON.parse(fs.readFileSync(healOf(home, root).mark, 'utf8')).reason, 'integrity_mismatch');
     nothingPlantedRan(home, root);
     assert.equal(fs.readdirSync(home).some((name) => name.startsWith('planted-')), false, 'the tampered package never ran');
     // The failure is remembered: the next start holds at once and asks the registry nothing.
@@ -447,13 +450,18 @@ test('uninstall in project A keeps the shared runtime, so project B keeps workin
     const all = await uninstall({ cwd: projects[0], home, yes: true, controller: false, all: true });
     assert.equal(all.uninstall.runtime.removed, true);
     assert.equal(fs.existsSync(path.join(home, '.marrow', 'runtime')), false);
-    const healed = runHook(preB(), projects[1], hookEnv(home, projects[1]));
+    // (B1: an npm_config_registry in the hook's env is now honoured, so this step leaves it out to
+    // reach the owner's registry in ~/.npmrc.)
+    const ownerEnv = hookEnv(home, projects[1]);
+    delete ownerEnv.npm_config_registry;
+    const healed = runHook(preB(), projects[1], ownerEnv);
     assert.equal(healed.status, 1, healed.stdout);
     assert.equal(healed.stderr, `${WARN_TEXT}\n`, 'npm could not install (the registry has no such SDK): warn and run');
     assert.ok(registry.requests().some((line) => line.includes('sdk')), 'the self-heal asked the owner\'s registry for the pinned SDK');
     // With the SDK pin left out, the same hook heals from this registry.
     const withoutSdk = localizeHookCommand(delocalizeHookCommand(preB()), PIN, { platform: 'linux', integrity: genuine.integrity, sdk: null });
-    fs.rmSync(path.join(home, '.marrow', 'runtime', 'mcp', `.heal-${PIN}.failed`), { force: true });
+    fs.rmSync(healOf(home, projects[1]).mark, { force: true });
+    fs.rmSync(healOf(home, projects[1]).tried, { force: true });
     const healedNoSdk = runHook(withoutSdk, projects[1], hookEnv(home, projects[1]));
     assert.equal(healedNoSdk.status, 0, healedNoSdk.stderr);
     assert.match(healedNoSdk.stdout, /"genuine":true/);
@@ -520,7 +528,7 @@ test('outage rule: a registry that answers 500, a heal that cannot finish within
       await waitForHeal(noNpm);
       assert.equal(noNpmRun.status, 1, noNpmRun.stderr);
       assert.equal(noNpmRun.stderr, `${WARN_TEXT}\n`);
-      assert.equal(JSON.parse(fs.readFileSync(path.join(noNpm, '.marrow', 'runtime', 'mcp', `.heal-${PIN}.failed`), 'utf8')).reason, 'npm_unavailable');
+      assert.equal(JSON.parse(fs.readFileSync(healOf(noNpm, root).mark, 'utf8')).reason, 'npm_unavailable');
       nothingPlantedRan(noNpm, root);
     }
   } finally {
@@ -582,7 +590,7 @@ test('failure record: only a private record in private directories counts; a loo
       const mcpRoot = path.join(home, '.marrow', 'runtime', 'mcp');
       fs.mkdirSync(mcpRoot, { recursive: true, mode: 0o700 });
       for (const dir of [path.join(home, '.marrow'), path.join(home, '.marrow', 'runtime'), mcpRoot]) fs.chmodSync(dir, 0o700);
-      const mark = path.join(mcpRoot, `.heal-${PIN}.failed`);
+      const mark = healOf(home, root).mark;
       fs.writeFileSync(mark, JSON.stringify({ at: Date.now(), reason: 'npm_install_failed' }), { mode: 0o600 });
       mutate({ home, mark, mcpRoot });
       return home;
@@ -609,7 +617,7 @@ test('failure record: only a private record in private directories counts; a loo
       const elsewhere = tempDir('marrow-heal-elsewhere-');
       homes.push(elsewhere);
       fs.mkdirSync(path.join(elsewhere, 'runtime', 'mcp'), { recursive: true, mode: 0o700 });
-      fs.writeFileSync(path.join(elsewhere, 'runtime', 'mcp', `.heal-${PIN}.failed`), JSON.stringify({ at: Date.now(), reason: 'npm_install_failed' }), { mode: 0o600 });
+      fs.writeFileSync(path.join(elsewhere, 'runtime', 'mcp', path.basename(healOf(home, root).mark)), JSON.stringify({ at: Date.now(), reason: 'npm_install_failed' }), { mode: 0o600 });
       if (linked.length > 1) fs.mkdirSync(path.join(home, ...linked.slice(0, -1)), { recursive: true, mode: 0o700 });
       fs.symlinkSync(linked.length === 1 ? elsewhere : linked.length === 2 ? path.join(elsewhere, 'runtime') : path.join(elsewhere, 'runtime', 'mcp'), path.join(home, ...linked));
       const held = runHook(hook(genuine.integrity), root, hookEnv(home, root));
@@ -650,8 +658,8 @@ test('a registry that lies (announces the pinned integrity, serves another tarba
     assert.equal(held.stderr, `${HOLD_TEXT}\n`);
     await waitForHeal(home);
     const mcpRoot = path.join(home, '.marrow', 'runtime', 'mcp');
-    assert.deepEqual(fs.readdirSync(mcpRoot), [`.heal-${PIN}.failed`]);
-    assert.equal(JSON.parse(fs.readFileSync(path.join(mcpRoot, `.heal-${PIN}.failed`), 'utf8')).reason, 'integrity_mismatch');
+    assert.deepEqual(fs.readdirSync(mcpRoot).sort(), healFiles(home, root));
+    assert.equal(JSON.parse(fs.readFileSync(healOf(home, root).mark, 'utf8')).reason, 'integrity_mismatch');
     const again = runHook(hook(genuine.integrity, 'gemini-pre-action-hook'), root, hookEnv(home, root));
     assert.equal(again.status, 2);
     nothingPlantedRan(home, root);
@@ -690,7 +698,7 @@ test('change 2: the npm child gets only the trusted PATH entries, and a heal sta
       for (const deadline = Date.now() + 30_000; Date.now() < deadline && fs.existsSync(path.join(home, '.marrow', 'runtime', 'mcp', `.heal-${PIN}.lock`));) spawnSync('sleep', ['0.2']);
       assert.equal(result.status, 1, result.stderr);
       assert.equal(result.stderr, `${WARN_TEXT}\n`);
-      assert.equal(JSON.parse(fs.readFileSync(path.join(home, '.marrow', 'runtime', 'mcp', `.heal-${PIN}.failed`), 'utf8')).reason, 'npm_unavailable');
+      assert.equal(JSON.parse(fs.readFileSync(healOf(home, project).mark, 'utf8')).reason, 'npm_unavailable');
       nothingPlantedRan(home, project);
     }
   } finally {

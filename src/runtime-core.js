@@ -12,11 +12,15 @@
 // Install rules: npm runs as `node <npm-cli.js next to node>` (Windows: only that; POSIX: `npm`
 // found on PATH as the hooks find node, never a relative entry or one inside the project, when no
 // npm-cli.js exists), shell:false, --ignore-scripts, --no-bin-links, an explicit
-// private --prefix stage that is also the working directory, every npm_* override removed, and
-// the pinned sha512 integrity, version and entry checked before the stage is renamed into place.
+// private --prefix stage that is also the working directory, every npm_* override removed except
+// an exact allowlist of network settings (registry, proxy, CA) from npm_config_* env, and the
+// pinned sha512 integrity, version and entry checked before the stage is renamed into place. When
+// a network setting is passed, the install must be exactly the pinned MCP and SDK, each with its
+// pinned integrity, so the registry it names can only serve the pinned bytes.
 // Self-heal: one lock per version (a directory created atomically), a detached child that does
 // the install so a host timeout cannot kill it half way, a bounded wait in the hook, and a
-// failure record so an offline machine answers at once instead of retrying on every call.
+// failure record per project (keyed by the sha256 of the project's real path) so an offline
+// machine answers at once, while still starting a heal at most once per 30 s per project.
 // Outage rule: when the heal fails for an outage (no npm, npm failed, the wait ran out), a
 // pre-action hook warns and lets the action run (exit 1, as npx failing did before); any other
 // failure (a tarball whose integrity does not match, an unsafe directory or package) holds it.
@@ -34,6 +38,8 @@ function runtimeCore() {
   const STALE_MS = 300000;
   const LOCK_STALE_MS = 120000;
   const RETRY_MS = 300000;
+  const ATTEMPT_MS = 30000;
+  const NETWORK_KEYS = ['registry', '@getmarrow:registry', 'proxy', 'https_proxy', 'noproxy', 'cafile', 'ca'];
   const PRE_RE = /-pre-action-hook$/;
   const REPAIR = 'The owner can repair it by running npx -y @getmarrow/install@latest --repair --cwd <project folder> from a terminal outside the project.';
   const HOLD = 'Marrow held this action: its verified local runtime could not start. ' + REPAIR;
@@ -183,19 +189,32 @@ function runtimeCore() {
     }
     return null;
   }
-  function npmEnvironment(source) {
+  function npmNetwork(source) {
+    const out = {};
+    const env = source || process.env;
+    for (const key of Object.keys(env).sort(byName)) {
+      const match = /^npm_config_(.+)$/i.exec(key);
+      if (!match) continue;
+      const name = match[1].toLowerCase().replace(/-/g, '_');
+      const value = env[key];
+      if (!NETWORK_KEYS.includes(name) || typeof value !== 'string' || !value || value.length > 2048 || /[\n\r\0]/.test(value)) continue;
+      out['npm_config_' + name] = value;
+    }
+    return out;
+  }
+  function npmEnvironment(source, network) {
     const env = {};
     for (const [key, value] of Object.entries(source || process.env)) {
       if (/^npm_/i.test(key)) continue;
       env[key] = value;
     }
-    return { ...env, npm_config_ignore_scripts: 'true', npm_config_update_notifier: 'false', npm_config_audit: 'false', npm_config_fund: 'false' };
+    return { ...env, ...(network || {}), npm_config_ignore_scripts: 'true', npm_config_update_notifier: 'false', npm_config_audit: 'false', npm_config_fund: 'false' };
   }
   function npmInstall(stage, specs, options) {
     const npm = npmInvocation(options);
     if (!npm) return 'npm_unavailable';
     const timeout = Math.max(1000, Math.min(NPM_TIMEOUT_MS, Number((options && options.timeout) || NPM_TIMEOUT_MS)));
-    const env = npmEnvironment((options && options.env) || process.env);
+    const env = npmEnvironment((options && options.env) || process.env, options && options.network);
     const result = cp().spawnSync(npm.file, [...npm.args, 'install', '--no-audit', '--no-fund', '--ignore-scripts', '--no-bin-links', '--loglevel=error', '--prefix=' + stage, ...specs], {
       cwd: stage,
       env: npm.path ? { ...env, PATH: npm.path } : env,
@@ -252,8 +271,10 @@ function runtimeCore() {
       if (sdk && VERSION_RE.test(String(sdk.version || ''))) dependencies['@getmarrow/sdk'] = sdk.version;
       fs.writeFileSync(path.join(stage, 'package.json'), JSON.stringify({ name: 'marrow-mcp-runtime', private: true, dependencies }, null, 2) + '\n', { mode: 0o600 });
       const specs = Object.entries(dependencies).map(([name, spec]) => name + '@' + spec);
-      if (typeof onProgress === 'function') onProgress('Installing a local copy of @getmarrow/mcp@' + version + ' for Marrow\'s hooks (up to ' + NPM_TIMEOUT_MS / 1000 + ' s; until it is installed, hooks install it themselves or hold protected actions)...\n');
-      const installed = install(stage, specs, { platform, execPath: npmExecPath, timeout: options && options.timeout });
+      if (typeof onProgress === 'function') onProgress('Installing a local copy of @getmarrow/mcp@' + version + ' for Marrow\'s hooks (up to ' + NPM_TIMEOUT_MS / 1000 + ' s; until it is installed, hooks install it themselves, warn and let actions run when npm or the registry cannot be reached, and hold actions on any other failure)...\n');
+      const network = pin ? npmNetwork((options && options.env) || process.env) : {};
+      const strict = Object.keys(network).length > 0;
+      const installed = install(stage, specs, { platform, execPath: npmExecPath, timeout: options && options.timeout, env: options && options.env, network });
       if (!installed || typeof installed === 'string') return { state: 'failed', reason: installed || 'npm_install_failed' };
       const lock = JSON.parse(fs.readFileSync(path.join(stage, 'package-lock.json'), 'utf8'));
       const packages = lock && typeof lock.packages === 'object' && lock.packages ? lock.packages : {};
@@ -265,6 +286,7 @@ function runtimeCore() {
         if (key === '') continue;
         if (!entry || typeof entry.integrity !== 'string' || !/^sha512-/.test(entry.integrity)) return { state: 'failed', reason: 'unverified_dependency' };
       }
+      if (strict && (Object.keys(packages).filter((key) => key !== '').sort(byName).join('\n') !== 'node_modules/@getmarrow/mcp\nnode_modules/@getmarrow/sdk' || !sdkEntry || sdkEntry.version !== pin.version || sdkEntry.integrity !== pin.integrity)) return { state: 'failed', reason: 'unverified_dependency' };
       const manifest = JSON.parse(fs.readFileSync(path.join(stage, 'node_modules', '@getmarrow', 'mcp', 'package.json'), 'utf8'));
       if (manifest.name !== '@getmarrow/mcp' || manifest.version !== version) return { state: 'failed', reason: 'package_mismatch' };
       const binRelative = typeof manifest.bin === 'object' && manifest.bin ? manifest.bin['marrow-mcp'] : null;
@@ -277,6 +299,7 @@ function runtimeCore() {
         return { state: 'failed', reason: 'unsafe_package_entry' };
       }
       if (!files.includes(bin)) return { state: 'failed', reason: 'package_entry_missing' };
+      if (strict && !files.every((file) => /^node_modules\/@getmarrow\/(mcp|sdk)\//.test(file) && !file.slice('node_modules/@getmarrow/'.length).includes('node_modules/'))) return { state: 'failed', reason: 'unverified_dependency' };
       if (!windows) fs.symlinkSync(nodePath, path.join(stage, 'node'));
       fs.writeFileSync(path.join(stage, '.verified'), JSON.stringify({
         schema: SCHEMA,
@@ -309,7 +332,19 @@ function runtimeCore() {
       if (stage) removeQuietly(stage);
     }
   }
-  const healPaths = (home, version) => ({ lock: path.join(rootOf(home), '.heal-' + version + '.lock'), mark: path.join(rootOf(home), '.heal-' + version + '.failed') });
+  function projectKey(project) {
+    let real = String(project || process.cwd());
+    try {
+      real = fs.realpathSync(real);
+    } catch {
+      real = path.resolve(real);
+    }
+    return crypto.createHash('sha256').update(real).digest('hex');
+  }
+  function healPaths(home, version, project) {
+    const key = projectKey(project);
+    return { lock: path.join(rootOf(home), '.heal-' + version + '.lock'), mark: path.join(rootOf(home), '.heal-' + version + '-' + key + '.failed'), tried: path.join(rootOf(home), '.heal-' + version + '-' + key + '.tried') };
+  }
   function failure(home, mark) {
     const none = { at: 0, reason: '' };
     try {
@@ -334,7 +369,7 @@ function runtimeCore() {
   }
   function heal(cfg, home, options) {
     if (!home || !VERSION_RE.test(cfg.version) || !INTEGRITY_RE.test(String(cfg.integrity || ''))) return { state: 'skipped', reason: 'no_verified_integrity' };
-    const { lock, mark } = healPaths(home, cfg.version);
+    const { lock, mark, tried } = healPaths(home, cfg.version, (options && options.project) || process.env.PWD || process.cwd());
     try {
       ensurePrivateRoot(home);
     } catch {
@@ -352,9 +387,17 @@ function runtimeCore() {
       }
     }
     try {
+      if (Date.now() - failure(home, tried).at < ATTEMPT_MS) return { state: 'busy' };
+      removeQuietly(tried);
+      try {
+        fs.writeFileSync(tried, JSON.stringify({ at: Date.now(), reason: 'heal_started' }), { mode: 0o600, flag: 'wx' });
+      } catch {
+        removeQuietly(tried);
+      }
       const result = ensure({ ...(options || {}), home, version: cfg.version, integrity: cfg.integrity, sdk: cfg.sdk, nodePath: process.execPath, npmExecPath: process.execPath, prune: false });
       removeQuietly(mark);
       if (result.state !== 'installed' && result.state !== 'present') fs.writeFileSync(mark, JSON.stringify({ at: Date.now(), reason: String(result.reason || 'failed') }), { mode: 0o600, flag: 'wx' });
+      else removeQuietly(tried);
       return result;
     } finally {
       removeQuietly(lock);
@@ -372,7 +415,8 @@ function runtimeCore() {
     const held = { state: 'failed', outage: false };
     const outage = (reason) => ({ state: 'failed', outage: OUTAGE.includes(reason) });
     if (!VERSION_RE.test(cfg.version) || !INTEGRITY_RE.test(String(cfg.integrity || '')) || typeof loader !== 'string') return held;
-    const { lock, mark } = healPaths(home, cfg.version);
+    const project = process.cwd();
+    const { lock, mark, tried } = healPaths(home, cfg.version, project);
     for (const dir of [path.join(home, '.marrow'), path.dirname(rootOf(home)), rootOf(home)]) {
       let stat = null;
       try {
@@ -384,17 +428,25 @@ function runtimeCore() {
       if (stat && (!stat.isDirectory() || stat.isSymbolicLink() || (me !== null && stat.uid !== me))) return held;
     }
     const started = Date.now();
-    if (!lockBusy(lock)) {
-      const last = failure(home, mark);
-      if (started - last.at < RETRY_MS) return outage(last.reason);
+    let spawned = false;
+    const kick = () => {
+      if (lockBusy(lock) || Date.now() - failure(home, tried).at < ATTEMPT_MS) return false;
       try {
-        const child = cp().spawn(process.execPath, ['-e', loader, '--', '--marrow-heal', '--package=@getmarrow/mcp@' + cfg.version, 'marrow-mcp'], { cwd: home, env: { ...process.env, PWD: process.cwd() }, detached: true, stdio: 'ignore', windowsHide: true });
+        const child = cp().spawn(process.execPath, ['-e', loader, '--', '--marrow-heal', '--package=@getmarrow/mcp@' + cfg.version, 'marrow-mcp'], { cwd: home, env: { ...process.env, PWD: project }, detached: true, stdio: 'ignore', windowsHide: true });
         child.on('error', () => {});
         child.unref();
       } catch {
-        return held;
+        return null;
       }
+      spawned = true;
+      return true;
+    };
+    const last = failure(home, mark);
+    if (started - last.at < RETRY_MS && !lockBusy(lock)) {
+      if (OUTAGE.includes(last.reason)) kick();
+      return outage(last.reason);
     }
+    if (!lockBusy(lock) && kick() === null) return held;
     const budget = budgetFor(sub);
     while (Date.now() - started < budget) {
       sleep(100);
@@ -402,6 +454,11 @@ function runtimeCore() {
       if (runtime) return runtime;
       const last = failure(home, mark);
       if (last.at >= started) return outage(last.reason);
+      if (!spawned && !lockBusy(lock)) {
+        const kicked = kick();
+        if (kicked === null) return held;
+        if (!kicked) return outage('heal_timeout');
+      }
     }
     return outage('heal_timeout');
   }
@@ -426,7 +483,7 @@ function runtimeCore() {
     process.argv = [process.argv[0], runtime.bin, ...args.slice(2)];
     require(runtime.bin);
   }
-  return { SCHEMA, HOLD, UNAVAILABLE, WARN, OUTAGE, NPM_TIMEOUT_MS, LOCK_STALE_MS, RETRY_MS, configOf, verify, ensure, heal, npmInvocation, npmEnvironment, npmInstall, removeOtherRuntimes, budgetFor, healPaths, main };
+  return { SCHEMA, HOLD, UNAVAILABLE, WARN, OUTAGE, NPM_TIMEOUT_MS, LOCK_STALE_MS, RETRY_MS, ATTEMPT_MS, NETWORK_KEYS, configOf, verify, ensure, heal, npmInvocation, npmNetwork, npmEnvironment, npmInstall, removeOtherRuntimes, budgetFor, healPaths, projectKey, main };
 }
 
 module.exports = { runtimeCore };
