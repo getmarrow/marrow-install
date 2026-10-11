@@ -63,7 +63,12 @@ function failureStatus(sub) {
 // A directory Marrow owns: a real directory (not a link) owned by this user, not writable by
 // others; created 0700 when missing.
 function ensurePrivateDirectory(directory) {
-  if (!fs.existsSync(directory)) fs.mkdirSync(directory, { mode: 0o700 });
+  try {
+    fs.mkdirSync(directory, { mode: 0o700 });
+  } catch (error) {
+    // A concurrent install may have created it first; it is checked below either way.
+    if (!error || error.code !== 'EEXIST') throw error;
+  }
   const stat = fs.lstatSync(directory);
   const uid = currentUid();
   if (!stat.isDirectory() || stat.isSymbolicLink() || (uid !== null && stat.uid !== uid)) {
@@ -291,7 +296,11 @@ function removeQuietly(target) {
   }
 }
 
-// Removes every runtime version except `keep` (and leftover staging directories).
+// A staging directory younger than this may belong to a concurrent install that is still running.
+const STAGE_STALE_MS = 5 * 60_000;
+
+// Removes every runtime version except `keep` (and leftover staging directories; another
+// install's stage that is still in progress is left alone).
 function removeOtherRuntimes(home, keep) {
   const root = runtimeRoot(home);
   const removed = [];
@@ -303,6 +312,13 @@ function removeOtherRuntimes(home, keep) {
   }
   for (const entry of entries) {
     if (entry === keep) continue;
+    if (entry.startsWith('.stage-')) {
+      try {
+        if (Date.now() - fs.lstatSync(path.join(root, entry)).mtimeMs < STAGE_STALE_MS) continue;
+      } catch {
+        continue;
+      }
+    }
     removeQuietly(path.join(root, entry));
     removed.push(entry);
   }

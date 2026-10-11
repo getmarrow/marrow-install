@@ -371,7 +371,11 @@ test('a new pin (update) gets its own runtime and older versions are removed', a
   try {
     const old = ensureMcpRuntime({ home, version: '3.9.1', integrity: fakeIntegrity('old'), npmInstall: fakeNpmInstall({ integrity: fakeIntegrity('old') }) });
     assert.equal(old.state, 'installed');
-    fs.mkdirSync(path.join(home, '.marrow', 'runtime', 'mcp', '.stage-3.9.2-1-abcd'));
+    // A stage left by an install that died an hour ago is removed (a fresh one may belong to a
+    // concurrent install and is kept: see runtime-concurrency.test.js).
+    const leftover = path.join(home, '.marrow', 'runtime', 'mcp', '.stage-3.9.2-1-abcd');
+    fs.mkdirSync(leftover);
+    fs.utimesSync(leftover, new Date(Date.now() - 3_600_000), new Date(Date.now() - 3_600_000));
     await install(installOptions(root, home));
     assert.deepEqual(fs.readdirSync(path.join(home, '.marrow', 'runtime', 'mcp')), [PIN]);
 
@@ -511,6 +515,13 @@ test('Windows (simulated): node + npm-cli.js next to node.exe installs the copy;
     assert.equal(held.status, 2);
     assert.equal(held.stderr, `${HOLD_TEXT}\n`);
     assert.deepEqual(fs.readdirSync(home).filter((name) => name.startsWith('shim-')), []);
+    // The installer writes that form for every plain hook when it runs on Windows.
+    fs.writeFileSync(path.join(project, 'CLAUDE.md'), '# Claude\n');
+    applyPlan(buildPlan(detectEnvironment(project, { HOME: home, PATH: process.env.PATH }), { mode: 'mcp', hookPlatform: 'win32' }), { yes: true, dryRun: false, doctor: false });
+    const claudeText = fs.readFileSync(path.join(project, '.claude', 'settings.json'), 'utf8');
+    assert.equal(hookTextUsesNpx(claudeText), false);
+    const plain = marrowCommands(path.join(project, '.claude', 'settings.json'));
+    assert.ok(plain.length >= 5 && plain.every((entry) => entry.startsWith('node -e "')), plain.join('\n').slice(0, 300));
   } finally {
     process.chdir(cwd);
     for (const directory of [home, project, bin]) fs.rmSync(directory, { recursive: true, force: true });
@@ -653,15 +664,22 @@ test('runtime guards: unsafe paths, loose or linked directories and records, FIF
     assert.equal(local.status, 0, local.stderr);
     assert.equal(local.stdout, '{"local":true}');
 
-    // LR3: a runtime directory others can read or enter is not trusted.
+    // A copy installed for another integrity (another tarball) is not the pinned one.
+    assert.equal(verifyMcpRuntime(home, PIN, fakeIntegrity('another tarball')), null);
+    // LR3: a runtime directory others can read or enter is not trusted, by verify or by the
+    // launcher on every start (which then holds).
     fs.chmodSync(dir, 0o750);
     assert.equal(verify(), null);
+    assert.equal(start().status, 2);
     fs.chmodSync(dir, 0o700);
     assert.ok(verify());
     // LR28: a .verified others can read, or one that is a link, is not trusted.
     const record = path.join(dir, '.verified');
     fs.chmodSync(record, 0o644);
     assert.equal(verify(), null);
+    const loose = start();
+    assert.equal(loose.status, 2, 'the launcher holds on a loose record too');
+    assert.equal(loose.stdout, '');
     fs.chmodSync(record, 0o600);
     fs.renameSync(record, `${record}.real`);
     fs.symlinkSync(`${record}.real`, record);
