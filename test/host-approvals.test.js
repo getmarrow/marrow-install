@@ -21,6 +21,8 @@ const LAUNCH_FAILURE = 'Marrow governance adapter was unavailable; this action i
 
 // The MCP version that answers the host-approval hooks: the sealed pin once the release re-pins,
 // until then the first version that ships them, as `update` would resolve it from the registry.
+const { canonicalHooks, fakeRuntime } = require('./support/fake-runtime');
+const { hookTextUsesNpx, localizeHookCommand } = require('../src/mcp-runtime');
 function hostApprovalVersion() {
   return installer.hostApprovalHooksSupported(PINS.MCP_ADAPTER_VERSION)
     ? PINS.MCP_ADAPTER_VERSION
@@ -44,9 +46,12 @@ function hostApprovalTarget() {
 const spec = (version = hostApprovalVersion()) => `@getmarrow/mcp@${version}`;
 const cmd = (entrypoint, version) => `npx -y --package=${spec(version)} marrow-mcp ${entrypoint}`;
 
+// Hook files hold Marrow's commands in the local runtime form; checks read the canonical spelling.
 function readJson(filePath) {
-  return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  return canonicalHooks(fs.readFileSync(filePath, 'utf8'));
 }
+// A canonical command as the installer writes it (the local runtime form, never npx).
+const written = (command, version = hostApprovalVersion()) => localizeHookCommand(command, version);
 
 // A temporary HOME (owner-only, as Grok's path check requires) and project for every case.
 function workspace(prefix) {
@@ -173,7 +178,8 @@ function candidateMcpSetup(settingsPath, version = hostApprovalVersion()) {
     (s) => ({ Stop: mcpReconcile(s, 'Stop', 'session-hook', cmd('claude-session-hook', version)) }),
   ];
   for (const step of steps) {
-    const settings = fs.existsSync(settingsPath) ? readJson(settingsPath) : {};
+    // MCP setup reads the file as written: it does not know the installer's local runtime form.
+    const settings = fs.existsSync(settingsPath) ? JSON.parse(fs.readFileSync(settingsPath, 'utf8')) : {};
     const hooks = settings.hooks && typeof settings.hooks === 'object' ? settings.hooks : {};
     settings.hooks = { ...hooks, ...step(settings) };
     fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
@@ -221,8 +227,17 @@ test('Claude Code: PermissionRequest and PostToolBatch (async) match marrow-mcp 
     // (The matcher names Marrow's own tools, marrow_decision_brief among them, so it is left out.)
     assert.doesNotMatch(JSON.stringify(settings.hooks.PermissionRequest.map(({ matcher, ...rest }) => rest)), /decision|behavior|allow"/);
     const written = fs.readFileSync(settingsPath, 'utf8');
+    assert.equal(hookTextUsesNpx(written), false);
     candidateMcpSetup(settingsPath);
-    assert.equal(fs.readFileSync(settingsPath, 'utf8'), written, 'MCP setup leaves the installer bytes alone');
+    // marrow-mcp setup (3.9.100) writes its npx lines next to the installer's local runtime form
+    // (reported as a finding for marrow-mcp). Doctor flags the file and the installer's repair
+    // converges back to the exact local form, one handler per event.
+    const afterSetup = fs.readFileSync(settingsPath, 'utf8');
+    if (afterSetup !== written) {
+      assert.ok(hookTextUsesNpx(afterSetup));
+      install(fresh);
+      assert.equal(fs.readFileSync(settingsPath, 'utf8'), written, 'the repair restores the installer bytes');
+    }
   } finally {
     fresh.cleanup();
   }
@@ -232,10 +247,14 @@ test('Claude Code: PermissionRequest and PostToolBatch (async) match marrow-mcp 
     writeOwnerFiles(mcpFirst, { '.claude/settings.json': { permissions: { allow: ['Read'] } } });
     candidateMcpSetup(settingsPath);
     const fromMcp = fs.readFileSync(settingsPath, 'utf8');
+    // The installer keeps every field MCP setup wrote and switches only the commands from npx to
+    // the local runtime form (byte for byte the same file once read in the canonical spelling).
     const change = install(mcpFirst).changes.find((entry) => entry.label === 'Claude Code MCP passive hooks');
-    assert.equal(change.changed, false);
-    assert.equal(change.already_present, true);
-    assert.equal(fs.readFileSync(settingsPath, 'utf8'), fromMcp);
+    assert.equal(change.changed, true);
+    const after = fs.readFileSync(settingsPath, 'utf8');
+    assert.equal(hookTextUsesNpx(after), false);
+    assert.deepEqual(canonicalHooks(after), JSON.parse(fromMcp));
+    assert.equal(install(mcpFirst).changes.find((entry) => entry.label === 'Claude Code MCP passive hooks').changed, false, 'a re-run changes nothing');
   } finally {
     mcpFirst.cleanup();
   }
@@ -285,7 +304,7 @@ test('Cursor beforeMCPExecution guard: Marrow\'s own tools pass at once without 
   try {
     fs.mkdirSync(path.join(ws.root, '.cursor'));
     install(ws);
-    const guard = readJson(path.join(ws.root, '.cursor', 'hooks.json')).hooks.beforeMCPExecution.find((entry) => isMarrowCommand(entry.command)).command;
+    const guard = written(readJson(path.join(ws.root, '.cursor', 'hooks.json')).hooks.beforeMCPExecution.find((entry) => isMarrowCommand(entry.command)).command);
     const bin = path.join(ws.base, 'fake-bin');
     fs.mkdirSync(bin);
     const spawned = path.join(ws.base, 'npx-ran');
@@ -301,9 +320,12 @@ case "$FAKE_NPX_MODE" in
 esac
 `);
     fs.chmodSync(path.join(bin, 'npx'), 0o755);
+    // The guard starts the private runtime (never npx); the stand-in answers in its place.
+    fakeRuntime(ws.base, hostApprovalVersion(), fs.readFileSync(path.join(bin, 'npx'), 'utf8'));
+    fs.rmSync(path.join(bin, 'npx'));
     const run = (mode, event) => {
       if (fs.existsSync(spawned)) fs.rmSync(spawned);
-      return spawnSync(guard, { shell: true, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, FAKE_NPX_MODE: mode }, input: JSON.stringify(event), encoding: 'utf8', timeout: 20_000 });
+      return spawnSync(guard, { shell: true, env: { ...process.env, HOME: ws.base, PATH: `${bin}:${process.env.PATH}`, FAKE_NPX_MODE: mode }, input: JSON.stringify(event), encoding: 'utf8', timeout: 20_000 });
     };
     const own = run('fail', { hook_event_name: 'beforeMCPExecution', mcp_server_name: 'marrow', tool_name: 'marrow_agent_runtime', tool_input: '{}' });
     assert.equal(own.status, 0, own.stderr);
@@ -318,7 +340,7 @@ esac
       const other = run('ask', { hook_event_name: 'beforeMCPExecution', tool_input: '{}', ...event });
       assert.equal(other.status, 0, JSON.stringify(event));
       assert.equal(other.stdout, '{"permission":"ask","user_message":"Approve?","agent_message":"asked"}\n', JSON.stringify(event));
-      assert.equal(fs.readFileSync(spawned, 'utf8').trim(), `-y --package=${spec()} marrow-mcp cursor-pre-action-hook`);
+      assert.equal(fs.readFileSync(spawned, 'utf8').trim(), `--package=${spec()} marrow-mcp cursor-pre-action-hook`);
     }
     const big = { hook_event_name: 'beforeMCPExecution', mcp_server_name: 'release-tools', tool_name: 'upload', tool_input: JSON.stringify({ blob: 'x'.repeat(300_000) }) };
     const echoed = run('echo', big);
@@ -330,7 +352,7 @@ esac
       assert.equal(failed.stdout, '', mode);
       assert.equal(failed.stderr, 'Marrow governance adapter was unavailable; this MCP call is blocked.\n', mode);
     }
-    const garbage = spawnSync(guard, { shell: true, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, FAKE_NPX_MODE: 'ask' }, input: 'not json', encoding: 'utf8' });
+    const garbage = spawnSync(guard, { shell: true, env: { ...process.env, HOME: ws.base, PATH: `${bin}:${process.env.PATH}`, FAKE_NPX_MODE: 'ask' }, input: 'not json', encoding: 'utf8' });
     assert.equal(garbage.status, 0, 'unparseable input still reaches the hook, which decides');
   } finally {
     ws.cleanup();
@@ -422,6 +444,9 @@ case "$FAKE_NPX_MODE" in
 esac
 `);
   fs.chmodSync(path.join(bin, 'npx'), 0o755);
+  // Hooks start the private runtime (never npx): the stand-in answers there, under HOME=dir.
+  fakeRuntime(dir, hostApprovalVersion(), fs.readFileSync(path.join(bin, 'npx'), 'utf8'));
+  fs.rmSync(path.join(bin, 'npx'));
   return bin;
 }
 
@@ -444,7 +469,7 @@ test('Gemini: the BeforeTool guard passes the typed-reply denial, keeps the fixe
     assert.equal(handler('AfterAgent', 'marrow-after-agent').command.includes(`${spec()} marrow-mcp gemini-session-hook`), true);
 
     const bin = fakeNpx(ws.base);
-    const run = (command, mode, input = '{}') => spawnSync(command, { shell: true, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, FAKE_NPX_MODE: mode }, input, encoding: 'utf8', timeout: 20_000 });
+    const run = (command, mode, input = '{}') => spawnSync(written(command), { shell: true, env: { ...process.env, HOME: ws.base, PATH: `${bin}:${process.env.PATH}`, FAKE_NPX_MODE: mode }, input, encoding: 'utf8', timeout: 20_000 });
     const passed = {
       allow: '{"decision":"allow"}\n',
       fixed: '{"decision":"deny","reason":"Marrow blocked this action because required governance approval or proof is unavailable."}\n',

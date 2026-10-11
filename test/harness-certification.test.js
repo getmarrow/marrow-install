@@ -7,6 +7,8 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const PINS = require('../src/pins');
+const { canonicalHooks, fakeRuntime } = require('./support/fake-runtime');
+const { hookTextUsesNpx } = require('../src/mcp-runtime');
 const PIN_RE = PINS.MCP_ADAPTER_VERSION.replaceAll('.', '\\.');
 // A stable version just ahead of the pin (the next patch), for unverified-ahead cases.
 const AHEAD = PINS.MCP_ADAPTER_VERSION.replace(/\d+$/, (patch) => String(Number(patch) + 1));
@@ -198,7 +200,7 @@ test('Cursor hooks reconcile exact native events, preserve unrelated entries, an
     const plan = buildPlan(detection, { mode: 'both' });
     const changes = applyPlan(plan, { yes: true, dryRun: false, doctor: false });
     const first = fs.readFileSync(hooksPath, 'utf8');
-    const settings = JSON.parse(first);
+    const settings = canonicalHooks(first);
     assert.equal(settings.version, 1);
     assert.deepEqual(settings.owner_setting, { preserved: true });
     assert.deepEqual(settings.hooks.customEvent, [{ command: 'owner-custom' }]);
@@ -320,7 +322,11 @@ test('Cline hooks install exact executable non-blocking scripts and remain byte-
     const fakeNpx = path.join(fakeBin, 'npx');
     fs.writeFileSync(fakeNpx, '#!/bin/sh\nif [ "${FAKE_NPX_FAIL:-}" = "1" ]; then exit 7; fi\nprintf "%s\\n" \'{"cancel":false}\'\n');
     fs.chmodSync(fakeNpx, 0o755);
-    const hookEnv = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}` };
+    // The scripts start the private runtime, never npx: the stand-in answers in its place.
+    assert.equal(hookTextUsesNpx(pre + post + cancel), false);
+    fakeRuntime(root, pre.match(/@getmarrow\/mcp@(\d+\.\d+\.\d+)/)[1], fs.readFileSync(fakeNpx, 'utf8'));
+    fs.rmSync(fakeNpx);
+    const hookEnv = { ...process.env, HOME: root, PATH: `${fakeBin}:${process.env.PATH}` };
     const allowed = spawnSync(hookPaths[0], [], { env: hookEnv, input: '{}', encoding: 'utf8' });
     assert.equal(allowed.status, 0, allowed.stderr);
     assert.deepEqual(JSON.parse(allowed.stdout), { cancel: false });
@@ -451,7 +457,7 @@ test('Windsurf reconciles exact native hooks, preserves unrelated config, fails 
     const plan = buildPlan(detection, { mode: 'mcp' });
     assert.equal(plan.writes.filter((write) => write.label === 'Windsurf native hooks').length, 1);
     const changes = applyPlan(plan, { yes: true, dryRun: false, doctor: false });
-    const settings = JSON.parse(fs.readFileSync(hooksPath, 'utf8'));
+    const settings = canonicalHooks(fs.readFileSync(hooksPath, 'utf8'));
     assert.deepEqual(settings.owner_setting, { retained: true });
     assert.deepEqual(settings.hooks.owner_event, [{ command: 'printf owner-event' }]);
     assert.equal(settings.hooks.pre_run_command.some((entry) => entry.command === 'printf owner-pre' && entry.owner === true), true);
@@ -466,16 +472,21 @@ test('Windsurf reconciles exact native hooks, preserves unrelated config, fails 
       assert.match(marrow[0].command, new RegExp(String.raw`@getmarrow\/mcp@${PIN_RE}`));
     }
 
-    const preCommand = settings.hooks.pre_run_command.find((entry) => /windsurf-pre-action-hook/.test(entry.command)).command;
-    const postCommand = settings.hooks.post_run_command.find((entry) => /windsurf-hook/.test(entry.command)).command;
-    const closeoutCommand = settings.hooks.post_cascade_response.find((entry) => /windsurf-session-hook/.test(entry.command)).command;
+    // Run the commands as written (the local runtime form), not their canonical spelling.
+    const written = (command) => require('../src/mcp-runtime').localizeHookCommand(command, PINS.MCP_ADAPTER_VERSION);
+    const preCommand = written(settings.hooks.pre_run_command.find((entry) => /windsurf-pre-action-hook/.test(entry.command)).command);
+    const postCommand = written(settings.hooks.post_run_command.find((entry) => /windsurf-hook/.test(entry.command)).command);
+    const closeoutCommand = written(settings.hooks.post_cascade_response.find((entry) => /windsurf-session-hook/.test(entry.command)).command);
+    assert.ok(fs.readFileSync(hooksPath, 'utf8').includes(JSON.stringify(preCommand).slice(1, -1)), 'the written command');
     assert.doesNotMatch(JSON.stringify(settings), /MARROW_API_KEY|mrw_/);
 
     const fakeBin = path.join(root, 'fake-bin');
     fs.mkdirSync(fakeBin);
     fs.writeFileSync(path.join(fakeBin, 'npx'), '#!/bin/sh\ncase "${FAKE_NPX_STATUS:-0}" in 0) exit 0 ;; 2) printf "%s\\n" "Marrow blocked this action because required governance approval or proof is unavailable." >&2; exit 2 ;; *) printf "%s\\n" "synthetic-private-launch-error" >&2; exit "$FAKE_NPX_STATUS" ;; esac\n');
     fs.chmodSync(path.join(fakeBin, 'npx'), 0o755);
-    const commandEnv = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}` };
+    fakeRuntime(root, PINS.MCP_ADAPTER_VERSION, fs.readFileSync(path.join(fakeBin, 'npx'), 'utf8'));
+    fs.rmSync(path.join(fakeBin, 'npx'));
+    const commandEnv = { ...process.env, HOME: root, PATH: `${fakeBin}:${process.env.PATH}` };
     const allowed = spawnSync(preCommand, { shell: true, env: { ...commandEnv, FAKE_NPX_STATUS: '0' }, input: '{}', encoding: 'utf8' });
     assert.equal(allowed.status, 0, allowed.stderr);
     assert.equal(allowed.stdout, '');
@@ -590,7 +601,7 @@ test('Gemini CLI reconciles exact native groups, validates decisions, keeps neut
     const plan = buildPlan(detection, { mode: 'mcp' });
     assert.equal(plan.writes.filter((write) => write.label === 'Gemini CLI native hooks').length, 1);
     const changes = applyPlan(plan, { yes: true, dryRun: false, doctor: false });
-    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    const settings = canonicalHooks(fs.readFileSync(settingsPath, 'utf8'));
     assert.deepEqual(settings.owner_setting, { retained: true });
     assert.deepEqual(settings.hooksConfig, { owner_option: 'retained' });
     assert.equal(settings.hooks.BeforeTool.some((group) => group.matcher === 'owner-tool'), true);
@@ -616,7 +627,8 @@ test('Gemini CLI reconciles exact native groups, validates decisions, keeps neut
       assert.equal(marrowHandlers[0].timeout, timeout);
       // The plain entrypoint, or (BeforeTool with host approvals) the guard naming it as JSON items.
       assert.match(marrowHandlers[0].command, new RegExp(`@getmarrow/mcp@${PIN_RE}(?: marrow-mcp |","marrow-mcp",")${entrypoint}`));
-      commands[eventName] = marrowHandlers[0].command;
+      // Run the command as written (the local runtime form), not its canonical spelling.
+      commands[eventName] = require('../src/mcp-runtime').localizeHookCommand(marrowHandlers[0].command, PINS.MCP_ADAPTER_VERSION);
     }
     assert.doesNotMatch(JSON.stringify(settings), /MARROW_API_KEY|mrw_/);
 
@@ -624,7 +636,9 @@ test('Gemini CLI reconciles exact native groups, validates decisions, keeps neut
     fs.mkdirSync(fakeBin);
     fs.writeFileSync(path.join(fakeBin, 'npx'), '#!/bin/sh\ncase "${FAKE_NPX_MODE:-allow}" in allow) printf "%s" \'{"decision":"allow"}\' ;; deny) printf "%s" \'{"decision":"deny","reason":"Marrow blocked this action because required governance approval or proof is unavailable."}\' ;; invalid) printf "%s" \'polluted {"decision":"allow"}\' ;; *) printf "%s\\n" "synthetic-private-launch-error" >&2; exit 7 ;; esac\n');
     fs.chmodSync(path.join(fakeBin, 'npx'), 0o755);
-    const commandEnv = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}` };
+    fakeRuntime(root, PINS.MCP_ADAPTER_VERSION, fs.readFileSync(path.join(fakeBin, 'npx'), 'utf8'));
+    fs.rmSync(path.join(fakeBin, 'npx'));
+    const commandEnv = { ...process.env, HOME: root, PATH: `${fakeBin}:${process.env.PATH}` };
     const allow = spawnSync(commands.BeforeTool, { shell: true, env: { ...commandEnv, FAKE_NPX_MODE: 'allow' }, input: '{}', encoding: 'utf8' });
     assert.equal(allow.status, 0, allow.stderr);
     assert.equal(allow.stdout, '{"decision":"allow"}\n');
@@ -768,7 +782,7 @@ test('fresh Grok installs create one private managed global hook and remain byte
     assert.equal(changes.find((entry) => entry.label === 'Grok native hooks').applied, true);
     assert.equal(fs.statSync(hookPath).mode & 0o777, 0o600);
     const first = fs.readFileSync(hookPath);
-    const settings = JSON.parse(first);
+    const settings = canonicalHooks(first);
     assert.match(JSON.stringify(settings), new RegExp(String.raw`@getmarrow\/mcp@${PIN_RE}`));
     assert.equal(settings.hooks.PreToolUse.some((entry) => (
       entry.matcher === GROK_NATIVE_HOOK_MATCHER
@@ -830,7 +844,7 @@ test('Gemini explicit hook disablement remains owner-controlled and reports enab
     const detection = detectEnvironment(root, { ...process.env, HOME: root });
     const plan = buildPlan(detection, { mode: 'mcp' });
     const changes = applyPlan(plan, { yes: true, dryRun: false, doctor: false });
-    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    const settings = canonicalHooks(fs.readFileSync(settingsPath, 'utf8'));
     assert.deepEqual(settings.hooksConfig, { enabled: false, owner: 'retained' });
     const profile = activationProfile(detection, plan, changes, 'gemini');
     assert.equal(profile.configuration_complete, false);
@@ -931,7 +945,8 @@ test('Claude native-hook configuration records local completeness without provin
     assert.equal(profile.complete, true);
     assert.match(profile.config_fingerprint, /^[a-f0-9]{64}$/);
     const settings = fs.readFileSync(path.join(root, '.claude', 'settings.json'), 'utf8');
-    const parsedSettings = JSON.parse(settings);
+    const parsedSettings = canonicalHooks(settings);
+    assert.equal(hookTextUsesNpx(settings), false);
     const canonicalFingerprint = crypto.createHash('sha256').update(JSON.stringify({
       schema: 'marrow-claude-native-hooks.v3',
       adapter_version: PINS.MCP_ADAPTER_VERSION,
@@ -1013,7 +1028,7 @@ test('Claude setup replaces old Marrow hooks without duplicate execution', () =>
     const plan = buildPlan(detection, { mode: 'both' });
     applyPlan(plan, { yes: true, dryRun: false, doctor: false });
     const first = fs.readFileSync(path.join(root, '.claude', 'settings.json'), 'utf8');
-    const settings = JSON.parse(first);
+    const settings = canonicalHooks(first);
     const commandCounts = Object.values(settings.hooks).flatMap((entries) => entries)
       .flatMap((entry) => entry.hooks || [])
       .filter((hook) => /^npx\s+(?:-y\s+)?(?:--package=)?@getmarrow\/mcp(?:@[^\s]+)?\s+(?:marrow-mcp\s+)?/.test(hook.command || ''));
@@ -1065,7 +1080,7 @@ test('Claude fingerprint includes unexpected legacy and duplicate active handler
     const plan = buildPlan(detection, { mode: 'both' });
     applyPlan(plan, { yes: true, dryRun: false, doctor: false });
     const settingsPath = path.join(root, '.claude', 'settings.json');
-    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    const settings = canonicalHooks(fs.readFileSync(settingsPath, 'utf8'));
     const certified = claudeNativeHookFingerprint(settings);
     settings.hooks.PreToolUse.push({
       matcher: NATIVE_HOOK_MATCHER,
@@ -1104,7 +1119,7 @@ test('Codex hooks reconcile exact native events, preserve unrelated entries, and
     const profile = activationProfile(detection, plan, changes, 'codex');
     const hooksPath = path.join(root, '.codex', 'hooks.json');
     const first = fs.readFileSync(hooksPath, 'utf8');
-    const settings = JSON.parse(first);
+    const settings = canonicalHooks(first);
 
     assert.deepEqual(settings.owner_setting, { preserved: true });
     assert.deepEqual(settings.hooks.CustomEvent, [{ hooks: [{ type: 'command', command: 'owner-custom' }] }]);

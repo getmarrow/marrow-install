@@ -34,6 +34,8 @@ const INSTALLER_VERSION = require('../package.json').version;
 const MATCHER = require('../src/marrow-own-tools').buildOwnToolMatchers().claude;
 const command = (entrypoint) => `npx -y --package=${MCP_PIN} marrow-mcp ${entrypoint}`;
 
+const { canonicalHooks } = require('./support/fake-runtime');
+const { hookTextUsesNpx } = require('../src/mcp-runtime');
 function tempDir(prefix = 'marrow-0166-') {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
@@ -116,7 +118,7 @@ function installClaude(root) {
 }
 
 function marrowHandlers(settingsPath) {
-  const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+  const settings = canonicalHooks(fs.readFileSync(settingsPath, 'utf8'));
   return Object.fromEntries(Object.entries(settings.hooks).map(([event, entries]) => [
     event,
     entries.flatMap((entry) => entry.hooks || []).filter((hook) => mcpSubcommand(hook.command)),
@@ -132,7 +134,8 @@ test('Claude hooks use the claude-* entrypoints and converge with MCP setup in b
     Stop: command('claude-session-hook'),
     ...(HOST_APPROVALS ? { PermissionRequest: command('claude-permission-request-hook'), PostToolBatch: command('claude-hook') } : {}),
   };
-  // Fresh install, then MCP setup: MCP leaves the installer's bytes alone.
+  // Fresh install, then MCP setup: MCP (3.9.100) adds its npx lines next to the installer's local
+  // runtime form (a marrow-mcp finding); the installer's next run converges back to its bytes.
   const fresh = tempDir();
   try {
     fs.writeFileSync(path.join(fresh, 'CLAUDE.md'), '# Claude\n');
@@ -143,13 +146,16 @@ test('Claude hooks use the claude-* entrypoints and converge with MCP setup in b
       assert.deepEqual(marrowHandlers(settingsPath)[event].map((hook) => hook.command), [wanted], event);
     }
     assert.doesNotMatch(written, /marrow-mcp (?:context-hook|pre-action-hook|hook|session-hook)"/);
+    assert.equal(hookTextUsesNpx(written), false);
     mcpSetup(settingsPath);
+    installClaude(fresh);
     assert.equal(fs.readFileSync(settingsPath, 'utf8'), written);
   } finally {
     fs.rmSync(fresh, { recursive: true, force: true });
   }
 
-  // An existing MCP-setup entry: the installer finds it current and never rewrites it.
+  // An existing MCP-setup entry: the installer keeps every field and switches only the commands
+  // from npx to the local runtime form; a re-run changes nothing.
   const mcpFirst = tempDir();
   try {
     const settingsPath = path.join(mcpFirst, '.claude', 'settings.json');
@@ -158,9 +164,11 @@ test('Claude hooks use the claude-* entrypoints and converge with MCP setup in b
     mcpSetup(settingsPath);
     const fromMcp = fs.readFileSync(settingsPath, 'utf8');
     const change = installClaude(mcpFirst);
-    assert.equal(change.changed, false);
-    assert.equal(change.already_present, true);
-    assert.equal(fs.readFileSync(settingsPath, 'utf8'), fromMcp);
+    assert.equal(change.changed, true);
+    const after = fs.readFileSync(settingsPath, 'utf8');
+    assert.equal(hookTextUsesNpx(after), false);
+    assert.deepEqual(canonicalHooks(after), JSON.parse(fromMcp));
+    assert.equal(installClaude(mcpFirst).changed, false);
   } finally {
     fs.rmSync(mcpFirst, { recursive: true, force: true });
   }
@@ -199,6 +207,7 @@ test('an existing 0.1.65 installer entry migrates once to one claude-* handler a
     assert.equal(handlers.PreToolUse[0].command, command('claude-pre-action-hook'));
     assert.equal(handlers.PreToolUse[0].timeout, 9);
     mcpSetup(settingsPath);
+    installClaude(root);
     assert.equal(fs.readFileSync(settingsPath, 'utf8'), migrated);
     const again = installClaude(root);
     assert.equal(again.changed, false);

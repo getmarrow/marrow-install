@@ -3089,9 +3089,9 @@ async function sidecarOnly(parsed) {
     const detection = detectEnvironment(root, process.env);
     // Maintenance re-applies the controller's own configured agent id and base URL. A different
     // value found in managed MCP config is replaced unless the owner allowlisted it, and the
-    // divergence is reported. It never edits the owner's Hermes config. Hooks stay on the
-    // verified local MCP runtime when there is one (checked, never installed, here).
-    const mcpRuntime = maintenanceMcpRuntime(detection, { mcpLocalRuntime: process.env.MARROW_LOCAL_RUNTIME !== '0' });
+    // divergence is reported. It never edits the owner's Hermes config. Hooks are written in
+    // the local MCP runtime form (never npx); the copy is checked, never installed, here.
+    const mcpRuntime = maintenanceMcpRuntime(detection);
     const plan = buildPlan(detection, {
       mode: managedMode,
       agentId: options.agentId,
