@@ -31,7 +31,7 @@ const HOST_APPROVALS = require('../src/installer').hostApprovalHooksSupported(PI
 const BIN = path.join(__dirname, '..', 'bin', 'marrow-install.js');
 const MCP_PIN = `@getmarrow/mcp@${PINS.MCP_ADAPTER_VERSION}`;
 const INSTALLER_VERSION = require('../package.json').version;
-const MATCHER = 'Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|functions\\.(?!mcp__marrow__marrow_).*|mcp__(?!marrow__marrow_).*';
+const MATCHER = require('../src/marrow-own-tools').buildOwnToolMatchers().claude;
 const command = (entrypoint) => `npx -y --package=${MCP_PIN} marrow-mcp ${entrypoint}`;
 
 function tempDir(prefix = 'marrow-0166-') {

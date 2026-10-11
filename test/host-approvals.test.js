@@ -14,8 +14,8 @@ const runner = require('../src/governed-runner');
 
 const BIN = path.join(__dirname, '..', 'bin', 'marrow-install.js');
 const FIXTURES = path.join(__dirname, 'fixtures', 'installer-0167');
-const CLAUDE_MATCHER = 'Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|functions\\.(?!mcp__marrow__marrow_).*|mcp__(?!marrow__marrow_).*';
-const CURSOR_FULL_MATCHER = 'Shell|Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|MCP:(?!marrow(?:_.*|:marrow_.*)$).*';
+const CLAUDE_MATCHER = require('../src/marrow-own-tools').buildOwnToolMatchers().claude;
+const CURSOR_FULL_MATCHER = require('../src/marrow-own-tools').buildOwnToolMatchers().cursor;
 const GEMINI_MATCHER = installer.GEMINI_NATIVE_HOOK_MATCHER;
 const LAUNCH_FAILURE = 'Marrow governance adapter was unavailable; this action is blocked.\n';
 
@@ -218,7 +218,8 @@ test('Claude Code: PermissionRequest and PostToolBatch (async) match marrow-mcp 
       assert.deepEqual(settings.hooks[event].flatMap((group) => group.hooks.map((hook) => hook.command)), [cmd(entrypoint)], event);
     }
     // The pass-through marker must never decide: no decision field, no matcher on PostToolBatch.
-    assert.doesNotMatch(JSON.stringify(settings.hooks.PermissionRequest), /decision|behavior|allow"/);
+    // (The matcher names Marrow's own tools, marrow_decision_brief among them, so it is left out.)
+    assert.doesNotMatch(JSON.stringify(settings.hooks.PermissionRequest.map(({ matcher, ...rest }) => rest)), /decision|behavior|allow"/);
     const written = fs.readFileSync(settingsPath, 'utf8');
     candidateMcpSetup(settingsPath);
     assert.equal(fs.readFileSync(settingsPath, 'utf8'), written, 'MCP setup leaves the installer bytes alone');
@@ -267,10 +268,11 @@ test('Cursor: ask on the execution hooks (failClosed, 15 s), MCP still gated in 
     assert.deepEqual(marrow('stop'), [{ command: cmd('cursor-session-hook'), timeout: 3 }]);
     const preToolUse = new RegExp(installer.CURSOR_PRE_TOOL_USE_HOST_APPROVAL_MATCHER);
     // Shell leaves preToolUse (beforeShellExecution runs in cloud agents too); third-party MCP
-    // calls stay, because cloud agents never run beforeMCPExecution. Marrow's own tools stay out.
+    // calls stay, because cloud agents never run beforeMCPExecution. `MCP:<tool>` names no server,
+    // so Marrow's own tools stay in too (the hook tells them apart).
     assert.equal(preToolUse.test('Shell'), false);
     for (const tool of ['MCP:deploy', 'MCP:github:create_pr', 'Write', 'Delete', 'Task', 'Read', 'Grep']) assert.equal(preToolUse.test(tool), true, tool);
-    for (const tool of ['MCP:marrow_agent_runtime', 'MCP:marrow:marrow_commit']) assert.equal(preToolUse.test(tool), false, tool);
+    for (const tool of ['MCP:marrow_agent_runtime', 'MCP:marrow:marrow_commit']) assert.equal(preToolUse.test(tool), true, tool);
     assert.doesNotMatch(JSON.stringify(settings), /"ask"/);
     for (const entries of Object.values(settings.hooks)) for (const entry of entries) assert.equal('permission' in entry, false);
   } finally {

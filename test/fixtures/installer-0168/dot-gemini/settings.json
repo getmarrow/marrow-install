@@ -1,0 +1,80 @@
+{
+  "owner_setting": {
+    "retained": true
+  },
+  "hooksConfig": {
+    "enabled": true
+  },
+  "hooks": {
+    "BeforeTool": [
+      {
+        "matcher": "write_file",
+        "hooks": [
+          {
+            "name": "owner-before",
+            "type": "command",
+            "command": "printf owner-before",
+            "timeout": 99
+          }
+        ]
+      },
+      {
+        "matcher": "^(?:run_shell_command|write_file|replace|edit_file|delete_file|read_file|read_many_files|glob|grep_search|list_directory|get_file_info|web_search|google_web_search|mcp_(?!marrow_marrow_)[A-Za-z0-9_]{1,192})$",
+        "hooks": [
+          {
+            "name": "marrow-before-tool",
+            "type": "command",
+            "command": "node -e 'const {spawn}=require(\"node:child_process\");const valid=value=>{try{const p=JSON.parse(value);if(!p||typeof p!==\"object\"||Array.isArray(p)||JSON.stringify(p)!==value)return false;const keys=Object.keys(p);if(p.decision===\"allow\")return keys.length===1;if(p.decision!==\"deny\"||typeof p.reason!==\"string\"||p.reason.length<1||p.reason.length>500)return false;if(keys.length===2)return keys.includes(\"reason\");return keys.length===3&&keys.includes(\"systemMessage\")&&typeof p.systemMessage===\"string\"&&p.systemMessage.length>0&&p.systemMessage.length<=600;}catch{return false;}};let child=null,timer=null,done=false,output=\"\",bytes=0;const fail=()=>{if(done)return;done=true;if(timer)clearTimeout(timer);try{if(child){if(child.stdout)child.stdout.destroy();if(!child.killed)child.kill(\"SIGKILL\");}}catch{}process.exitCode=2;process.stderr.write(\"Marrow governance adapter was unavailable; this action is blocked.\\n\",()=>process.exit(2));};try{child=spawn(process.platform===\"win32\"?\"npx.cmd\":\"npx\",[\"-y\",\"--package=@getmarrow/mcp@3.9.100\",\"marrow-mcp\",\"gemini-pre-action-hook\"],{stdio:[\"inherit\",\"pipe\",\"ignore\"]});timer=setTimeout(fail,4500);child.stdout.on(\"data\",chunk=>{if(done)return;bytes+=chunk.length;if(bytes>4096){fail();return;}output+=chunk.toString(\"utf8\");});child.on(\"error\",fail);child.on(\"close\",code=>{if(done)return;const out=output.replace(/\\n+$/,\"\");if(code!==0||!valid(out)){fail();return;}done=true;clearTimeout(timer);process.stdout.write(out+\"\\n\");});}catch{fail();}'",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "BeforeAgent": [
+      {
+        "hooks": [
+          {
+            "name": "owner-before-agent",
+            "type": "command",
+            "command": "printf owner-agent"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "name": "marrow-before-agent",
+            "type": "command",
+            "command": "node -e 'const {spawn}=require(\"node:child_process\");const text=(v)=>typeof v===\"string\"&&v.length<=1000;const valid=value=>{try{const p=JSON.parse(value);if(!p||typeof p!==\"object\"||Array.isArray(p)||JSON.stringify(p)!==value)return false;for(const key of Object.keys(p)){if(key===\"systemMessage\"){if(!text(p.systemMessage))return false;}else if(key===\"hookSpecificOutput\"){const h=p.hookSpecificOutput;if(!h||typeof h!==\"object\"||Array.isArray(h)||Object.keys(h).sort().join()!==\"additionalContext,hookEventName\"||h.hookEventName!==\"BeforeAgent\"||!text(h.additionalContext))return false;}else return false;}return true;}catch{return false;}};let child=null,timer=null,done=false,output=\"\",bytes=0;const neutral=()=>{if(done)return;done=true;if(timer)clearTimeout(timer);try{if(child){if(child.stdout)child.stdout.destroy();if(!child.killed)child.kill(\"SIGKILL\");}}catch{}process.exitCode=0;process.stdout.write(\"{}\\n\",()=>process.exit(0));};try{child=spawn(process.platform===\"win32\"?\"npx.cmd\":\"npx\",[\"-y\",\"--package=@getmarrow/mcp@3.9.100\",\"marrow-mcp\",\"gemini-context-hook\"],{stdio:[\"inherit\",\"pipe\",\"ignore\"]});timer=setTimeout(neutral,4500);child.stdout.on(\"data\",chunk=>{if(done)return;bytes+=chunk.length;if(bytes>4096){neutral();return;}output+=chunk.toString(\"utf8\");});child.on(\"error\",neutral);child.on(\"close\",code=>{if(done)return;const out=output.replace(/\\n+$/,\"\");if(code!==0||!valid(out)){neutral();return;}done=true;clearTimeout(timer);process.stdout.write(out+\"\\n\");});}catch{neutral();}'",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "AfterTool": [
+      {
+        "matcher": "^(?:run_shell_command|write_file|replace|edit_file|delete_file|read_file|read_many_files|glob|grep_search|list_directory|get_file_info|web_search|google_web_search|mcp_(?!marrow_marrow_)[A-Za-z0-9_]{1,192})$",
+        "hooks": [
+          {
+            "name": "marrow-after-tool",
+            "type": "command",
+            "command": "sh -c 'npx -y --package=@getmarrow/mcp@3.9.100 marrow-mcp gemini-hook >/dev/null 2>&1 || :; printf \"%s\\n\" \"{}\"; exit 0'",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "AfterAgent": [
+      {
+        "hooks": [
+          {
+            "name": "marrow-after-agent",
+            "type": "command",
+            "command": "sh -c 'npx -y --package=@getmarrow/mcp@3.9.100 marrow-mcp gemini-session-hook >/dev/null 2>&1 || :; printf \"%s\\n\" \"{}\"; exit 0'",
+            "timeout": 3000
+          }
+        ]
+      }
+    ]
+  }
+}

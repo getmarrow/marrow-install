@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "command": "./owner/pre.sh",
+        "matcher": "Write"
+      },
+      {
+        "command": "npx -y --package=@getmarrow/mcp@3.9.100 marrow-mcp cursor-pre-action-hook",
+        "matcher": "Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|MCP:(?!marrow(?:_.*|:marrow_.*)$).*",
+        "timeout": 15,
+        "failClosed": true,
+        "async": false
+      }
+    ],
+    "beforeShellExecution": [
+      {
+        "command": "./owner/approve-network.sh",
+        "matcher": "curl|wget",
+        "timeout": 30
+      },
+      {
+        "command": "npx -y --package=@getmarrow/mcp@3.9.100 marrow-mcp cursor-pre-action-hook",
+        "timeout": 15,
+        "failClosed": true,
+        "async": false
+      }
+    ],
+    "sessionStart": [
+      {
+        "command": "./owner/session-init.sh"
+      },
+      {
+        "command": "npx -y --package=@getmarrow/mcp@3.9.100 marrow-mcp cursor-session-hook",
+        "timeout": 5
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "./owner/prompt-audit.sh"
+      },
+      {
+        "command": "npx -y --package=@getmarrow/mcp@3.9.100 marrow-mcp cursor-context-hook",
+        "timeout": 5
+      }
+    ],
+    "afterFileEdit": [
+      {
+        "command": "./owner/format.sh"
+      }
+    ],
+    "postToolUse": [
+      {
+        "command": "npx -y --package=@getmarrow/mcp@3.9.100 marrow-mcp cursor-hook",
+        "matcher": "Shell|Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|MCP:(?!marrow(?:_.*|:marrow_.*)$).*",
+        "timeout": 5
+      }
+    ],
+    "postToolUseFailure": [
+      {
+        "command": "npx -y --package=@getmarrow/mcp@3.9.100 marrow-mcp cursor-hook",
+        "matcher": "Shell|Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|MCP:(?!marrow(?:_.*|:marrow_.*)$).*",
+        "timeout": 5
+      }
+    ],
+    "stop": [
+      {
+        "command": "npx -y --package=@getmarrow/mcp@3.9.100 marrow-mcp cursor-session-hook",
+        "timeout": 3
+      }
+    ],
+    "beforeMCPExecution": [
+      {
+        "command": "node -e 'const {spawn}=require(\"node:child_process\");const chunks=[];let size=0,over=false,done=false;const fail=()=>{if(done)return;done=true;process.exitCode=2;process.stderr.write(\"Marrow governance adapter was unavailable; this MCP call is blocked.\\n\",()=>process.exit(2));};process.stdin.on(\"error\",fail);process.stdin.on(\"data\",c=>{size+=c.length;if(size>16777216){over=true;return;}chunks.push(c);});process.stdin.on(\"end\",()=>{if(over){fail();return;}const raw=Buffer.concat(chunks);let ev=null;try{ev=JSON.parse(raw.toString(\"utf8\"));}catch{ev=null;}if(ev&&typeof ev===\"object\"&&ev.mcp_server_name===\"marrow\"&&typeof ev.tool_name===\"string\"&&/^marrow_[a-z0-9_]{1,64}$/.test(ev.tool_name)){done=true;process.stdout.write(\"{\\\"permission\\\":\\\"allow\\\"}\\n\");return;}let child;try{child=spawn(process.platform===\"win32\"?\"npx.cmd\":\"npx\",[\"-y\",\"--package=@getmarrow/mcp@3.9.100\",\"marrow-mcp\",\"cursor-pre-action-hook\"],{stdio:[\"pipe\",\"pipe\",\"ignore\"]});}catch{fail();return;}let out=\"\",bytes=0;child.stdout.on(\"data\",c=>{bytes+=c.length;if(bytes<=65536)out+=c.toString(\"utf8\");});child.on(\"error\",fail);child.stdin.on(\"error\",()=>{});child.on(\"close\",code=>{if(done)return;let p=null;try{p=JSON.parse(out);}catch{p=null;}if(code!==0||bytes>65536||!p||typeof p!==\"object\"||Array.isArray(p)){fail();return;}done=true;process.stdout.write(JSON.stringify(p)+\"\\n\");});child.stdin.end(raw);});'",
+        "timeout": 15,
+        "failClosed": true,
+        "async": false
+      }
+    ],
+    "afterShellExecution": [
+      {
+        "command": "npx -y --package=@getmarrow/mcp@3.9.100 marrow-mcp cursor-hook",
+        "timeout": 5
+      }
+    ],
+    "afterMCPExecution": [
+      {
+        "command": "npx -y --package=@getmarrow/mcp@3.9.100 marrow-mcp cursor-hook",
+        "timeout": 5
+      }
+    ]
+  }
+}
