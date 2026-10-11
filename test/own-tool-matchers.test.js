@@ -1,4 +1,4 @@
-require('./support/isolated-environment');
+const { deadRegistryHome } = require('./support/isolated-environment');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
@@ -9,6 +9,7 @@ const test = require('node:test');
 const PINS = require('../src/pins');
 const installer = require('../src/installer');
 const own = require('../src/marrow-own-tools');
+const { fakeRuntime } = require('./support/fake-runtime');
 
 // The registered names, as @getmarrow/mcp fix/own-tool-exact (4311df21) lists them.
 const NAMES_JSON = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'marrow-own-tool-names.json'), 'utf8'));
@@ -365,13 +366,25 @@ const OLD_MATCHER_STRINGS = Object.values(OLD);
 const OLD_GUARD = '/^marrow_[a-z0-9_]{1,64}$/';
 
 const HOSTS = [
-  { client: 'claude-code', label: 'Claude Code MCP passive hooks', file: '.claude/settings.json', stale: true },
-  { client: 'codex', label: 'Codex native hooks', file: '.codex/hooks.json', stale: true },
-  { client: 'cursor', label: 'Cursor native hooks', file: '.cursor/hooks.json', stale: true },
-  { client: 'gemini', label: 'Gemini CLI native hooks', file: '.gemini/settings.json', stale: true },
-  { client: 'grok', label: 'Grok native hooks', file: '~/.grok/hooks/marrow.json', stale: false },
-  { client: 'windsurf', label: 'Windsurf native hooks', file: '.windsurf/hooks.json', stale: false },
+  { client: 'claude-code', label: 'Claude Code MCP passive hooks', file: '.claude/settings.json', matcher: true },
+  { client: 'codex', label: 'Codex native hooks', file: '.codex/hooks.json', matcher: true },
+  { client: 'cursor', label: 'Cursor native hooks', file: '.cursor/hooks.json', matcher: true },
+  { client: 'gemini', label: 'Gemini CLI native hooks', file: '.gemini/settings.json', matcher: true },
+  { client: 'grok', label: 'Grok native hooks', file: '~/.grok/hooks/marrow.json', matcher: false },
+  { client: 'windsurf', label: 'Windsurf native hooks', file: '.windsurf/hooks.json', matcher: false },
 ];
+
+// A host file with its Marrow command strings replaced by a marker: what is left is everything
+// the installer must not touch (matchers, events, names, owner entries).
+function maskMarrowCommands(value) {
+  if (Array.isArray(value)) return value.map(maskMarrowCommands);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, key === 'command' && isMarrowCommand(item) ? '<marrow command>' : maskMarrowCommands(item)]));
+  }
+  return value;
+}
+const PIN_SPEC = `@getmarrow/mcp@${PINS.MCP_ADAPTER_VERSION}`;
+const PIN_RUNTIME_DIR = `.marrow/runtime/mcp/${PINS.MCP_ADAPTER_VERSION}/`;
 
 test('0.1.68 install: doctor reports the old matchers as needing repair; repair rewrites only Marrow entries; uninstall removes the new ones', async () => {
   const ws = workspace('marrow-own-matchers-');
@@ -379,21 +392,29 @@ test('0.1.68 install: doctor reports the old matchers as needing repair; repair 
     const manifest = load0168(ws);
     const before = Object.fromEntries(Object.keys(manifest.files).map((relative) => [relative, fs.readFileSync(wsPath(ws, relative), 'utf8')]));
     // The fixtures really hold the 0.1.68 strings.
-    for (const host of HOSTS.filter((item) => item.stale)) {
+    for (const host of HOSTS.filter((item) => item.matcher)) {
       assert.ok(OLD_MATCHER_STRINGS.some((value) => before[host.file].includes(JSON.stringify(value).slice(1, -1))), host.file);
+    }
+    // Every 0.1.68 hook file runs Marrow through npx at the 0.1.68 pin, which is not the current
+    // pin (src/pins.js) and not the verified-runtime form the installer writes now.
+    for (const host of HOSTS) {
+      assert.match(before[host.file], /npx -y --package=@getmarrow\/mcp@\d+\.\d+\.\d+ marrow-mcp /, `${host.file} holds npx commands`);
+      assert.equal(before[host.file].includes(PIN_SPEC), false, `${host.file} predates the current pin`);
+      assert.equal(before[host.file].includes(PIN_RUNTIME_DIR), false, `${host.file} predates the verified-runtime form`);
     }
     assert.ok(before['.cursor/hooks.json'].includes(OLD_GUARD.replace(/\\/g, '\\\\')), 'the 0.1.68 Cursor guard');
 
-    // Doctor on the 0.1.68 layout: the four hosts with an own-tool matcher are incomplete, and a
-    // dry run would rewrite exactly their files.
+    // Doctor on the 0.1.68 layout: no host is complete (the four with an own-tool matcher, and
+    // Grok and Windsurf, whose npx commands are at the old pin and are not the verified-runtime
+    // form), and a dry run would rewrite exactly those files.
     let { detection, plan: current } = plan(ws);
     const dry = installer.applyPlan(current, { yes: false, dryRun: true, doctor: false });
     for (const host of HOSTS) {
       const profile = installer.activationProfile(detection, current, dry, host.client);
-      assert.equal(profile.observed_hooks.includes('pre_action'), !host.stale, `${host.client}: ${profile.observed_hooks}`);
+      assert.equal(profile.observed_hooks.includes('pre_action'), false, `${host.client}: ${profile.observed_hooks}`);
       const change = dry.find((item) => item.label === host.label);
       assert.ok(change, host.label);
-      assert.equal(change.changed, host.stale, `${host.label} changed`);
+      assert.equal(change.changed, true, `${host.label} changed`);
     }
     for (const relative of Object.keys(before)) assert.equal(fs.readFileSync(wsPath(ws, relative), 'utf8'), before[relative], `dry run wrote ${relative}`);
 
@@ -411,7 +432,19 @@ test('0.1.68 install: doctor reports the old matchers as needing repair; repair 
       for (const old of OLD_MATCHER_STRINGS) assert.equal(text.includes(JSON.stringify(old).slice(1, -1)), false, `${relative} still has ${old.slice(-40)}`);
       assert.equal(text.includes(OLD_GUARD.replace(/\\/g, '\\\\')), false, `${relative} still has the old guard`);
     }
-    for (const host of HOSTS.filter((item) => !item.stale)) assert.equal(after(host.file), before[host.file], `${host.file} must not change`);
+    // Grok and Windsurf have no own-tool matcher. Repair rewrites their Marrow commands (to the
+    // current pin, in the verified-runtime form) and nothing else: with the commands masked, the
+    // file is byte-for-byte the 0.1.68 content.
+    for (const host of HOSTS) {
+      const text = after(host.file);
+      assert.deepEqual(Object.keys(JSON.parse(text).hooks), Object.keys(JSON.parse(before[host.file]).hooks), `${host.file} events`);
+      assert.equal(text.includes(PIN_SPEC), true, `${host.file} is at the current pin`);
+      assert.equal(text.includes(PIN_RUNTIME_DIR), true, `${host.file} starts the verified runtime`);
+      assert.equal(/npx -y --package=@getmarrow\/mcp@/.test(text), false, `${host.file} no longer runs npx`);
+    }
+    for (const host of HOSTS.filter((item) => !item.matcher)) {
+      assert.deepEqual(maskMarrowCommands(JSON.parse(after(host.file))), maskMarrowCommands(JSON.parse(before[host.file])), `${host.file} changes only Marrow commands`);
+    }
     const expected = expectedStrings();
     const claude = JSON.parse(after('.claude/settings.json'));
     for (const event of ['PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'PermissionRequest']) {
@@ -439,12 +472,14 @@ test('0.1.68 install: doctor reports the old matchers as needing repair; repair 
     }
 
     // Doctor after repair: complete for every host; a second run changes nothing.
+    const repaired = Object.fromEntries(Object.keys(before).map((relative) => [relative, after(relative)]));
     ({ detection, plan: current } = plan(ws));
     const again = installer.applyPlan(current, { yes: true, dryRun: false, doctor: false });
     assert.deepEqual(again.filter((change) => change.changed).map((change) => change.label), []);
     for (const host of HOSTS) {
       assert.equal(installer.activationProfile(detection, current, again, host.client).observed_hooks.includes('pre_action'), true, host.client);
     }
+    for (const host of HOSTS.filter((item) => !item.matcher)) assert.equal(after(host.file), repaired[host.file], `${host.file} must not change on the second run`);
     assert.ok(applied.some((change) => change.applied));
 
     // Uninstall removes the new entries and leaves the owner's files as they were.
@@ -478,7 +513,7 @@ test('an install written with the r1 candidate matchers: doctor reports it for r
     }
     ({ detection, plan: current } = plan(ws));
     const dry = installer.applyPlan(current, { yes: false, dryRun: true, doctor: false });
-    for (const host of HOSTS.filter((item) => item.stale)) {
+    for (const host of HOSTS.filter((item) => item.matcher)) {
       assert.equal(installer.activationProfile(detection, current, dry, host.client).observed_hooks.includes('pre_action'), false, host.client);
       assert.equal(dry.find((item) => item.label === host.label).changed, true, host.label);
     }
@@ -500,17 +535,20 @@ test('Cursor beforeMCPExecution guard: allows at once only server "marrow" with 
   const ws = workspace('marrow-own-guard-');
   try {
     fs.mkdirSync(path.join(ws.root, '.cursor'));
-    const { plan: current } = plan(ws);
-    installer.applyPlan(current, { yes: true, dryRun: false, doctor: false });
+    // The sealed target (the pin and its integrity from src/pins.js), as a default install writes
+    // it: the guard's loader verifies the runtime against that integrity.
+    const detection = installer.detectEnvironment(ws.root, { HOME: ws.home, PATH: process.env.PATH });
+    installer.applyPlan(installer.buildPlan(detection, { mode: 'mcp' }), { yes: true, dryRun: false, doctor: false });
     const guard = readJson(path.join(ws.root, '.cursor', 'hooks.json')).hooks.beforeMCPExecution.find((entry) => isMarrowCommand(entry.command)).command;
-    const bin = path.join(ws.base, 'fake-bin');
-    fs.mkdirSync(bin);
-    const spawned = path.join(ws.base, 'npx-ran');
-    fs.writeFileSync(path.join(bin, 'npx'), `#!/bin/sh\ncat >/dev/null\nprintf x >> ${JSON.stringify(spawned)}\nprintf '%s\\n' '{"permission":"ask","user_message":"Approve?","agent_message":"asked"}'\n`);
-    fs.chmodSync(path.join(bin, 'npx'), 0o755);
-    const run = (event) => {
+    assert.equal(guard.includes(own.cursorOwnToolGuardCondition()), true);
+    assert.equal(guard.includes(PIN_RUNTIME_DIR), true, 'the guard starts the verified runtime at the pin');
+    // The guard starts the verified private runtime for the pinned MCP (never npx from PATH). This
+    // stand-in runtime answers "ask" and leaves a marker, so a case that reaches the hook shows.
+    const spawned = path.join(ws.base, 'runtime-ran');
+    fakeRuntime(ws.home, PINS.MCP_ADAPTER_VERSION, `#!/bin/sh\ncat >/dev/null\nprintf x >> ${JSON.stringify(spawned)}\nprintf '%s\\n' '{"permission":"ask","user_message":"Approve?","agent_message":"asked"}'\n`);
+    const run = (event, env = { HOME: ws.home }) => {
       if (fs.existsSync(spawned)) fs.rmSync(spawned);
-      const out = spawnSync(guard, { shell: true, env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, input: JSON.stringify({ hook_event_name: 'beforeMCPExecution', tool_input: '{}', ...event }), encoding: 'utf8', timeout: 20_000 });
+      const out = spawnSync(guard, { shell: true, env: { ...process.env, ...env }, input: JSON.stringify({ hook_event_name: 'beforeMCPExecution', tool_input: '{}', ...event }), encoding: 'utf8', timeout: 20_000 });
       return { status: out.status, stdout: out.stdout, hook: fs.existsSync(spawned) };
     };
     for (const name of NAMES) {
@@ -530,6 +568,23 @@ test('Cursor beforeMCPExecution guard: allows at once only server "marrow" with 
       { mcp_server_name: 'marrow', tool_name: 'marrow_delete_all', server: 'marrow' },
     ];
     for (const event of cases) assert.deepEqual(run(event), asked, JSON.stringify(event));
+
+    // A planted npx first on PATH never runs: with no verified runtime under HOME the guard holds
+    // (exit 2, no decision on stdout) for every non-own case, and the planted npx leaves no marker.
+    // Marrow's own tools are still allowed at once, with no runtime and no npx.
+    const bin = path.join(ws.base, 'fake-bin');
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, 'npx'), `#!/bin/sh\ncat >/dev/null\nprintf x >> ${JSON.stringify(spawned)}\nprintf '%s\\n' '{"permission":"ask","user_message":"Approve?","agent_message":"asked"}'\n`);
+    fs.chmodSync(path.join(bin, 'npx'), 0o755);
+    const bareHome = path.join(ws.base, 'bare-home');
+    const bare = { HOME: bareHome, PATH: `${bin}:${process.env.PATH}` };
+    fs.mkdirSync(bareHome, { mode: 0o700 });
+    deadRegistryHome(bareHome);
+    assert.equal(fs.existsSync(path.join(bareHome, '.marrow')), false);
+    for (const event of cases) assert.deepEqual(run(event, bare), { status: 2, stdout: '', hook: false }, `planted npx: ${JSON.stringify(event)}`);
+    for (const name of NAMES) {
+      assert.deepEqual(run({ mcp_server_name: 'marrow', tool_name: name }, bare), { status: 0, stdout: '{"permission":"allow"}\n', hook: false }, `planted npx: ${name}`);
+    }
   } finally {
     ws.cleanup();
   }
