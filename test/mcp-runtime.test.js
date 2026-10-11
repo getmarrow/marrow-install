@@ -838,7 +838,7 @@ test('Cline hook scripts start the inline loader, never npx, and fail closed wit
     assert.ok(detection.cline && fs.existsSync(pre));
     const text = fs.readFileSync(pre, 'utf8');
     assert.equal(hookTextUsesNpx(text), false);
-    assert.ok(text.includes(`{ for N in "$HOME/.marrow/runtime/mcp/${PIN}/node" node /usr/local/bin/node /opt/homebrew/bin/node; do`));
+    assert.ok(text.includes(`{ N="$HOME/.marrow/runtime/mcp/${PIN}/node"; if [ ! -x "$N" ]; then`));
     assert.ok(text.includes(`/.source))+[])" -- --package=@getmarrow/mcp@${PIN} marrow-mcp cline-pre-action-hook;`));
     const shimDir = plantProject(root);
     const result = spawnSync(pre, [], { cwd: root, env: { HOME: home, PATH: `${shimDir}:${root}:${path.dirname(process.execPath)}:/usr/bin:/bin` }, input: '{}', encoding: 'utf8' });

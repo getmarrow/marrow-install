@@ -2530,7 +2530,10 @@ function upsertMcpServerConfig(filePath, options = {}) {
   // the Marrow MCP server, whose own tools the hook matchers leave ungated.
   const serverVersion = compatibleMcpTargetVersion(options.mcpVersion) ? options.mcpVersion : MCP_ADAPTER_VERSION;
   servers.marrow = {
-    ...mcpServerLaunch(serverVersion, options.mcpIntegrity && serverVersion === options.mcpVersion ? { integrity: options.mcpIntegrity } : {}),
+    ...mcpServerLaunch(serverVersion, {
+      platform: options.hookPlatform || process.platform,
+      ...(options.mcpIntegrity && serverVersion === options.mcpVersion ? { integrity: options.mcpIntegrity } : {}),
+    }),
     env,
   };
   config.mcpServers = servers;
@@ -2835,6 +2838,7 @@ function buildPlan(detection, options) {
         ...mcpConfigOptions,
         mcpVersion: mcpTargetVersion,
         mcpIntegrity: mcpTargetIntegrity,
+        hookPlatform,
         onDivergence: (divergence) => write.identityDivergence.push(divergence),
       }));
     };

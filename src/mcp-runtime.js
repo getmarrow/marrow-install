@@ -158,33 +158,52 @@ function loaderConfig(loader) {
 const V = '(\\d+\\.\\d+\\.\\d+)';
 const SUB = '([a-z][a-z-]{0,63})';
 const ARGS = `--package=@getmarrow/mcp@${V} marrow-mcp ${SUB}`;
-const NODES = (version) => `"$HOME/.marrow/runtime/mcp/${version}/node" node /usr/local/bin/node /opt/homebrew/bin/node`;
-const NODES_RE = '"\\$HOME/\\.marrow/runtime/mcp/(\\d+\\.\\d+\\.\\d+)/node" node /usr/local/bin/node /opt/homebrew/bin/node';
 const canonicalEntrypoint = (version, sub) => `npx -y --package=@getmarrow/mcp@${version} marrow-mcp ${sub}`;
 const RUN = (version) => `$HOME/.marrow/runtime/mcp/${version}/run`;
 
-// 1. A plain entrypoint command. POSIX: /bin/sh finds node (the one captured at install, then
-// PATH, then the usual absolute places) and runs the loader, passed as $0. Windows: node on the
-// loader, quoted so cmd, PowerShell and sh all read it the same way. No node at all: the fixed
-// text with the hold (2) or failure (1) status.
-function localPlain(version, sub, platform, cfg = runtimeConfig(version)) {
-  const args = `--package=@getmarrow/mcp@${version} marrow-mcp ${sub}`;
-  if (platform === 'win32') return `node -e "${loaderFor(cfg)}" -- ${args}`;
-  return `/bin/sh -c 'for N in ${NODES(version)}; do if command -v "$N" >/dev/null 2>&1; then exec "$N" -e "$0" -- ${args}; fi; done; printf "%s\\n" "${failureText(sub)}" >&2; exit ${failureStatus(sub)}' "${loaderFor(cfg)}"`;
+// Each written form is built from its parts by one function, and the pattern that recognizes it
+// is generated from the same function (named groups for the version, entrypoint and loader; a
+// repeated part must repeat exactly), so the writer and the reader cannot drift apart.
+const SENTINEL = { version: '\u0001V\u0001', sub: '\u0001S\u0001', loader: '\u0001L\u0001', text: '\u0001T\u0001', status: '\u0001X\u0001' };
+function formPattern(build) {
+  const seen = new Set();
+  const parts = { V: ['v', '\\d+\\.\\d+\\.\\d+'], S: ['s', '[a-z][a-z-]{0,63}'], L: ['l', LOADER_NC] };
+  return build(SENTINEL).replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\u0001([VSLTX])\u0001/g, (match, key) => {
+    if (key === 'T') return '[^"\']*';
+    if (key === 'X') return '[12]';
+    const [name, pattern] = parts[key];
+    if (seen.has(name)) return `\\k<${name}>`;
+    seen.add(name);
+    return `(?<${name}>${pattern})`;
+  });
 }
-const PLAIN_RE = new RegExp(`^/bin/sh -c 'for N in ${NODES_RE}; do if command -v "\\$N" >/dev/null 2>&1; then exec "\\$N" -e "\\$0" -- ${ARGS}; fi; done; printf "%s\\\\n" "[^"']*" >&2; exit [12]' "(${LOADER_NC})"$`);
-const WINDOWS_PLAIN_RE = new RegExp(`^node -e "(${LOADER_NC})" -- ${ARGS}$`);
+const partsFor = (version, sub, cfg) => ({ version, sub, loader: loaderFor(cfg), text: failureText(sub), status: failureStatus(sub) });
+const argsOf = (p) => `--package=@getmarrow/mcp@${p.version} marrow-mcp ${p.sub}`;
+// Which node runs the loader (POSIX): the one captured in the private runtime when it exists, else
+// node on PATH or in the usual absolute places, but never a relative path or one inside the
+// current (project) directory, so a project cannot plant the node that checks it.
+const nodeSearch = (p, found) => `N="$HOME/.marrow/runtime/mcp/${p.version}/node"; if [ ! -x "$N" ]; then N=; P="$PATH:/usr/local/bin:/opt/homebrew/bin"; while [ -n "$P" ]; do D="\${P%%:*}"; case "$P" in (*:*) P="\${P#*:}" ;; (*) P= ;; esac; case "$D" in ("$PWD"|"$PWD"/*) ;; (/*) if [ -f "$D/node" ] && [ -x "$D/node" ]; then N="$D/node"; break; fi ;; esac; done; fi; ${found}`;
+
+// 1. A plain entrypoint command. POSIX: /bin/sh picks node as above and runs the loader, passed as
+// $0. Windows: node on the loader, quoted so cmd, PowerShell and sh all read it the same way. No
+// usable node: the fixed text with the hold (2) or failure (1) status.
+const plainPosix = (p) => `/bin/sh -c '${nodeSearch(p, `if [ -n "$N" ]; then exec "$N" -e "$0" -- ${argsOf(p)}; fi;`)} printf "%s\\n" "${p.text}" >&2; exit ${p.status}' "${p.loader}"`;
+const plainWindows = (p) => `node -e "${p.loader}" -- ${argsOf(p)}`;
+function localPlain(version, sub, platform, cfg = runtimeConfig(version)) {
+  return (platform === 'win32' ? plainWindows : plainPosix)(partsFor(version, sub, cfg));
+}
+const PLAIN_RE = new RegExp(`^${formPattern(plainPosix)}$`);
+const WINDOWS_PLAIN_RE = new RegExp(`^${formPattern(plainWindows)}$`);
 const LEGACY_PLAIN_RE = new RegExp(`^/bin/sh -c 'M="\\$HOME/\\.marrow/runtime/mcp/${V}/run"; if \\[ -x "\\$M" \\]; then exec "\\$M" ${ARGS}; fi; exec npx -y --package=@getmarrow/mcp@\\2 marrow-mcp \\3'$`);
 const CANONICAL_PLAIN_RE = new RegExp(`^npx -y ${ARGS}$`);
 
 // 2. An entrypoint inside an `sh -c '...'` wrapper (Windsurf, Gemini, every platform) or a Cline
 // hook script: the same node search and loader, or the fixed text with the hold or failure status.
+const innerForm = (p) => `{ ${nodeSearch(p, `if [ -n "$N" ]; then "$N" -e "${p.loader}" -- ${argsOf(p)}; else printf "%s\\n" "${p.text}" >&2; (exit ${p.status}); fi; }`)}`;
 function localInner(version, sub, cfg = runtimeConfig(version)) {
-  const args = `--package=@getmarrow/mcp@${version} marrow-mcp ${sub}`;
-  return `{ for N in ${NODES(version)}; do if command -v "$N" >/dev/null 2>&1; then break; fi; N=; done; if [ -n "$N" ]; then "$N" -e "${loaderFor(cfg)}" -- ${args}; else printf "%s\\n" "${failureText(sub)}" >&2; (exit ${failureStatus(sub)}); fi; }`;
+  return innerForm(partsFor(version, sub, cfg));
 }
-const INNER_SOURCE = `\\{ for N in ${NODES_RE}; do if command -v "\\$N" >/dev/null 2>&1; then break; fi; N=; done; if \\[ -n "\\$N" \\]; then "\\$N" -e "(${LOADER_NC})" -- ${ARGS}; else printf "%s\\\\n" "[^"']*" >&2; \\(exit [12]\\); fi; \\}`;
-const INNER_RE = new RegExp(INNER_SOURCE, 'g');
+const INNER_RE = new RegExp(formPattern(innerForm), 'g');
 const LEGACY_INNER_RE = new RegExp(`\\{ M="\\$HOME/\\.marrow/runtime/mcp/${V}/run"; if \\[ -x "\\$M" \\]; then "\\$M" ${ARGS}; else npx -y --package=@getmarrow/mcp@\\2 marrow-mcp \\3; fi; \\}`, 'g');
 const CANONICAL_INNER_RE = new RegExp(`npx -y ${ARGS}`, 'g');
 
@@ -199,8 +218,10 @@ const SPAWN_RE = new RegExp(`spawn\\(process\\.execPath,\\["-e","(${LOADER_NC})"
 const LEGACY_SPAWN_RE = /spawn\(\.\.\.\(\(f,m,a\)=>f\.existsSync\(m\)\?\[m,a\.slice\(1\)\]:\[process\.platform==="win32"\?"npx\.cmd":"npx",a\]\)\(require\("node:fs"\),\(process\.env\.HOME\|\|""\)\+"\/\.marrow\/runtime\/mcp\/\d+\.\d+\.\d+\/run",(\["-y","--package=@getmarrow\/mcp@\d+\.\d+\.\d+","marrow-mcp","[a-z-]+"\])\),/g;
 const LEGACY_SPAWN_ONE_RE = new RegExp(LEGACY_SPAWN_RE.source);
 const CANONICAL_SPAWN_RE = /spawn\(process\.platform==="win32"\?"npx\.cmd":"npx",\["-y","--package=@getmarrow\/mcp@(\d+\.\d+\.\d+)","marrow-mcp","([a-z-]+)"\],/g;
-const localGuardPrefix = (version) => `N="$HOME/.marrow/runtime/mcp/${version}/node"; [ -x "$N" ] || N=node; exec "$N" -e '`;
-const LOCAL_GUARD_PREFIX_RE = /^N="\$HOME\/\.marrow\/runtime\/mcp\/\d+\.\d+\.\d+\/node"; \[ -x "\$N" \] \|\| N=node; exec "\$N" -e '/;
+// The POSIX guard runs on node found as above (none: a path that fails, as a missing node did).
+const guardPrefixForm = (p) => nodeSearch(p, `[ -n "$N" ] || N=/nonexistent/marrow-node; exec "$N" -e '`);
+const localGuardPrefix = (version) => guardPrefixForm({ version });
+const LOCAL_GUARD_PREFIX_RE = new RegExp(`^${formPattern(guardPrefixForm)}`);
 const LEGACY_GUARD_SPAWN_HINT = 'spawn(...((f,m,a)=>f.existsSync(m)';
 
 // The configuration of every loader in a command, when all are valid and carry the same one.
@@ -221,16 +242,12 @@ function delocalizeHookCommand(command) {
   if (typeof command !== 'string') return command;
   const legacyPlain = command.match(LEGACY_PLAIN_RE);
   if (legacyPlain && legacyPlain[1] === legacyPlain[2]) return canonicalEntrypoint(legacyPlain[2], legacyPlain[3]);
-  const plain = command.match(PLAIN_RE);
-  if (plain && plain[1] === plain[2]) {
-    const cfg = commandConfig([plain[4]]);
-    return cfg && cfg.version === plain[2] && localPlain(plain[2], plain[3], 'posix', cfg) === command ? canonicalEntrypoint(plain[2], plain[3]) : command;
-  }
-  const windowsPlain = command.match(WINDOWS_PLAIN_RE);
-  if (windowsPlain) {
-    const cfg = commandConfig([windowsPlain[1]]);
-    return cfg && cfg.version === windowsPlain[2] && localPlain(windowsPlain[2], windowsPlain[3], 'win32', cfg) === command
-      ? canonicalEntrypoint(windowsPlain[2], windowsPlain[3]) : command;
+  for (const [pattern, platform] of [[PLAIN_RE, 'posix'], [WINDOWS_PLAIN_RE, 'win32']]) {
+    const found = command.match(pattern);
+    if (!found) continue;
+    const { v, s, l } = found.groups;
+    const cfg = commandConfig([l]);
+    return cfg && cfg.version === v && localPlain(v, s, platform, cfg) === command ? canonicalEntrypoint(v, s) : command;
   }
   const prefixed = LOCAL_GUARD_PREFIX_RE.test(command);
   if (prefixed || (command.startsWith('node -e \'') && (command.includes('spawn(process.execPath,["-e","') || command.includes(LEGACY_GUARD_SPAWN_HINT)))) {
@@ -258,9 +275,10 @@ function delocalizeHookCommand(command) {
     let mismatch = false;
     const inner = command
       .replace(LEGACY_INNER_RE, (match, runVersion, version, sub) => (runVersion === version ? canonicalEntrypoint(version, sub) : match))
-      .replace(INNER_RE, (match, nodeVersion, loader, version, sub) => {
+      .replace(INNER_RE, (match, ...rest) => {
+        const { v: version, s: sub, l: loader } = rest[rest.length - 1];
         const cfg = commandConfig([loader]);
-        if (nodeVersion !== version || !cfg || cfg.version !== version || localInner(version, sub, cfg) !== match) {
+        if (!cfg || cfg.version !== version || localInner(version, sub, cfg) !== match) {
           mismatch = true;
           return match;
         }
@@ -381,27 +399,37 @@ function localizeHookScriptText(text, version, { integrity, sdk } = {}) {
 // Earlier Cline script lines ("$HOME/.marrow/runtime/mcp/<v>/run" ...) back to the canonical form.
 function delocalizeHookScriptText(text) {
   if (typeof text !== 'string') return text;
-  return text.replace(INNER_RE, (match, nodeVersion, loader, version, sub) => {
+  return text.replace(INNER_RE, (match, ...rest) => {
+    const { v: version, s: sub, l: loader } = rest[rest.length - 1];
     const cfg = commandConfig([loader]);
-    return nodeVersion === version && cfg && cfg.version === version && localInner(version, sub, cfg) === match ? canonicalEntrypoint(version, sub) : match;
+    return cfg && cfg.version === version && localInner(version, sub, cfg) === match ? canonicalEntrypoint(version, sub) : match;
   }).replace(/"\$HOME\/\.marrow\/runtime\/mcp\/(\d+\.\d+\.\d+)\/run" --package=@getmarrow\/mcp@(\d+\.\d+\.\d+) marrow-mcp ([a-z][a-z-]{0,63})/g,
     (match, runVersion, version, sub) => (runVersion === version ? canonicalEntrypoint(version, sub) : match));
 }
 
-// The MCP server entry (.mcp.json, .cursor/mcp.json): node on the loader, with no shell, so the
-// same entry works on every platform. Base and 0.1.68 wrote `npx -y --package=... marrow-mcp`.
-function mcpServerLaunch(version, { integrity, sdk } = {}) {
-  return { command: 'node', args: ['-e', loaderFor(runtimeConfig(version, { integrity, sdk })), '--', `--package=@getmarrow/mcp@${version}`, 'marrow-mcp'] };
+// The MCP server entry (.mcp.json, .cursor/mcp.json), started by the host with no shell. POSIX:
+// /bin/sh with the same node search as the hooks, on the loader. Windows: node on the loader.
+// Base and 0.1.68 wrote `npx -y --package=... marrow-mcp`, started from the project directory.
+function mcpServerLaunch(version, { integrity, sdk, platform = process.platform } = {}) {
+  const loader = loaderFor(runtimeConfig(version, { integrity, sdk }));
+  const tail = [`--package=@getmarrow/mcp@${version}`, 'marrow-mcp'];
+  if (platform === 'win32') return { command: 'node', args: ['-e', loader, '--', ...tail] };
+  const script = nodeSearch({ version }, `if [ -n "$N" ]; then exec "$N" -e "$0" -- "$@"; fi; printf "%s\\n" "${UNAVAILABLE_TEXT}" >&2; exit 1`);
+  return { command: '/bin/sh', args: ['-c', script, loader, ...tail] };
 }
 
-// The version of a server entry this module wrote (exact loader, matching version), else null.
+// The version of a server entry this module wrote (exactly, with a valid loader), else null.
 function mcpServerLaunchVersion(entry) {
-  if (!entry || typeof entry !== 'object' || entry.command !== 'node' || !Array.isArray(entry.args) || entry.args.length !== 5) return null;
-  const [flag, loader, dashes, spec, bin] = entry.args;
-  const match = String(spec).match(/^--package=@getmarrow\/mcp@(\d+\.\d+\.\d+)$/);
-  if (flag !== '-e' || dashes !== '--' || bin !== 'marrow-mcp' || !match) return null;
+  if (!entry || typeof entry !== 'object' || !Array.isArray(entry.args)) return null;
+  const args = entry.args.map(String);
+  const spec = args.find((arg) => /^--package=@getmarrow\/mcp@\d+\.\d+\.\d+$/.test(arg));
+  const loader = args.find((arg) => arg.startsWith('eval(global.MARROW_L='));
+  if (!spec || !loader) return null;
   const cfg = loaderConfig(loader);
-  return cfg && cfg.version === match[1] ? match[1] : null;
+  const version = spec.slice('--package=@getmarrow/mcp@'.length);
+  if (!cfg || cfg.version !== version) return null;
+  const written = JSON.stringify({ command: entry.command, args });
+  return ['linux', 'win32'].some((platform) => JSON.stringify(mcpServerLaunch(version, { ...cfg, platform })) === written) ? version : null;
 }
 
 // Whether a hook file's text still starts @getmarrow/mcp through npx (the canonical form, an
