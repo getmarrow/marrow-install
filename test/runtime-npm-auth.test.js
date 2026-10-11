@@ -12,7 +12,12 @@ const { ROWS, runRow, setup } = require('./support/npm-auth-rows');
 // hook env (an env-expanded value), makes the install read private user and global configs that carry no auth (only the owner's
 // registry URLs, read under a bare env, when they are safe) instead; a project .npmrc is never read.
 
-const OUTSIDE = ['HTTP_PROXY', 'http_proxy', 'Https_Proxy', 'HTTPS_PROXY', 'PROXY', 'proxy', 'NO_PROXY', 'no_proxy', 'ALL_PROXY', 'NODE_EXTRA_CA_CERTS', 'NODE_TLS_REJECT_UNAUTHORIZED', 'NODE_OPTIONS', 'NODE_USE_ENV_PROXY', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'OPENSSL_CONF', 'OPENSSL_MODULES', 'HOSTALIASES', 'LOCALDOMAIN', 'RES_OPTIONS', 'PREFIX', 'prefix', 'DESTDIR'];
+const OUTSIDE = ['HTTP_PROXY', 'http_proxy', 'Https_Proxy', 'HTTPS_PROXY', 'PROXY', 'proxy', 'ALL_PROXY', 'all_proxy', 'NODE_EXTRA_CA_CERTS', 'NODE_TLS_REJECT_UNAUTHORIZED', 'NODE_USE_ENV_PROXY', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'OPENSSL_CONF', 'OPENSSL_MODULES', 'openssl_conf', 'HOSTALIASES', 'hostaliases', 'LOCALDOMAIN', 'RES_OPTIONS', 'PREFIX', 'prefix', 'DESTDIR', 'destdir'];
+// FU-1 r4 (A16p): only these can never route or intercept traffic, so they alone are not "from outside".
+const NO_PROXY_NAMES = ['NO_PROXY', 'no_proxy', 'No_Proxy', 'NOPROXY', 'noproxy'];
+const NODE_OPTIONS_OK = ['--max-old-space-size=4096', '--max-old-space-size=1', '--max-old-space-size=999999', '--max-semi-space-size=64', '--max-semi-space-size=9999', '--enable-source-maps', '--no-warnings', '--no-deprecation', '--trace-warnings', '--trace-deprecation', '--max-old-space-size=4096 --no-warnings --enable-source-maps'];
+const NODE_OPTIONS_BAD = ['-r ./x.js', '--require ./x.js', '--require=./x.js', '--import ./x.mjs', '--import=data:text/javascript,1', '--loader ./x.mjs', '--experimental-loader=./x.mjs', '--experimental-fetch', '--use-openssl-ca', '--use-bundled-ca', '--tls-min-v1.0', '--tls-cipher-list=x', '--openssl-config=/tmp/x', '--openssl-legacy-provider', '--inspect', '--inspect-brk=0', '--inspect=0.0.0.0:9229', '--max-old-space-size=4096 --require ./x.js', '--max-old-space-size=4096 --use-openssl-ca', '--max-old-space-size=4096\t--require ./x.js', '--max-old-space-size=4096\n--require ./x.js', '--max-old-space-size=4096 "--require" ./x.js', "--max-old-space-size=4096 '--require ./x.js'", '--max-old-space-size=4096 \\--require', '--max-old-space-size=4096\0', '--max-old-space-size=4096x', '--max-old-space-size=x', '--max-old-space-size=', '--max-old-space-size=1234567', '--max-semi-space-size=12345', '--max-old-space-size=-1', '--max-old-space-size=4096 ', ' --max-old-space-size=4096', '--max-old-space-size=4096  --no-warnings', ' ', '--max_old_space_size=4096', '--MAX-OLD-SPACE-SIZE=4096', '--no-warnings=1', '--enable-source-maps-x', '--unknown-flag', '--max-old-space-size=４０９６'];
+
 
 test('FU-1: every environment variable npm or node reads as a network or config-location setting, and every refused env network value, means "from outside", in any case; unrelated or stripped ones do not', () => {
   for (const key of OUTSIDE) assert.equal(runtimeCore.npmOutside({ HOME: '/h', [key]: 'x' }), true, key);
@@ -23,6 +28,37 @@ test('FU-1: every environment variable npm or node reads as a network or config-
     assert.equal(runtimeCore.npmOutside({ HOME: '/h', [key]: 'http://x/' }), false, `${key}: passed as a network setting (decided by the caller), stripped, or ignored by npm`);
   }
   assert.deepEqual(runtimeCore.npmNetwork({ npm_config_registry: 'http://x/${NPM_TOKEN}/', npm_config_proxy: 'http://p/' }), { npm_config_proxy: 'http://p/' }, 'a ${VAR} in an env network value never passes');
+});
+
+test('FU-1 r4: DNS, OpenSSL, PREFIX/DESTDIR and NODE_USE_ENV_PROXY variables stay foreign (isolated, path URL refused); a no-proxy setting alone or a NODE_OPTIONS of only allowlisted memory and warning flags is not; anything else in NODE_OPTIONS is', () => {
+  for (const key of OUTSIDE) {
+    assert.equal(runtimeCore.npmOutside({ HOME: '/h', [key]: 'x' }), true, `${key}: outside`);
+    assert.equal(runtimeCore.npmForeign({ HOME: '/h', [key]: 'x' }), true, `${key}: foreign`);
+    assert.equal(runtimeCore.npmForeign({ HOME: '/h', [key]: 'x', NO_PROXY: 'x' }), true, `${key} + NO_PROXY: still foreign`);
+    assert.equal(runtimeCore.npmForeign({ HOME: '/h', [key]: 'x', NODE_OPTIONS: '--max-old-space-size=4096' }), true, `${key} + allowlisted NODE_OPTIONS: still foreign`);
+  }
+  for (const key of [...NO_PROXY_NAMES, 'npm_config_noproxy', 'NPM_CONFIG_NOPROXY', 'Npm_Config_NoProxy']) {
+    assert.equal(runtimeCore.npmOutside({ HOME: '/h', [key]: 'example.invalid' }), false, `${key} alone: not outside`);
+    assert.equal(runtimeCore.npmForeign({ HOME: '/h', [key]: 'example.invalid' }), false, `${key} alone: not foreign`);
+    for (const other of [{ HTTP_PROXY: 'http://a/' }, { https_proxy: 'http://a/' }, { npm_config_proxy: 'http://a/' }, { NODE_EXTRA_CA_CERTS: '/tmp/x' }, { HOSTALIASES: '/tmp/x' }, { npm_config_strict_ssl: 'false' }, { npm_config_proxy: '' }, { npm_config_registry: 'http://r/${X}' }, { NODE_OPTIONS: '--use-openssl-ca' }]) {
+      assert.equal(runtimeCore.npmForeign({ HOME: '/h', [key]: 'example.invalid', ...other }), true, `${key} + ${Object.keys(other)[0]}: foreign`);
+      assert.equal(runtimeCore.npmOutside({ HOME: '/h', [key]: 'example.invalid', ...other }), runtimeCore.npmOutside({ HOME: '/h', ...other }), `${key} + ${Object.keys(other)[0]}: unchanged`);
+    }
+  }
+  for (const bad of ['', 'x\r\n', 'x${X}', 'x'.repeat(2049)]) assert.equal(runtimeCore.npmForeign({ npm_config_noproxy: bad }), true, `a refused npm_config_noproxy ${JSON.stringify(bad.slice(0, 8))} stays foreign`);
+  for (const value of NODE_OPTIONS_OK) {
+    for (const key of ['NODE_OPTIONS', 'node_options']) {
+      assert.equal(runtimeCore.npmOutside({ HOME: '/h', [key]: value }), false, `${key}=${JSON.stringify(value)}: not outside`);
+      assert.equal(runtimeCore.npmForeign({ HOME: '/h', [key]: value }), false, `${key}=${JSON.stringify(value)}: not foreign`);
+    }
+  }
+  assert.equal(runtimeCore.npmOutside({ NODE_OPTIONS: '' }), false, 'empty NODE_OPTIONS: not outside');
+  for (const value of NODE_OPTIONS_BAD) {
+    for (const key of ['NODE_OPTIONS', 'node_options', 'Node_Options']) {
+      assert.equal(runtimeCore.npmOutside({ HOME: '/h', [key]: value }), true, `${key}=${JSON.stringify(value)}: outside`);
+      assert.equal(runtimeCore.npmForeign({ HOME: '/h', [key]: value }), true, `${key}=${JSON.stringify(value)}: foreign`);
+    }
+  }
 });
 
 test('FU-1 end to end (real npm, capture servers, dummy token): no abuse row sends the owner\'s token to the attacker; the owner\'s mirror, proxy and auth work as before; a project .npmrc is never read', async () => {
@@ -47,6 +83,8 @@ test('FU-1 end to end (real npm, capture servers, dummy token): no abuse row sen
       if (['A1', 'A10', 'A10b', 'A10c'].includes(row.id)) assert.ok(result.attacker.requests > 0, `${row.id}: the env proxy is still used (without auth)`);
       if (row.id === 'N4') assert.ok(result.genuine && result.mirror.token_hits === 0, 'N4: the env registry is used (npm precedence, as on master) and the owner mirror is never sent auth');
       if (/^A16/.test(row.id)) assert.equal(result.mirror.token_hits, 0, `${row.id}: the path or query token is never written or sent`);
+      if (['L2', 'NP1', 'O1'].includes(row.id)) assert.ok(result.mirror.token_hits > 0, `${row.id}: owner mode, the mirror that requires auth gets the owner auth`);
+      if (['V2', 'NP2', 'O3', 'O3t', 'O4'].includes(row.id)) assert.equal(result.mirror.token_hits, 0, `${row.id}: isolated or path refused: the owner auth or path token is never sent`);
       if (row.id === 'L5') assert.ok(result.mirror.token_hits > 0, 'L5: owner mode sends the path token to the owner mirror, as master');
       if (['N1', 'N5'].includes(row.id)) assert.equal(result.mirror.token_hits, 0, `${row.id}: userinfo is never written or sent`);
       if (['A3', 'A4', 'A5'].includes(row.id)) assert.equal(result.genuine, true, `${row.id}: the env network works, without auth; the pins decide`);

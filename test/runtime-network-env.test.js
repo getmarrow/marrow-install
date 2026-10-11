@@ -155,7 +155,11 @@ test('B1: only the exact npm network allowlist passes from npm_config_* env, in 
   for (const name of ['npm-config-registry', 'npm_configregistry', 'npmconfig_registry', 'NPM_CONFIGREGISTRY', 'xnpm_config_registry', 'REGISTRY', 'npm_registry']) source[name] = 'https://evil.example/';
   assert.deepEqual(runtimeCore.npmNetwork(source), {});
   const env = runtimeCore.npmEnvironment(source, runtimeCore.npmNetwork(source));
-  assert.deepEqual(Object.keys(env).filter((key) => /^npm_/i.test(key)).sort(), ['npm_config_audit', 'npm_config_fund', 'npm_config_ignore_scripts', 'npm_config_update_notifier']);
+  // FU-1 r4: only npm-owned npm_* names (npm_config*, lifecycle, package, command, execpath) are
+  // removed; npm_registry is not a setting npm reads, so it passes like any other variable.
+  assert.deepEqual(Object.keys(env).filter((key) => /^npm_/i.test(key)).sort(), ['npm_config_audit', 'npm_config_fund', 'npm_config_ignore_scripts', 'npm_config_update_notifier', 'npm_registry']);
+  const owned = { npm_lifecycle_event: 'x', npm_lifecycle_script: 'x', npm_package_json: 'x', npm_package_name: 'x', npm_command: 'x', npm_execpath: 'x', npm_node_execpath: 'x', NPM_EXECPATH: 'x', npm_configx: 'x', Npm_Config: 'x' };
+  assert.deepEqual(Object.keys(runtimeCore.npmEnvironment({ ...owned, NPM_TOKEN: 'v', npm_auth_value: 'v' }, {})).filter((key) => /^npm_/i.test(key)).sort(), ['NPM_TOKEN', 'npm_auth_value', 'npm_config_audit', 'npm_config_fund', 'npm_config_ignore_scripts', 'npm_config_update_notifier']);
   // The forced settings cannot be overridden from env.
   assert.equal(runtimeCore.npmEnvironment({ npm_config_ignore_scripts: 'false', NPM_CONFIG_IGNORE_SCRIPTS: 'false' }, runtimeCore.npmNetwork({ npm_config_ignore_scripts: 'false' })).npm_config_ignore_scripts, 'true');
   // Values with a newline, CR or NUL, empty values and values over 2048 characters are dropped.

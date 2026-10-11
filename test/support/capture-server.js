@@ -1,6 +1,7 @@
 // A capture server for the FU-1 tests, run as its own process. Usage:
 //   node capture-server.js <config.json> <counts file>
-// config: { packages: <as registry-stub.js>, key?: <PEM file>, cert?: <PEM file> }
+// config: { packages: <as registry-stub.js>, key?: <PEM file>, cert?: <PEM file>, requireAuth?: true }
+// With requireAuth it answers 401 to any registry request whose authorization header lacks the token.
 // It is a registry, a forward proxy (absolute-form requests are answered from the same packages)
 // and, given a key and certificate, a TLS-intercepting proxy for CONNECT. The dummy token to look
 // for arrives in MARROW_CAPTURE_TOKEN; it is never printed or written. The counts file holds only
@@ -27,6 +28,7 @@ function record(text) {
 
 function answer(req, res, origin) {
   record(`${req.method} ${req.url}\n${req.rawHeaders.join('\n')}`);
+  if (config.requireAuth && !(token && String(req.headers.authorization || '').includes(token))) return res.writeHead(401, { 'content-type': 'application/json' }).end('{"error":"auth required"}');
   const url = decodeURIComponent(new URL(req.url, origin).pathname);
   const tarball = url.match(/^\/-\/tarballs\/(.+)\/(\d+\.\d+\.\d+)\.tgz$/);
   if (tarball) {

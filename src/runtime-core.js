@@ -12,7 +12,7 @@
 // Install rules: npm runs as `node <npm-cli.js next to node>` (Windows: only that; POSIX: `npm`
 // found on PATH as the hooks find node, never a relative entry or one inside the project, when no
 // npm-cli.js exists), shell:false, --ignore-scripts, --no-bin-links, an explicit
-// private --prefix stage that is also the working directory, every npm_* override removed except
+// private --prefix stage that is also the working directory, every npm-owned npm_* variable removed except
 // an exact allowlist of network settings (registry, proxy, CA) from npm_config_* env, and the
 // pinned sha512 integrity, version and entry checked before the stage is renamed into place. When
 // a network setting is passed, the install must be exactly the pinned MCP and SDK, each with its
@@ -20,7 +20,12 @@
 // npm auth (FU-1): the owner's npm config, and so their auth, is used only when no network
 // setting comes from outside it: none passed from env, none refused as unparseable, no proxy, CA,
 // TLS, DNS, OpenSSL or PREFIX variable that npm or node reads, and npm resolving the same network
-// settings under the hook env as under a bare one (no env-expanded value). Otherwise npm reads
+// settings and the same config key names under the hook env as under a bare one (no env-expanded
+// value, except an auth value, which npm shows only as (protected); a certfile or keyfile, whose
+// value npm never shows, or a redacted value counts as moved). Only a no-proxy setting (it can only
+// remove proxying) and a NODE_OPTIONS made only of a short allowlist of memory and warning flags do
+// not count as from outside. npm-owned npm_* variables are removed; others reach npm, so an
+// owner auth value of ${VAR} form expands. Otherwise npm reads
 // private user and global configs (removed after) that carry no auth, proxy, CA or TLS setting:
 // the global one is empty and the user one holds only the owner's registry and @getmarrow:registry
 // URLs, taken from `npm config get` under a bare env (read twice, equal), each refused when it has
@@ -58,7 +63,9 @@ function runtimeCore() {
   const FOREIGN_CONFIG = ['strict_ssl', 'local_address', 'replace_registry_host'];
   const DEFAULT_REGISTRY = 'https://registry.npmjs.org';
   const BASE_ENV = ['path', 'home', 'userprofile', 'appdata', 'localappdata', 'systemroot', 'systemdrive', 'windir', 'comspec', 'pathext', 'temp', 'tmp', 'tmpdir'];
-  const OUTSIDE_ENV = ['http_proxy', 'https_proxy', 'proxy', 'no_proxy', 'all_proxy', 'node_extra_ca_certs', 'node_tls_reject_unauthorized', 'node_options', 'node_use_env_proxy', 'ssl_cert_file', 'ssl_cert_dir', 'openssl_conf', 'openssl_modules', 'hostaliases', 'localdomain', 'res_options', 'prefix', 'destdir'];
+  const OUTSIDE_ENV = ['http_proxy', 'https_proxy', 'proxy', 'all_proxy', 'node_extra_ca_certs', 'node_tls_reject_unauthorized', 'node_use_env_proxy', 'ssl_cert_file', 'ssl_cert_dir', 'openssl_conf', 'openssl_modules', 'hostaliases', 'localdomain', 'res_options', 'prefix', 'destdir'];
+  const NODE_OPTION_RE = /^(--max-old-space-size=\d{1,6}|--max-semi-space-size=\d{1,4}|--enable-source-maps|--no-warnings|--no-deprecation|--trace-warnings|--trace-deprecation)$/;
+  const NPM_OWN_RE = /^npm_(config|lifecycle_|package_|command$|execpath$|node_execpath$)/i;
   const PRE_RE = /-pre-action-hook$/;
   const REPAIR = 'The owner can repair it by running npx -y @getmarrow/install@latest --repair --cwd <project folder> from a terminal outside the project.';
   const HOLD = 'Marrow held this action: its verified local runtime could not start. ' + REPAIR;
@@ -221,35 +228,42 @@ function runtimeCore() {
     }
     return out;
   }
+  function outsideName(key, value) {
+    if (key.toLowerCase() === 'node_options') return value !== undefined && value !== '' && !String(value).split(' ').every((token) => NODE_OPTION_RE.test(token));
+    return OUTSIDE_ENV.includes(key.toLowerCase());
+  }
   function npmOutside(source) {
     const env = source || process.env;
     return Object.keys(env).some((key) => {
       const match = /^npm_config_(.+)$/i.exec(key);
-      return OUTSIDE_ENV.includes(key.toLowerCase()) || Boolean(match && NETWORK_KEYS.includes(match[1].toLowerCase().replace(/-/g, '_')) && !Object.keys(npmNetwork({ [key]: env[key] })).length);
+      return outsideName(key, env[key]) || Boolean(match && NETWORK_KEYS.includes(match[1].toLowerCase().replace(/-/g, '_')) && !Object.keys(npmNetwork({ [key]: env[key] })).length);
     });
   }
   function bareEnv(env) {
-    const base = { npm_config_update_notifier: 'false' };
-    for (const key of Object.keys(env)) if (BASE_ENV.includes(key.toLowerCase())) base[key] = env[key];
+    const base = { npm_config_ignore_scripts: 'true', npm_config_update_notifier: 'false', npm_config_audit: 'false', npm_config_fund: 'false' };
+    for (const key of Object.keys(env)) if (BASE_ENV.includes(key.toLowerCase()) || key === 'npm_config_noproxy') base[key] = env[key];
     return base;
   }
   function npmRead(npm, stage, vars, keys, timeout) {
-    const done = cp().spawnSync(npm.file, [...npm.args, 'config', 'get', ...keys, '--prefix=' + stage], { cwd: stage, env: npm.path ? { ...vars, PATH: npm.path } : vars, stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 1 << 20, timeout: Math.min(timeout, 10000), windowsHide: true, shell: false });
+    const done = cp().spawnSync(npm.file, [...npm.args, 'config', ...(keys ? ['get', ...keys] : ['list']), '--prefix=' + stage], { cwd: stage, env: npm.path ? { ...vars, PATH: npm.path } : vars, stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 1 << 20, timeout: Math.min(timeout, 10000), windowsHide: true, shell: false });
     return done.status === 0 ? String(done.stdout) : null;
   }
   function npmConfigMoves(npm, stage, env, timeout) {
     const full = npmRead(npm, stage, env, CONFIG_KEYS, timeout);
     const plain = npmRead(npm, stage, bareEnv(env), CONFIG_KEYS, timeout);
-    return full === null || plain === null || full !== plain;
+    if (full === null || plain === null || full !== plain) return true;
+    const list = npmRead(npm, stage, env, null, timeout);
+    const plainList = npmRead(npm, stage, bareEnv(env), null, timeout);
+    return list === null || plainList === null || list !== plainList || list.includes('***') || list.split('\n').some((line) => /^(\/\/\S*:)?_?(certfile|keyfile) = /i.test(line));
   }
   function npmForeign(source) {
     const env = source || process.env;
     return Object.keys(env).some((key) => {
-      if (OUTSIDE_ENV.includes(key.toLowerCase())) return true;
+      if (outsideName(key, env[key])) return true;
       const match = /^npm_config_(.+)$/i.exec(key);
       if (!match) return false;
       const name = match[1].toLowerCase().replace(/-/g, '_');
-      if (name === 'registry' || name === '@getmarrow:registry') return Object.keys(npmNetwork({ [key]: env[key] })).length === 0;
+      if (name === 'registry' || name === '@getmarrow:registry' || name === 'noproxy') return Object.keys(npmNetwork({ [key]: env[key] })).length === 0;
       return NETWORK_KEYS.includes(name) || FOREIGN_CONFIG.includes(name);
     });
   }
@@ -280,7 +294,7 @@ function runtimeCore() {
   function npmEnvironment(source, network) {
     const env = {};
     for (const [key, value] of Object.entries(source || process.env)) {
-      if (/^npm_/i.test(key)) continue;
+      if (NPM_OWN_RE.test(key)) continue;
       env[key] = value;
     }
     return { ...env, ...(network || {}), npm_config_ignore_scripts: 'true', npm_config_update_notifier: 'false', npm_config_audit: 'false', npm_config_fund: 'false' };
@@ -291,7 +305,7 @@ function runtimeCore() {
     const timeout = Math.max(1000, Math.min(NPM_TIMEOUT_MS, Number((options && options.timeout) || NPM_TIMEOUT_MS)));
     const source = (options && options.env) || process.env;
     const env = npmEnvironment(source, options && options.network);
-    const passed = Object.keys((options && options.network) || {}).length > 0 || npmOutside(source);
+    const passed = Object.keys((options && options.network) || {}).some((key) => key !== 'npm_config_noproxy') || npmOutside(source);
     const moved = !passed && npmConfigMoves(npm, stage, env, timeout);
     const blank = passed || moved ? stage + '-npmrc' : null;
     const owner = blank ? npmOwnerRegistries(npm, stage, env, timeout, moved || npmForeign(source)) : {};

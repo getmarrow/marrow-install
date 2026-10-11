@@ -64,10 +64,10 @@ function setup() {
   return { work, mcp, sdk, tls: certificates(work), packages: { '@getmarrow/mcp': { [PIN]: mcp }, '@getmarrow/sdk': { [SDK]: sdk } }, token: 'gf' + crypto.randomBytes(18).toString('hex') };
 }
 
-async function startCapture(ctx, label) {
+async function startCapture(ctx, label, extra = {}) {
   const config = path.join(ctx.work, `capture-${label}-${crypto.randomBytes(3).toString('hex')}.json`);
   const counts = `${config}.counts`;
-  fs.writeFileSync(config, JSON.stringify({ packages: ctx.packages, ...(ctx.tls ? { key: ctx.tls.key, cert: ctx.tls.cert } : {}) }));
+  fs.writeFileSync(config, JSON.stringify({ packages: ctx.packages, ...(ctx.tls ? { key: ctx.tls.key, cert: ctx.tls.cert } : {}), ...extra }));
   const child = spawn(process.execPath, [CAPTURE, config, counts], { stdio: ['ignore', 'pipe', 'inherit'], env: { PATH: process.env.PATH, MARROW_CAPTURE_TOKEN: ctx.token } });
   const port = await new Promise((resolve, reject) => {
     let out = '';
@@ -90,7 +90,7 @@ const NPMJS = (c) => `//registry.npmjs.org/:_authToken=${c.t}\n${BASE(c)}`;
 const ROWS = [
   { id: 'L0', what: 'legit: no overrides, owner mirror with auth in ~/.npmrc', legit: true, user: MIRROR },
   { id: 'L1', what: 'legit: owner mirror and owner proxy, both in ~/.npmrc', legit: true, user: (c) => `${MIRROR(c)}proxy=${c.p.url}\n` },
-  { id: 'L2', what: 'legit: ~/.npmrc auth value ${NPM_TOKEN}, NPM_TOKEN in env', legit: true, user: (c) => `registry=${c.m.url}\n//127.0.0.1:${c.m.port}/:_authToken=\${NPM_TOKEN}\n${BASE(c)}`, env: (c) => ({ NPM_TOKEN: c.t }) },
+  { id: 'L2', what: 'legit: ~/.npmrc auth value ${NPM_TOKEN}, NPM_TOKEN in env, owner mirror requires auth (401 without it)', legit: true, authMirror: true, user: (c) => `registry=${c.m.url}\n//127.0.0.1:${c.m.port}/:_authToken=\${NPM_TOKEN}\n${BASE(c)}`, env: (c) => ({ NPM_TOKEN: c.t }) },
   { id: 'A1', what: 'env npm_config_proxy = attacker', user: MIRROR, env: (c) => ({ npm_config_proxy: c.a.url }) },
   { id: 'A2', what: 'env HTTP_PROXY = attacker (plain)', user: MIRROR, env: (c) => ({ HTTP_PROXY: c.a.url }) },
   { id: 'A2b', what: 'env Http_Proxy (mixed case) = attacker, NO_PROXY empty', user: MIRROR, env: (c) => ({ Http_Proxy: c.a.url, NO_PROXY: '' }) },
@@ -126,6 +126,18 @@ const ROWS = [
   { id: 'N3', what: 'owner registry is a host the env proxy also controls (attacker), owner auth for it in ~/.npmrc, env proxy = attacker', user: (c) => `registry=${c.a.url}\n//127.0.0.1:${c.a.port}/:_authToken=${c.t}\n${BASE(c)}`, env: (c) => ({ npm_config_proxy: c.a.url }) },
   { id: 'N4', what: 'env npm_config_registry = attacker while the owner has a mirror (env wins by npm precedence, as on master; no owner auth anywhere)', user: MIRROR, env: (c) => ({ npm_config_registry: c.a.url }) },
   { id: 'N5', what: 'owner scoped @getmarrow:registry URL with userinfo + env proxy = attacker', user: (c) => `registry=${c.m.url}\n@getmarrow:registry=http://u:${c.t}@127.0.0.1:${c.m.port}/\n${BASE(c)}`, env: (c) => ({ npm_config_proxy: c.a.url }) },
+  // FU-1 r4: ${VAR} auth, no-proxy and NODE_OPTIONS rows. The env var names here are what the project controls.
+  { local: true, id: 'V1', what: 'owner registry and auth key host are ${MARROW_MH}, env MARROW_MH = attacker', user: (c) => `registry=http://\${MARROW_MH}/x/\n//\${MARROW_MH}/x/:_authToken=${c.t}\n${BASE(c)}`, env: (c) => ({ MARROW_MH: `127.0.0.1:${c.a.port}` }) },
+  { id: 'V2', what: 'owner registry is the mirror root; auth for the mirror and for //${MARROW_MH}/ (env = attacker): isolated, so the mirror gets no auth either', user: (c) => `registry=${c.m.url}\n//127.0.0.1:${c.m.port}/:_authToken=${c.t}\n//\${MARROW_MH}/:_authToken=${c.t}\n${BASE(c)}`, env: (c) => ({ MARROW_MH: `127.0.0.1:${c.a.port}` }) },
+  { id: 'V3', what: '~/.npmrc auth ${NPM_TOKEN} + env HTTP_PROXY = attacker', user: (c) => `registry=${c.m.url}\n//127.0.0.1:${c.m.port}/:_authToken=\${NPM_TOKEN}\n${BASE(c)}`, env: (c) => ({ NPM_TOKEN: c.t, HTTP_PROXY: c.a.url }) },
+  { id: 'V4', what: '~/.npmrc auth ${NPM_TOKEN}, the project sets NPM_TOKEN to another dummy: only the owner mirror can get it', legit: true, user: (c) => `registry=${c.m.url}\n//127.0.0.1:${c.m.port}/:_authToken=\${NPM_TOKEN}\n${BASE(c)}`, env: () => ({ NPM_TOKEN: 'gf' + crypto.randomBytes(18).toString('hex') }) },
+  { id: 'NP1', what: 'legit: NO_PROXY alone + owner path mirror that requires auth', legit: true, authMirror: true, user: (c) => `registry=http://127.0.0.1:${c.m.port}/team/\n//127.0.0.1:${c.m.port}/:_authToken=${c.t}\n${BASE(c)}`, env: () => ({ NO_PROXY: 'example.invalid', no_proxy: 'example.invalid', npm_config_noproxy: 'example.invalid' }) },
+  { local: true, id: 'NP2', what: 'NO_PROXY + HTTP_PROXY = attacker, owner path-token mirror', user: (c) => `registry=http://127.0.0.1:${c.m.port}/${c.t}/\n${BASE(c)}`, env: (c) => ({ NO_PROXY: 'example.invalid', HTTP_PROXY: c.a.url }) },
+  { id: 'O1', what: 'legit: NODE_OPTIONS=--max-old-space-size=4096 alone + owner path mirror that requires auth', legit: true, authMirror: true, user: (c) => `registry=http://127.0.0.1:${c.m.port}/team/\n//127.0.0.1:${c.m.port}/:_authToken=${c.t}\n${BASE(c)}`, env: () => ({ NODE_OPTIONS: '--max-old-space-size=4096' }) },
+  { id: 'O2', what: 'NODE_OPTIONS=--max-old-space-size=4096 --use-openssl-ca + SSL_CERT_FILE = attacker CA + HTTPS_PROXY = attacker', tls: true, user: NPMJS, env: (c) => ({ NODE_OPTIONS: '--max-old-space-size=4096 --use-openssl-ca', SSL_CERT_FILE: c.tls.ca, HTTPS_PROXY: c.a.url }) },
+  { local: true, id: 'O3', what: 'NODE_OPTIONS=--max-old-space-size=4096 --require <project file> + owner path-token mirror', user: (c) => `registry=http://127.0.0.1:${c.m.port}/${c.t}/\n${BASE(c)}`, files: () => ({ 'x.js': '' }), env: (c) => ({ NODE_OPTIONS: `--max-old-space-size=4096 --require ${path.join(c.root, 'x.js')}` }) },
+  { local: true, id: 'O3t', what: 'NODE_OPTIONS with a tab before --require + owner path-token mirror', user: (c) => `registry=http://127.0.0.1:${c.m.port}/${c.t}/\n${BASE(c)}`, files: () => ({ 'x.js': '' }), env: (c) => ({ NODE_OPTIONS: `--max-old-space-size=4096\t--require ${path.join(c.root, 'x.js')}` }) },
+  { local: true, id: 'O4', what: 'NODE_OPTIONS=--max-old-space-size=4096 --trace-uncaught (not allowlisted) + owner path-token mirror', user: (c) => `registry=http://127.0.0.1:${c.m.port}/${c.t}/\n${BASE(c)}`, env: () => ({ NODE_OPTIONS: '--max-old-space-size=4096 --trace-uncaught' }) },
 ];
 
 const hookFor = (ctx, sub = 'claude-pre-action-hook') => localizeHookCommand(`npx -y --package=@getmarrow/mcp@${PIN} marrow-mcp ${sub}`, PIN, { platform: 'linux', integrity: ctx.mcp.integrity, sdk: { version: SDK, integrity: ctx.sdk.integrity } });
@@ -143,7 +155,7 @@ async function waitForHeal(home) {
 async function runRow(ctx, row, command) {
   const home = tempDir('marrow-fu1-home-');
   const root = tempDir('marrow-fu1-project-');
-  const servers = { m: await startCapture(ctx, 'mirror'), a: await startCapture(ctx, 'attacker'), p: await startCapture(ctx, 'ownproxy') };
+  const servers = { m: await startCapture(ctx, 'mirror', row.authMirror ? { requireAuth: true } : {}), a: await startCapture(ctx, 'attacker'), p: await startCapture(ctx, 'ownproxy') };
   try {
     const c = { ...servers, t: ctx.token, tls: ctx.tls, home, root };
     fs.writeFileSync(path.join(home, '.npmrc'), row.user(c), { mode: 0o600 });

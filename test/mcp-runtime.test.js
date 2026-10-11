@@ -488,6 +488,7 @@ function fakeNpmCli(binDir, { windows = false } = {}) {
   const argsLog = path.join(binDir, 'args.json');
   fs.writeFileSync(path.join(cliDir, 'npm-cli.js'), [
     "const fs = require('fs'); const path = require('path');",
+    "if (process.argv[2] === 'config' && process.argv[3] === 'list') { let owner = {}; try { owner = JSON.parse(fs.readFileSync(path.join(process.env.HOME, '.fake-owner'), 'utf8')); } catch {} if (owner.listFail && process.env.MARROW_TEST_LIST_FAIL) process.exit(1); process.stdout.write(String(owner.list || '').replace(/\\$\\{([^${}]+)\\}/g, (m, n) => (process.env[n] !== undefined ? process.env[n] : m))); process.exit(0); }",
     "if (process.argv[2] === 'config') { const keys = process.argv.slice(4).filter((a) => !a.startsWith('--')); if (process.env.MARROW_TEST_CONFIG_FAIL) process.exit(1); let owner = {}; try { owner = JSON.parse(fs.readFileSync(path.join(process.env.HOME, '.fake-owner'), 'utf8')); } catch {} if (owner.fail && keys.length === 2) process.exit(1); const flip = path.join(process.env.HOME, '.fake-flip'); let n = ''; if (fs.existsSync(flip) && keys.length === 2) { fs.appendFileSync(flip, 'x'); n = String(fs.statSync(flip).size); } process.stdout.write(keys.map((k) => k + '=' + (k === 'registry' ? (process.env.MARROW_TEST_ENV_REGISTRY || owner.registry || 'https://registry.npmjs.org/') + n : k === '@getmarrow:registry' ? owner.scoped || 'undefined' : k === 'proxy' ? owner.proxy || process.env.MARROW_TEST_PROXY || 'null' : 'null')).join('\\n') + '\\n'); process.exit(0); }",
     `fs.writeFileSync(${JSON.stringify(argsLog)}, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd(), npm_env: Object.keys(process.env).filter((k) => /^npm_/i.test(k)).sort(), ignore: process.env.npm_config_ignore_scripts, configs: process.argv.slice(2).filter((a) => /^--(user|global)config=/.test(a)).map((a) => { const file = a.slice(a.indexOf('=') + 1); const stat = fs.statSync(file); return { flag: a.slice(0, a.indexOf('=')), file, size: stat.size, mode: stat.mode & 0o777, text: fs.readFileSync(file, 'utf8') }; }) }));`,
     "const stage = process.cwd();",
@@ -560,12 +561,19 @@ test('FU-1: with any network setting from outside the owner\'s ~/.npmrc, npm get
     // Triggers: an env network setting (passed, or refused as unparseable), a variable npm or node
     // reads, a network setting npm resolves differently under the hook env than under a bare one
     // (here a ~/.npmrc proxy=${MARROW_TEST_PROXY}), and npm failing to answer at all.
-    const triggers = [{ npm_config_proxy: 'http://127.0.0.1:9\r' }, { npm_config_registry: 'http://127.0.0.1:9/${NPM_TOKEN}' }, { npm_config_registry: 'http://127.0.0.1:9/' }, { 'NPM_CONFIG_HTTPS-PROXY': 'http://127.0.0.1:9' }, { npm_config_proxy: 'http://127.0.0.1:9' }, { npm_config_cafile: '/tmp/x' }, { npm_config_ca: 'x' }, { npm_config_noproxy: 'x' }, { 'npm_config_@getmarrow:registry': 'http://127.0.0.1:9/' }, { HTTP_PROXY: 'http://127.0.0.1:9' }, { https_proxy: 'http://127.0.0.1:9' }, { Proxy: 'http://127.0.0.1:9' }, { NO_PROXY: '*' }, { NODE_EXTRA_CA_CERTS: '/tmp/x' }, { NODE_TLS_REJECT_UNAUTHORIZED: '0' }, { NODE_OPTIONS: '--use-openssl-ca' }, { SSL_CERT_FILE: '/tmp/x' }, { PREFIX: '/tmp' }, { DESTDIR: '/tmp' }, { MARROW_TEST_PROXY: 'http://127.0.0.1:9' }, { MARROW_TEST_CONFIG_FAIL: '1' }];
+    const triggers = [{ npm_config_proxy: 'http://127.0.0.1:9\r' }, { npm_config_registry: 'http://127.0.0.1:9/${NPM_TOKEN}' }, { npm_config_registry: 'http://127.0.0.1:9/' }, { 'NPM_CONFIG_HTTPS-PROXY': 'http://127.0.0.1:9' }, { npm_config_proxy: 'http://127.0.0.1:9' }, { npm_config_cafile: '/tmp/x' }, { npm_config_ca: 'x' }, { 'npm_config_@getmarrow:registry': 'http://127.0.0.1:9/' }, { HTTP_PROXY: 'http://127.0.0.1:9' }, { https_proxy: 'http://127.0.0.1:9' }, { Proxy: 'http://127.0.0.1:9' }, { NO_PROXY: '*', HTTP_PROXY: 'http://127.0.0.1:9' }, { npm_config_noproxy: 'x', https_proxy: 'http://127.0.0.1:9' }, { NODE_EXTRA_CA_CERTS: '/tmp/x' }, { NODE_TLS_REJECT_UNAUTHORIZED: '0' }, { NODE_OPTIONS: '--use-openssl-ca' }, { NODE_OPTIONS: '--max-old-space-size=4096 --use-bundled-ca' }, { NODE_OPTIONS: '--max-old-space-size=4096 --trace-uncaught' }, { HOSTALIASES: '/tmp/x' }, { RES_OPTIONS: 'ndots:1' }, { LOCALDOMAIN: 'x' }, { OPENSSL_CONF: '/tmp/x' }, { NODE_USE_ENV_PROXY: '1' }, { SSL_CERT_FILE: '/tmp/x' }, { PREFIX: '/tmp' }, { DESTDIR: '/tmp' }, { MARROW_TEST_PROXY: 'http://127.0.0.1:9' }, { MARROW_TEST_CONFIG_FAIL: '1' }];
     for (const env of triggers) {
       const log = run(env);
       assert.deepEqual(log.configs, [{ flag: '--userconfig', file: `${log.cwd}-npmrc/user`, size: 0, mode: 0o600, text: '' }, { flag: '--globalconfig', file: `${log.cwd}-npmrc/global`, size: 0, mode: 0o600, text: '' }], JSON.stringify(env));
       assert.equal(fs.existsSync(`${log.cwd}-npmrc`), false, 'removed after');
       assert.equal(log.cwd.startsWith(path.join(home, '.marrow', 'runtime', 'mcp', '.stage-')), true, 'run from its own private stage, never the project');
+    }
+    // FU-1 r4: a no-proxy setting alone and a NODE_OPTIONS of only allowlisted flags keep owner mode;
+    // so does a token variable npm does not own (an owner auth value of ${VAR} form expands).
+    for (const env of [{ NO_PROXY: '*' }, { no_proxy: 'localhost' }, { NOPROXY: 'x' }, { npm_config_noproxy: 'x' }, { NODE_OPTIONS: '--max-old-space-size=4096' }, { NODE_OPTIONS: '--max-old-space-size=4096 --no-warnings' }, { NPM_TOKEN: 'gfdummy' }]) {
+      const log = run(env);
+      assert.deepEqual(log.configs, [], `${JSON.stringify(Object.keys(env))}: owner mode`);
+      assert.deepEqual(log.npm_env, ['npm_config_audit', 'npm_config_fund', 'npm_config_ignore_scripts', ...(env.npm_config_noproxy ? ['npm_config_noproxy'] : []), 'npm_config_update_notifier'].concat(env.NPM_TOKEN ? ['NPM_TOKEN'] : []).sort());
     }
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
@@ -618,12 +626,15 @@ test('FU-1 r2: isolated mode writes only the owner\'s registry and @getmarrow:re
       for (const key of ['registry', 'scoped']) assert.equal(run({ [key]: value }, {}).configs[0].text, '', `${key} ${value} is always refused`);
       assert.equal(run({ registry: value }, { HTTP_PROXY: undefined, npm_config_registry: 'https://env.example.test/' }).configs[0].text, '', `${value}: refused even with only an env registry`);
     }
-    const outsideEnvs = [{ HTTP_PROXY: 'http://127.0.0.1:9' }, { http_proxy: 'http://127.0.0.1:9' }, { Https_Proxy: 'http://127.0.0.1:9' }, { ALL_PROXY: 'http://127.0.0.1:9' }, { NO_PROXY: 'x' }, { npm_config_proxy: 'http://127.0.0.1:9' }, { NPM_CONFIG_HTTPS_PROXY: 'http://127.0.0.1:9' }, { npm_config_noproxy: 'x' }, { npm_config_cafile: '/tmp/x' }, { NPM_CONFIG_CA: 'x' }, { npm_config_strict_ssl: 'false' }, { npm_config_strict_ssl: 'true' }, { NODE_EXTRA_CA_CERTS: '/tmp/x' }, { SSL_CERT_FILE: '/tmp/x' }, { SSL_CERT_DIR: '/tmp/x' }, { NODE_OPTIONS: '--use-openssl-ca' }, { NODE_TLS_REJECT_UNAUTHORIZED: '0' }, { npm_config_local_address: '127.0.0.1' }, { npm_config_registry: 'https://env.example.test/${X}' }, { npm_config_proxy: 'http://127.0.0.1:9\r\n' }];
+    const outsideEnvs = [{ HTTP_PROXY: 'http://127.0.0.1:9' }, { http_proxy: 'http://127.0.0.1:9' }, { Https_Proxy: 'http://127.0.0.1:9' }, { ALL_PROXY: 'http://127.0.0.1:9' }, { NO_PROXY: 'x', HTTP_PROXY: 'http://127.0.0.1:9' }, { npm_config_proxy: 'http://127.0.0.1:9' }, { NPM_CONFIG_HTTPS_PROXY: 'http://127.0.0.1:9' }, { npm_config_noproxy: 'x', NODE_EXTRA_CA_CERTS: '/tmp/x' }, { HOSTALIASES: '/tmp/x' }, { RES_OPTIONS: 'ndots:1' }, { LOCALDOMAIN: 'x' }, { OPENSSL_CONF: '/tmp/x' }, { OPENSSL_MODULES: '/tmp/x' }, { PREFIX: '/tmp' }, { DESTDIR: '/tmp' }, { NODE_USE_ENV_PROXY: '1' }, { NODE_OPTIONS: '--max-old-space-size=4096 --use-openssl-ca' }, { NODE_OPTIONS: '--max-old-space-size=4096 --trace-uncaught' }, { npm_config_cafile: '/tmp/x' }, { NPM_CONFIG_CA: 'x' }, { npm_config_strict_ssl: 'false' }, { npm_config_strict_ssl: 'true' }, { NODE_EXTRA_CA_CERTS: '/tmp/x' }, { SSL_CERT_FILE: '/tmp/x' }, { SSL_CERT_DIR: '/tmp/x' }, { NODE_OPTIONS: '--use-openssl-ca' }, { NODE_TLS_REJECT_UNAUTHORIZED: '0' }, { npm_config_local_address: '127.0.0.1' }, { npm_config_registry: 'https://env.example.test/${X}' }, { npm_config_proxy: 'http://127.0.0.1:9\r\n' }];
     for (const env of outsideEnvs) {
       const log = run({ registry: PATHED, scoped: SCOPED }, { HTTP_PROXY: undefined, npm_config_registry: 'https://env.example.test/', ...env });
       assert.equal(log.configs[0].text, `@getmarrow:registry=${SCOPED}\n`, `${JSON.stringify(env)}: a path URL is refused, a root URL still written`);
     }
     assert.equal(run({ registry: PATHED }, { HTTP_PROXY: undefined, npm_config_registry: 'https://env.example.test/' }).configs[0].text, `registry=${PATHED}\n`, 'only an env registry from outside: the path URL is still written');
+    for (const env of [{ NO_PROXY: 'x' }, { npm_config_noproxy: 'x' }, { NOPROXY: 'x' }, { NODE_OPTIONS: '--max-old-space-size=4096' }]) {
+      assert.equal(run({ registry: PATHED }, { HTTP_PROXY: undefined, npm_config_registry: 'https://env.example.test/', ...env }).configs[0].text, `registry=${PATHED}\n`, `FU-1 r4: ${Object.keys(env)[0]} alone is not foreign: the path URL is still written`);
+    }
     assert.equal(run({ scoped: 'http://scoped.example.test:4873/team/' }, { HTTP_PROXY: undefined, 'npm_config_@getmarrow:registry': 'https://env.example.test/' }).configs[0].text, '@getmarrow:registry=http://scoped.example.test:4873/team/\n', 'only an env scoped registry from outside: the path URL is still written');
     assert.equal(run({ registry: PATHED, scoped: SCOPED }, { HTTP_PROXY: undefined, MARROW_TEST_ENV_REGISTRY: 'https://env.example.test/' }).configs[0].text, `@getmarrow:registry=${SCOPED}\n`, 'npm resolving a setting differently under the hook env (nothing else from outside) also refuses a path URL');
     assert.equal(run({ registry: 'https://mirror.example.test//' }, {}).configs[0].text, '', 'a path of // is not /');
@@ -644,6 +655,44 @@ test('FU-1 r2: isolated mode writes only the owner\'s registry and @getmarrow:re
     const envOnly = run(null, { npm_config_registry: 'https://env.example.test/' });
     assert.equal(envOnly.configs[0].text, '');
     assert.ok(envOnly.npm_env.includes('npm_config_registry'));
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(path.dirname(bin), { recursive: true, force: true });
+  }
+});
+
+test('FU-1 r4: npm config list must match under the hook env and a bare one: config key names (auth key hosts included) and every shown value; only a (protected) auth value may differ; a certfile, keyfile or redacted value, or a failed list, isolates', () => {
+  const home = deadRegistryHome(tempDir('marrow-runtime-fu1r4-home-'));
+  const bin = path.join(tempDir('marrow-runtime-fu1r4-prefix-'), 'bin');
+  fs.mkdirSync(bin);
+  const { node, argsLog } = fakeNpmCli(bin);
+  const owner = path.join(home, '.fake-owner');
+  const base = { HOME: home, PATH: `${path.dirname(process.execPath)}:/usr/bin:/bin` };
+  const mode = (config, env) => {
+    fs.rmSync(runtimeDir(home, PIN), { recursive: true, force: true });
+    fs.writeFileSync(owner, JSON.stringify(config));
+    const result = ensureMcpRuntime({ home, version: PIN, integrity: PINS.MCP_ADAPTER_INTEGRITY, sdk: { version: PINS.SDK_ADAPTER_VERSION, integrity: PINS.SDK_ADAPTER_INTEGRITY }, npmExecPath: node, env: { ...base, ...env } });
+    assert.equal(result.state, 'installed', JSON.stringify(result));
+    return JSON.parse(fs.readFileSync(argsLog, 'utf8')).configs.length ? 'isolated' : 'owner';
+  };
+  const AUTH = '; "user" config from /h/.npmrc\n\n//mirror.example.test/x/:_authToken = (protected)\nregistry = "http://mirror.example.test/x/"\n';
+  try {
+    assert.equal(mode({ list: AUTH }, { MARROW_TEST_HOST: 'evil.example.test' }), 'owner', 'identical names and values, auth shown as (protected): owner mode');
+    assert.equal(mode({ list: '//mirror.example.test/x/:_authToken = (protected)\n' }, {}), 'owner');
+    const isolated = [
+      [{ list: '//${MARROW_TEST_HOST}/x/:_authToken = (protected)\nregistry = "http://mirror.example.test/x/"\n' }, { MARROW_TEST_HOST: 'evil.example.test' }, 'V2: a ${VAR} in an auth key host'],
+      [{ list: '//mirror.example.test/x/:${MARROW_TEST_KEY} = (protected)\n' }, { MARROW_TEST_KEY: '_password' }, 'a ${VAR} in an auth key name'],
+      [{ list: '@other:registry = "http://${MARROW_TEST_HOST}/"\n' }, { MARROW_TEST_HOST: 'evil.example.test' }, 'a ${VAR} in another scope registry'],
+      [{ list: 'https-proxy = "http://${MARROW_TEST_HOST}/"\n' }, { MARROW_TEST_HOST: 'evil.example.test' }, 'a ${VAR} in any shown routing value'],
+      [{ list: 'some-new-key = "${MARROW_TEST_HOST}"\n' }, { MARROW_TEST_HOST: 'x' }, 'a difference in an unclassified key'],
+      [{ list: '//mirror.example.test/:certfile = (protected)\n' }, {}, 'a certfile npm never shows'],
+      [{ list: '//mirror.example.test/:keyfile = (protected)\n' }, {}, 'a keyfile npm never shows'],
+      [{ list: 'certfile = (protected)\n' }, {}, 'a top-level certfile'],
+      [{ list: 'KEYFILE = (protected)\n' }, {}, 'a keyfile in any case'],
+      [{ list: '@other:registry = "http://u:***@mirror.example.test/"\n' }, {}, 'a value npm redacted'],
+      [{ list: AUTH, listFail: true }, { MARROW_TEST_LIST_FAIL: '1' }, 'a list that fails'],
+    ];
+    for (const [config, env, what] of isolated) assert.equal(mode(config, env), 'isolated', what);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
     fs.rmSync(path.dirname(bin), { recursive: true, force: true });
