@@ -82,8 +82,8 @@ async function startCapture(ctx, label) {
 
 // Each row: the owner's ~/.npmrc, the project's .npmrc, extra files, and the hook env. `m` is the
 // owner's own mirror (auth for it in ~/.npmrc), `a` the attacker; `t` the dummy token. `local`
-// rows also get a dead HTTPS_PROXY on head only: head reads no owner config there whatever it
-// adds, and its default https registry must not be the real one. Master (npx) never needs it.
+// rows also get a dead HTTPS_PROXY on head only: the owner URL is refused there, so head falls back
+// to npm's default https registry, which must not be the real one. Master (npx) never needs it.
 const BASE = ({ home }) => `cache=${path.join(home, '.npm-cache')}\nfetch-retries=0\nfetch-timeout=5000\n`;
 const MIRROR = (c) => `registry=${c.m.url}\n//127.0.0.1:${c.m.port}/:_authToken=${c.t}\n${BASE(c)}`;
 const NPMJS = (c) => `//registry.npmjs.org/:_authToken=${c.t}\n${BASE(c)}`;
@@ -92,15 +92,15 @@ const ROWS = [
   { id: 'L1', what: 'legit: owner mirror and owner proxy, both in ~/.npmrc', legit: true, user: (c) => `${MIRROR(c)}proxy=${c.p.url}\n` },
   { id: 'L2', what: 'legit: ~/.npmrc auth value ${NPM_TOKEN}, NPM_TOKEN in env', legit: true, user: (c) => `registry=${c.m.url}\n//127.0.0.1:${c.m.port}/:_authToken=\${NPM_TOKEN}\n${BASE(c)}`, env: (c) => ({ NPM_TOKEN: c.t }) },
   { id: 'A1', what: 'env npm_config_proxy = attacker', user: MIRROR, env: (c) => ({ npm_config_proxy: c.a.url }) },
-  { local: true, id: 'A2', what: 'env HTTP_PROXY = attacker (plain)', user: MIRROR, env: (c) => ({ HTTP_PROXY: c.a.url }) },
-  { local: true, id: 'A2b', what: 'env Http_Proxy (mixed case) = attacker, NO_PROXY empty', user: MIRROR, env: (c) => ({ Http_Proxy: c.a.url, NO_PROXY: '' }) },
-  { local: true, id: 'A2c', what: 'env plain proxy = attacker + npm_config_noproxy=localhost', user: MIRROR, env: (c) => ({ proxy: c.a.url, npm_config_noproxy: 'localhost' }) },
+  { id: 'A2', what: 'env HTTP_PROXY = attacker (plain)', user: MIRROR, env: (c) => ({ HTTP_PROXY: c.a.url }) },
+  { id: 'A2b', what: 'env Http_Proxy (mixed case) = attacker, NO_PROXY empty', user: MIRROR, env: (c) => ({ Http_Proxy: c.a.url, NO_PROXY: '' }) },
+  { id: 'A2c', what: 'env plain proxy = attacker + npm_config_noproxy=localhost', user: MIRROR, env: (c) => ({ proxy: c.a.url, npm_config_noproxy: 'localhost' }) },
   { id: 'A3', what: 'env npm_config_https_proxy = attacker + npm_config_cafile = attacker CA', tls: true, user: NPMJS, env: (c) => ({ npm_config_https_proxy: c.a.url, npm_config_cafile: c.tls.ca }) },
   { id: 'A3b', what: 'env NPM_CONFIG_HTTPS-PROXY + npm_config_ca (inline PEM)', tls: true, user: NPMJS, env: (c) => ({ 'NPM_CONFIG_HTTPS-PROXY': c.a.url, npm_config_ca: fs.readFileSync(c.tls.ca, 'utf8').trim().replace(/\n/g, '\\n') }) },
   { id: 'A4', what: 'env HTTPS_PROXY + NODE_EXTRA_CA_CERTS = attacker CA', tls: true, user: NPMJS, env: (c) => ({ HTTPS_PROXY: c.a.url, NODE_EXTRA_CA_CERTS: c.tls.ca }) },
   { id: 'A5', what: 'env npm_config_registry = attacker', user: MIRROR, env: (c) => ({ npm_config_registry: c.a.url }) },
   { id: 'A5b', what: 'env npm_config_registry = attacker, owner auth unscoped in ~/.npmrc', user: (c) => `_authToken=${c.t}\n${MIRROR(c)}`, env: (c) => ({ npm_config_registry: c.a.url }) },
-  { local: true, id: 'A6', what: 'env npm_config_@getmarrow:registry = attacker', user: MIRROR, env: (c) => ({ 'npm_config_@getmarrow:registry': c.a.url }) },
+  { id: 'A6', what: 'env npm_config_@getmarrow:registry = attacker', user: MIRROR, env: (c) => ({ 'npm_config_@getmarrow:registry': c.a.url }) },
   { id: 'A7', what: 'project .npmrc proxy = attacker', user: MIRROR, project: (c) => `proxy=${c.a.url}\n` },
   { id: 'A7b', what: 'project .npmrc registry = attacker', user: MIRROR, project: (c) => `registry=${c.a.url}\n` },
   { id: 'A7c', what: 'project .npmrc registry=https npmjs + https-proxy = attacker + cafile = attacker CA', tls: true, user: (c) => `${MIRROR(c)}//registry.npmjs.org/:_authToken=${c.t}\n`, project: (c) => `registry=https://registry.npmjs.org/\nhttps-proxy=${c.a.url}\ncafile=${c.tls.ca}\n` },
@@ -109,12 +109,17 @@ const ROWS = [
   { id: 'A10', what: 'auth in env npm_config__authToken + env proxy = attacker', user: (c) => `registry=${c.m.url}\n${BASE(c)}`, env: (c) => ({ npm_config__authToken: c.t, npm_config_proxy: c.a.url }) },
   { id: 'A10b', what: 'auth in env NPM_CONFIG_//host/:_authToken + env proxy = attacker', user: (c) => `registry=${c.m.url}\n${BASE(c)}`, env: (c) => ({ [`NPM_CONFIG_//127.0.0.1:${c.m.port}/:_authToken`]: c.t, npm_config_proxy: c.a.url }) },
   { id: 'A10c', what: 'auth in env Npm_Config_//host/:_AuthToken (mixed) + env Proxy = attacker', user: (c) => `registry=${c.m.url}\n${BASE(c)}`, env: (c) => ({ [`Npm_Config_//127.0.0.1:${c.m.port}/:_AuthToken`]: c.t, Npm_Config_Proxy: c.a.url }) },
-  { local: true, id: 'A11', what: 'env npm_config_proxy = attacker followed by CRLF', user: MIRROR, env: (c) => ({ npm_config_proxy: `${c.a.url}\r\n` }) },
+  { id: 'A11', what: 'env npm_config_proxy = attacker followed by CRLF', user: MIRROR, env: (c) => ({ npm_config_proxy: `${c.a.url}\r\n` }) },
   { id: 'A12', what: 'env npm_config_strict_ssl=false + https-proxy = attacker (no CA)', tls: true, user: NPMJS, env: (c) => ({ npm_config_strict_ssl: 'false', npm_config_https_proxy: c.a.url }) },
   { id: 'A12b', what: 'env NODE_TLS_REJECT_UNAUTHORIZED=0 + HTTPS_PROXY = attacker (no CA)', tls: true, user: NPMJS, env: (c) => ({ NODE_TLS_REJECT_UNAUTHORIZED: '0', HTTPS_PROXY: c.a.url }) },
   { id: 'A13', what: 'project .npmrc userconfig = attacker file (proxy, ${NPM_TOKEN} auth)', user: (c) => `registry=${c.m.url}\n//127.0.0.1:${c.m.port}/:_authToken=\${NPM_TOKEN}\n${BASE(c)}`, files: (c) => ({ 'evil.npmrc': `registry=${c.m.url}\nproxy=${c.a.url}\n//127.0.0.1:${c.m.port}/:_authToken=\${NPM_TOKEN}\n${BASE(c)}` }), project: (c) => `userconfig=${path.join(c.root, 'evil.npmrc')}\n`, env: (c) => ({ NPM_TOKEN: c.t }) },
-  { local: true, id: 'A14', what: '~/.npmrc proxy=${MARROW_P}, env MARROW_P = attacker', user: (c) => `${MIRROR(c)}proxy=\${MARROW_P}\n`, env: (c) => ({ MARROW_P: c.a.url }) },
-  { local: true, id: 'A15', what: 'env PREFIX = project dir whose etc/npmrc names proxy = attacker', user: MIRROR, files: (c) => ({ 'etc/npmrc': `proxy=${c.a.url}\n` }), env: (c) => ({ PREFIX: c.root }) },
+  { id: 'A14', what: '~/.npmrc proxy=${MARROW_P}, env MARROW_P = attacker', user: (c) => `${MIRROR(c)}proxy=\${MARROW_P}\n`, env: (c) => ({ MARROW_P: c.a.url }) },
+  { id: 'A15', what: 'env PREFIX = project dir whose etc/npmrc names proxy = attacker', user: MIRROR, files: (c) => ({ 'etc/npmrc': `proxy=${c.a.url}\n` }), env: (c) => ({ PREFIX: c.root }) },
+  { id: 'N1', what: 'owner registry URL has userinfo carrying the token + env proxy = attacker', user: (c) => `registry=http://owner:${c.t}@127.0.0.1:${c.m.port}/\n${BASE(c)}`, env: (c) => ({ npm_config_proxy: c.a.url }) },
+  { local: true, id: 'N2', what: 'owner registry URL is ${MARROW_R}, env MARROW_R = attacker (auth for the attacker host in ~/.npmrc)', user: (c) => `registry=\${MARROW_R}\n//127.0.0.1:${c.a.port}/:_authToken=${c.t}\n${BASE(c)}`, env: (c) => ({ MARROW_R: c.a.url }) },
+  { id: 'N3', what: 'owner registry is a host the env proxy also controls (attacker), owner auth for it in ~/.npmrc, env proxy = attacker', user: (c) => `registry=${c.a.url}\n//127.0.0.1:${c.a.port}/:_authToken=${c.t}\n${BASE(c)}`, env: (c) => ({ npm_config_proxy: c.a.url }) },
+  { id: 'N4', what: 'env npm_config_registry = attacker while the owner has a mirror (env wins by npm precedence, as on master; no owner auth anywhere)', user: MIRROR, env: (c) => ({ npm_config_registry: c.a.url }) },
+  { id: 'N5', what: 'owner scoped @getmarrow:registry URL with userinfo + env proxy = attacker', user: (c) => `registry=${c.m.url}\n@getmarrow:registry=http://u:${c.t}@127.0.0.1:${c.m.port}/\n${BASE(c)}`, env: (c) => ({ npm_config_proxy: c.a.url }) },
 ];
 
 const hookFor = (ctx, sub = 'claude-pre-action-hook') => localizeHookCommand(`npx -y --package=@getmarrow/mcp@${PIN} marrow-mcp ${sub}`, PIN, { platform: 'linux', integrity: ctx.mcp.integrity, sdk: { version: SDK, integrity: ctx.sdk.integrity } });
@@ -142,7 +147,9 @@ async function runRow(ctx, row, command) {
       fs.writeFileSync(path.join(root, name), text);
     }
     const env = { HOME: home, PATH: `${path.dirname(process.execPath)}:/usr/bin:/bin`, ...(row.local && !command ? { HTTPS_PROXY: 'http://127.0.0.1:9' } : {}), ...(row.env ? row.env(c) : {}) };
-    const result = spawnSync('/bin/sh', ['-c', command || hookFor(ctx)], { cwd: root, env, input: EVENT, encoding: 'latin1', timeout: 90_000 });
+    // dash drops env names that are not shell identifiers (npm_config_@scope:registry, NPM_CONFIG_HTTPS-PROXY, NPM_CONFIG_//host/:_authToken); bash passes them on, as the user's shell or a host can.
+    const shell = Object.keys(env).every((name) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) ? '/bin/sh' : '/bin/bash';
+    const result = spawnSync(shell, ['-c', command || hookFor(ctx)], { cwd: root, env, input: EVENT, encoding: 'latin1', timeout: 90_000 });
     await waitForHeal(home);
     const leaked = [result.stdout, result.stderr].filter((text) => String(text || '').includes(ctx.token)).length;
     return {

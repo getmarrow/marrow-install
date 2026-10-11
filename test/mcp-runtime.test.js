@@ -488,8 +488,8 @@ function fakeNpmCli(binDir, { windows = false } = {}) {
   const argsLog = path.join(binDir, 'args.json');
   fs.writeFileSync(path.join(cliDir, 'npm-cli.js'), [
     "const fs = require('fs'); const path = require('path');",
-    "if (process.argv[2] === 'config') { process.stdout.write('registry=http://127.0.0.1:9/\\nproxy=' + (process.env.MARROW_TEST_PROXY || 'null') + '\\n'); process.exit(process.env.MARROW_TEST_CONFIG_FAIL ? 1 : 0); }",
-    `fs.writeFileSync(${JSON.stringify(argsLog)}, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd(), npm_env: Object.keys(process.env).filter((k) => /^npm_/i.test(k)).sort(), ignore: process.env.npm_config_ignore_scripts, configs: process.argv.slice(2).filter((a) => /^--(user|global)config=/.test(a)).map((a) => { const file = a.slice(a.indexOf('=') + 1); const stat = fs.statSync(file); return { flag: a.slice(0, a.indexOf('=')), file, size: stat.size, mode: stat.mode & 0o777 }; }) }));`,
+    "if (process.argv[2] === 'config') { const keys = process.argv.slice(4).filter((a) => !a.startsWith('--')); if (process.env.MARROW_TEST_CONFIG_FAIL) process.exit(1); let owner = {}; try { owner = JSON.parse(fs.readFileSync(path.join(process.env.HOME, '.fake-owner'), 'utf8')); } catch {} if (owner.fail && keys.length === 2) process.exit(1); const flip = path.join(process.env.HOME, '.fake-flip'); let n = ''; if (fs.existsSync(flip) && keys.length === 2) { fs.appendFileSync(flip, 'x'); n = String(fs.statSync(flip).size); } process.stdout.write(keys.map((k) => k + '=' + (k === 'registry' ? (process.env.MARROW_TEST_ENV_REGISTRY || owner.registry || 'https://registry.npmjs.org/') + n : k === '@getmarrow:registry' ? owner.scoped || 'undefined' : k === 'proxy' ? owner.proxy || process.env.MARROW_TEST_PROXY || 'null' : 'null')).join('\\n') + '\\n'); process.exit(0); }",
+    `fs.writeFileSync(${JSON.stringify(argsLog)}, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd(), npm_env: Object.keys(process.env).filter((k) => /^npm_/i.test(k)).sort(), ignore: process.env.npm_config_ignore_scripts, configs: process.argv.slice(2).filter((a) => /^--(user|global)config=/.test(a)).map((a) => { const file = a.slice(a.indexOf('=') + 1); const stat = fs.statSync(file); return { flag: a.slice(0, a.indexOf('=')), file, size: stat.size, mode: stat.mode & 0o777, text: fs.readFileSync(file, 'utf8') }; }) }));`,
     "const stage = process.cwd();",
     "const version = process.argv.find((a) => a.startsWith('@getmarrow/mcp@')).slice('@getmarrow/mcp@'.length);",
     "const mcp = path.join(stage, 'node_modules', '@getmarrow', 'mcp'); const sdk = path.join(stage, 'node_modules', '@getmarrow', 'sdk');",
@@ -524,7 +524,7 @@ test('the default installer path runs node + npm-cli.js (no shell, no npm on PAT
     assert.deepEqual(log.npm_env, ['npm_config_audit', 'npm_config_fund', 'npm_config_ignore_scripts', 'npm_config_registry', 'npm_config_update_notifier'], 'prefix and userconfig overrides are removed; the registry (a network setting) is kept (B1)');
     // FU-1: the registry came from env, so npm reads no owner config at all: an empty private user
     // and global config next to the stage, deleted after.
-    assert.deepEqual(log.configs, [{ flag: '--userconfig', file: `${log.cwd}-npmrc/user`, size: 0, mode: 0o600 }, { flag: '--globalconfig', file: `${log.cwd}-npmrc/global`, size: 0, mode: 0o600 }]);
+    assert.deepEqual(log.configs, [{ flag: '--userconfig', file: `${log.cwd}-npmrc/user`, size: 0, mode: 0o600, text: '' }, { flag: '--globalconfig', file: `${log.cwd}-npmrc/global`, size: 0, mode: 0o600, text: '' }]);
     assert.equal(fs.existsSync(`${log.cwd}-npmrc`), false, 'the empty configs are removed');
     assert.equal(log.ignore, 'true');
     assert.equal(fs.existsSync(path.join(home, 'shim-npm')) || fs.existsSync(path.join(home, 'shim-npx')), false);
@@ -563,10 +563,70 @@ test('FU-1: with any network setting from outside the owner\'s ~/.npmrc, npm get
     const triggers = [{ npm_config_proxy: 'http://127.0.0.1:9\r' }, { npm_config_registry: 'http://127.0.0.1:9/${NPM_TOKEN}' }, { npm_config_registry: 'http://127.0.0.1:9/' }, { 'NPM_CONFIG_HTTPS-PROXY': 'http://127.0.0.1:9' }, { npm_config_proxy: 'http://127.0.0.1:9' }, { npm_config_cafile: '/tmp/x' }, { npm_config_ca: 'x' }, { npm_config_noproxy: 'x' }, { 'npm_config_@getmarrow:registry': 'http://127.0.0.1:9/' }, { HTTP_PROXY: 'http://127.0.0.1:9' }, { https_proxy: 'http://127.0.0.1:9' }, { Proxy: 'http://127.0.0.1:9' }, { NO_PROXY: '*' }, { NODE_EXTRA_CA_CERTS: '/tmp/x' }, { NODE_TLS_REJECT_UNAUTHORIZED: '0' }, { NODE_OPTIONS: '--use-openssl-ca' }, { SSL_CERT_FILE: '/tmp/x' }, { PREFIX: '/tmp' }, { DESTDIR: '/tmp' }, { MARROW_TEST_PROXY: 'http://127.0.0.1:9' }, { MARROW_TEST_CONFIG_FAIL: '1' }];
     for (const env of triggers) {
       const log = run(env);
-      assert.deepEqual(log.configs, [{ flag: '--userconfig', file: `${log.cwd}-npmrc/user`, size: 0, mode: 0o600 }, { flag: '--globalconfig', file: `${log.cwd}-npmrc/global`, size: 0, mode: 0o600 }], JSON.stringify(env));
+      assert.deepEqual(log.configs, [{ flag: '--userconfig', file: `${log.cwd}-npmrc/user`, size: 0, mode: 0o600, text: '' }, { flag: '--globalconfig', file: `${log.cwd}-npmrc/global`, size: 0, mode: 0o600, text: '' }], JSON.stringify(env));
       assert.equal(fs.existsSync(`${log.cwd}-npmrc`), false, 'removed after');
       assert.equal(log.cwd.startsWith(path.join(home, '.marrow', 'runtime', 'mcp', '.stage-')), true, 'run from its own private stage, never the project');
     }
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(path.dirname(bin), { recursive: true, force: true });
+  }
+});
+
+test('FU-1 r2: isolated mode writes only the owner\'s registry and @getmarrow:registry URL, read under a bare env, never auth, proxy or CA; an unsafe or unstable value writes nothing', () => {
+  const home = deadRegistryHome(tempDir('marrow-runtime-fu1r2-home-'));
+  const bin = path.join(tempDir('marrow-runtime-fu1r2-prefix-'), 'bin');
+  fs.mkdirSync(bin);
+  const { node, argsLog } = fakeNpmCli(bin);
+  const base = { HOME: home, PATH: `${path.dirname(process.execPath)}:/usr/bin:/bin`, HTTP_PROXY: 'http://127.0.0.1:9' };
+  const owner = path.join(home, '.fake-owner');
+  const flip = path.join(home, '.fake-flip');
+  const run = (file, env) => {
+    fs.rmSync(runtimeDir(home, PIN), { recursive: true, force: true });
+    fs.rmSync(owner, { force: true });
+    fs.rmSync(flip, { force: true });
+    if (file) fs.writeFileSync(owner, JSON.stringify(file.config || file));
+    if (file && file.flip) fs.writeFileSync(flip, '');
+    const result = ensureMcpRuntime({ home, version: PIN, integrity: PINS.MCP_ADAPTER_INTEGRITY, sdk: { version: PINS.SDK_ADAPTER_VERSION, integrity: PINS.SDK_ADAPTER_INTEGRITY }, npmExecPath: node, env: { ...base, ...env } });
+    assert.equal(result.state, 'installed', JSON.stringify(result));
+    const log = JSON.parse(fs.readFileSync(argsLog, 'utf8'));
+    assert.deepEqual(log.configs.map((c) => c.flag), ['--userconfig', '--globalconfig']);
+    assert.equal(log.configs[1].text, '', 'the global config stays empty');
+    assert.equal(fs.existsSync(`${log.cwd}-npmrc`), false, 'removed after');
+    return log;
+  };
+  const MIRROR = 'https://mirror.example.test/npm/';
+  const SCOPED = 'http://scoped.example.test:4873/';
+  try {
+    assert.equal(run(null, {}).configs[0].text, '', 'npm default registry: nothing to write');
+    const both = run({ registry: MIRROR, scoped: SCOPED, proxy: 'http://p.example.test:3128/' }, {});
+    assert.equal(both.configs[0].text, `registry=${MIRROR}\n@getmarrow:registry=${SCOPED}\n`, 'only the two URLs; no proxy, auth or CA');
+    assert.equal(both.configs[0].mode, 0o600);
+    assert.equal(run({ registry: MIRROR }, {}).configs[0].text, `registry=${MIRROR}\n`);
+    assert.equal(run({ scoped: SCOPED }, {}).configs[0].text, `@getmarrow:registry=${SCOPED}\n`);
+    const refused = ['https://user@mirror.example.test/', 'https://user:pass@mirror.example.test/', 'https://:pass@mirror.example.test/', 'https://mirror.example.test@evil.example.test/', 'https://mirror.example.test/${NPM_TOKEN}/', 'https://${HOST}/', 'https://mirror.example.test/\nproxy=http://evil.example.test/', 'https://mirror.example.test/\r', 'https://mirror.example.test/\u0000', `https://mirror.example.test/${'a'.repeat(2048)}`, 'ftp://mirror.example.test/', 'file:///tmp/x', '//mirror.example.test/', 'mirror.example.test', 'https://mirror.example.test/#x', 'https://mirror.example.test/;x', 'https://mirror.example.test/a b', 'https://mirror.example.test/"', "https://mirror.example.test/'", 'https://mirror.example.test/\\x', 'null', 'undefined', ''];
+    for (const value of refused) {
+      for (const key of ['registry', 'scoped']) {
+        const log = run({ [key]: value }, {});
+        assert.equal(log.configs[0].text, '', `${key} ${JSON.stringify(value)} is refused`);
+      }
+    }
+    const mixed = run({ registry: 'https://user@mirror.example.test/', scoped: SCOPED }, {});
+    assert.equal(mixed.configs[0].text, `@getmarrow:registry=${SCOPED}\n`, 'a refused key writes nothing; the other still passes');
+    assert.equal(run({ config: { registry: MIRROR }, flip: true }, {}).configs[0].text, '', 'a value that differs between two reads is refused');
+    assert.equal(run({ registry: MIRROR, fail: true }, {}).configs[0].text, '', 'npm failing to answer the owner read writes nothing');
+    assert.equal(run({ registry: MIRROR }, { MARROW_TEST_ENV_REGISTRY: 'https://env.example.test/' }).configs[0].text, `registry=${MIRROR}\n`, 'the owner URL is read under a bare env, never the hook env');
+    for (const env of [{ npm_config_proxy: 'http://127.0.0.1:9' }, { npm_config__authToken: 'x', npm_config_cafile: '/tmp/x' }]) {
+      assert.equal(run({ registry: MIRROR, proxy: 'http://p.example.test:3128/' }, env).configs[0].text, `registry=${MIRROR}\n`, 'no proxy, CA or auth from the owner config');
+    }
+    // An env registry keeps npm's precedence (env over user config, as on master), and the user
+    // config still carries the owner URLs only, no auth: the env registry never meets owner data.
+    const envRegistry = run({ registry: MIRROR, scoped: SCOPED }, { npm_config_registry: 'https://env.example.test/' });
+    assert.equal(envRegistry.configs[0].text, `registry=${MIRROR}\n@getmarrow:registry=${SCOPED}\n`);
+    assert.deepEqual(envRegistry.npm_env, ['npm_config_audit', 'npm_config_fund', 'npm_config_ignore_scripts', 'npm_config_registry', 'npm_config_update_notifier']);
+    const envOnly = run(null, { npm_config_registry: 'https://env.example.test/' });
+    assert.equal(envOnly.configs[0].text, '');
+    assert.ok(envOnly.npm_env.includes('npm_config_registry'));
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
     fs.rmSync(path.dirname(bin), { recursive: true, force: true });
@@ -591,7 +651,7 @@ test('FU-1 consumers: every host\'s Marrow hook, the Cline scripts and the MCP s
     for (const text of texts) {
       for (const packed of text.match(/brotliDecompressSync\(Buffer\.from\(\/([A-Za-z0-9_-]+)\/\.source/g) || []) {
         const source = zlib.brotliDecompressSync(Buffer.from(packed.match(/\/([A-Za-z0-9_-]+)\//)[1], 'base64url')).toString();
-        assert.ok(source.includes('npmOutside(source) || npmConfigMoves(npm, stage, env, timeout)') && source.includes("'--globalconfig=' + path.join(blank, 'global')"), 'the loader carries the FU-1 guard');
+        assert.ok(source.includes('npmOutside(source) || npmConfigMoves(npm, stage, env, timeout)') && source.includes('npmOwnerRegistries(npm, stage, env, timeout)') && source.includes("'--globalconfig=' + path.join(blank, 'global')"), 'the loader carries the FU-1 guard');
         loaders += 1;
       }
     }

@@ -21,8 +21,13 @@
 // setting comes from outside it: none passed from env, none refused as unparseable, no proxy, CA,
 // TLS, DNS, OpenSSL or PREFIX variable that npm or node reads, and npm resolving the same network
 // settings under the hook env as under a bare one (no env-expanded value). Otherwise npm reads
-// empty private user and global configs (removed after), so no auth is sent: the pinned public
-// tarballs need none. A project npm config is never read (the stage is the prefix and working dir).
+// private user and global configs (removed after) that carry no auth, proxy, CA or TLS setting:
+// the global one is empty and the user one holds only the owner's registry and @getmarrow:registry
+// URLs, taken from `npm config get` under a bare env (read twice, equal), each refused when it has
+// userinfo, a control character, a ${ , is over 2048 characters or is not http(s). An env
+// registry keeps npm's precedence (env over user config), exactly as before, and gets no owner
+// data. The pinned public tarballs need no auth. A project npm config is never read (the stage is
+// the prefix and working dir).
 // Self-heal: one lock per version (a directory created atomically), a detached child that does
 // the install so a host timeout cannot kill it half way, a bounded wait in the hook, and a
 // failure record per project (keyed by the sha256 of the project's real path) so an offline
@@ -47,6 +52,8 @@ function runtimeCore() {
   const ATTEMPT_MS = 30000;
   const NETWORK_KEYS = ['registry', '@getmarrow:registry', 'proxy', 'https_proxy', 'noproxy', 'cafile', 'ca'];
   const CONFIG_KEYS = ['registry', '@getmarrow:registry', 'proxy', 'https-proxy', 'noproxy', 'cafile', 'ca', 'strict-ssl', 'local-address', 'replace-registry-host', 'userconfig', 'globalconfig'];
+  const OWNER_KEYS = ['registry', '@getmarrow:registry'];
+  const DEFAULT_REGISTRY = 'https://registry.npmjs.org';
   const BASE_ENV = ['path', 'home', 'userprofile', 'appdata', 'localappdata', 'systemroot', 'systemdrive', 'windir', 'comspec', 'pathext', 'temp', 'tmp', 'tmpdir'];
   const OUTSIDE_ENV = ['http_proxy', 'https_proxy', 'proxy', 'no_proxy', 'all_proxy', 'node_extra_ca_certs', 'node_tls_reject_unauthorized', 'node_options', 'node_use_env_proxy', 'ssl_cert_file', 'ssl_cert_dir', 'openssl_conf', 'openssl_modules', 'hostaliases', 'localdomain', 'res_options', 'prefix', 'destdir'];
   const PRE_RE = /-pre-action-hook$/;
@@ -218,13 +225,42 @@ function runtimeCore() {
       return OUTSIDE_ENV.includes(key.toLowerCase()) || Boolean(match && NETWORK_KEYS.includes(match[1].toLowerCase().replace(/-/g, '_')) && !Object.keys(npmNetwork({ [key]: env[key] })).length);
     });
   }
-  function npmConfigMoves(npm, stage, env, timeout) {
+  function bareEnv(env) {
     const base = { npm_config_update_notifier: 'false' };
     for (const key of Object.keys(env)) if (BASE_ENV.includes(key.toLowerCase())) base[key] = env[key];
-    const read = (vars) => cp().spawnSync(npm.file, [...npm.args, 'config', 'get', ...CONFIG_KEYS, '--prefix=' + stage], { cwd: stage, env: npm.path ? { ...vars, PATH: npm.path } : vars, stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 1 << 20, timeout: Math.min(timeout, 10000), windowsHide: true, shell: false });
-    const full = read(env);
-    const plain = read(base);
-    return full.status !== 0 || plain.status !== 0 || String(full.stdout) !== String(plain.stdout);
+    return base;
+  }
+  function npmRead(npm, stage, vars, keys, timeout) {
+    const done = cp().spawnSync(npm.file, [...npm.args, 'config', 'get', ...keys, '--prefix=' + stage], { cwd: stage, env: npm.path ? { ...vars, PATH: npm.path } : vars, stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 1 << 20, timeout: Math.min(timeout, 10000), windowsHide: true, shell: false });
+    return done.status === 0 ? String(done.stdout) : null;
+  }
+  function npmConfigMoves(npm, stage, env, timeout) {
+    const full = npmRead(npm, stage, env, CONFIG_KEYS, timeout);
+    const plain = npmRead(npm, stage, bareEnv(env), CONFIG_KEYS, timeout);
+    return full === null || plain === null || full !== plain;
+  }
+  function ownerUrl(value) {
+    if (typeof value !== 'string' || value.length > 2048 || /[^\x21-\x7e]|["'\\#;`]|\$\{/.test(value) || !/^https?:\/\/[^/?]+/i.test(value)) return null;
+    if (/^https?:\/\/[^/?]*@/i.test(value)) return null;
+    try {
+      const url = new URL(value);
+      return (url.protocol === 'http:' || url.protocol === 'https:') && url.hostname && !url.username && !url.password ? value : null;
+    } catch {
+      return null;
+    }
+  }
+  function npmOwnerRegistries(npm, stage, env, timeout) {
+    const first = npmRead(npm, stage, bareEnv(env), OWNER_KEYS, timeout);
+    const second = first === null ? null : npmRead(npm, stage, bareEnv(env), OWNER_KEYS, timeout);
+    const out = {};
+    if (first === null || first !== second) return out;
+    const lines = first.replace(/\n$/, '').split('\n');
+    if (lines.length !== OWNER_KEYS.length) return out;
+    OWNER_KEYS.forEach((key, index) => {
+      const value = lines[index].startsWith(key + '=') ? ownerUrl(lines[index].slice(key.length + 1)) : null;
+      if (value && value.replace(/\/+$/, '') !== DEFAULT_REGISTRY) out[key] = value;
+    });
+    return out;
   }
   function npmEnvironment(source, network) {
     const env = {};
@@ -241,11 +277,13 @@ function runtimeCore() {
     const source = (options && options.env) || process.env;
     const env = npmEnvironment(source, options && options.network);
     const blank = Object.keys((options && options.network) || {}).length > 0 || npmOutside(source) || npmConfigMoves(npm, stage, env, timeout) ? stage + '-npmrc' : null;
+    const owner = blank ? npmOwnerRegistries(npm, stage, env, timeout) : {};
     let result;
     try {
       if (blank) {
         fs.mkdirSync(blank, { mode: 0o700 });
-        for (const name of ['user', 'global']) fs.writeFileSync(path.join(blank, name), '', { mode: 0o600, flag: 'wx' });
+        fs.writeFileSync(path.join(blank, 'user'), Object.keys(owner).map((key) => key + '=' + owner[key] + '\n').join(''), { mode: 0o600, flag: 'wx' });
+        fs.writeFileSync(path.join(blank, 'global'), '', { mode: 0o600, flag: 'wx' });
       }
       const config = blank ? ['--userconfig=' + path.join(blank, 'user'), '--globalconfig=' + path.join(blank, 'global')] : [];
       result = cp().spawnSync(npm.file, [...npm.args, 'install', '--no-audit', '--no-fund', '--ignore-scripts', '--no-bin-links', '--loglevel=error', '--prefix=' + stage, ...config, ...specs], {
@@ -519,7 +557,7 @@ function runtimeCore() {
     process.argv = [process.argv[0], runtime.bin, ...args.slice(2)];
     require(runtime.bin);
   }
-  return { SCHEMA, HOLD, UNAVAILABLE, WARN, OUTAGE, NPM_TIMEOUT_MS, LOCK_STALE_MS, RETRY_MS, ATTEMPT_MS, NETWORK_KEYS, configOf, verify, ensure, heal, npmInvocation, npmNetwork, npmOutside, npmConfigMoves, npmEnvironment, npmInstall, removeOtherRuntimes, budgetFor, healPaths, projectKey, main };
+  return { SCHEMA, HOLD, UNAVAILABLE, WARN, OUTAGE, NPM_TIMEOUT_MS, LOCK_STALE_MS, RETRY_MS, ATTEMPT_MS, NETWORK_KEYS, configOf, verify, ensure, heal, npmInvocation, npmNetwork, npmOutside, npmConfigMoves, npmOwnerRegistries, npmEnvironment, npmInstall, removeOtherRuntimes, budgetFor, healPaths, projectKey, main };
 }
 
 module.exports = { runtimeCore };

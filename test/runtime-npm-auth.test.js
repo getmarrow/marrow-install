@@ -9,8 +9,8 @@ const { ROWS, runRow, setup } = require('./support/npm-auth-rows');
 // FU-1: the owner's npm auth reaches the network only when every network setting comes from the
 // owner's own npm config. A network setting from the environment (npm_config_* allowlist, plain
 // proxy variables, CA and TLS variables, PREFIX), or one that npm resolves differently under the
-// hook env (an env-expanded value), makes the install read empty private user and global configs
-// instead; a project .npmrc is never read.
+// hook env (an env-expanded value), makes the install read private user and global configs that carry no auth (only the owner's
+// registry URLs, read under a bare env, when they are safe) instead; a project .npmrc is never read.
 
 const OUTSIDE = ['HTTP_PROXY', 'http_proxy', 'Https_Proxy', 'HTTPS_PROXY', 'PROXY', 'proxy', 'NO_PROXY', 'no_proxy', 'ALL_PROXY', 'NODE_EXTRA_CA_CERTS', 'NODE_TLS_REJECT_UNAUTHORIZED', 'NODE_OPTIONS', 'NODE_USE_ENV_PROXY', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'OPENSSL_CONF', 'OPENSSL_MODULES', 'HOSTALIASES', 'LOCALDOMAIN', 'RES_OPTIONS', 'PREFIX', 'prefix', 'DESTDIR'];
 
@@ -45,6 +45,8 @@ test('FU-1 end to end (real npm, capture servers, dummy token): no abuse row sen
         assert.ok(result.genuine && result.mirror.token_hits > 0, `${row.id}: the owner config is used unchanged`);
       }
       if (['A1', 'A10', 'A10b', 'A10c'].includes(row.id)) assert.ok(result.attacker.requests > 0, `${row.id}: the env proxy is still used (without auth)`);
+      if (row.id === 'N4') assert.ok(result.genuine && result.mirror.token_hits === 0, 'N4: the env registry is used (npm precedence, as on master) and the owner mirror is never sent auth');
+      if (['N1', 'N5'].includes(row.id)) assert.equal(result.mirror.token_hits, 0, `${row.id}: userinfo is never written or sent`);
       if (['A3', 'A4', 'A5'].includes(row.id)) assert.equal(result.genuine, true, `${row.id}: the env network works, without auth; the pins decide`);
     }
   } finally {
