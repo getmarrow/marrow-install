@@ -373,6 +373,16 @@ function runtimeCore() {
     const outage = (reason) => ({ state: 'failed', outage: OUTAGE.includes(reason) });
     if (!VERSION_RE.test(cfg.version) || !INTEGRITY_RE.test(String(cfg.integrity || '')) || typeof loader !== 'string') return held;
     const { lock, mark } = healPaths(home, cfg.version);
+    for (const dir of [path.join(home, '.marrow'), path.dirname(rootOf(home)), rootOf(home)]) {
+      let stat = null;
+      try {
+        stat = fs.lstatSync(dir);
+      } catch {
+        stat = null;
+      }
+      const me = uid();
+      if (stat && (!stat.isDirectory() || stat.isSymbolicLink() || (me !== null && stat.uid !== me))) return held;
+    }
     const started = Date.now();
     if (!lockBusy(lock)) {
       const last = failure(home, mark);

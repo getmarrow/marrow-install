@@ -601,6 +601,22 @@ test('failure record: only a private record in private directories counts; a loo
       await waitForHeal(home);
       nothingPlantedRan(home, root);
     }
+    // ~/.marrow (or a runtime directory under it) redirected by a link: the heal cannot run there
+    // and that is not an outage: held at once, nothing read through the link.
+    for (const linked of [['.marrow'], ['.marrow', 'runtime'], ['.marrow', 'runtime', 'mcp']]) {
+      const home = ownerHome(registry.url);
+      homes.push(home);
+      const elsewhere = tempDir('marrow-heal-elsewhere-');
+      homes.push(elsewhere);
+      fs.mkdirSync(path.join(elsewhere, 'runtime', 'mcp'), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(path.join(elsewhere, 'runtime', 'mcp', `.heal-${PIN}.failed`), JSON.stringify({ at: Date.now(), reason: 'npm_install_failed' }), { mode: 0o600 });
+      if (linked.length > 1) fs.mkdirSync(path.join(home, ...linked.slice(0, -1)), { recursive: true, mode: 0o700 });
+      fs.symlinkSync(linked.length === 1 ? elsewhere : linked.length === 2 ? path.join(elsewhere, 'runtime') : path.join(elsewhere, 'runtime', 'mcp'), path.join(home, ...linked));
+      const held = runHook(hook(genuine.integrity), root, hookEnv(home, root));
+      assert.equal(held.status, 2, `${linked.join('/')}: ${held.stderr}`);
+      assert.equal(held.stderr, `${HOLD_TEXT}\n`);
+      assert.ok(held.ms < 5000, `${held.ms} ms`);
+    }
     // A trusted record of an outage: warn at once, no registry request.
     const outage = forged(() => {});
     const before = registry.requests().length;
