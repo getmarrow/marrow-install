@@ -20,6 +20,7 @@ const {
   planHermesMcpConfig,
 } = require('./hermes-config');
 const { ensureOwnerApiKey, readOwnerApiKey } = require('./owner-env');
+const { buildOwnToolMatchers, cursorOwnToolGuardCondition } = require('./marrow-own-tools');
 const {
   delocalizeHookCommand,
   ensureMcpRuntime,
@@ -291,7 +292,7 @@ const CURSOR_MCP_PRE_ACTION_GUARD_SOURCE = [
   'process.stdin.on("error",fail);',
   'process.stdin.on("data",c=>{size+=c.length;if(size>16777216){over=true;return;}chunks.push(c);});',
   'process.stdin.on("end",()=>{if(over){fail();return;}const raw=Buffer.concat(chunks);let ev=null;try{ev=JSON.parse(raw.toString("utf8"));}catch{ev=null;}',
-  'if(ev&&typeof ev==="object"&&ev.mcp_server_name==="marrow"&&typeof ev.tool_name==="string"&&/^marrow_[a-z0-9_]{1,64}$/.test(ev.tool_name)){done=true;process.stdout.write("{\\"permission\\":\\"allow\\"}\\n");return;}',
+  `if(ev&&typeof ev==="object"&&${cursorOwnToolGuardCondition()}){done=true;process.stdout.write("{\\"permission\\":\\"allow\\"}\\n");return;}`,
   'let child;try{',
   `child=spawn(process.platform==="win32"?"npx.cmd":"npx",${JSON.stringify(['-y', `--package=${MCP_PACKAGE_SPEC}`, 'marrow-mcp', 'cursor-pre-action-hook'])},{stdio:["pipe","pipe","ignore"]});`,
   '}catch{fail();return;}',
@@ -387,21 +388,22 @@ const GROK_PRE_ACTION_GUARD_SOURCE = [
   'child.stdin.end(Buffer.concat(input));}catch{fail();}});',
 ].join('');
 const GROK_PRE_ACTION_HOOK_COMMAND = `node -e '${GROK_PRE_ACTION_GUARD_SOURCE}'`;
-const NATIVE_HOOK_MATCHER = 'Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|functions\\.(?!mcp__marrow__marrow_).*|mcp__(?!marrow__marrow_).*';
-const CODEX_NATIVE_HOOK_MATCHER = 'Bash|apply_patch|Edit|Write|MultiEdit|mcp__(?!marrow__marrow_).*|functions\\.(?!marrow_).*';
-const CURSOR_NATIVE_HOOK_MATCHER = 'Shell|Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|MCP:(?!marrow(?:_.*|:marrow_.*)$).*';
+const OWN_TOOL_MATCHERS = buildOwnToolMatchers();
+const NATIVE_HOOK_MATCHER = OWN_TOOL_MATCHERS.claude;
+const CODEX_NATIVE_HOOK_MATCHER = OWN_TOOL_MATCHERS.codex;
+const CURSOR_NATIVE_HOOK_MATCHER = OWN_TOOL_MATCHERS.cursor;
 // Host approvals: Cursor enforces an "ask" only on beforeShellExecution and beforeMCPExecution,
 // never on preToolUse. Shell calls move to beforeShellExecution (it runs in cloud agents too).
 // MCP calls stay in preToolUse as well, because cloud agents never run beforeMCPExecution: the
 // MCP hook defers there to beforeMCPExecution only in a local interactive session (sessionStart
 // evidence) and holds in cloud and background agents. The result hooks keep the full matcher.
-const CURSOR_PRE_TOOL_USE_HOST_APPROVAL_MATCHER = 'Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|MCP:(?!marrow(?:_.*|:marrow_.*)$).*';
+const CURSOR_PRE_TOOL_USE_HOST_APPROVAL_MATCHER = OWN_TOOL_MATCHERS.cursorPreToolUseHostApproval;
 // Cursor's gating hooks are failClosed: a cold npx start on a slow network must not block a
 // call, so they get room beyond the MCP hook's own 4-second budget.
 const CURSOR_GATE_HOOK_TIMEOUT_SECONDS = 15;
 const CURSOR_EXECUTION_PRE_EVENTS = Object.freeze(['beforeShellExecution', 'beforeMCPExecution']);
 const CURSOR_EXECUTION_POST_EVENTS = Object.freeze(['afterShellExecution', 'afterMCPExecution']);
-const GEMINI_NATIVE_HOOK_MATCHER = '^(?:run_shell_command|write_file|replace|edit_file|delete_file|read_file|read_many_files|glob|grep_search|list_directory|get_file_info|web_search|google_web_search|mcp_(?!marrow_marrow_)[A-Za-z0-9_]{1,192})$';
+const GEMINI_NATIVE_HOOK_MATCHER = OWN_TOOL_MATCHERS.gemini;
 const GROK_NATIVE_HOOK_MATCHER = 'run_terminal_command|search_replace|write|spawn_subagent|use_tool|workflow|image_gen|image_edit|image_to_video|reference_to_video';
 const CODEX_HOOK_TIMEOUT_SECONDS = 5;
 const CODEX_SESSION_TIMEOUT_SECONDS = 3;

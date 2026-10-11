@@ -14,8 +14,8 @@ const runner = require('../src/governed-runner');
 
 const BIN = path.join(__dirname, '..', 'bin', 'marrow-install.js');
 const FIXTURES = path.join(__dirname, 'fixtures', 'installer-0167');
-const CLAUDE_MATCHER = 'Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|functions\\.(?!mcp__marrow__marrow_).*|mcp__(?!marrow__marrow_).*';
-const CURSOR_FULL_MATCHER = 'Shell|Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|MCP:(?!marrow(?:_.*|:marrow_.*)$).*';
+const CLAUDE_MATCHER = require('../src/marrow-own-tools').buildOwnToolMatchers().claude;
+const CURSOR_FULL_MATCHER = require('../src/marrow-own-tools').buildOwnToolMatchers().cursor;
 const GEMINI_MATCHER = installer.GEMINI_NATIVE_HOOK_MATCHER;
 const LAUNCH_FAILURE = 'Marrow governance adapter was unavailable; this action is blocked.\n';
 
@@ -218,7 +218,8 @@ test('Claude Code: PermissionRequest and PostToolBatch (async) match marrow-mcp 
       assert.deepEqual(settings.hooks[event].flatMap((group) => group.hooks.map((hook) => hook.command)), [cmd(entrypoint)], event);
     }
     // The pass-through marker must never decide: no decision field, no matcher on PostToolBatch.
-    assert.doesNotMatch(JSON.stringify(settings.hooks.PermissionRequest), /decision|behavior|allow"/);
+    // (The matcher names Marrow's own tools, marrow_decision_brief among them, so it is left out.)
+    assert.doesNotMatch(JSON.stringify(settings.hooks.PermissionRequest.map(({ matcher, ...rest }) => rest)), /decision|behavior|allow"/);
     const written = fs.readFileSync(settingsPath, 'utf8');
     candidateMcpSetup(settingsPath);
     assert.equal(fs.readFileSync(settingsPath, 'utf8'), written, 'MCP setup leaves the installer bytes alone');
