@@ -121,7 +121,7 @@ Earlier release notes are in the [CHANGELOG](https://github.com/getmarrow/marrow
 
 The installer detects these from project and home-directory signals:
 
-- Claude Code (`.claude/settings.json` or `CLAUDE.md` in the project, or your installation: `~/.claude/`, `~/.claude.json` or `claude` on `PATH`; a project marker of another host still ranks first), Cursor and Cursor Composer (`.cursor`), Cline (`.clinerules`), Windsurf (`.windsurf`), Gemini CLI (`.gemini`), Grok (`~/.grok` or `.grok`), Codex (a `.codex` directory or an `AGENTS.md` with owner content; one holding only the Marrow block is not a signal), Hermes (see above) and OpenClaw;
+- Claude Code (`.claude/settings.json` or `CLAUDE.md` in the project, or your installation: `~/.claude/`, `~/.claude.json` or `claude` on `PATH`; a project marker of another host still ranks first), Cursor and Cursor Composer (`.cursor`), Cline (`.clinerules`), Windsurf (`.windsurf`), Gemini CLI (`.gemini`), Grok (`~/.grok` or `.grok`), Codex (a `.codex` directory that is empty, holds another entry besides `hooks.json`, or whose `hooks.json` has a non-Marrow hook; or an `AGENTS.md` with owner content. A directory holding only Marrow's own `hooks.json`, or an `AGENTS.md` holding only the Marrow block, is not a signal), Hermes (see above) and OpenClaw;
 - MCP client configuration, Node.js and Python projects.
 
 Which hook files the installer writes, and when (a host is written only when its row's signal is present):
@@ -129,7 +129,7 @@ Which hook files the installer writes, and when (a host is written only when its
 | Host | Written when | File |
 |---|---|---|
 | Claude Code | `.claude/settings.json` or `CLAUDE.md` in the project, **or** `~/.claude/`, `~/.claude.json` or `claude` on `PATH` | `.claude/settings.json` (and `.mcp.json`) |
-| Codex | a `.codex` directory, or an `AGENTS.md` with owner content | `.codex/hooks.json`, `AGENTS.md` |
+| Codex | a `.codex` directory that is empty, holds another entry besides `hooks.json`, or whose `hooks.json` has a hook that is not Marrow's (a directory holding only a Marrow-only or empty `hooks.json` is not a signal), or an `AGENTS.md` with owner content | `.codex/hooks.json`, `AGENTS.md` |
 | Cursor and Composer | a `.cursor` directory | `.cursor/hooks.json`, `.cursor/mcp.json` |
 | Cline, Windsurf, Gemini CLI | `.clinerules`, `.windsurf`, `.gemini` | `.clinerules/hooks/*`, `.windsurf/hooks.json`, `.gemini/settings.json` |
 | Grok | `~/.grok` or a project `.grok` exists | `~/.grok/hooks/marrow.json` |

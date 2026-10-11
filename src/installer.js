@@ -864,7 +864,16 @@ function parseArgs(argv, env = process.env) {
   };
   let explicitOperation = false;
 
-  for (let i = 0; i < argv.length; i += 1) {
+  // Value of the option at argv[i]. Only consumes the next argument when it exists and is not an
+  // option itself, so a missing value never swallows a following flag.
+  let i = 0;
+  const optionValue = () => {
+    const next = argv[i + 1];
+    if (next === undefined || String(next).startsWith('-')) return '';
+    i += 1;
+    return next;
+  };
+  for (; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === 'activate' || arg === '--activate') {
       explicitOperation = true;
@@ -904,17 +913,18 @@ function parseArgs(argv, env = process.env) {
     else if (arg === '--no-controller') options.controller = false;
     else if (arg === '--no-local-runtime') options.mcpLocalRuntime = false;
     else if (arg === '--self-test') options.selfTest = true;
-    else if (arg === '--cwd') options.cwd = path.resolve(argv[++i] || options.cwd);
+    else if (arg === '--cwd') options.cwd = path.resolve(optionValue() || options.cwd);
     else if (arg === '--mode') {
       explicitOperation = true;
-      options.mode = argv[++i] || options.mode;
+      options.mode = optionValue() || options.mode;
     }
     else if (arg === '--key') {
-      options.apiKey = argv[++i] || options.apiKey;
+      // A missing value (end of argv, or another option next) is a missing key, never a key.
+      options.apiKey = optionValue() || options.apiKey;
       options.keyFromArg = true;
     }
-    else if (arg === '--base-url') options.baseUrl = argv[++i] || options.baseUrl;
-    else if (arg === '--agent-id') options.agentId = argv[++i] || options.agentId;
+    else if (arg === '--base-url') options.baseUrl = optionValue() || options.baseUrl;
+    else if (arg === '--agent-id') options.agentId = optionValue() || options.agentId;
     else if (arg === '--mcp') {
       explicitOperation = true;
       options.mode = 'mcp';

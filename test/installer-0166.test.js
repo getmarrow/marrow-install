@@ -18,6 +18,7 @@ const {
   printReport,
   runSelfTest,
   stableAgentId,
+  parseArgs,
 } = require('../src/installer');
 const { planHermesMcpConfig, redactUndoLines } = require('../src/hermes-config');
 const { readOwnerApiKey } = require('../src/owner-env');
@@ -1273,6 +1274,89 @@ test('keyless guard treats empty or whitespace-only keys (env, ~/.marrow/env, --
       }
     }
   }
+});
+
+test('--key with no value, or followed by an option, is a missing key: exit 2, zero files, option still parsed', async () => {
+  const base = ['--yes', '--no-self-test', '--no-controller', '--no-local-runtime'];
+  const cases = [
+    ['--key last', [...base, '--key']],
+    ['--key --no-controller', ['--yes', '--no-self-test', '--no-local-runtime', '--key', '--no-controller']],
+    ['--key -y', ['--no-self-test', '--no-controller', '--no-local-runtime', '--key', '-y']],
+    ['--key --yes', ['--no-self-test', '--no-controller', '--no-local-runtime', '--key', '--yes']],
+    ['--key --mode', [...base, '--key', '--mode', 'mcp']],
+    ['--key empty', [...base, '--key', '']],
+  ];
+  for (const [label, args] of cases) {
+    const home = tempDir('marrow-yes-nokey-home-');
+    const project = tempDir('marrow-yes-nokey-proj-');
+    try {
+      fs.mkdirSync(path.join(project, '.claude'));
+      fs.writeFileSync(path.join(project, '.claude', 'settings.json'), '{}\n');
+      fs.mkdirSync(path.join(project, '.codex'));
+      const env = { PATH: process.env.PATH, HOME: home };
+      const beforeHome = snapshotTree(home);
+      const beforeProject = snapshotTree(project);
+      const run = await runBin(args, { cwd: project, env });
+      assert.equal(run.status, 2, `${label}: ${run.stderr}`);
+      assert.equal(run.stdout, KEYLESS_MESSAGE_ACTIVATE, label);
+      assert.deepEqual(snapshotTree(home), beforeHome, label);
+      assert.deepEqual(snapshotTree(project), beforeProject, label);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(project, { recursive: true, force: true });
+    }
+  }
+});
+
+test('--key= (equals form) is not an option: refused, nothing written', async () => {
+  for (const arg of ['--key=', '--key= ']) {
+    const home = tempDir('marrow-yes-eq-home-');
+    const project = tempDir('marrow-yes-eq-proj-');
+    try {
+      fs.mkdirSync(path.join(project, '.claude'));
+      fs.writeFileSync(path.join(project, '.claude', 'settings.json'), '{}\n');
+      const beforeHome = snapshotTree(home);
+      const beforeProject = snapshotTree(project);
+      const run = await runBin(['--yes', '--no-self-test', '--no-controller', '--no-local-runtime', arg], {
+        cwd: project, env: { PATH: process.env.PATH, HOME: home },
+      });
+      assert.notEqual(run.status, 0, JSON.stringify(arg));
+      assert.deepEqual(snapshotTree(home), beforeHome);
+      assert.deepEqual(snapshotTree(project), beforeProject);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(project, { recursive: true, force: true });
+    }
+  }
+});
+
+test('value options never swallow a following option; a real key after --key is unchanged', () => {
+  const dummyKey = `mrw_dummy_${crypto.randomBytes(12).toString('hex')}`;
+  const noEnv = { HOME: '/nonexistent-home' };
+  let o = parseArgs(['--key', '--no-controller', '--yes'], noEnv);
+  assert.equal(o.apiKey, '');
+  assert.equal(o.controller, false);
+  assert.equal(o.yes, true);
+  o = parseArgs(['--key', '-y'], noEnv);
+  assert.equal(o.apiKey, '');
+  assert.equal(o.yes, true);
+  assert.equal(parseArgs(['--key'], noEnv).apiKey, '');
+  o = parseArgs(['--key', dummyKey, '--no-controller'], noEnv);
+  assert.equal(o.apiKey, dummyKey);
+  assert.equal(o.keyFromArg, true);
+  assert.equal(o.controller, false);
+  // The other value options: a following option is parsed as an option, defaults kept.
+  o = parseArgs(['--cwd', '--dry-run'], noEnv);
+  assert.equal(o.dryRun, true);
+  assert.equal(o.cwd, process.cwd());
+  o = parseArgs(['--agent-id', '--no-self-test', '--base-url', '--json'], noEnv);
+  assert.equal(o.selfTest, false);
+  assert.equal(o.json, true);
+  assert.equal(o.agentId, '');
+  assert.equal(o.baseUrl, parseArgs([], noEnv).baseUrl);
+  o = parseArgs(['--mode', 'mcp', '--agent-id', 'a1'], noEnv);
+  assert.equal(o.mode, 'mcp');
+  assert.equal(o.agentId, 'a1');
 });
 
 test('with a key, --yes still writes hooks as before (offline: self-test skipped, no controller)', async () => {
