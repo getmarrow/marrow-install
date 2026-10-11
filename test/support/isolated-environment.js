@@ -42,8 +42,21 @@ process.env.PATH = String(process.env.PATH || '').split(path.delimiter).map((dir
   return shim;
 }).join(path.delimiter);
 process.once('exit', () => fs.rmSync(pathShimRoot, { recursive: true, force: true }));
+// A hook whose verified runtime is missing installs it itself with the owner's own npm config
+// (environment overrides are ignored). Tests never reach a real registry: npm here gets a dead
+// one, with no retries, so a self-heal fails at once and the hook holds.
+const DEAD_REGISTRY_NPMRC = 'registry=http://127.0.0.1:9/\nfetch-retries=0\nfetch-timeout=2000\n';
+function deadRegistryHome(home) {
+  fs.writeFileSync(path.join(home, '.npmrc'), DEAD_REGISTRY_NPMRC, { mode: 0o600 });
+  return home;
+}
+deadRegistryHome(isolatedHome);
+// A safety net for any hook a test runs under another HOME: npm's proxy settings (not npm_*
+// variables, which the install removes) point at a dead port, except for local test registries.
+for (const name of ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy']) process.env[name] = 'http://127.0.0.1:9';
+for (const name of ['NO_PROXY', 'no_proxy']) process.env[name] = '127.0.0.1,localhost';
 process.env.HOME = isolatedHome;
 process.env.USERPROFILE = isolatedHome;
 process.once('exit', () => fs.rmSync(isolatedHome, { recursive: true, force: true }));
 
-module.exports = { isolatedHome };
+module.exports = { deadRegistryHome, isolatedHome };

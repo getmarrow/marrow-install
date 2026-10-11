@@ -1,4 +1,4 @@
-require('./support/isolated-environment');
+const { deadRegistryHome } = require('./support/isolated-environment');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -33,6 +33,8 @@ process.stdout.write(JSON.stringify(ensureMcpRuntime({ home, version, integrity,
 test('concurrent first installs leave one verified copy and no stage; hooks started meanwhile hold or run that copy, never anything else', async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-runtime-race-'));
   fs.chmodSync(home, 0o700);
+  // A hook that finds no copy yet starts its own self-heal; it must never reach a real registry.
+  deadRegistryHome(home);
   const worker = path.join(home, 'worker.js');
   fs.writeFileSync(worker, WORKER);
   const command = localizeHookCommand(`npx -y --package=@getmarrow/mcp@${PIN} marrow-mcp claude-pre-action-hook`, PIN);
@@ -70,7 +72,13 @@ test('concurrent first installs leave one verified copy and no stage; hooks star
       }
     }
     assert.ok(verifyMcpRuntime(home, PIN, PINS.MCP_ADAPTER_INTEGRITY));
-    assert.deepEqual(fs.readdirSync(path.dirname(runtimeDir(home, PIN))), [PIN], 'one copy, no stage left behind');
+    // A hook that found no copy started a self-heal (offline here); wait for it to finish. It may
+    // leave its failure record, never a stage or its lock (see runtime-self-heal.test.js).
+    const root = path.dirname(runtimeDir(home, PIN));
+    for (const deadline = Date.now() + 60_000; Date.now() < deadline && fs.readdirSync(root).some((name) => name.endsWith('.lock'));) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.deepEqual(fs.readdirSync(path.dirname(runtimeDir(home, PIN))).filter((name) => !name.startsWith('.heal-')), [PIN], 'one copy, no stage left behind');
     const after = spawnSync('/bin/sh', ['-c', command], { env, input: '{}', encoding: 'utf8' });
     assert.equal(after.status, 0, after.stderr);
     assert.equal(after.stdout, '{"local":true}');

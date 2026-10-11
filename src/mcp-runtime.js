@@ -8,41 +8,31 @@
 // Layout (all owner-only, directories 0700):
 //   ~/.marrow/runtime/mcp/<version>/node_modules/...   the package, installed with --ignore-scripts
 //   ~/.marrow/runtime/mcp/<version>/.verified          integrity record (0600)
-//   ~/.marrow/runtime/mcp/<version>/launch.cjs         checks the files, then runs the entrypoint
-//   ~/.marrow/runtime/mcp/<version>/run                /bin/sh script: absolute node + launch.cjs
 //   ~/.marrow/runtime/mcp/<version>/node               link to the node binary captured at install
-// (On Windows there is no run script or node link: hooks start launch.cjs with node.)
+//   ~/.marrow/runtime/mcp/.heal-<version>.lock|.failed  a hook's self-heal in progress / last failure
+// (On Windows there is no node link.)
 //
-// The package's integrity is checked against the pin (or the registry-verified update target)
-// when it is installed, from a private staging directory with npm's environment overrides
-// removed. Every start re-checks the installed files against the record. Nothing ever falls
-// back to npx: when the copy is missing or changed, a pre-action hook holds the call (exit 2
-// with a fixed repair message) and every other entrypoint exits 1. Hook commands reach the
-// runtime through $HOME, so project hook files stay the same for every user and name no local path.
+// Every hook command carries the runtime loader inline (runtime-core.js, compressed): it checks
+// the installed files against the record and runs the entry. When the copy is missing or changed,
+// it installs the pinned version itself, with the installer's own rules and the pinned integrity
+// it carries, and only when that fails does a pre-action hook hold the call (exit 2 with a fixed
+// repair message; every other entrypoint exits 1). Nothing ever reads the project or starts npx.
+// Hook commands reach the runtime through the home directory, so project hook files stay the same
+// for every user and name no local path.
 
-const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
+const zlib = require('node:zlib');
+const PINS = require('./pins');
+const { runtimeCore } = require('./runtime-core');
 
-const RUNTIME_SCHEMA = 'marrow-mcp-runtime.v1';
+const core = runtimeCore();
+const RUNTIME_SCHEMA = core.SCHEMA;
+const HOLD_TEXT = core.HOLD;
+const UNAVAILABLE_TEXT = core.UNAVAILABLE;
+const NPM_INSTALL_TIMEOUT_MS = core.NPM_TIMEOUT_MS;
 const VERSION_RE = /^\d+\.\d+\.\d+$/;
-const INTEGRITY_RE = /^sha512-[A-Za-z0-9+/]{86}==$/;
-// Paths written into the run script, quoted with single quotes: no quote, backslash or newline.
-const SAFE_PATH_RE = /^[^'\\\n\r\0]+$/;
-// A black-holed registry must not hold an install for minutes.
-const NPM_INSTALL_TIMEOUT_MS = 30_000;
 const PRE_ACTION_SUB_RE = /-pre-action-hook$/;
-// The fixed texts a hook prints when no verified copy can start. They name no key, path or
-// input, and contain no quote, $, %, !, backslash or backtick, so every hook form (sh, node -e
-// in any shell) can carry them literally.
-const REPAIR_STEP = 'The owner can repair it by running npx -y @getmarrow/install@latest --repair --cwd <project folder> from a terminal outside the project.';
-const HOLD_TEXT = `Marrow held this action: its verified local runtime could not start. ${REPAIR_STEP}`;
-const UNAVAILABLE_TEXT = `Marrow could not start its verified local runtime. ${REPAIR_STEP}`;
-
-function currentUid() {
-  return typeof process.getuid === 'function' ? process.getuid() : null;
-}
 
 function runtimeRoot(home) {
   return path.join(home, '.marrow', 'runtime', 'mcp');
@@ -60,373 +50,102 @@ function failureStatus(sub) {
   return PRE_ACTION_SUB_RE.test(String(sub || '')) ? 2 : 1;
 }
 
-// A directory Marrow owns: a real directory (not a link) owned by this user, not writable by
-// others; created 0700 when missing.
-function ensurePrivateDirectory(directory) {
-  try {
-    fs.mkdirSync(directory, { mode: 0o700 });
-  } catch (error) {
-    // A concurrent install may have created it first; it is checked below either way.
-    if (!error || error.code !== 'EEXIST') throw error;
-  }
-  const stat = fs.lstatSync(directory);
-  const uid = currentUid();
-  if (!stat.isDirectory() || stat.isSymbolicLink() || (uid !== null && stat.uid !== uid)) {
-    throw new Error(`unsafe runtime directory ${directory}`);
-  }
-  if ((stat.mode & 0o077) !== 0) fs.chmodSync(directory, 0o700);
-}
-
-function privateDirectoryOk(directory, platform = process.platform) {
-  try {
-    const stat = fs.lstatSync(directory);
-    const uid = currentUid();
-    return stat.isDirectory() && !stat.isSymbolicLink() && (uid === null || stat.uid === uid)
-      && (platform === 'win32' || (stat.mode & 0o077) === 0);
-  } catch {
-    return false;
-  }
-}
-
-// Every entry under `relative`, checked with lstat: anything that is not a plain file or
-// directory (a link, FIFO, socket or device) and anything writable by every user rejects the
-// whole copy. npm's .bin links are skipped; the runtime is never started through them.
-function listFiles(base, relative = '', platform = process.platform) {
-  const directory = path.join(base, relative);
-  const out = [];
-  for (const name of fs.readdirSync(directory).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
-    const rel = relative ? `${relative}/${name}` : name;
-    if (rel === 'node_modules/.bin') continue;
-    const stat = fs.lstatSync(path.join(base, rel));
-    if (platform !== 'win32' && (stat.mode & 0o002) !== 0) throw new Error(`world-writable entry in runtime package: ${rel}`);
-    if (stat.isDirectory()) out.push(...listFiles(base, rel, platform));
-    else if (stat.isFile()) out.push(rel);
-    else throw new Error(`unexpected entry in runtime package: ${rel}`);
-  }
-  return out;
-}
-
-// The installed package files, as the launcher hashes them on every start (npm's own lock copy
-// and any .bin links are not package files). node_modules itself must be a real directory.
-function packageFiles(directory, platform = process.platform) {
-  const stat = fs.lstatSync(path.join(directory, 'node_modules'));
-  if (!stat.isDirectory()) throw new Error('runtime node_modules is not a directory');
-  return listFiles(directory, 'node_modules', platform).filter((file) => file !== 'node_modules/.package-lock.json');
-}
-
-function manifestDigest(directory, files) {
-  const hash = crypto.createHash('sha256');
-  for (const file of files) {
-    hash.update(file);
-    hash.update('\0');
-    hash.update(fs.readFileSync(path.join(directory, file)));
-    hash.update('\0');
-  }
-  return hash.digest('hex');
-}
-
-const LAUNCHER_SOURCE = `'use strict';
-// Written by @getmarrow/install. Runs the verified local @getmarrow/mcp and nothing else: when
-// the copy is missing or any of its files changed, a pre-action hook is held (exit 2, fixed
-// text on stderr) and every other entrypoint exits 1. It never falls back to npx.
-const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
-const args = process.argv.slice(2);
-const POSIX = process.platform !== 'win32';
-const uid = typeof process.getuid === 'function' ? process.getuid() : null;
-const owned = (stat) => !POSIX || uid === null || stat.uid === uid;
-// Every package file now present, listed as at install: an added file is a change too, and a
-// link, FIFO, socket, device or world-writable entry rejects the copy.
-function listFiles(relative) {
-  const out = [];
-  const names = fs.readdirSync(path.join(__dirname, relative)).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-  for (const name of names) {
-    const rel = relative + '/' + name;
-    if (rel === 'node_modules/.bin') continue;
-    const stat = fs.lstatSync(path.join(__dirname, rel));
-    if (POSIX && (stat.mode & 0o002) !== 0) throw new Error('writable');
-    if (stat.isDirectory()) out.push(...listFiles(rel));
-    else if (stat.isFile()) out.push(rel);
-    else throw new Error('type');
-  }
-  return out;
-}
-function verifiedEntry() {
-  try {
-    const dir = fs.lstatSync(__dirname);
-    if (!dir.isDirectory() || !owned(dir) || (POSIX && (dir.mode & 0o077) !== 0)) return null;
-    const recordStat = fs.lstatSync(path.join(__dirname, '.verified'));
-    if (!recordStat.isFile() || !owned(recordStat) || (POSIX && (recordStat.mode & 0o077) !== 0)) return null;
-    if (!fs.lstatSync(path.join(__dirname, 'node_modules')).isDirectory()) return null;
-    const record = JSON.parse(fs.readFileSync(path.join(__dirname, '.verified'), 'utf8'));
-    if (record.schema !== ${JSON.stringify(RUNTIME_SCHEMA)}) return null;
-    if (args[0] !== '--package=@getmarrow/mcp@' + record.version || args[1] !== 'marrow-mcp') return null;
-    const present = listFiles('node_modules').filter((file) => file !== 'node_modules/.package-lock.json');
-    if (JSON.stringify(present) !== JSON.stringify(record.files)) return null;
-    const hash = crypto.createHash('sha256');
-    for (const file of record.files) {
-      hash.update(file);
-      hash.update('\\0');
-      hash.update(fs.readFileSync(path.join(__dirname, file)));
-      hash.update('\\0');
-    }
-    return hash.digest('hex') === record.manifest_sha256 ? path.join(__dirname, record.bin) : null;
-  } catch {
-    return null;
-  }
-}
-const entry = verifiedEntry();
-if (entry) {
-  process.argv = [process.argv[0], entry, ...args.slice(2)];
-  require(entry);
-} else {
-  // Any argument naming a pre-action entrypoint holds, so an unexpected argument shape never
-  // turns a hold into a non-blocking failure.
-  const pre = args.some((arg) => ${PRE_ACTION_SUB_RE.toString()}.test(String(arg)));
-  process.stderr.write((pre ? ${JSON.stringify(HOLD_TEXT)} : ${JSON.stringify(UNAVAILABLE_TEXT)}) + '\\n');
-  process.exitCode = pre ? 2 : 1;
-}
-`;
-
-// The run script: the captured node (or node on PATH when that binary is gone) on the launcher,
-// which verifies the copy itself. With no launcher, the fixed hold or failure; never npx.
-function runScript(nodePath, launcherPath) {
-  return [
-    '#!/bin/sh',
-    '# Written by @getmarrow/install: the verified local @getmarrow/mcp. It never falls back to npx.',
-    `if [ -f '${launcherPath}' ]; then N='${nodePath}'; [ -x "$N" ] || N="$(command -v node)"; if [ -n "$N" ]; then exec "$N" '${launcherPath}' "$@"; fi; fi`,
-    `for arg; do case "$arg" in *-pre-action-hook) printf '%s\\n' '${HOLD_TEXT}' >&2; exit 2 ;; esac; done`,
-    `printf '%s\\n' '${UNAVAILABLE_TEXT}' >&2`,
-    'exit 1',
-    '',
-  ].join('\n');
-}
-
-function readRecord(directory, platform = process.platform) {
-  try {
-    const stat = fs.lstatSync(path.join(directory, '.verified'));
-    if (!stat.isFile() || stat.isSymbolicLink() || (platform !== 'win32' && (stat.mode & 0o077) !== 0)) return null;
-    const record = JSON.parse(fs.readFileSync(path.join(directory, '.verified'), 'utf8'));
-    return record && record.schema === RUNTIME_SCHEMA ? record : null;
-  } catch {
-    return null;
-  }
-}
-
 // The runtime for one version, when its record matches the expected integrity and its files
-// still hash to the record. Returns null otherwise.
+// still hash to the record. Returns null otherwise (also when no integrity is given).
 function verifyMcpRuntime(home, version, integrity, { platform = process.platform } = {}) {
-  if (!home || !VERSION_RE.test(String(version || ''))) return null;
-  const directory = runtimeDir(home, version);
-  const dirs = [path.join(home, '.marrow'), path.dirname(runtimeRoot(home)), runtimeRoot(home), directory];
-  if (!dirs.every((dir) => privateDirectoryOk(dir, platform))) return null;
-  const record = readRecord(directory, platform);
-  if (!record || record.version !== version) return null;
-  if (integrity && record.integrity !== integrity) return null;
-  try {
-    const files = packageFiles(directory, platform);
-    if (JSON.stringify(files) !== JSON.stringify(record.files)) return null;
-    if (manifestDigest(directory, files) !== record.manifest_sha256) return null;
-    if (fs.readFileSync(path.join(directory, 'launch.cjs'), 'utf8') !== LAUNCHER_SOURCE) return null;
-    if (platform !== 'win32') {
-      const runStat = fs.lstatSync(path.join(directory, 'run'));
-      if (!runStat.isFile() || (runStat.mode & 0o100) === 0) return null;
-      const nodeTarget = fs.readlinkSync(path.join(directory, 'node'));
-      if (fs.readFileSync(path.join(directory, 'run'), 'utf8') !== runScript(nodeTarget, path.join(directory, 'launch.cjs'))) return null;
-    }
-  } catch {
-    return null;
-  }
-  const result = { state: 'verified', version, directory, launcher: path.join(directory, 'launch.cjs') };
-  return platform === 'win32' ? result : { ...result, run: path.join(directory, 'run'), node: path.join(directory, 'node') };
-}
-
-// npm itself, without a shell and without a PATH lookup where possible: node running the
-// npm-cli.js that ships next to it (on Windows the only accepted form, so a planted npm.cmd or
-// npx.cmd in the project or early on PATH is never started). POSIX falls back to `npm` on PATH,
-// which never searches the current directory unless PATH itself names it.
-function npmInvocation({ platform = process.platform, execPath = process.execPath } = {}) {
-  const bin = path.dirname(execPath);
-  const candidates = platform === 'win32'
-    ? [path.join(bin, 'node_modules', 'npm', 'bin', 'npm-cli.js')]
-    : [path.join(bin, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'), '/usr/share/nodejs/npm/bin/npm-cli.js', '/usr/lib/node_modules/npm/bin/npm-cli.js'];
-  for (const cli of candidates) {
-    try {
-      if (fs.statSync(cli).isFile()) return { file: execPath, args: [cli] };
-    } catch {
-      // try the next location
-    }
-  }
-  return platform === 'win32' ? null : { file: 'npm', args: [] };
-}
-
-// npm's environment without overrides that could come from a project or a parent `npm run`
-// (npm_config_registry, npm_config_prefix, npm_config_userconfig, ...): the install reads only
-// the owner's own npm config, and the pinned integrity decides what is accepted anyway.
-function npmEnvironment(source = process.env) {
-  const env = {};
-  for (const [key, value] of Object.entries(source)) {
-    if (/^npm_/i.test(key)) continue;
-    env[key] = value;
-  }
-  return { ...env, npm_config_ignore_scripts: 'true', npm_config_update_notifier: 'false', npm_config_audit: 'false', npm_config_fund: 'false' };
-}
-
-function defaultNpmInstall(stage, specs, { platform = process.platform, execPath = process.execPath, env = process.env } = {}) {
-  const npm = npmInvocation({ platform, execPath });
-  if (!npm) return false;
-  const result = spawnSync(npm.file, [...npm.args, 'install', '--no-audit', '--no-fund', '--ignore-scripts', '--no-bin-links',
-    '--loglevel=error', `--prefix=${stage}`, ...specs], {
-    cwd: stage,
-    env: npmEnvironment(env),
-    stdio: 'ignore',
-    timeout: NPM_INSTALL_TIMEOUT_MS,
-    windowsHide: true,
-    shell: false,
-  });
-  return result.status === 0;
-}
-
-function removeQuietly(target) {
-  try {
-    fs.rmSync(target, { recursive: true, force: true });
-  } catch {
-    // Best effort: a leftover directory is cleaned on the next install or update.
-  }
-}
-
-// A staging directory younger than this may belong to a concurrent install that is still running.
-const STAGE_STALE_MS = 5 * 60_000;
-
-// Removes every runtime version except `keep` (and leftover staging directories; another
-// install's stage that is still in progress is left alone).
-function removeOtherRuntimes(home, keep) {
-  const root = runtimeRoot(home);
-  const removed = [];
-  let entries = [];
-  try {
-    entries = fs.readdirSync(root);
-  } catch {
-    return removed;
-  }
-  for (const entry of entries) {
-    if (entry === keep) continue;
-    if (entry.startsWith('.stage-')) {
-      try {
-        if (Date.now() - fs.lstatSync(path.join(root, entry)).mtimeMs < STAGE_STALE_MS) continue;
-      } catch {
-        continue;
-      }
-    }
-    removeQuietly(path.join(root, entry));
-    removed.push(entry);
-  }
-  return removed;
+  return core.verify(home, version, integrity, { platform });
 }
 
 // Installs (or keeps) the runtime for one MCP version whose tarball integrity is known.
 // `sdk` is the pinned SDK { version, integrity }; when the installed SDK has that version, its
-// integrity must match too. Never throws: a failure leaves hooks holding until a repair.
-function ensureMcpRuntime({ home, version, integrity, sdk = null, nodePath = process.execPath, npmInstall = defaultNpmInstall, npmExecPath = process.execPath, platform = process.platform, onProgress = null } = {}) {
-  const windows = platform === 'win32';
-  if (!home || !VERSION_RE.test(String(version || '')) || !INTEGRITY_RE.test(String(integrity || ''))) {
-    return { state: 'skipped', reason: 'no_verified_integrity' };
-  }
-  const existing = verifyMcpRuntime(home, version, integrity, { platform });
-  if (existing) {
-    const removed = removeOtherRuntimes(home, version);
-    return { ...existing, state: 'present', removed_versions: removed };
-  }
-  const directory = runtimeDir(home, version);
-  if (!windows && (!SAFE_PATH_RE.test(directory) || !SAFE_PATH_RE.test(String(nodePath || '')) || !path.isAbsolute(String(nodePath || '')))) {
-    return { state: 'skipped', reason: 'unsafe_path' };
-  }
-  let stage = null;
-  try {
-    ensurePrivateDirectory(path.join(home, '.marrow'));
-    ensurePrivateDirectory(path.dirname(runtimeRoot(home)));
-    ensurePrivateDirectory(runtimeRoot(home));
-    stage = path.join(runtimeRoot(home), `.stage-${version}-${process.pid}-${crypto.randomBytes(4).toString('hex')}`);
-    fs.mkdirSync(stage, { mode: 0o700 });
-    const dependencies = { '@getmarrow/mcp': version };
-    if (sdk && VERSION_RE.test(String(sdk.version || ''))) dependencies['@getmarrow/sdk'] = sdk.version;
-    fs.writeFileSync(path.join(stage, 'package.json'), `${JSON.stringify({ name: 'marrow-mcp-runtime', private: true, dependencies }, null, 2)}\n`, { mode: 0o600 });
-    const specs = Object.entries(dependencies).map(([name, spec]) => `${name}@${spec}`);
-    if (typeof onProgress === 'function') {
-      onProgress(`Installing a local copy of @getmarrow/mcp@${version} for Marrow's hooks (up to ${NPM_INSTALL_TIMEOUT_MS / 1000} s; until it is installed, hooks hold protected actions)...\n`);
-    }
-    if (!npmInstall(stage, specs, { platform, execPath: npmExecPath })) return { state: 'failed', reason: 'npm_install_failed' };
-    const lock = JSON.parse(fs.readFileSync(path.join(stage, 'package-lock.json'), 'utf8'));
-    const packages = lock && typeof lock.packages === 'object' && lock.packages ? lock.packages : {};
-    const mcp = packages['node_modules/@getmarrow/mcp'] || {};
-    if (mcp.version !== version || mcp.integrity !== integrity) return { state: 'failed', reason: 'integrity_mismatch' };
-    const sdkEntry = packages['node_modules/@getmarrow/sdk'];
-    if (sdk && sdkEntry && sdkEntry.version === sdk.version && sdkEntry.integrity !== sdk.integrity) {
-      return { state: 'failed', reason: 'sdk_integrity_mismatch' };
-    }
-    for (const [key, entry] of Object.entries(packages)) {
-      if (key === '') continue;
-      if (!entry || typeof entry.integrity !== 'string' || !/^sha512-/.test(entry.integrity)) return { state: 'failed', reason: 'unverified_dependency' };
-    }
-    const installed = JSON.parse(fs.readFileSync(path.join(stage, 'node_modules', '@getmarrow', 'mcp', 'package.json'), 'utf8'));
-    if (installed.name !== '@getmarrow/mcp' || installed.version !== version) return { state: 'failed', reason: 'package_mismatch' };
-    const binRelative = typeof installed.bin === 'object' && installed.bin ? installed.bin['marrow-mcp'] : null;
-    if (typeof binRelative !== 'string' || !/^[A-Za-z0-9._/-]+$/.test(binRelative) || binRelative.includes('..')) {
-      return { state: 'failed', reason: 'package_entry_missing' };
-    }
-    const bin = `node_modules/@getmarrow/mcp/${binRelative.replace(/^\.\//, '')}`;
-    let files;
-    try {
-      files = packageFiles(stage, platform);
-    } catch {
-      return { state: 'failed', reason: 'unsafe_package_entry' };
-    }
-    if (!files.includes(bin)) return { state: 'failed', reason: 'package_entry_missing' };
-    const launcher = path.join(directory, 'launch.cjs');
-    fs.writeFileSync(path.join(stage, 'launch.cjs'), LAUNCHER_SOURCE, { mode: 0o600 });
-    if (!windows) {
-      fs.writeFileSync(path.join(stage, 'run'), runScript(nodePath, launcher), { mode: 0o700 });
-      fs.symlinkSync(nodePath, path.join(stage, 'node'));
-    }
-    fs.writeFileSync(path.join(stage, '.verified'), `${JSON.stringify({
-      schema: RUNTIME_SCHEMA,
-      version,
-      integrity,
-      sdk_version: sdkEntry ? sdkEntry.version : null,
-      bin,
-      files,
-      manifest_sha256: manifestDigest(stage, files),
-      installed_at: new Date().toISOString(),
-    }, null, 2)}\n`, { mode: 0o600 });
-    // A concurrent install of the same version may have finished first: keep its verified copy.
-    const raced = verifyMcpRuntime(home, version, integrity, { platform });
-    if (raced) return { ...raced, state: 'present', removed_versions: removeOtherRuntimes(home, version) };
-    removeQuietly(directory);
-    try {
-      fs.renameSync(stage, directory);
-    } catch (error) {
-      const other = verifyMcpRuntime(home, version, integrity, { platform });
-      if (other) return { ...other, state: 'present', removed_versions: removeOtherRuntimes(home, version) };
-      throw error;
-    }
-    stage = null;
-    const verified = verifyMcpRuntime(home, version, integrity, { platform });
-    if (!verified) return { state: 'failed', reason: 'verification_failed' };
-    const removed = removeOtherRuntimes(home, version);
-    return { ...verified, state: 'installed', removed_versions: removed };
-  } catch (error) {
-    return { state: 'failed', reason: error && /unsafe runtime directory/.test(error.message) ? 'unsafe_directory' : 'install_error' };
-  } finally {
-    if (stage) removeQuietly(stage);
-  }
+// integrity must match too. Never throws: a failure leaves hooks to heal it or hold.
+function ensureMcpRuntime(options = {}) {
+  return core.ensure({ ...options, prune: true });
 }
 
+function defaultNpmInstall(stage, specs, options = {}) {
+  return core.npmInstall(stage, specs, options);
+}
+
+function npmInvocation(options = {}) {
+  return core.npmInvocation(options);
+}
+
+function npmEnvironment(source = process.env) {
+  return core.npmEnvironment(source);
+}
+
+// The shared runtime serves every project on this machine, so a project uninstall keeps it;
+// only an explicit full uninstall (`uninstall --all`) removes it.
 function removeMcpRuntime(home, { dryRun = false } = {}) {
   const root = path.dirname(runtimeRoot(home));
   if (!fs.existsSync(root)) return { removed: false, path: root };
-  if (!dryRun) removeQuietly(root);
+  if (!dryRun) fs.rmSync(root, { recursive: true, force: true });
   return { removed: !dryRun, would_remove: dryRun, path: root };
+}
+
+// ---------------------------------------------------------------------------
+// The inline loader: the core's text with the pinned version, integrity and SDK pin, compressed
+// and base64url-encoded inside regex literals, so it contains no quote, $, %, !, backslash or
+// backtick and every hook form (sh single or double quotes, cmd, PowerShell, a JS string) can
+// carry it literally.
+// ---------------------------------------------------------------------------
+
+const CORE_SOURCE = runtimeCore.toString().split('\n').map((line) => line.trim()).filter(Boolean).join('\n');
+const LOADER_RE = /eval\(global\.MARROW_L=require\(\/node:zlib\/\.source\)\.brotliDecompressSync\(Buffer\.from\(\/([A-Za-z0-9_-]{16,16000})\/\.source,\/base64url\/\.source\)\)\+\[\]\)/;
+const LOADER_PATTERN = LOADER_RE.source;
+// The same pattern with no capture group, for use inside the command patterns below.
+const LOADER_NC = LOADER_PATTERN.replace('([A-Za-z0-9_-]', '(?:[A-Za-z0-9_-]');
+
+function runtimeConfig(version, { integrity, sdk } = {}) {
+  const pinned = version === PINS.MCP_ADAPTER_VERSION;
+  return core.configOf(
+    version,
+    integrity === undefined ? (pinned ? PINS.MCP_ADAPTER_INTEGRITY : null) : integrity,
+    sdk === undefined ? { version: PINS.SDK_ADAPTER_VERSION, integrity: PINS.SDK_ADAPTER_INTEGRITY } : sdk,
+  );
+}
+
+function launcherSource(cfg) {
+  return `'use strict';\nconst CFG = ${JSON.stringify(cfg)};\n(${CORE_SOURCE})().main(CFG, global.MARROW_L);\n`;
+}
+
+const loaderCache = new Map();
+function loaderFor(cfg) {
+  const source = launcherSource(cfg);
+  if (!loaderCache.has(source)) {
+    const packed = zlib.brotliCompressSync(Buffer.from(source), {
+      params: { [zlib.constants.BROTLI_PARAM_MODE]: zlib.constants.BROTLI_MODE_TEXT, [zlib.constants.BROTLI_PARAM_QUALITY]: 11 },
+    }).toString('base64url');
+    loaderCache.set(source, `eval(global.MARROW_L=require(/node:zlib/.source).brotliDecompressSync(Buffer.from(/${packed}/.source,/base64url/.source))+[])`);
+  }
+  return loaderCache.get(source);
+}
+
+// The configuration a loader carries, only when it decodes to exactly the launcher this module
+// writes for that configuration (compressed bytes may differ between zlib builds; the code that
+// runs may not). A write with another configuration (integrity) than the current target's
+// replaces the command.
+function loaderConfig(loader) {
+  const match = String(loader || '').match(new RegExp(`^${LOADER_PATTERN}$`));
+  if (!match) return null;
+  let source;
+  try {
+    source = zlib.brotliDecompressSync(Buffer.from(match[1], 'base64url'), { maxOutputLength: 1 << 17 }).toString('utf8');
+  } catch {
+    return null;
+  }
+  const line = source.split('\n')[1] || '';
+  if (!line.startsWith('const CFG = ') || !line.endsWith(';')) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(line.slice('const CFG = '.length, -1));
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object' || !VERSION_RE.test(String(parsed.version || ''))) return null;
+  const cfg = core.configOf(parsed.version, parsed.integrity, parsed.sdk);
+  return launcherSource(cfg) === source ? cfg : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -439,47 +158,61 @@ function removeMcpRuntime(home, { dryRun = false } = {}) {
 const V = '(\\d+\\.\\d+\\.\\d+)';
 const SUB = '([a-z][a-z-]{0,63})';
 const ARGS = `--package=@getmarrow/mcp@${V} marrow-mcp ${SUB}`;
-const RUN = (version) => `$HOME/.marrow/runtime/mcp/${version}/run`;
-const NODE = (version) => `$HOME/.marrow/runtime/mcp/${version}/node`;
+const NODES = (version) => `"$HOME/.marrow/runtime/mcp/${version}/node" node /usr/local/bin/node /opt/homebrew/bin/node`;
+const NODES_RE = '"\\$HOME/\\.marrow/runtime/mcp/(\\d+\\.\\d+\\.\\d+)/node" node /usr/local/bin/node /opt/homebrew/bin/node';
 const canonicalEntrypoint = (version, sub) => `npx -y --package=@getmarrow/mcp@${version} marrow-mcp ${sub}`;
+const RUN = (version) => `$HOME/.marrow/runtime/mcp/${version}/run`;
 
-// 1. A plain entrypoint command. POSIX: /bin/sh on the run script. Windows: node on the
-// launcher, quoted so cmd, PowerShell and sh all read it the same way.
-function localPlain(version, sub, platform) {
+// 1. A plain entrypoint command. POSIX: /bin/sh finds node (the one captured at install, then
+// PATH, then the usual absolute places) and runs the loader, passed as $0. Windows: node on the
+// loader, quoted so cmd, PowerShell and sh all read it the same way. No node at all: the fixed
+// text with the hold (2) or failure (1) status.
+function localPlain(version, sub, platform, cfg = runtimeConfig(version)) {
   const args = `--package=@getmarrow/mcp@${version} marrow-mcp ${sub}`;
-  if (platform === 'win32') {
-    return `node -e "const p=require('path').join(require('os').homedir(),'.marrow','runtime','mcp','${version}','launch.cjs');if(require('fs').existsSync(p)){process.argv.splice(1,0,p);require(p)}else{console.error('${failureText(sub)}');process.exitCode=${failureStatus(sub)}}" -- ${args}`;
-  }
-  return `/bin/sh -c 'M="${RUN(version)}"; if [ -x "$M" ]; then exec "$M" ${args}; fi; printf "%s\\n" "${failureText(sub)}" >&2; exit ${failureStatus(sub)}'`;
+  if (platform === 'win32') return `node -e "${loaderFor(cfg)}" -- ${args}`;
+  return `/bin/sh -c 'for N in ${NODES(version)}; do if command -v "$N" >/dev/null 2>&1; then exec "$N" -e "$0" -- ${args}; fi; done; printf "%s\\n" "${failureText(sub)}" >&2; exit ${failureStatus(sub)}' "${loaderFor(cfg)}"`;
 }
-const PLAIN_RE = new RegExp(`^/bin/sh -c 'M="\\$HOME/\\.marrow/runtime/mcp/${V}/run"; if \\[ -x "\\$M" \\]; then exec "\\$M" ${ARGS}; fi; printf "%s\\\\n" "[^"']*" >&2; exit [12]'$`);
-const WINDOWS_PLAIN_RE = new RegExp(`^node -e "const p=require\\('path'\\)\\.join\\(require\\('os'\\)\\.homedir\\(\\),'\\.marrow','runtime','mcp','${V}','launch\\.cjs'\\);[^"]*" -- ${ARGS}$`);
+const PLAIN_RE = new RegExp(`^/bin/sh -c 'for N in ${NODES_RE}; do if command -v "\\$N" >/dev/null 2>&1; then exec "\\$N" -e "\\$0" -- ${ARGS}; fi; done; printf "%s\\\\n" "[^"']*" >&2; exit [12]' "(${LOADER_NC})"$`);
+const WINDOWS_PLAIN_RE = new RegExp(`^node -e "(${LOADER_NC})" -- ${ARGS}$`);
 const LEGACY_PLAIN_RE = new RegExp(`^/bin/sh -c 'M="\\$HOME/\\.marrow/runtime/mcp/${V}/run"; if \\[ -x "\\$M" \\]; then exec "\\$M" ${ARGS}; fi; exec npx -y --package=@getmarrow/mcp@\\2 marrow-mcp \\3'$`);
 const CANONICAL_PLAIN_RE = new RegExp(`^npx -y ${ARGS}$`);
 
-// 2. An entrypoint inside an `sh -c '...'` wrapper (Windsurf, Gemini, every platform): the run
-// script, or the fixed text on stderr with the hold (2) or failure (1) status.
-function localInner(version, sub) {
+// 2. An entrypoint inside an `sh -c '...'` wrapper (Windsurf, Gemini, every platform) or a Cline
+// hook script: the same node search and loader, or the fixed text with the hold or failure status.
+function localInner(version, sub, cfg = runtimeConfig(version)) {
   const args = `--package=@getmarrow/mcp@${version} marrow-mcp ${sub}`;
-  return `{ M="${RUN(version)}"; if [ -x "$M" ]; then "$M" ${args}; else printf "%s\\n" "${failureText(sub)}" >&2; (exit ${failureStatus(sub)}); fi; }`;
+  return `{ for N in ${NODES(version)}; do if command -v "$N" >/dev/null 2>&1; then break; fi; N=; done; if [ -n "$N" ]; then "$N" -e "${loaderFor(cfg)}" -- ${args}; else printf "%s\\n" "${failureText(sub)}" >&2; (exit ${failureStatus(sub)}); fi; }`;
 }
-const INNER_RE = new RegExp(`\\{ M="\\$HOME/\\.marrow/runtime/mcp/${V}/run"; if \\[ -x "\\$M" \\]; then "\\$M" ${ARGS}; else printf "%s\\\\n" "[^"']*" >&2; \\(exit [12]\\); fi; \\}`, 'g');
+const INNER_SOURCE = `\\{ for N in ${NODES_RE}; do if command -v "\\$N" >/dev/null 2>&1; then break; fi; N=; done; if \\[ -n "\\$N" \\]; then "\\$N" -e "(${LOADER_NC})" -- ${ARGS}; else printf "%s\\\\n" "[^"']*" >&2; \\(exit [12]\\); fi; \\}`;
+const INNER_RE = new RegExp(INNER_SOURCE, 'g');
 const LEGACY_INNER_RE = new RegExp(`\\{ M="\\$HOME/\\.marrow/runtime/mcp/${V}/run"; if \\[ -x "\\$M" \\]; then "\\$M" ${ARGS}; else npx -y --package=@getmarrow/mcp@\\2 marrow-mcp \\3; fi; \\}`, 'g');
 const CANONICAL_INNER_RE = new RegExp(`npx -y ${ARGS}`, 'g');
 
-// 3. A node guard (`node -e '...'`) that spawns the entrypoint: node on the launcher, by an
-// absolute path under the home directory. A missing launcher fails the spawn, and every guard
-// already treats a failed child as its own launch failure (it blocks, or stays neutral).
+// 3. A node guard (`node -e '...'`) that spawns the entrypoint: the guard's own node on the
+// loader. A failed child is what every guard already treats as its own launch failure (it
+// blocks, or stays neutral).
 const SPAWN_NPX = 'spawn(process.platform==="win32"?"npx.cmd":"npx",';
-function localSpawn(version, sub) {
-  return `spawn(process.execPath,[require("node:path").join(require("node:os").homedir(),".marrow","runtime","mcp","${version}","launch.cjs"),"--package=@getmarrow/mcp@${version}","marrow-mcp","${sub}"],`;
+function localSpawn(version, sub, cfg = runtimeConfig(version)) {
+  return `spawn(process.execPath,["-e","${loaderFor(cfg)}","--","--package=@getmarrow/mcp@${version}","marrow-mcp","${sub}"],`;
 }
-const SPAWN_RE = /spawn\(process\.execPath,\[require\("node:path"\)\.join\(require\("node:os"\)\.homedir\(\),"\.marrow","runtime","mcp","(\d+\.\d+\.\d+)","launch\.cjs"\),"--package=@getmarrow\/mcp@(\d+\.\d+\.\d+)","marrow-mcp","([a-z-]+)"\],/g;
+const SPAWN_RE = new RegExp(`spawn\\(process\\.execPath,\\["-e","(${LOADER_NC})","--","--package=@getmarrow/mcp@(\\d+\\.\\d+\\.\\d+)","marrow-mcp","([a-z-]+)"\\],`, 'g');
 const LEGACY_SPAWN_RE = /spawn\(\.\.\.\(\(f,m,a\)=>f\.existsSync\(m\)\?\[m,a\.slice\(1\)\]:\[process\.platform==="win32"\?"npx\.cmd":"npx",a\]\)\(require\("node:fs"\),\(process\.env\.HOME\|\|""\)\+"\/\.marrow\/runtime\/mcp\/\d+\.\d+\.\d+\/run",(\["-y","--package=@getmarrow\/mcp@\d+\.\d+\.\d+","marrow-mcp","[a-z-]+"\])\),/g;
 const LEGACY_SPAWN_ONE_RE = new RegExp(LEGACY_SPAWN_RE.source);
 const CANONICAL_SPAWN_RE = /spawn\(process\.platform==="win32"\?"npx\.cmd":"npx",\["-y","--package=@getmarrow\/mcp@(\d+\.\d+\.\d+)","marrow-mcp","([a-z-]+)"\],/g;
-const localGuardPrefix = (version) => `N="${NODE(version)}"; [ -x "$N" ] || N=node; exec "$N" -e '`;
+const localGuardPrefix = (version) => `N="$HOME/.marrow/runtime/mcp/${version}/node"; [ -x "$N" ] || N=node; exec "$N" -e '`;
 const LOCAL_GUARD_PREFIX_RE = /^N="\$HOME\/\.marrow\/runtime\/mcp\/\d+\.\d+\.\d+\/node"; \[ -x "\$N" \] \|\| N=node; exec "\$N" -e '/;
+const LEGACY_GUARD_SPAWN_HINT = 'spawn(...((f,m,a)=>f.existsSync(m)';
+
+// The configuration of every loader in a command, when all are valid and carry the same one.
+function commandConfig(loaders) {
+  let cfg = null;
+  for (const loader of loaders) {
+    const found = loaderConfig(loader);
+    if (!found || (cfg && JSON.stringify(found) !== JSON.stringify(cfg))) return null;
+    cfg = found;
+  }
+  return cfg;
+}
 
 // The canonical (npx) form of a hook command; any other command is returned unchanged. Only a
 // command that the current writer would produce again exactly (or an earlier writer's local
@@ -488,36 +221,53 @@ function delocalizeHookCommand(command) {
   if (typeof command !== 'string') return command;
   const legacyPlain = command.match(LEGACY_PLAIN_RE);
   if (legacyPlain && legacyPlain[1] === legacyPlain[2]) return canonicalEntrypoint(legacyPlain[2], legacyPlain[3]);
-  const plain = command.match(PLAIN_RE) || command.match(WINDOWS_PLAIN_RE);
+  const plain = command.match(PLAIN_RE);
   if (plain && plain[1] === plain[2]) {
-    const platform = command.startsWith('node ') ? 'win32' : 'posix';
-    return localPlain(plain[2], plain[3], platform) === command ? canonicalEntrypoint(plain[2], plain[3]) : command;
+    const cfg = commandConfig([plain[4]]);
+    return cfg && cfg.version === plain[2] && localPlain(plain[2], plain[3], 'posix', cfg) === command ? canonicalEntrypoint(plain[2], plain[3]) : command;
+  }
+  const windowsPlain = command.match(WINDOWS_PLAIN_RE);
+  if (windowsPlain) {
+    const cfg = commandConfig([windowsPlain[1]]);
+    return cfg && cfg.version === windowsPlain[2] && localPlain(windowsPlain[2], windowsPlain[3], 'win32', cfg) === command
+      ? canonicalEntrypoint(windowsPlain[2], windowsPlain[3]) : command;
   }
   const prefixed = LOCAL_GUARD_PREFIX_RE.test(command);
-  if (prefixed || (command.startsWith('node -e \'') && /spawn\(process\.execPath,\[require\("node:path"\)/.test(command))) {
+  if (prefixed || (command.startsWith('node -e \'') && (command.includes('spawn(process.execPath,["-e","') || command.includes(LEGACY_GUARD_SPAWN_HINT)))) {
     const body = prefixed ? command.replace(LOCAL_GUARD_PREFIX_RE, 'node -e \'') : command;
-    const canonical = body
-      .replace(LEGACY_SPAWN_RE, `${SPAWN_NPX}$1,`)
-      .replace(SPAWN_RE, (match, runVersion, version, sub) => (runVersion === version
-        ? `${SPAWN_NPX}${JSON.stringify(['-y', `--package=@getmarrow/mcp@${version}`, 'marrow-mcp', sub])},`
-        : match));
-    if (canonical === body) return command;
-    // The current guard forms must map back exactly; a legacy guard is rewritten on repair.
-    if (!LEGACY_SPAWN_ONE_RE.test(body)) {
-      const platform = prefixed ? 'posix' : 'win32';
-      const version = (canonical.match(/--package=@getmarrow\/mcp@(\d+\.\d+\.\d+)/) || [])[1];
-      if (!version || localizeHookCommand(canonical, version, { platform }) !== command) return command;
+    if (LEGACY_SPAWN_ONE_RE.test(body)) {
+      const canonical = body.replace(LEGACY_SPAWN_RE, `${SPAWN_NPX}$1,`);
+      return canonical === body ? command : canonical;
     }
+    const loaders = [];
+    const canonical = body.replace(SPAWN_RE, (match, loader, version, sub) => {
+      loaders.push(loader);
+      return `${SPAWN_NPX}${JSON.stringify(['-y', `--package=@getmarrow/mcp@${version}`, 'marrow-mcp', sub])},`;
+    });
+    if (canonical === body) return command;
+    const cfg = commandConfig(loaders);
+    const version = (canonical.match(/--package=@getmarrow\/mcp@(\d+\.\d+\.\d+)/) || [])[1];
+    // The current guard forms must map back exactly.
+    if (!cfg || !version || localizeHookCommand(canonical, version, { platform: prefixed ? 'posix' : 'win32', ...cfg }) !== command) return command;
     return canonical;
   }
   if (command.startsWith('/bin/sh -c \'') && (LEGACY_INNER_RE.test(command) || INNER_RE.test(command))) {
     LEGACY_INNER_RE.lastIndex = 0;
     INNER_RE.lastIndex = 0;
+    const loaders = [];
+    let mismatch = false;
     const inner = command
       .replace(LEGACY_INNER_RE, (match, runVersion, version, sub) => (runVersion === version ? canonicalEntrypoint(version, sub) : match))
-      .replace(INNER_RE, (match, runVersion, version, sub) => (
-        runVersion === version && localInner(version, sub) === match ? canonicalEntrypoint(version, sub) : match
-      ));
+      .replace(INNER_RE, (match, nodeVersion, loader, version, sub) => {
+        const cfg = commandConfig([loader]);
+        if (nodeVersion !== version || !cfg || cfg.version !== version || localInner(version, sub, cfg) !== match) {
+          mismatch = true;
+          return match;
+        }
+        loaders.push(loader);
+        return canonicalEntrypoint(version, sub);
+      });
+    if (mismatch || (loaders.length && !commandConfig(loaders))) return command;
     return inner === command ? command : `sh -c '${inner.slice('/bin/sh -c \''.length)}`;
   }
   return command;
@@ -525,20 +275,22 @@ function delocalizeHookCommand(command) {
 
 // The local runtime form of a canonical hook command for `version`, or the command unchanged
 // when it is not a Marrow entrypoint for that version. The result always maps back exactly.
-function localizeHookCommand(command, version, { platform = process.platform } = {}) {
+// `integrity` and `sdk` are what the loader installs when it heals (defaults: the pins).
+function localizeHookCommand(command, version, { platform = process.platform, integrity, sdk } = {}) {
   if (typeof command !== 'string' || !VERSION_RE.test(String(version || ''))) return command;
   const windows = platform === 'win32';
+  const cfg = runtimeConfig(version, { integrity, sdk });
   let local = command;
   const plain = command.match(CANONICAL_PLAIN_RE);
   if (plain) {
     if (plain[1] !== version) return command;
-    local = localPlain(version, plain[2], windows ? 'win32' : 'posix');
+    local = localPlain(version, plain[2], windows ? 'win32' : 'posix', cfg);
   } else if (command.startsWith('node -e \'') && command.includes(SPAWN_NPX)) {
     let matched = false;
     const body = command.slice('node -e \''.length).replace(CANONICAL_SPAWN_RE, (match, specVersion, sub) => {
       if (specVersion !== version) return match;
       matched = true;
-      return localSpawn(version, sub);
+      return localSpawn(version, sub, cfg);
     });
     if (!matched) return command;
     local = windows ? `node -e '${body}` : `${localGuardPrefix(version)}${body}`;
@@ -547,7 +299,7 @@ function localizeHookCommand(command, version, { platform = process.platform } =
     const body = command.slice('sh -c \''.length).replace(CANONICAL_INNER_RE, (match, specVersion, sub) => {
       if (specVersion !== version) return match;
       matched = true;
-      return localInner(version, sub);
+      return localInner(version, sub, cfg);
     });
     if (!matched) return command;
     local = `/bin/sh -c '${body}`;
@@ -559,12 +311,10 @@ function localizeHookCommand(command, version, { platform = process.platform } =
 
 function mapsBack(local, command) {
   // delocalize re-checks guard forms through localize; compare without recursing forever.
-  const plain = local.match(PLAIN_RE) || local.match(WINDOWS_PLAIN_RE);
-  if (plain) return canonicalEntrypoint(plain[2], plain[3]) === command;
-  if (local.startsWith('/bin/sh -c \'')) return delocalizeHookCommand(local) === command;
+  if (local.match(PLAIN_RE) || local.match(WINDOWS_PLAIN_RE) || local.startsWith('/bin/sh -c \'')) return delocalizeHookCommand(local) === command;
   const prefixed = LOCAL_GUARD_PREFIX_RE.test(local);
   const body = prefixed ? local.replace(LOCAL_GUARD_PREFIX_RE, 'node -e \'') : local;
-  const canonical = body.replace(SPAWN_RE, (match, runVersion, version, sub) => (runVersion === version
+  const canonical = body.replace(SPAWN_RE, (match, loader, version, sub) => (loaderConfig(loader)
     ? `${SPAWN_NPX}${JSON.stringify(['-y', `--package=@getmarrow/mcp@${version}`, 'marrow-mcp', sub])},`
     : match));
   return canonical === command;
@@ -580,8 +330,11 @@ function mapHookCommands(value, map) {
   ]));
 }
 
-// Hook settings text with Marrow's entrypoints for `version` switched to the local runtime.
-function localizeHookSettingsText(text, version, { platform = process.platform } = {}) {
+// Hook settings text with Marrow's entrypoints for `version` switched to the local runtime. A
+// command already in `previousText` that maps to the same canonical form and carries the same
+// configuration is kept byte for byte, so a file written on another machine (another zlib
+// build) is not rewritten.
+function localizeHookSettingsText(text, version, { platform = process.platform, integrity, sdk, previousText = null } = {}) {
   if (typeof text !== 'string' || !text.trim()) return text;
   let parsed;
   try {
@@ -589,23 +342,66 @@ function localizeHookSettingsText(text, version, { platform = process.platform }
   } catch {
     return text;
   }
+  const expected = JSON.stringify(runtimeConfig(version, { integrity, sdk }));
+  const keep = new Map();
+  if (typeof previousText === 'string' && previousText.trim()) {
+    try {
+      mapHookCommands(JSON.parse(previousText), (command) => {
+        const canonical = delocalizeHookCommand(command);
+        const loaders = [...command.matchAll(new RegExp(LOADER_PATTERN, 'g'))].map((match) => match[0]);
+        const cfg = loaders.length ? commandConfig(loaders) : null;
+        if (canonical !== command && cfg && JSON.stringify(cfg) === expected
+          && (platform === 'win32') === command.startsWith('node -e "')) keep.set(canonical, command);
+        return command;
+      });
+    } catch {
+      keep.clear();
+    }
+  }
   let changed = false;
   const mapped = mapHookCommands(parsed, (command) => {
-    const local = localizeHookCommand(command, version, { platform });
+    const local = keep.get(command) || localizeHookCommand(command, version, { platform, integrity, sdk });
     if (local !== command) changed = true;
     return local;
   });
   return changed ? `${JSON.stringify(mapped, null, 2)}\n` : text;
 }
 
-// A hook script (Cline) with each canonical entrypoint line switched to the run script for
-// `version`. A missing run script fails the line, and each script already treats that as no
-// decision (the pre-action script then cancels the call).
-function localizeHookScriptText(text, version) {
+// A hook script (Cline) with each canonical entrypoint switched to the inline loader for
+// `version`. Without node the line fails, and each script already treats that as no decision
+// (the pre-action script then cancels the call).
+function localizeHookScriptText(text, version, { integrity, sdk } = {}) {
   if (typeof text !== 'string' || !VERSION_RE.test(String(version || ''))) return text;
+  const cfg = runtimeConfig(version, { integrity, sdk });
   return text.replace(CANONICAL_INNER_RE, (match, specVersion, sub) => (
-    specVersion === version ? `"${RUN(version)}" --package=@getmarrow/mcp@${version} marrow-mcp ${sub}` : match
+    specVersion === version ? localInner(version, sub, cfg) : match
   ));
+}
+
+// Earlier Cline script lines ("$HOME/.marrow/runtime/mcp/<v>/run" ...) back to the canonical form.
+function delocalizeHookScriptText(text) {
+  if (typeof text !== 'string') return text;
+  return text.replace(INNER_RE, (match, nodeVersion, loader, version, sub) => {
+    const cfg = commandConfig([loader]);
+    return nodeVersion === version && cfg && cfg.version === version && localInner(version, sub, cfg) === match ? canonicalEntrypoint(version, sub) : match;
+  }).replace(/"\$HOME\/\.marrow\/runtime\/mcp\/(\d+\.\d+\.\d+)\/run" --package=@getmarrow\/mcp@(\d+\.\d+\.\d+) marrow-mcp ([a-z][a-z-]{0,63})/g,
+    (match, runVersion, version, sub) => (runVersion === version ? canonicalEntrypoint(version, sub) : match));
+}
+
+// The MCP server entry (.mcp.json, .cursor/mcp.json): node on the loader, with no shell, so the
+// same entry works on every platform. Base and 0.1.68 wrote `npx -y --package=... marrow-mcp`.
+function mcpServerLaunch(version, { integrity, sdk } = {}) {
+  return { command: 'node', args: ['-e', loaderFor(runtimeConfig(version, { integrity, sdk })), '--', `--package=@getmarrow/mcp@${version}`, 'marrow-mcp'] };
+}
+
+// The version of a server entry this module wrote (exact loader, matching version), else null.
+function mcpServerLaunchVersion(entry) {
+  if (!entry || typeof entry !== 'object' || entry.command !== 'node' || !Array.isArray(entry.args) || entry.args.length !== 5) return null;
+  const [flag, loader, dashes, spec, bin] = entry.args;
+  const match = String(spec).match(/^--package=@getmarrow\/mcp@(\d+\.\d+\.\d+)$/);
+  if (flag !== '-e' || dashes !== '--' || bin !== 'marrow-mcp' || !match) return null;
+  const cfg = loaderConfig(loader);
+  return cfg && cfg.version === match[1] ? match[1] : null;
 }
 
 // Whether a hook file's text still starts @getmarrow/mcp through npx (the canonical form, an
@@ -615,24 +411,40 @@ function hookTextUsesNpx(text) {
   return /npx -y --package=@getmarrow\/mcp@/.test(text) || text.includes('"npx.cmd":"npx"') || text.includes('\\"npx.cmd\\":\\"npx\\"');
 }
 
+// Whether an MCP server config still starts the Marrow server through npx.
+function mcpServerUsesNpx(config) {
+  const entry = config && typeof config === 'object' && config.mcpServers && typeof config.mcpServers === 'object' ? config.mcpServers.marrow : null;
+  if (!entry || typeof entry !== 'object') return false;
+  const args = Array.isArray(entry.args) ? entry.args.map(String) : [];
+  return /(?:^|[\\/])npx(?:\.cmd)?$/.test(String(entry.command || '')) && args.some((arg) => /^--package=@getmarrow\/mcp(?:@|$)/.test(arg));
+}
+
 module.exports = {
   HOLD_TEXT,
   NPM_INSTALL_TIMEOUT_MS,
   RUNTIME_SCHEMA,
-  LAUNCHER_SOURCE,
   UNAVAILABLE_TEXT,
+  RUN,
   defaultNpmInstall,
   delocalizeHookCommand,
+  delocalizeHookScriptText,
   ensureMcpRuntime,
   hookTextUsesNpx,
+  launcherSource,
+  loaderConfig,
+  loaderFor,
   localizeHookCommand,
   localizeHookScriptText,
   localizeHookSettingsText,
   mapHookCommands,
+  mcpServerLaunch,
+  mcpServerLaunchVersion,
+  mcpServerUsesNpx,
   npmEnvironment,
   npmInvocation,
   removeMcpRuntime,
-  runScript,
+  runtimeConfig,
+  runtimeCore: core,
   runtimeDir,
   runtimeRoot,
   verifyMcpRuntime,
