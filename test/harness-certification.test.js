@@ -57,10 +57,12 @@ test('native matchers include supported read, search, and status tools without m
   assert.equal(claude.test('mcp__marrow__marrow_agent_status'), false);
   const cursor = new RegExp(`^(?:${CURSOR_NATIVE_HOOK_MATCHER})$`);
   for (const tool of ['Read', 'Glob', 'Grep', 'Search', 'WebSearch', 'List']) assert.equal(cursor.test(tool), true, tool);
-  assert.equal(cursor.test('MCP:marrow_agent_status'), false);
+  // Cursor's `MCP:<tool>` and Gemini's `mcp_<server>_<tool>` do not prove the server: Marrow's own
+  // tools reach the hook there (only Claude Code's exact `mcp__marrow__<tool>` is skipped).
+  assert.equal(cursor.test('MCP:marrow_agent_status'), true);
   const gemini = new RegExp(GEMINI_NATIVE_HOOK_MATCHER);
   for (const tool of ['read_file', 'read_many_files', 'glob', 'grep_search', 'list_directory', 'get_file_info', 'web_search']) assert.equal(gemini.test(tool), true, tool);
-  assert.equal(gemini.test('mcp_marrow_marrow_agent_status'), false);
+  assert.equal(gemini.test('mcp_marrow_marrow_agent_status'), true);
 });
 const GEMINI_MATCHER = require('../src/marrow-own-tools').buildOwnToolMatchers().gemini;
 const SDK_INTEGRITY = PINS.SDK_ADAPTER_INTEGRITY;

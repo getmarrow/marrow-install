@@ -64,9 +64,9 @@ const MARROW_OWN_TOOL_NAMES = Object.freeze([
   'marrow_workflow_gate',
 ]);
 
-// Every hook matcher and guard skips only these names on a server named exactly `marrow`
-// (case-sensitive). Any other tool, including an unregistered marrow_* name, a case variant or
-// a padded name, still reaches the hook.
+// A matcher or guard skips only these names on a server named exactly `marrow` (case-sensitive),
+// and only where the host's label or payload proves that server. Any other tool, including an
+// unregistered marrow_* name, a case variant or a padded name, still reaches the hook.
 const MARROW_OWN_SERVER = 'marrow';
 
 // The names go into regex sources unescaped, so each must be a plain identifier.
@@ -79,23 +79,30 @@ function checkedNames(names) {
 }
 checkedNames(MARROW_OWN_TOOL_NAMES);
 
-// One helper builds every host's matcher. `$` inside each lookahead is the end of the tool name:
-// the hosts test these as JavaScript regexes without the m flag, and an MCP prefix occurs only at
-// the start of a name, so a search and a full match skip the same names.
+// One helper builds every host's matcher. Claude Code, Cursor and Gemini test them as JavaScript
+// regexes, unanchored and without the m flag, so `^` and `$` are the start and end of the label.
+// Every consuming part is `[\s\S]*`, so a label padded with a line terminator, NUL or space
+// anywhere still matches, under a search and a full match.
 function buildOwnToolMatchers(names = MARROW_OWN_TOOL_NAMES) {
   const own = `(?:${checkedNames(names).join('|')})`;
-  // Shared with @getmarrow/mcp NATIVE_HOOK_MATCHER (byte-identical): Claude Code tool names and
-  // the Codex `functions.` namespace.
-  const mcpTail = `functions\\.(?!mcp__${MARROW_OWN_SERVER}__${own}$).*|mcp__(?!${MARROW_OWN_SERVER}__${own}$).*`;
-  // Cursor preToolUse names MCP tools `MCP:<tool>` or `MCP:<server>:<tool>`.
-  const cursorMcp = `MCP:(?!(?:${MARROW_OWN_SERVER}:)?${own}$).*`;
+  // Shared with @getmarrow/mcp NATIVE_HOOK_MATCHER (byte-identical). Claude Code names an MCP tool
+  // `mcp__<server>__<tool>` and maps every other character to `_` without trimming, so the exact
+  // label `mcp__marrow__<own>` comes only from server `marrow`: that whole label is skipped, and any
+  // other label holding `mcp__` or `functions.` anywhere reaches the hook.
+  const mcpTail = `^(?!mcp__${MARROW_OWN_SERVER}__${own}$)[\\s\\S]*(?:functions\\.|mcp__)[\\s\\S]*`;
+  // Cursor preToolUse names an MCP tool `MCP:<tool>`, without its server, so no MCP label is
+  // skipped; Marrow's own tools are told apart in the hook (beforeMCPExecution carries the server).
+  const cursorMcp = '[\\s\\S]*MCP:[\\s\\S]*';
   return {
     claude: `Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|${mcpTail}`,
     // Codex keeps its own native tools (apply_patch included) and the shared MCP part.
     codex: `Bash|apply_patch|Edit|Write|MultiEdit|${mcpTail}`,
     cursor: `Shell|Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|${cursorMcp}`,
     cursorPreToolUseHostApproval: `Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|${cursorMcp}`,
-    gemini: `^(?:run_shell_command|write_file|replace|edit_file|delete_file|read_file|read_many_files|glob|grep_search|list_directory|get_file_info|web_search|google_web_search|mcp_(?!${MARROW_OWN_SERVER}_${own}$).*)$`,
+    // Gemini names an MCP tool `mcp_<server>_<tool>`, which other server/tool pairs can also
+    // produce, so every `mcp_` label reaches the hook (its payload's mcp_context names the server).
+    // Gemini tool names start with a letter: a label that does not (a padded one) reaches it too.
+    gemini: '^(?:run_shell_command|write_file|replace|edit_file|delete_file|read_file|read_many_files|glob|grep_search|list_directory|get_file_info|web_search|google_web_search|mcp_[\\s\\S]*)$|^[^A-Za-z_][\\s\\S]*',
   };
 }
 

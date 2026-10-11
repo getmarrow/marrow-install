@@ -25,9 +25,11 @@ const OLD = {
   gemini: '^(?:run_shell_command|write_file|replace|edit_file|delete_file|read_file|read_many_files|glob|grep_search|list_directory|get_file_info|web_search|google_web_search|mcp_(?!marrow_marrow_)[A-Za-z0-9_]{1,192})$',
 };
 
-// The exact strings of the shared rule, assembled here from the JSON (not from the module).
-function expectedStrings() {
-  const OWN = NAMES.join('|');
+const OWN = NAMES.join('|');
+const GEMINI_BUILTINS = 'run_shell_command|write_file|replace|edit_file|delete_file|read_file|read_many_files|glob|grep_search|list_directory|get_file_info|web_search|google_web_search';
+
+// The r1 candidate (8371de15) strings, for the "never looser than r1" checks.
+const R1 = (() => {
   const tail = `functions\\.(?!mcp__marrow__(?:${OWN})$).*|mcp__(?!marrow__(?:${OWN})$).*`;
   const cursorMcp = `MCP:(?!(?:marrow:)?(?:${OWN})$).*`;
   return {
@@ -35,57 +37,120 @@ function expectedStrings() {
     codex: `Bash|apply_patch|Edit|Write|MultiEdit|${tail}`,
     cursor: `Shell|Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|${cursorMcp}`,
     cursorPreToolUseHostApproval: `Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|${cursorMcp}`,
-    gemini: `^(?:run_shell_command|write_file|replace|edit_file|delete_file|read_file|read_many_files|glob|grep_search|list_directory|get_file_info|web_search|google_web_search|mcp_(?!marrow_(?:${OWN})$).*)$`,
+    gemini: `^(?:${GEMINI_BUILTINS}|mcp_(?!marrow_(?:${OWN})$).*)$`,
+  };
+})();
+
+// The exact strings of the rule, assembled here from the JSON (not from the module).
+function expectedStrings() {
+  const tail = `^(?!mcp__marrow__(?:${OWN})$)[\\s\\S]*(?:functions\\.|mcp__)[\\s\\S]*`;
+  const cursorMcp = '[\\s\\S]*MCP:[\\s\\S]*';
+  return {
+    claude: `Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|${tail}`,
+    codex: `Bash|apply_patch|Edit|Write|MultiEdit|${tail}`,
+    cursor: `Shell|Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|${cursorMcp}`,
+    cursorPreToolUseHostApproval: `Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|${cursorMcp}`,
+    gemini: `^(?:${GEMINI_BUILTINS}|mcp_[\\s\\S]*)$|^[^A-Za-z_][\\s\\S]*`,
   };
 }
 
-// How a host applies a matcher. The repo's tests (and @getmarrow/mcp test/hook-install.test.js)
-// treat Claude Code, Codex and Cursor matchers as a full match; Claude Code's own rule is a
-// regex test (a search). Gemini's matcher carries its own anchors. Each case must hold both ways.
+// How a host applies a matcher. Claude Code, Cursor and Gemini run RegExp.prototype.test on the
+// label and Codex runs Regex::is_match: all unanchored (a search). Every case is also checked
+// under a full match, so no result depends on which of the two a host uses.
 const SEMANTICS = {
   full: (matcher) => new RegExp(`^(?:${matcher})$`),
   search: (matcher) => new RegExp(matcher),
 };
-const reaches = (matcher, tool, mode) => SEMANTICS[mode](matcher).test(tool);
+const MODES = Object.keys(SEMANTICS);
+const COMPILED = new Map();
+function reaches(matcher, tool, mode) {
+  const key = `${mode}\u0000${matcher}`;
+  if (!COMPILED.has(key)) COMPILED.set(key, SEMANTICS[mode](matcher));
+  return COMPILED.get(key).test(tool);
+}
 
-// Host forms of an MCP tool, per matcher.
+// Labels a host might send for a (server, tool) pair, written raw.
 const FORMS = {
   claude: (server, tool) => [`mcp__${server}__${tool}`, `functions.mcp__${server}__${tool}`],
   codex: (server, tool) => [`mcp__${server}__${tool}`, `functions.mcp__${server}__${tool}`],
-  cursor: (server, tool) => [`MCP:${server}:${tool}`, ...(server === 'marrow' ? [`MCP:${tool}`] : [])],
-  cursorPreToolUseHostApproval: (server, tool) => [`MCP:${server}:${tool}`, ...(server === 'marrow' ? [`MCP:${tool}`] : [])],
+  cursor: (server, tool) => [`MCP:${tool}`, `MCP:${server}:${tool}`],
+  cursorPreToolUseHostApproval: (server, tool) => [`MCP:${tool}`, `MCP:${server}:${tool}`],
   gemini: (server, tool) => [`mcp_${server}_${tool}`],
+};
+// The only labels any matcher skips: the exact Claude Code label of an own tool on server `marrow`
+// (shared by the Codex string). Cursor's `MCP:<tool>` and Gemini's `mcp_<server>_<tool>` cannot
+// prove the server, so no label is skipped there.
+const SKIPPED = {
+  claude: (name) => [`mcp__marrow__${name}`],
+  codex: (name) => [`mcp__marrow__${name}`],
+  cursor: () => [],
+  cursorPreToolUseHostApproval: () => [],
+  gemini: () => [],
+};
+const skippedSet = (key) => new Set(NAMES.flatMap(SKIPPED[key]));
+
+// Each host's real label for a (server, tool) pair, transcribed from the host sources
+// (evidence/r2/host-label-research.md).
+function claudeIn(value) {
+  // Claude Code 2.1.296 In(): every char outside [a-zA-Z0-9_-] becomes `_`; claude.ai connectors collapse.
+  let out = value.replace(/[^a-zA-Z0-9_-]/g, '_');
+  if (value.startsWith('claude.ai ')) out = out.replace(/_+/g, '_').replace(/^_|_$/g, '');
+  return out;
+}
+function geminiLabel(server, tool) {
+  // Gemini CLI 0.63.0 generateValidName(`${server}_${tool}`).
+  let name = `${server}_${tool}`;
+  name = name.startsWith('mcp_') ? name : `mcp_${name}`;
+  name = name.replace(/[^a-zA-Z0-9_\-.:]/g, '_');
+  if (/^[^a-zA-Z_]/.test(name)) name = `_${name}`;
+  if (name.length > 63) name = `${name.slice(0, 30)}...${name.slice(-30)}`;
+  return name;
+}
+const HOST_LABELS = {
+  claude: (server, tool) => [`mcp__${claudeIn(server)}__${claudeIn(tool)}`],
+  // Cursor CLI 2026.10.01: preToolUse/postToolUse send `MCP:${toolName}`, never the server.
+  cursor: (server, tool) => [`MCP:${tool}`],
+  cursorPreToolUseHostApproval: (server, tool) => [`MCP:${tool}`],
+  gemini: (server, tool) => [geminiLabel(server, tool)],
 };
 
 const SERVER_VARIANTS = ['MARROW', 'Marrow', 'mARROW', 'marroW', 'marrow2', 'marrow_', '_marrow', 'xmarrow', 'marrowx', 'marrow-evil', 'evil', 'plugin_marrow_marrow',
-  'mаrrow', 'ｍarrow', 'marrow​', 'marrow ', ' marrow'];
+  'mаrrow', 'ｍarrow', 'marrow​', 'marrow ', ' marrow', 'marrow_marrow', 'marrow-', 'marrow.', 'marrow marrow', 'mcp_marrow', 'marrow__marrow', 'marrow:marrow',
+  'claude.ai marrow', 'evil-server', 'evil_server'];
 const TOOL_VARIANTS = ['MARROW_COMMIT', 'Marrow_commit', 'marrow_Commit', 'marrow_delete_all', 'marrow_exec', 'marrow_x', 'marrow_', 'marrow', 'marrow_commitx',
   'marrow_commit ', ' marrow_commit', 'marrow_commit\t', 'marrow_workflow_', 'marrow_workflow_gatex', 'marrow_workflowgate', 'marrow_commit|marrow_ask',
-  'marrow_x__deploy_prod', 'marrow_commit__mcp__github__push', 'constructor', '__proto__', 'delete_all', 'x'];
+  'marrow_x__deploy_prod', 'marrow_commit__mcp__github__push', 'constructor', '__proto__', 'delete_all', 'x', 'xmarrow_commit', 'commit', '_marrow_commit',
+  'marrow.commit', 'marrow-commit', 'marrow:marrow_commit', 'marrow_marrow_commit'];
+// Padding a label may carry before, after or on both sides.
+const PADS = ['\n', '\r', '\r\n', ' ', ' ', ' ', '\t', '\u0000'];
+const padded = (label) => PADS.flatMap((pad) => [`${pad}${label}`, `${label}${pad}`, `${pad}${label}${pad}`]);
 
-// Every probe that must still reach the hook, per matcher.
-function abuseProbes(key) {
-  const probes = [];
-  for (const server of SERVER_VARIANTS) for (const tool of ['marrow_commit', 'marrow_delete_all']) probes.push(...FORMS[key](server, tool));
-  for (const tool of TOOL_VARIANTS) probes.push(...FORMS[key]('marrow', tool));
+// Every label a matcher is checked against: the abuse probes plus every own name in every form.
+function probes(key) {
+  const out = [];
+  for (const server of SERVER_VARIANTS) for (const tool of ['marrow_commit', 'marrow_delete_all', ...NAMES.slice(0, 3)]) out.push(...FORMS[key](server, tool));
+  for (const tool of TOOL_VARIANTS) out.push(...FORMS[key]('marrow', tool));
+  for (const name of NAMES) out.push(...FORMS[key]('marrow', name));
   if (key === 'claude' || key === 'codex') {
-    probes.push('mcp__evil__x', 'mcp__marrow__marrow_delete_all', 'mcp__MARROW__marrow_commit', 'mcp__marrow__marrow_commit ',
+    out.push('mcp__evil__x', 'mcp__marrow__marrow_delete_all', 'mcp__MARROW__marrow_commit', 'mcp__marrow__marrow_commit ',
       'functions.mcp__MARROW__marrow_commit', 'functions.marrow_commit', 'functions.marrow_delete_all', 'functions.mcp__marrow__marrow_x',
       'functions.functions.mcp__marrow__marrow_commit', 'functions.mcp__evil__mcp__marrow__marrow_commit', 'mcp__evil__mcp__marrow__marrow_commit',
+      'xmcp__marrow__marrow_commit', 'mcp__marrow__marrow_commitmcp__marrow__marrow_commit', 'mcp__marrow__mcp__marrow__marrow_commit',
       'functions.exec', 'functions.apply_patch', 'Bash', 'Write', 'Edit', 'MultiEdit');
   }
-  if (key === 'claude') probes.push('Read', 'Glob', 'Grep', 'Search', 'WebSearch', 'Task');
-  if (key === 'codex') probes.push('apply_patch');
+  if (key === 'claude') out.push('Read', 'Glob', 'Grep', 'Search', 'WebSearch', 'Task');
+  if (key === 'codex') out.push('apply_patch');
   if (key.startsWith('cursor')) {
-    probes.push('MCP:marrow_delete_all', 'MCP:MARROW:marrow_commit', 'MCP:Marrow:marrow_commit', 'MCP:evil:marrow_commit', 'MCP:marrow:marrow_commit ',
-      'MCP:marrow_commit ', 'MCP::marrow_commit', 'MCP:marrow:marrow:marrow_commit', 'MCP:', 'MCP:toString', 'Write', 'Delete', 'Read', 'List');
-    if (key === 'cursor') probes.push('Shell');
+    out.push('MCP:marrow_commit', 'MCP:marrow:marrow_commit', 'MCP:evil:marrow_commit', 'MCP:marrow_delete_all', 'MCP:MARROW:marrow_commit',
+      'MCP:Marrow:marrow_commit', 'MCP:marrow:marrow_commit ', 'MCP:marrow_commit ', 'MCP::marrow_commit', 'MCP:marrow:marrow:marrow_commit', 'MCP:',
+      'MCP:toString', 'xMCP:marrow_commit', 'Write', 'Delete', 'Read', 'List');
+    if (key === 'cursor') out.push('Shell');
   }
   if (key === 'gemini') {
-    probes.push('mcp_marrow_marrow_delete_all', 'mcp_MARROW_marrow_commit', 'mcp_marrow_marrow_commit ', 'mcp_evil_x', 'mcp_marrow_x',
-      'mcp_evil-server_deploy', `mcp_evil_${'x'.repeat(200)}`, 'run_shell_command', 'write_file', 'replace', 'read_file', 'web_search');
+    out.push('mcp_marrow_marrow_commit', 'mcp_marrow_marrow_delete_all', 'mcp_MARROW_marrow_commit', 'mcp_marrow_marrow_commit ', 'mcp_evil_x', 'mcp_marrow_x',
+      'mcp_evil-server_deploy', `mcp_evil_${'x'.repeat(200)}`, 'mcp_mcp_marrow_marrow_commit', 'run_shell_command', 'write_file', 'replace', 'read_file', 'web_search');
   }
-  return [...new Set(probes)];
+  return [...new Set(out)];
 }
 
 test('src/marrow-own-tools.js holds exactly the 58 registered names, in file order', () => {
@@ -95,19 +160,26 @@ test('src/marrow-own-tools.js holds exactly the 58 registered names, in file ord
   assert.equal(new Set(NAMES).size, 58);
   assert.equal(Object.isFrozen(own.MARROW_OWN_TOOL_NAMES), true);
   assert.equal(own.MARROW_OWN_SERVER, 'marrow');
+  // One `__` split only: no name holds `__`, so `mcp__marrow__<name>` has a single reading.
+  for (const name of NAMES) assert.equal(name.includes('__'), false, name);
 });
 
-test('every matcher is the exact string of the shared rule, built from the names, and the installer writes it', () => {
+test('every matcher is the exact string of the rule, built from the names, and the installer writes it', () => {
   const expected = expectedStrings();
   assert.deepEqual(own.buildOwnToolMatchers(), expected);
   assert.equal(installer.NATIVE_HOOK_MATCHER, expected.claude);
   assert.equal(installer.CURSOR_NATIVE_HOOK_MATCHER, expected.cursor);
   assert.equal(installer.CURSOR_PRE_TOOL_USE_HOST_APPROVAL_MATCHER, expected.cursorPreToolUseHostApproval);
   assert.equal(installer.GEMINI_NATIVE_HOOK_MATCHER, expected.gemini);
-  // Byte-identical with the rule @getmarrow/mcp's NATIVE_HOOK_MATCHER follows.
-  const OWN = NAMES.join('|');
+  // Byte-identical with @getmarrow/mcp NATIVE_HOOK_MATCHER (MCP_SYNC_STRING in the r2 result).
   assert.equal(installer.NATIVE_HOOK_MATCHER,
-    `Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|functions\\.(?!mcp__marrow__(?:${OWN})$).*|mcp__(?!marrow__(?:${OWN})$).*`);
+    `Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|^(?!mcp__marrow__(?:${OWN})$)[\\s\\S]*(?:functions\\.|mcp__)[\\s\\S]*`);
+  for (const [key, matcher] of Object.entries(expected)) {
+    // Every consuming part is exactly `[\s\S]*`: no `.*`, `(?s)`, `[^]` or m flag that a line terminator could escape.
+    assert.equal(/(^|[^\\])\.[*+]/.test(matcher), false, key);
+    assert.equal(matcher.includes('(?s)') || matcher.includes('[^]') || matcher.includes('(?m)'), false, key);
+    assert.doesNotThrow(() => new RegExp(matcher), key);
+  }
   // A name that is not a plain identifier never reaches a regex source or the guard.
   for (const bad of ['marrow_.*', 'marrow_x|evil', 'marrow_x)$|(?=', 'MARROW_X', 'marrow_x"', '', 'evil']) {
     assert.throws(() => own.buildOwnToolMatchers([bad]), /invalid Marrow tool name/, bad);
@@ -116,44 +188,105 @@ test('every matcher is the exact string of the shared rule, built from the names
   assert.throws(() => own.buildOwnToolMatchers([]), /invalid Marrow tool name list/);
 });
 
-test('each matcher skips exactly the 58 own names in each host form, under full-match and search semantics', () => {
+test('each matcher skips exactly the labels its host proves are own, and nothing else, under search and full match', () => {
   for (const [key, matcher] of Object.entries(own.buildOwnToolMatchers())) {
-    const modes = key === 'gemini' ? ['search'] : ['full', 'search'];
-    for (const mode of modes) {
-      for (const name of NAMES) {
-        for (const form of FORMS[key]('marrow', name)) assert.equal(reaches(matcher, form, mode), false, `${key}/${mode}: own ${JSON.stringify(form)} must be skipped`);
+    const skipped = skippedSet(key);
+    assert.equal(skipped.size, key === 'claude' || key === 'codex' ? 58 : 0, key);
+    for (const mode of MODES) {
+      for (const label of skipped) assert.equal(reaches(matcher, label, mode), false, `${key}/${mode}: own ${JSON.stringify(label)} must be skipped`);
+      for (const probe of probes(key)) {
+        assert.equal(reaches(matcher, probe, mode), !skipped.has(probe), `${key}/${mode}: ${JSON.stringify(probe)}`);
       }
-      for (const probe of abuseProbes(key)) assert.equal(reaches(matcher, probe, mode), true, `${key}/${mode}: ${JSON.stringify(probe)} must reach the hook`);
     }
   }
 });
 
-test('no matcher is looser than 0.1.68: whatever reached the hook before still does', () => {
+test('collisions: a label is skipped only when no (server, tool) pair but (marrow, an own name) can produce it', () => {
+  const matchers = own.buildOwnToolMatchers();
+  const servers = ['marrow', ...SERVER_VARIANTS];
+  const tools = [...NAMES, ...TOOL_VARIANTS];
+  for (const [key, label] of Object.entries(HOST_LABELS)) {
+    for (const mode of MODES) {
+      for (const server of servers) {
+        for (const tool of tools) {
+          for (const value of label(server, tool)) {
+            const skipped = !reaches(matchers[key], value, mode);
+            // Claude Code: only server `marrow` (the trust anchor) reaches `mcp__marrow__`; on it the
+            // tool part must be an own name after the host's own normalisation.
+            const allowed = key === 'claude' && server === 'marrow' && NAMES.includes(claudeIn(tool));
+            if (skipped) assert.equal(allowed, true, `${key}/${mode}: (${JSON.stringify(server)}, ${JSON.stringify(tool)}) -> ${JSON.stringify(value)} skipped`);
+            if (key === 'claude' && server === 'marrow' && NAMES.includes(tool)) assert.equal(skipped, true, `${key}/${mode}: own ${tool}`);
+          }
+        }
+      }
+    }
+  }
+  // Gemini: these pairs all give one label, so it is never skipped.
+  const shared = geminiLabel('marrow', 'marrow_commit');
+  assert.equal(shared, 'mcp_marrow_marrow_commit');
+  for (const [server, tool] of [['marrow_marrow', 'commit'], ['mcp_marrow', 'marrow_commit'], ['marrow marrow', 'commit'], ['marrow/marrow', 'commit']]) {
+    assert.equal(geminiLabel(server, tool), shared, `${server}/${tool}`);
+  }
+  for (const mode of MODES) {
+    assert.equal(reaches(matchers.gemini, shared, mode), true, mode);
+    // Cursor: `MCP:<tool>` carries no server, and a tool named `marrow:marrow_commit` on any server
+    // gives `MCP:marrow:marrow_commit`; both forms reach the hook, as does a foreign server.
+    for (const key of ['cursor', 'cursorPreToolUseHostApproval']) {
+      for (const value of ['MCP:marrow_commit', 'MCP:marrow:marrow_commit', 'MCP:evil:marrow_commit', 'MCP:marrow_workflow_gate']) {
+        assert.equal(reaches(matchers[key], value, mode), true, `${key}/${mode}: ${value}`);
+      }
+    }
+    // Claude Code: look-alike servers give other labels, which reach the hook.
+    for (const server of ['marrow_', 'marrow-', 'marrow.', 'MARROW', 'Marrow', 'marrow_marrow', 'marrow__marrow', 'claude.ai marrow']) {
+      const value = HOST_LABELS.claude(server, 'marrow_commit')[0];
+      assert.notEqual(value, 'mcp__marrow__marrow_commit', server);
+      assert.equal(reaches(matchers.claude, value, mode), true, `${mode}: ${server} -> ${value}`);
+    }
+  }
+});
+
+test('padded labels (LF, CR, CRLF, U+2028, U+2029, space, tab, NUL; before, after, both) always reach the hook', () => {
+  for (const [key, matcher] of Object.entries(own.buildOwnToolMatchers())) {
+    for (const name of NAMES) {
+      const labels = [...FORMS[key]('marrow', name), ...SKIPPED[key](name), ...(key === 'gemini' ? [geminiLabel('marrow', name)] : [])];
+      for (const label of new Set(labels)) {
+        for (const value of padded(label)) {
+          for (const mode of MODES) assert.equal(reaches(matcher, value, mode), true, `${key}/${mode}: ${JSON.stringify(value)}`);
+        }
+      }
+    }
+  }
+});
+
+test('no matcher is looser than 0.1.68 or the r1 candidate: whatever reached the hook before still does', () => {
   const now = own.buildOwnToolMatchers();
   for (const key of Object.keys(OLD)) {
-    // The 58 own forms are skipped by design (0.1.68 Codex still sent `functions.mcp__marrow__<own>`
-    // to the hook, which allowed it); every other name keeps reaching the hook.
-    const probes = [...abuseProbes(key), 'mcp__marrow__marrow_commit\n', 'MCP:marrow_commit\n', 'mcp_marrow_marrow_commit\n', 'mcp__evil__x\n'];
-    for (const mode of key === 'gemini' ? ['search'] : ['full', 'search']) {
-      for (const probe of probes) {
-        if (reaches(OLD[key], probe, mode)) assert.equal(reaches(now[key], probe, mode), true, `${key}/${mode}: ${JSON.stringify(probe)}`);
+    const sample = [...probes(key), ...NAMES.slice(0, 4).flatMap((name) => [...FORMS[key]('marrow', name), ...SKIPPED[key](name)]).flatMap(padded),
+      'mcp__marrow__marrow_commit\n', 'MCP:marrow_commit\n', 'mcp_marrow_marrow_commit\n', 'mcp__evil__x\n'];
+    for (const mode of MODES) {
+      for (const probe of sample) {
+        if (reaches(OLD[key], probe, mode)) assert.equal(reaches(now[key], probe, mode), true, `0.1.68 ${key}/${mode}: ${JSON.stringify(probe)}`);
+        if (reaches(R1[key], probe, mode)) assert.equal(reaches(now[key], probe, mode), true, `r1 ${key}/${mode}: ${JSON.stringify(probe)}`);
       }
     }
-    // And the unregistered names on server marrow that 0.1.68 skipped now reach the hook.
-    const opened = abuseProbes(key).filter((probe) => !reaches(OLD[key], probe, 'search') && reaches(now[key], probe, 'search'));
-    assert.ok(opened.length >= 5, `${key}: ${opened.length}`);
+    // And labels that 0.1.68 and r1 skipped now reach the hook.
+    const opened = (base) => sample.filter((probe) => !reaches(base[key], probe, 'search') && reaches(now[key], probe, 'search'));
+    assert.ok(opened(OLD).length >= 5, `${key}: ${opened(OLD).length}`);
+    assert.ok(opened(R1).length >= 5, `${key}: ${opened(R1).length}`);
   }
 });
 
-test('the brief\'s named cases for the Claude Code / Codex matcher', () => {
+test('the named cases for the Claude Code / Codex matcher', () => {
   for (const key of ['claude', 'codex']) {
     const matcher = own.buildOwnToolMatchers()[key];
-    for (const mode of ['full', 'search']) {
-      for (const tool of ['mcp__marrow__marrow_delete_all', 'mcp__MARROW__marrow_commit', 'mcp__marrow__marrow_commit ', 'mcp__evil__x']) {
-        assert.equal(reaches(matcher, tool, mode), true, `${key}/${mode}: ${tool}`);
+    for (const mode of MODES) {
+      for (const tool of ['mcp__marrow__marrow_delete_all', 'mcp__MARROW__marrow_commit', 'mcp__marrow__marrow_commit ', 'mcp__evil__x',
+        '\nmcp__marrow__marrow_commit', 'mcp__marrow__marrow_commit ',
+        // No host sends `functions.mcp__…` today; it cannot prove the server, so it reaches the hook.
+        'functions.mcp__marrow__marrow_workflow_gate']) {
+        assert.equal(reaches(matcher, tool, mode), true, `${key}/${mode}: ${JSON.stringify(tool)}`);
       }
       assert.equal(reaches(matcher, 'mcp__marrow__marrow_commit', mode), false);
-      assert.equal(reaches(matcher, 'functions.mcp__marrow__marrow_workflow_gate', mode), false);
       assert.equal(reaches(matcher, 'mcp__marrow__marrow_workflow', mode), false);
     }
   }
@@ -322,6 +455,42 @@ test('0.1.68 install: doctor reports the old matchers as needing repair; repair 
       assert.deepEqual(readJson(wsPath(ws, relative)), owner[relative], relative);
     }
     assert.equal(fs.existsSync(path.join(ws.home, '.grok', 'hooks', 'marrow.json')), false);
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('an install written with the r1 candidate matchers: doctor reports it for repair and repair writes the current ones', () => {
+  const ws = workspace('marrow-own-r1-');
+  try {
+    load0168(ws);
+    let { detection, plan: current } = plan(ws);
+    installer.applyPlan(current, { yes: true, dryRun: false, doctor: false });
+    const now = expectedStrings();
+    const escaped = (value) => JSON.stringify(value).slice(1, -1);
+    const files = ['.claude/settings.json', '.codex/hooks.json', '.cursor/hooks.json', '.gemini/settings.json'];
+    // Put the r1 strings where the current ones are (the longer Cursor string first: it contains the other).
+    for (const relative of files) {
+      let text = fs.readFileSync(wsPath(ws, relative), 'utf8');
+      for (const key of ['claude', 'codex', 'cursor', 'cursorPreToolUseHostApproval', 'gemini']) text = text.split(escaped(now[key])).join(escaped(R1[key]));
+      assert.ok(Object.values(R1).some((value) => text.includes(escaped(value))), relative);
+      fs.writeFileSync(wsPath(ws, relative), text);
+    }
+    ({ detection, plan: current } = plan(ws));
+    const dry = installer.applyPlan(current, { yes: false, dryRun: true, doctor: false });
+    for (const host of HOSTS.filter((item) => item.stale)) {
+      assert.equal(installer.activationProfile(detection, current, dry, host.client).observed_hooks.includes('pre_action'), false, host.client);
+      assert.equal(dry.find((item) => item.label === host.label).changed, true, host.label);
+    }
+    installer.applyPlan(current, { yes: true, dryRun: false, doctor: false });
+    for (const relative of files) {
+      const text = fs.readFileSync(wsPath(ws, relative), 'utf8');
+      for (const value of Object.values(R1)) assert.equal(text.includes(escaped(value)), false, `${relative} keeps an r1 string`);
+    }
+    ({ detection, plan: current } = plan(ws));
+    const again = installer.applyPlan(current, { yes: true, dryRun: false, doctor: false });
+    assert.deepEqual(again.filter((change) => change.changed).map((change) => change.label), []);
+    for (const host of HOSTS) assert.equal(installer.activationProfile(detection, current, again, host.client).observed_hooks.includes('pre_action'), true, host.client);
   } finally {
     ws.cleanup();
   }

@@ -268,10 +268,11 @@ test('Cursor: ask on the execution hooks (failClosed, 15 s), MCP still gated in 
     assert.deepEqual(marrow('stop'), [{ command: cmd('cursor-session-hook'), timeout: 3 }]);
     const preToolUse = new RegExp(installer.CURSOR_PRE_TOOL_USE_HOST_APPROVAL_MATCHER);
     // Shell leaves preToolUse (beforeShellExecution runs in cloud agents too); third-party MCP
-    // calls stay, because cloud agents never run beforeMCPExecution. Marrow's own tools stay out.
+    // calls stay, because cloud agents never run beforeMCPExecution. `MCP:<tool>` names no server,
+    // so Marrow's own tools stay in too (the hook tells them apart).
     assert.equal(preToolUse.test('Shell'), false);
     for (const tool of ['MCP:deploy', 'MCP:github:create_pr', 'Write', 'Delete', 'Task', 'Read', 'Grep']) assert.equal(preToolUse.test(tool), true, tool);
-    for (const tool of ['MCP:marrow_agent_runtime', 'MCP:marrow:marrow_commit']) assert.equal(preToolUse.test(tool), false, tool);
+    for (const tool of ['MCP:marrow_agent_runtime', 'MCP:marrow:marrow_commit']) assert.equal(preToolUse.test(tool), true, tool);
     assert.doesNotMatch(JSON.stringify(settings), /"ask"/);
     for (const entries of Object.values(settings.hooks)) for (const entry of entries) assert.equal('permission' in entry, false);
   } finally {
