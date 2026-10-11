@@ -46,10 +46,40 @@ test('FU-1 end to end (real npm, capture servers, dummy token): no abuse row sen
       }
       if (['A1', 'A10', 'A10b', 'A10c'].includes(row.id)) assert.ok(result.attacker.requests > 0, `${row.id}: the env proxy is still used (without auth)`);
       if (row.id === 'N4') assert.ok(result.genuine && result.mirror.token_hits === 0, 'N4: the env registry is used (npm precedence, as on master) and the owner mirror is never sent auth');
+      if (/^A16/.test(row.id)) assert.equal(result.mirror.token_hits, 0, `${row.id}: the path or query token is never written or sent`);
+      if (row.id === 'L5') assert.ok(result.mirror.token_hits > 0, 'L5: owner mode sends the path token to the owner mirror, as master');
       if (['N1', 'N5'].includes(row.id)) assert.equal(result.mirror.token_hits, 0, `${row.id}: userinfo is never written or sent`);
       if (['A3', 'A4', 'A5'].includes(row.id)) assert.equal(result.genuine, true, `${row.id}: the env network works, without auth; the pins decide`);
     }
   } finally {
     fs.rmSync(ctx.work, { recursive: true, force: true });
+  }
+});
+
+// FU-1 F2: npm runs under spawnSync, which blocks the event loop, so a signal handler cannot run
+// until npm returns (and removing it afterwards would swallow the signal). The private config is
+// therefore not removed on SIGTERM; the file holds only scheme://host[:port]/ URLs, and a later
+// install removes a stale `<stage>-npmrc` directory with its stage.
+test('FU-1 F2: a stale private <stage>-npmrc directory left by a killed install is removed by the next install; a fresh one is kept', () => {
+  const os = require('node:os');
+  const path = require('node:path');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-fu1-stale-'));
+  try {
+    const root = path.join(home, '.marrow', 'runtime', 'mcp');
+    fs.mkdirSync(root, { recursive: true });
+    const stale = path.join(root, '.stage-0.0.1-1-aaaa-npmrc');
+    const fresh = path.join(root, '.stage-0.0.1-2-bbbb-npmrc');
+    for (const dir of [stale, fresh]) {
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, 'user'), 'registry=https://mirror.example.test/\n');
+    }
+    const old = new Date(Date.now() - 3600_000);
+    fs.utimesSync(stale, old, old);
+    const removed = runtimeCore.removeOtherRuntimes(home, '9.9.9');
+    assert.deepEqual(removed, ['.stage-0.0.1-1-aaaa-npmrc']);
+    assert.equal(fs.existsSync(stale), false);
+    assert.equal(fs.existsSync(fresh), true);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
   }
 });

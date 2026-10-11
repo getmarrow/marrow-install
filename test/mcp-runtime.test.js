@@ -587,7 +587,7 @@ test('FU-1 r2: isolated mode writes only the owner\'s registry and @getmarrow:re
     fs.rmSync(flip, { force: true });
     if (file) fs.writeFileSync(owner, JSON.stringify(file.config || file));
     if (file && file.flip) fs.writeFileSync(flip, '');
-    const result = ensureMcpRuntime({ home, version: PIN, integrity: PINS.MCP_ADAPTER_INTEGRITY, sdk: { version: PINS.SDK_ADAPTER_VERSION, integrity: PINS.SDK_ADAPTER_INTEGRITY }, npmExecPath: node, env: { ...base, ...env } });
+    const result = ensureMcpRuntime({ home, version: PIN, integrity: PINS.MCP_ADAPTER_INTEGRITY, sdk: { version: PINS.SDK_ADAPTER_VERSION, integrity: PINS.SDK_ADAPTER_INTEGRITY }, npmExecPath: node, env: Object.fromEntries(Object.entries({ ...base, ...env }).filter(([, value]) => value !== undefined)) });
     assert.equal(result.state, 'installed', JSON.stringify(result));
     const log = JSON.parse(fs.readFileSync(argsLog, 'utf8'));
     assert.deepEqual(log.configs.map((c) => c.flag), ['--userconfig', '--globalconfig']);
@@ -595,7 +595,7 @@ test('FU-1 r2: isolated mode writes only the owner\'s registry and @getmarrow:re
     assert.equal(fs.existsSync(`${log.cwd}-npmrc`), false, 'removed after');
     return log;
   };
-  const MIRROR = 'https://mirror.example.test/npm/';
+  const MIRROR = 'https://mirror.example.test/';
   const SCOPED = 'http://scoped.example.test:4873/';
   try {
     assert.equal(run(null, {}).configs[0].text, '', 'npm default registry: nothing to write');
@@ -611,6 +611,23 @@ test('FU-1 r2: isolated mode writes only the owner\'s registry and @getmarrow:re
         assert.equal(log.configs[0].text, '', `${key} ${JSON.stringify(value)} is refused`);
       }
     }
+    // FU-1 F1: a path, query, fragment or * can carry a token. ? # * are always refused; a path other than / is
+    // refused whenever a proxy, CA or TLS setting (or anything but an env registry) comes from outside.
+    const PATHED = 'https://mirror.example.test/gfSecretSegment/';
+    for (const value of ['https://mirror.example.test/?token=gfx', 'https://mirror.example.test?token=gfx', 'https://mirror.example.test/a#b', 'https://mirror.example.test/*/', 'https://mirror.example.test/a*', 'https://mirror.example.test/a?']) {
+      for (const key of ['registry', 'scoped']) assert.equal(run({ [key]: value }, {}).configs[0].text, '', `${key} ${value} is always refused`);
+      assert.equal(run({ registry: value }, { HTTP_PROXY: undefined, npm_config_registry: 'https://env.example.test/' }).configs[0].text, '', `${value}: refused even with only an env registry`);
+    }
+    const outsideEnvs = [{ HTTP_PROXY: 'http://127.0.0.1:9' }, { http_proxy: 'http://127.0.0.1:9' }, { Https_Proxy: 'http://127.0.0.1:9' }, { ALL_PROXY: 'http://127.0.0.1:9' }, { NO_PROXY: 'x' }, { npm_config_proxy: 'http://127.0.0.1:9' }, { NPM_CONFIG_HTTPS_PROXY: 'http://127.0.0.1:9' }, { npm_config_noproxy: 'x' }, { npm_config_cafile: '/tmp/x' }, { NPM_CONFIG_CA: 'x' }, { npm_config_strict_ssl: 'false' }, { npm_config_strict_ssl: 'true' }, { NODE_EXTRA_CA_CERTS: '/tmp/x' }, { SSL_CERT_FILE: '/tmp/x' }, { SSL_CERT_DIR: '/tmp/x' }, { NODE_OPTIONS: '--use-openssl-ca' }, { NODE_TLS_REJECT_UNAUTHORIZED: '0' }, { npm_config_local_address: '127.0.0.1' }, { npm_config_registry: 'https://env.example.test/${X}' }, { npm_config_proxy: 'http://127.0.0.1:9\r\n' }];
+    for (const env of outsideEnvs) {
+      const log = run({ registry: PATHED, scoped: SCOPED }, { HTTP_PROXY: undefined, npm_config_registry: 'https://env.example.test/', ...env });
+      assert.equal(log.configs[0].text, `@getmarrow:registry=${SCOPED}\n`, `${JSON.stringify(env)}: a path URL is refused, a root URL still written`);
+    }
+    assert.equal(run({ registry: PATHED }, { HTTP_PROXY: undefined, npm_config_registry: 'https://env.example.test/' }).configs[0].text, `registry=${PATHED}\n`, 'only an env registry from outside: the path URL is still written');
+    assert.equal(run({ scoped: 'http://scoped.example.test:4873/team/' }, { HTTP_PROXY: undefined, 'npm_config_@getmarrow:registry': 'https://env.example.test/' }).configs[0].text, '@getmarrow:registry=http://scoped.example.test:4873/team/\n', 'only an env scoped registry from outside: the path URL is still written');
+    assert.equal(run({ registry: PATHED, scoped: SCOPED }, { HTTP_PROXY: undefined, MARROW_TEST_ENV_REGISTRY: 'https://env.example.test/' }).configs[0].text, `@getmarrow:registry=${SCOPED}\n`, 'npm resolving a setting differently under the hook env (nothing else from outside) also refuses a path URL');
+    assert.equal(run({ registry: 'https://mirror.example.test//' }, {}).configs[0].text, '', 'a path of // is not /');
+    assert.equal(run({ registry: 'https://mirror.example.test:8443' }, {}).configs[0].text, 'registry=https://mirror.example.test:8443\n', 'no path at all is the root');
     const mixed = run({ registry: 'https://user@mirror.example.test/', scoped: SCOPED }, {});
     assert.equal(mixed.configs[0].text, `@getmarrow:registry=${SCOPED}\n`, 'a refused key writes nothing; the other still passes');
     assert.equal(run({ config: { registry: MIRROR }, flip: true }, {}).configs[0].text, '', 'a value that differs between two reads is refused');
@@ -651,7 +668,7 @@ test('FU-1 consumers: every host\'s Marrow hook, the Cline scripts and the MCP s
     for (const text of texts) {
       for (const packed of text.match(/brotliDecompressSync\(Buffer\.from\(\/([A-Za-z0-9_-]+)\/\.source/g) || []) {
         const source = zlib.brotliDecompressSync(Buffer.from(packed.match(/\/([A-Za-z0-9_-]+)\//)[1], 'base64url')).toString();
-        assert.ok(source.includes('npmOutside(source) || npmConfigMoves(npm, stage, env, timeout)') && source.includes('npmOwnerRegistries(npm, stage, env, timeout)') && source.includes("'--globalconfig=' + path.join(blank, 'global')"), 'the loader carries the FU-1 guard');
+        assert.ok(source.includes('npmOutside(source);') && source.includes('npmConfigMoves(npm, stage, env, timeout)') && source.includes('npmOwnerRegistries(npm, stage, env, timeout, moved || npmForeign(source))') && source.includes("'--globalconfig=' + path.join(blank, 'global')"), 'the loader carries the FU-1 guard');
         loaders += 1;
       }
     }

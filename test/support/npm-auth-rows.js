@@ -61,7 +61,7 @@ function setup() {
   const manifest = { name: '@getmarrow/mcp', version: PIN, bin: { 'marrow-mcp': 'dist/cli.js' }, dependencies: { '@getmarrow/sdk': `^${SDK}` } };
   const mcp = pack(work, 'mcp', manifest, { 'dist/cli.js': GENUINE_CLI });
   const sdk = pack(work, 'sdk', { name: '@getmarrow/sdk', version: SDK, main: 'index.js' }, { 'index.js': 'module.exports = {};\n' });
-  return { work, mcp, sdk, tls: certificates(work), packages: { '@getmarrow/mcp': { [PIN]: mcp }, '@getmarrow/sdk': { [SDK]: sdk } }, token: crypto.randomBytes(18).toString('hex') };
+  return { work, mcp, sdk, tls: certificates(work), packages: { '@getmarrow/mcp': { [PIN]: mcp }, '@getmarrow/sdk': { [SDK]: sdk } }, token: 'gf' + crypto.randomBytes(18).toString('hex') };
 }
 
 async function startCapture(ctx, label) {
@@ -115,6 +115,12 @@ const ROWS = [
   { id: 'A13', what: 'project .npmrc userconfig = attacker file (proxy, ${NPM_TOKEN} auth)', user: (c) => `registry=${c.m.url}\n//127.0.0.1:${c.m.port}/:_authToken=\${NPM_TOKEN}\n${BASE(c)}`, files: (c) => ({ 'evil.npmrc': `registry=${c.m.url}\nproxy=${c.a.url}\n//127.0.0.1:${c.m.port}/:_authToken=\${NPM_TOKEN}\n${BASE(c)}` }), project: (c) => `userconfig=${path.join(c.root, 'evil.npmrc')}\n`, env: (c) => ({ NPM_TOKEN: c.t }) },
   { id: 'A14', what: '~/.npmrc proxy=${MARROW_P}, env MARROW_P = attacker', user: (c) => `${MIRROR(c)}proxy=\${MARROW_P}\n`, env: (c) => ({ MARROW_P: c.a.url }) },
   { id: 'A15', what: 'env PREFIX = project dir whose etc/npmrc names proxy = attacker', user: MIRROR, files: (c) => ({ 'etc/npmrc': `proxy=${c.a.url}\n` }), env: (c) => ({ PREFIX: c.root }) },
+  { local: true, id: 'A16', what: 'owner registry URL path carries the token + env HTTP_PROXY = attacker', user: (c) => `registry=http://127.0.0.1:${c.m.port}/${c.t}/\n${BASE(c)}`, env: (c) => ({ HTTP_PROXY: c.a.url }) },
+  { id: 'A16h', what: 'https owner registry URL path carries the token + env HTTPS_PROXY = attacker + env cafile = attacker CA', tls: true, user: (c) => `registry=https://registry.npmjs.org/${c.t}/\n${BASE(c)}`, env: (c) => ({ HTTPS_PROXY: c.a.url, npm_config_cafile: c.tls.ca }) },
+  { local: true, id: 'A16q', what: 'owner registry URL query carries the token + env HTTP_PROXY = attacker', user: (c) => `registry=http://127.0.0.1:${c.m.port}/?token=${c.t}\n${BASE(c)}`, env: (c) => ({ HTTP_PROXY: c.a.url }) },
+  { local: true, id: 'A16p', what: 'control: plain owner registry path, no secret in it, + env HTTP_PROXY = attacker', user: (c) => `registry=http://127.0.0.1:${c.m.port}/team/\n${BASE(c)}`, env: (c) => ({ HTTP_PROXY: c.a.url }) },
+  { local: true, id: 'A16s', what: 'owner registry URL path is * (a redaction-shaped value) + env HTTP_PROXY = attacker', user: (c) => `registry=http://127.0.0.1:${c.m.port}/*/\n${BASE(c)}`, env: (c) => ({ HTTP_PROXY: c.a.url }) },
+  { id: 'L5', what: 'legit: owner path-token registry, nothing from outside (owner mode, as master)', legit: true, user: (c) => `registry=http://127.0.0.1:${c.m.port}/${c.t}/\n${BASE(c)}` },
   { id: 'N1', what: 'owner registry URL has userinfo carrying the token + env proxy = attacker', user: (c) => `registry=http://owner:${c.t}@127.0.0.1:${c.m.port}/\n${BASE(c)}`, env: (c) => ({ npm_config_proxy: c.a.url }) },
   { local: true, id: 'N2', what: 'owner registry URL is ${MARROW_R}, env MARROW_R = attacker (auth for the attacker host in ~/.npmrc)', user: (c) => `registry=\${MARROW_R}\n//127.0.0.1:${c.a.port}/:_authToken=${c.t}\n${BASE(c)}`, env: (c) => ({ MARROW_R: c.a.url }) },
   { id: 'N3', what: 'owner registry is a host the env proxy also controls (attacker), owner auth for it in ~/.npmrc, env proxy = attacker', user: (c) => `registry=${c.a.url}\n//127.0.0.1:${c.a.port}/:_authToken=${c.t}\n${BASE(c)}`, env: (c) => ({ npm_config_proxy: c.a.url }) },

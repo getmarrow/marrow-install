@@ -24,7 +24,9 @@
 // private user and global configs (removed after) that carry no auth, proxy, CA or TLS setting:
 // the global one is empty and the user one holds only the owner's registry and @getmarrow:registry
 // URLs, taken from `npm config get` under a bare env (read twice, equal), each refused when it has
-// userinfo, a control character, a ${ , is over 2048 characters or is not http(s). An env
+// userinfo, a control character, a ${ , a ? # or *, is over 2048 characters or is not http(s). When any proxy,
+// CA, TLS, DNS, OpenSSL or PREFIX setting comes from outside (not only an env registry), or the
+// config moved, a URL whose path is not exactly / is refused too (a path can carry a token). An env
 // registry keeps npm's precedence (env over user config), exactly as before, and gets no owner
 // data. The pinned public tarballs need no auth. A project npm config is never read (the stage is
 // the prefix and working dir).
@@ -53,6 +55,7 @@ function runtimeCore() {
   const NETWORK_KEYS = ['registry', '@getmarrow:registry', 'proxy', 'https_proxy', 'noproxy', 'cafile', 'ca'];
   const CONFIG_KEYS = ['registry', '@getmarrow:registry', 'proxy', 'https-proxy', 'noproxy', 'cafile', 'ca', 'strict-ssl', 'local-address', 'replace-registry-host', 'userconfig', 'globalconfig'];
   const OWNER_KEYS = ['registry', '@getmarrow:registry'];
+  const FOREIGN_CONFIG = ['strict_ssl', 'local_address', 'replace_registry_host'];
   const DEFAULT_REGISTRY = 'https://registry.npmjs.org';
   const BASE_ENV = ['path', 'home', 'userprofile', 'appdata', 'localappdata', 'systemroot', 'systemdrive', 'windir', 'comspec', 'pathext', 'temp', 'tmp', 'tmpdir'];
   const OUTSIDE_ENV = ['http_proxy', 'https_proxy', 'proxy', 'no_proxy', 'all_proxy', 'node_extra_ca_certs', 'node_tls_reject_unauthorized', 'node_options', 'node_use_env_proxy', 'ssl_cert_file', 'ssl_cert_dir', 'openssl_conf', 'openssl_modules', 'hostaliases', 'localdomain', 'res_options', 'prefix', 'destdir'];
@@ -239,9 +242,21 @@ function runtimeCore() {
     const plain = npmRead(npm, stage, bareEnv(env), CONFIG_KEYS, timeout);
     return full === null || plain === null || full !== plain;
   }
-  function ownerUrl(value) {
-    if (typeof value !== 'string' || value.length > 2048 || /[^\x21-\x7e]|["'\\#;`]|\$\{/.test(value) || !/^https?:\/\/[^/?]+/i.test(value)) return null;
+  function npmForeign(source) {
+    const env = source || process.env;
+    return Object.keys(env).some((key) => {
+      if (OUTSIDE_ENV.includes(key.toLowerCase())) return true;
+      const match = /^npm_config_(.+)$/i.exec(key);
+      if (!match) return false;
+      const name = match[1].toLowerCase().replace(/-/g, '_');
+      if (name === 'registry' || name === '@getmarrow:registry') return Object.keys(npmNetwork({ [key]: env[key] })).length === 0;
+      return NETWORK_KEYS.includes(name) || FOREIGN_CONFIG.includes(name);
+    });
+  }
+  function ownerUrl(value, rootOnly) {
+    if (typeof value !== 'string' || value.length > 2048 || /[^\x21-\x7e]|["'\\#;`?*]|\$\{/.test(value) || !/^https?:\/\/[^/?]+/i.test(value)) return null;
     if (/^https?:\/\/[^/?]*@/i.test(value)) return null;
+    if (rootOnly && !/^https?:\/\/[^/]+\/?$/i.test(value)) return null;
     try {
       const url = new URL(value);
       return (url.protocol === 'http:' || url.protocol === 'https:') && url.hostname && !url.username && !url.password ? value : null;
@@ -249,7 +264,7 @@ function runtimeCore() {
       return null;
     }
   }
-  function npmOwnerRegistries(npm, stage, env, timeout) {
+  function npmOwnerRegistries(npm, stage, env, timeout, rootOnly) {
     const first = npmRead(npm, stage, bareEnv(env), OWNER_KEYS, timeout);
     const second = first === null ? null : npmRead(npm, stage, bareEnv(env), OWNER_KEYS, timeout);
     const out = {};
@@ -257,7 +272,7 @@ function runtimeCore() {
     const lines = first.replace(/\n$/, '').split('\n');
     if (lines.length !== OWNER_KEYS.length) return out;
     OWNER_KEYS.forEach((key, index) => {
-      const value = lines[index].startsWith(key + '=') ? ownerUrl(lines[index].slice(key.length + 1)) : null;
+      const value = lines[index].startsWith(key + '=') ? ownerUrl(lines[index].slice(key.length + 1), rootOnly) : null;
       if (value && value.replace(/\/+$/, '') !== DEFAULT_REGISTRY) out[key] = value;
     });
     return out;
@@ -276,8 +291,10 @@ function runtimeCore() {
     const timeout = Math.max(1000, Math.min(NPM_TIMEOUT_MS, Number((options && options.timeout) || NPM_TIMEOUT_MS)));
     const source = (options && options.env) || process.env;
     const env = npmEnvironment(source, options && options.network);
-    const blank = Object.keys((options && options.network) || {}).length > 0 || npmOutside(source) || npmConfigMoves(npm, stage, env, timeout) ? stage + '-npmrc' : null;
-    const owner = blank ? npmOwnerRegistries(npm, stage, env, timeout) : {};
+    const passed = Object.keys((options && options.network) || {}).length > 0 || npmOutside(source);
+    const moved = !passed && npmConfigMoves(npm, stage, env, timeout);
+    const blank = passed || moved ? stage + '-npmrc' : null;
+    const owner = blank ? npmOwnerRegistries(npm, stage, env, timeout, moved || npmForeign(source)) : {};
     let result;
     try {
       if (blank) {
@@ -557,7 +574,7 @@ function runtimeCore() {
     process.argv = [process.argv[0], runtime.bin, ...args.slice(2)];
     require(runtime.bin);
   }
-  return { SCHEMA, HOLD, UNAVAILABLE, WARN, OUTAGE, NPM_TIMEOUT_MS, LOCK_STALE_MS, RETRY_MS, ATTEMPT_MS, NETWORK_KEYS, configOf, verify, ensure, heal, npmInvocation, npmNetwork, npmOutside, npmConfigMoves, npmOwnerRegistries, npmEnvironment, npmInstall, removeOtherRuntimes, budgetFor, healPaths, projectKey, main };
+  return { SCHEMA, HOLD, UNAVAILABLE, WARN, OUTAGE, NPM_TIMEOUT_MS, LOCK_STALE_MS, RETRY_MS, ATTEMPT_MS, NETWORK_KEYS, configOf, verify, ensure, heal, npmInvocation, npmNetwork, npmOutside, npmForeign, ownerUrl, npmConfigMoves, npmOwnerRegistries, npmEnvironment, npmInstall, removeOtherRuntimes, budgetFor, healPaths, projectKey, main };
 }
 
 module.exports = { runtimeCore };

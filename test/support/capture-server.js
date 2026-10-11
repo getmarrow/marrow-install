@@ -35,7 +35,7 @@ function answer(req, res, origin) {
     res.writeHead(200, { 'content-type': 'application/octet-stream' });
     return res.end(fs.readFileSync(entry.tarball));
   }
-  const name = url.slice(1);
+  const name = url.slice(1).replace(/^(?!-\/)[^@/][^/]*\//, '');
   const versions = config.packages[name];
   if (!versions) return res.writeHead(404, { 'content-type': 'application/json' }).end('{"error":"not found"}');
   const doc = { name, 'dist-tags': { latest: Object.keys(versions).pop() }, versions: {} };
