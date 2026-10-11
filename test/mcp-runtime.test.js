@@ -851,3 +851,123 @@ test('Cline hook scripts start the inline loader, never npx, and fail closed wit
     fs.rmSync(home, { recursive: true, force: true });
   }
 });
+
+// Collision table (round 2): what reads as Marrow's own hook or server entry, and what the loader
+// carries. Commands that differ anywhere in the loader's code, its configuration, the entrypoint
+// or the surrounding shell are different; the same command written by another zlib build is not.
+test('collisions: an edited loader, configuration, entrypoint or server entry is never Marrow\'s own; the canonical spelling carries no secret', () => {
+  const zlib = require('node:zlib');
+  const { launcherSource, loaderConfig, mcpServerLaunch, mcpServerLaunchVersion, mcpServerUsesNpx } = require('../src/mcp-runtime');
+  const canonical = `npx -y --package=@getmarrow/mcp@${PIN} marrow-mcp claude-pre-action-hook`;
+  const cfg = runtimeConfig(PIN);
+  const pack = (source, params = {}) => zlib.brotliCompressSync(Buffer.from(source), { params }).toString('base64url');
+  const loaderOf = (packed) => `eval(global.MARROW_L=require(/node:zlib/.source).brotliDecompressSync(Buffer.from(/${packed}/.source,/base64url/.source))+[])`;
+  for (const platform of ['linux', 'win32']) {
+    const local = localizeHookCommand(canonical, PIN, { platform });
+    const loader = loaderFor(cfg);
+    assert.ok(local.includes(loader));
+    // The same code compressed differently (another zlib build) is still Marrow's own.
+    const other = loaderOf(pack(launcherSource(cfg), { [zlib.constants.BROTLI_PARAM_QUALITY]: 5 }));
+    assert.notEqual(other, loader);
+    assert.equal(delocalizeHookCommand(local.split(loader).join(other)), canonical, `${platform}: recompressed`);
+    // Any change to the code it runs, even after a valid configuration line, is not.
+    for (const edited of [
+      launcherSource(cfg).replace('process.exitCode = pre ? 2 : 1;', 'process.exitCode = 0;'),
+      `${launcherSource(cfg)}\n;require('child_process').execSync('true');`,
+      launcherSource(cfg).replace('const NPM_TIMEOUT_MS = 30000;', 'const NPM_TIMEOUT_MS = 30001;'),
+    ]) {
+      assert.notEqual(edited, launcherSource(cfg));
+      const swapped = local.split(loader).join(loaderOf(pack(edited)));
+      assert.equal(delocalizeHookCommand(swapped), swapped, `${platform}: edited loader code`);
+      assert.equal(loaderConfig(loaderOf(pack(edited))), null);
+    }
+    // Another integrity, another SDK pin or another version inside the loader: a different command
+    // (it reads as Marrow's, and the installer rewrites it with the current target's).
+    for (const changed of [runtimeConfig(PIN, { integrity: fakeIntegrity('evil') }), runtimeConfig(PIN, { sdk: null })]) {
+      const commandFor = localizeHookCommand(canonical, PIN, { platform, ...changed });
+      assert.notEqual(commandFor, local);
+      assert.equal(delocalizeHookCommand(commandFor), canonical);
+      assert.deepEqual(loaderConfig(loaderFor(changed)), changed);
+    }
+    const otherVersion = local.split(loader).join(loaderFor(runtimeConfig(AHEAD, { integrity: fakeIntegrity('ahead') })));
+    assert.equal(delocalizeHookCommand(otherVersion), otherVersion, `${platform}: loader version differs from the command`);
+    // A different entrypoint is a different canonical command.
+    const context = localizeHookCommand(canonical.replace('claude-pre-action-hook', 'claude-context-hook'), PIN, { platform });
+    assert.notEqual(delocalizeHookCommand(context), canonical);
+    // No key, token or path in the command: only the version, integrity and SDK pin.
+    assert.doesNotMatch(Buffer.from(loader.match(/\/([A-Za-z0-9_-]+)\/\.source,/)[1], 'base64url').toString('latin1'), /MARROW_API_KEY=|Bearer /);
+    assert.equal(zlib.brotliDecompressSync(Buffer.from(loader.match(/\/([A-Za-z0-9_-]+)\/\.source,/)[1], 'base64url')).toString().includes('/home/'), false);
+  }
+  // Server entries: only the exact written form is Marrow's.
+  for (const platform of ['linux', 'win32']) {
+    const entry = mcpServerLaunch(PIN, { platform });
+    assert.equal(mcpServerLaunchVersion(entry), PIN);
+    assert.equal(mcpServerLaunchVersion({ ...entry, args: [...entry.args, '--extra'] }), null);
+    assert.equal(mcpServerLaunchVersion({ ...entry, command: '/usr/bin/env' }), null);
+    const swapped = entry.args.map((arg) => (arg.startsWith('eval(') ? loaderOf(pack(`${launcherSource(cfg)}\n;0`)) : arg));
+    assert.equal(mcpServerLaunchVersion({ ...entry, args: swapped }), null);
+    assert.equal(mcpServerUsesNpx({ mcpServers: { marrow: entry } }), false);
+  }
+  assert.equal(mcpServerUsesNpx({ mcpServers: { marrow: { command: 'npx', args: ['-y', `--package=@getmarrow/mcp@${PIN}`, 'marrow-mcp'] } } }), true);
+  assert.equal(mcpServerUsesNpx({ mcpServers: { marrow: { command: 'C:\\nodejs\\npx.cmd', args: [`--package=@getmarrow/mcp@${PIN}`, 'marrow-mcp'] } } }), true);
+});
+
+test('a hook\'s self-heal never removes another version\'s runtime (another project may use it); the installer prunes as before', () => {
+  const home = deadRegistryHome(tempDir('marrow-runtime-prune-'));
+  const { runtimeCore } = require('../src/mcp-runtime');
+  try {
+    assert.equal(ensureMcpRuntime({ home, version: AHEAD, integrity: fakeIntegrity('ahead'), npmInstall: fakeNpmInstall({ integrity: fakeIntegrity('ahead') }) }).state, 'installed');
+    const healed = runtimeCore.heal(runtimeConfig(PIN, { sdk: null }), home, { npmInstall: fakeNpmInstall() });
+    assert.equal(healed.state, 'installed');
+    assert.deepEqual(healed.removed_versions, []);
+    assert.ok(verifyMcpRuntime(home, AHEAD, fakeIntegrity('ahead')), 'the other version is kept');
+    assert.deepEqual(fs.readdirSync(path.join(home, '.marrow', 'runtime', 'mcp')).sort(), [PIN, AHEAD].sort());
+    // A heal while another holds the lock does nothing.
+    fs.rmSync(runtimeDir(home, PIN), { recursive: true, force: true });
+    fs.mkdirSync(path.join(home, '.marrow', 'runtime', 'mcp', `.heal-${PIN}.lock`));
+    assert.equal(runtimeCore.heal(runtimeConfig(PIN, { sdk: null }), home, { npmInstall: fakeNpmInstall() }).state, 'busy');
+    assert.equal(fs.existsSync(runtimeDir(home, PIN)), false);
+    // The installer's own install prunes other versions, as before.
+    fs.rmSync(path.join(home, '.marrow', 'runtime', 'mcp', `.heal-${PIN}.lock`), { recursive: true });
+    assert.deepEqual(ensureMcpRuntime({ home, version: PIN, integrity: PINS.MCP_ADAPTER_INTEGRITY, npmInstall: fakeNpmInstall() }).removed_versions, [AHEAD]);
+    // A failed heal records why (no path, no key), and a later success clears it.
+    const failed = runtimeCore.heal(runtimeConfig(AHEAD, { integrity: fakeIntegrity('ahead'), sdk: null }), home, { npmInstall: () => false });
+    assert.equal(failed.reason, 'npm_install_failed');
+    const mark = path.join(home, '.marrow', 'runtime', 'mcp', `.heal-${AHEAD}.failed`);
+    assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(mark, 'utf8'))).sort(), ['at', 'reason']);
+    assert.equal(fs.statSync(mark).mode & 0o777, 0o600);
+    assert.equal(runtimeCore.heal(runtimeConfig(AHEAD, { integrity: fakeIntegrity('ahead'), sdk: null }), home, { npmInstall: fakeNpmInstall({ integrity: fakeIntegrity('ahead') }) }).state, 'installed');
+    assert.equal(fs.existsSync(mark), false);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('doctor flags an MCP server entry that starts npx (F-I1), and repair rewrites it to the verified runtime', async () => {
+  const { root, home } = allHostsProject();
+  try {
+    await install(installOptions(root, home));
+    const mcpJson = path.join(root, '.mcp.json');
+    const cursorMcp = path.join(root, '.cursor', 'mcp.json');
+    const written = { mcp: fs.readFileSync(mcpJson, 'utf8'), cursor: fs.readFileSync(cursorMcp, 'utf8') };
+    for (const text of Object.values(written)) {
+      const entry = JSON.parse(text).mcpServers.marrow;
+      assert.equal(entry.command, '/bin/sh');
+      assert.equal(entry.args.some((arg) => arg === 'npx' || /npx -y --package/.test(arg)), false);
+    }
+    for (const file of [mcpJson, cursorMcp]) {
+      const config = JSON.parse(fs.readFileSync(file, 'utf8'));
+      config.mcpServers.marrow = { ...config.mcpServers.marrow, command: 'npx', args: ['-y', `--package=@getmarrow/mcp@${PIN}`, 'marrow-mcp'] };
+      fs.writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`);
+    }
+    const doctor = await install(installOptions(root, home, { yes: false, doctor: true }));
+    assert.equal(doctor.mcp_runtime.needs_repair, true);
+    assert.ok(doctor.mcp_runtime.legacy_npx_hooks.includes(mcpJson) && doctor.mcp_runtime.legacy_npx_hooks.includes(cursorMcp));
+    await install(installOptions(root, home, { repair: true }));
+    assert.equal(fs.readFileSync(mcpJson, 'utf8'), written.mcp);
+    assert.equal(fs.readFileSync(cursorMcp, 'utf8'), written.cursor);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});

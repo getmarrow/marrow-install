@@ -224,6 +224,12 @@ const localGuardPrefix = (version) => guardPrefixForm({ version });
 const LOCAL_GUARD_PREFIX_RE = new RegExp(`^${formPattern(guardPrefixForm)}`);
 const LEGACY_GUARD_SPAWN_HINT = 'spawn(...((f,m,a)=>f.existsSync(m)';
 
+// The command with each valid loader in it spelled as this module compresses it, so a command
+// written by another zlib build compares equal to its exact rebuild.
+function withCanonicalLoaders(command, cfg) {
+  return command.replace(new RegExp(LOADER_PATTERN, 'g'), (loader) => (loaderConfig(loader) ? loaderFor(cfg) : loader));
+}
+
 // The configuration of every loader in a command, when all are valid and carry the same one.
 function commandConfig(loaders) {
   let cfg = null;
@@ -247,7 +253,7 @@ function delocalizeHookCommand(command) {
     if (!found) continue;
     const { v, s, l } = found.groups;
     const cfg = commandConfig([l]);
-    return cfg && cfg.version === v && localPlain(v, s, platform, cfg) === command ? canonicalEntrypoint(v, s) : command;
+    return cfg && cfg.version === v && localPlain(v, s, platform, cfg) === withCanonicalLoaders(command, cfg) ? canonicalEntrypoint(v, s) : command;
   }
   const prefixed = LOCAL_GUARD_PREFIX_RE.test(command);
   if (prefixed || (command.startsWith('node -e \'') && (command.includes('spawn(process.execPath,["-e","') || command.includes(LEGACY_GUARD_SPAWN_HINT)))) {
@@ -265,7 +271,7 @@ function delocalizeHookCommand(command) {
     const cfg = commandConfig(loaders);
     const version = (canonical.match(/--package=@getmarrow\/mcp@(\d+\.\d+\.\d+)/) || [])[1];
     // The current guard forms must map back exactly.
-    if (!cfg || !version || localizeHookCommand(canonical, version, { platform: prefixed ? 'posix' : 'win32', ...cfg }) !== command) return command;
+    if (!cfg || !version || localizeHookCommand(canonical, version, { platform: prefixed ? 'posix' : 'win32', ...cfg }) !== withCanonicalLoaders(command, cfg)) return command;
     return canonical;
   }
   if (command.startsWith('/bin/sh -c \'') && (LEGACY_INNER_RE.test(command) || INNER_RE.test(command))) {
@@ -278,7 +284,7 @@ function delocalizeHookCommand(command) {
       .replace(INNER_RE, (match, ...rest) => {
         const { v: version, s: sub, l: loader } = rest[rest.length - 1];
         const cfg = commandConfig([loader]);
-        if (!cfg || cfg.version !== version || localInner(version, sub, cfg) !== match) {
+        if (!cfg || cfg.version !== version || localInner(version, sub, cfg) !== withCanonicalLoaders(match, cfg)) {
           mismatch = true;
           return match;
         }
@@ -402,7 +408,7 @@ function delocalizeHookScriptText(text) {
   return text.replace(INNER_RE, (match, ...rest) => {
     const { v: version, s: sub, l: loader } = rest[rest.length - 1];
     const cfg = commandConfig([loader]);
-    return cfg && cfg.version === version && localInner(version, sub, cfg) === match ? canonicalEntrypoint(version, sub) : match;
+    return cfg && cfg.version === version && localInner(version, sub, cfg) === withCanonicalLoaders(match, cfg) ? canonicalEntrypoint(version, sub) : match;
   }).replace(/"\$HOME\/\.marrow\/runtime\/mcp\/(\d+\.\d+\.\d+)\/run" --package=@getmarrow\/mcp@(\d+\.\d+\.\d+) marrow-mcp ([a-z][a-z-]{0,63})/g,
     (match, runVersion, version, sub) => (runVersion === version ? canonicalEntrypoint(version, sub) : match));
 }
@@ -428,7 +434,7 @@ function mcpServerLaunchVersion(entry) {
   const cfg = loaderConfig(loader);
   const version = spec.slice('--package=@getmarrow/mcp@'.length);
   if (!cfg || cfg.version !== version) return null;
-  const written = JSON.stringify({ command: entry.command, args });
+  const written = JSON.stringify({ command: entry.command, args: args.map((arg) => (arg === loader ? loaderFor(cfg) : arg)) });
   return ['linux', 'win32'].some((platform) => JSON.stringify(mcpServerLaunch(version, { ...cfg, platform })) === written) ? version : null;
 }
 
