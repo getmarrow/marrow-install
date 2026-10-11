@@ -24,7 +24,7 @@ function runtimeCore() {
   const SCHEMA = 'marrow-mcp-runtime.v2';
   const VERSION_RE = /^\d+\.\d+\.\d+$/;
   const INTEGRITY_RE = /^sha512-[A-Za-z0-9+/]{86}==$/;
-  const SAFE_PATH_RE = /^[^'\\\n\r\0]+$/;
+  const SAFE_PATH_RE = /^[^\n\r\0]+$/;
   const NPM_TIMEOUT_MS = 30000;
   const STALE_MS = 300000;
   const LOCK_STALE_MS = 120000;

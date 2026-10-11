@@ -330,14 +330,14 @@ test('runtime deleted or tampered mid-session: the next start installs it again;
   }
 });
 
-test('HOME with odd characters: spaces, $, double quotes and non-ASCII heal and run; a single quote or backslash holds (unsafe path)', async () => {
+test('HOME with odd characters: spaces, $, quotes, backslash, backtick and non-ASCII heal and run; a newline holds (unsafe path)', async () => {
   const work = tempDir('marrow-heal-work-');
   const genuine = packPackage(work, 'genuine', GENUINE_CLI);
   const registry = await startRegistry(work, { '@getmarrow/mcp': { [PIN]: genuine } });
   const parent = tempDir('marrow-heal-odd-');
   const root = plantedProject('http://127.0.0.1:9/');
   try {
-    for (const [name, ok] of [['my home $USER "q" ünï `x`', true], ["o'brien", false], ['back\\slash', false]]) {
+    for (const [name, ok] of [['my home $USER "q" ünï `x`', true], ["o'brien", true], ['back\\slash', true], ['new\nline', false]]) {
       const home = path.join(parent, name);
       fs.mkdirSync(home, { mode: 0o700 });
       fs.writeFileSync(path.join(home, '.npmrc'), `registry=${registry.url}\ncache=${path.join(parent, `cache-${ok}`)}\nfetch-retries=0\n`, { mode: 0o600 });

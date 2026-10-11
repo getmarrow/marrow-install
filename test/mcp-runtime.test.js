@@ -648,13 +648,16 @@ test('runtime guards: unsafe paths, loose or linked directories and records, FIF
     env: { HOME: home, PATH: `${shimDir}:/usr/bin:/bin`, ...env }, input: '{}', encoding: 'utf8', timeout: 30_000,
   });
   try {
-    // LR14: a quote, a newline or a relative node path never reaches the run script.
-    for (const nodePath of ["/opt/it's/node", '/opt/a\nb/node', 'bin/node']) {
+    // LR14: a newline or a relative node path is refused. A quote or backslash is fine now: no
+    // script is written with paths in it (round 1 refused them for its run script).
+    for (const nodePath of ['/opt/a\nb/node', 'bin/node']) {
       assert.deepEqual(ensureMcpRuntime(options({ nodePath })), { state: 'skipped', reason: 'unsafe_path' }, JSON.stringify(nodePath));
     }
-    const quoted = path.join(home, "o'brien");
+    const quoted = path.join(home, "o'brien \\ x");
     fs.mkdirSync(quoted, { mode: 0o700 });
-    assert.deepEqual(ensureMcpRuntime(options({ home: quoted })), { state: 'skipped', reason: 'unsafe_path' });
+    assert.equal(ensureMcpRuntime(options({ home: quoted })).state, 'installed');
+    assert.ok(verifyMcpRuntime(quoted, PIN, PINS.MCP_ADAPTER_INTEGRITY));
+    fs.rmSync(quoted, { recursive: true, force: true });
     // LR12: a runtime directory that is a link is refused, and nothing is written through it.
     const elsewhere = tempDir('marrow-runtime-elsewhere-');
     fs.mkdirSync(path.join(home, '.marrow'), { mode: 0o700 });
