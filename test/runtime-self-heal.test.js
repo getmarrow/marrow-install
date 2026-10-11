@@ -11,6 +11,7 @@ const PINS = require('../src/pins');
 const { install, uninstall, parseArgs } = require('../src/installer');
 const {
   HOLD_TEXT,
+  WARN_TEXT,
   UNAVAILABLE_TEXT,
   delocalizeHookCommand,
   localizeHookCommand,
@@ -183,7 +184,7 @@ test('teammate with no ~/.marrow, online: the hook installs the pinned copy itse
   }
 });
 
-test('offline with no copy: the pre-action hook holds with the fixed text (non-pre entrypoints exit 1); the failure is remembered so later calls hold at once', async () => {
+test('offline with no copy: the pre-action hook warns and lets the call run (exit 1, as npx failing did; non-pre entrypoints exit 1); the failure is remembered so later calls warn at once', async () => {
   const work = tempDir('marrow-heal-work-');
   const genuine = packPackage(work, 'genuine', GENUINE_CLI);
   const home = deadRegistryHome(tempDir('marrow-heal-offline-'));
@@ -191,13 +192,14 @@ test('offline with no copy: the pre-action hook holds with the fixed text (non-p
   const root = plantedProject('http://127.0.0.1:9/');
   try {
     const held = runHook(hook(genuine.integrity), root, hookEnv(home, root));
-    assert.equal(held.status, 2, held.stdout);
+    assert.equal(held.status, 1, held.stdout);
     assert.equal(held.stdout, '');
-    assert.equal(held.stderr, `${HOLD_TEXT}\n`);
+    assert.equal(held.stderr, `${WARN_TEXT}\n`);
     const mark = JSON.parse(fs.readFileSync(path.join(home, '.marrow', 'runtime', 'mcp', `.heal-${PIN}.failed`), 'utf8'));
     assert.equal(mark.reason, 'npm_install_failed');
     const again = runHook(hook(genuine.integrity), root, hookEnv(home, root));
-    assert.equal(again.status, 2);
+    assert.equal(again.status, 1);
+    assert.equal(again.stderr, `${WARN_TEXT}\n`);
     assert.ok(again.ms < held.ms || again.ms < 3000, `${again.ms} ms`);
     const result = runHook(hook(genuine.integrity, 'claude-hook'), root, hookEnv(home, root));
     assert.equal(result.status, 1);
@@ -446,8 +448,8 @@ test('uninstall in project A keeps the shared runtime, so project B keeps workin
     assert.equal(all.uninstall.runtime.removed, true);
     assert.equal(fs.existsSync(path.join(home, '.marrow', 'runtime')), false);
     const healed = runHook(preB(), projects[1], hookEnv(home, projects[1]));
-    assert.equal(healed.status, 2, healed.stdout);
-    assert.equal(healed.stderr, `${HOLD_TEXT}\n`);
+    assert.equal(healed.status, 1, healed.stdout);
+    assert.equal(healed.stderr, `${WARN_TEXT}\n`, 'npm could not install (the registry has no such SDK): warn and run');
     assert.ok(registry.requests().some((line) => line.includes('sdk')), 'the self-heal asked the owner\'s registry for the pinned SDK');
     // With the SDK pin left out, the same hook heals from this registry.
     const withoutSdk = localizeHookCommand(delocalizeHookCommand(preB()), PIN, { platform: 'linux', integrity: genuine.integrity, sdk: null });
@@ -460,5 +462,185 @@ test('uninstall in project A keeps the shared runtime, so project B keeps workin
   } finally {
     registry.stop();
     for (const dir of [work, home, ...projects]) fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('outage rule: a registry that answers 500, a heal that cannot finish within the hook budget, and no npm at all warn and let the call run; nothing unverified ever runs', async () => {
+  const work = tempDir('marrow-heal-work-');
+  const genuine = packPackage(work, 'genuine', GENUINE_CLI);
+  const down = await startRegistry(work, { status: 500 });
+  const root = plantedProject('http://127.0.0.1:9/');
+  const homes = [];
+  try {
+    // Registry down (500): warn, exit 1, and the failure is remembered (no retry storm).
+    const home = ownerHome(down.url);
+    homes.push(home);
+    const first = runHook(hook(genuine.integrity), root, hookEnv(home, root));
+    assert.equal(first.status, 1, first.stderr);
+    assert.equal(first.stdout, '');
+    assert.equal(first.stderr, `${WARN_TEXT}\n`);
+    assert.ok(down.requests().length > 0, 'the heal asked the registry');
+    await waitForHeal(home);
+    const asked = down.requests().length;
+    const again = runHook(hook(genuine.integrity, 'codex-pre-action-hook'), root, hookEnv(home, root));
+    assert.equal(again.status, 1);
+    assert.equal(again.stderr, `${WARN_TEXT}\n`);
+    assert.equal(down.requests().length, asked, 'within the back-off no registry request');
+    nothingPlantedRan(home, root);
+
+    // A heal still running when the budget ends (a registry that hangs; here a live lock): a
+    // 5 s host's hook waits 3.5 s, then warns; it never runs anything unverified.
+    const slow = ownerHome('http://127.0.0.1:9/');
+    homes.push(slow);
+    const mcpRoot = path.join(slow, '.marrow', 'runtime', 'mcp');
+    fs.mkdirSync(path.join(mcpRoot, `.heal-${PIN}.lock`), { recursive: true, mode: 0o700 });
+    for (const dir of [path.join(slow, '.marrow'), path.join(slow, '.marrow', 'runtime'), mcpRoot]) fs.chmodSync(dir, 0o700);
+    const timedOut = runHook(hook(genuine.integrity, 'codex-pre-action-hook'), root, hookEnv(slow, root));
+    assert.equal(timedOut.status, 1, timedOut.stderr);
+    assert.equal(timedOut.stderr, `${WARN_TEXT}\n`);
+    assert.ok(timedOut.ms >= 3400 && timedOut.ms < 20_000, `${timedOut.ms} ms`);
+    nothingPlantedRan(slow, root);
+
+    // Change 2: no npm-cli.js next to node, and the only npm on PATH is the project's (first on
+    // PATH, relative and absolute, and through a link into the project): none is used, the heal
+    // fails as npm_unavailable, and the hook warns. The project's npm shim never runs.
+    // (A copy of node, so no npm-cli.js sits next to it; node resolves a link to its target.)
+    const bare = tempDir('marrow-heal-bare-node-');
+    fs.copyFileSync(process.execPath, path.join(bare, 'node'));
+    fs.chmodSync(path.join(bare, 'node'), 0o755);
+    const linkToProject = tempDir('marrow-heal-link-');
+    fs.symlinkSync(root, path.join(linkToProject, 'bin'));
+    const noNpm = ownerHome('http://127.0.0.1:9/');
+    homes.push(noNpm, bare, linkToProject);
+    const env = { HOME: noNpm, PATH: `.:${root}:${bare}:/nonexistent` };
+    assert.equal(runtimeCore.npmInvocation({ platform: 'linux', execPath: path.join(bare, 'node'), env: { PATH: `.:${root}:${path.join(linkToProject, 'bin')}:${bare}`, PWD: root } }), null);
+    // (Only where no system npm sits in the fixed places the search also tries.)
+    if (!['/usr/local/bin/npm', '/opt/homebrew/bin/npm', '/usr/share/nodejs/npm/bin/npm-cli.js', '/usr/lib/node_modules/npm/bin/npm-cli.js'].some((file) => fs.existsSync(file))) {
+      const noNpmRun = runHook(hook(genuine.integrity), root, env);
+      await waitForHeal(noNpm);
+      assert.equal(noNpmRun.status, 1, noNpmRun.stderr);
+      assert.equal(noNpmRun.stderr, `${WARN_TEXT}\n`);
+      assert.equal(JSON.parse(fs.readFileSync(path.join(noNpm, '.marrow', 'runtime', 'mcp', `.heal-${PIN}.failed`), 'utf8')).reason, 'npm_unavailable');
+      nothingPlantedRan(noNpm, root);
+    }
+  } finally {
+    down.stop();
+    for (const dir of [work, root, ...homes]) fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('change 2: the POSIX npm fallback uses the filtered PATH search (no relative entry, nothing inside the project, links resolved) and runs npm-cli.js on the trusted node', () => {
+  const project = tempDir('marrow-npm-project-');
+  const good = tempDir('marrow-npm-good-');
+  const bare = tempDir('marrow-npm-bare-');
+  const link = tempDir('marrow-npm-link-');
+  try {
+    const shim = '#!/bin/sh\nexit 0\n';
+    fs.writeFileSync(path.join(project, 'npm'), shim, { mode: 0o755 });
+    fs.mkdirSync(path.join(project, 'bin'));
+    fs.writeFileSync(path.join(project, 'bin', 'npm'), shim, { mode: 0o755 });
+    // A trusted dir whose npm is a link INTO the project, and a trusted dir that is a link to it.
+    fs.symlinkSync(path.join(project, 'npm'), path.join(link, 'npm'));
+    fs.symlinkSync(path.join(project, 'bin'), path.join(link, 'projbin'));
+    const execPath = path.join(bare, 'node');
+    const lookup = (PATH) => runtimeCore.npmInvocation({ platform: 'linux', execPath, env: { PATH, PWD: project } });
+    for (const PATH of ['.', 'bin', project, `${project}/bin`, `${project}/`, link, path.join(link, 'projbin'), `.:${project}:${link}`]) {
+      assert.equal(lookup(PATH), null, PATH);
+    }
+    // A genuine npm (a link to npm-cli.js) after the project's: runs as <trusted node> <npm-cli.js>.
+    fs.mkdirSync(path.join(good, 'lib', 'npm', 'bin'), { recursive: true });
+    fs.writeFileSync(path.join(good, 'lib', 'npm', 'bin', 'npm-cli.js'), '', { mode: 0o755 });
+    fs.mkdirSync(path.join(good, 'bin'));
+    fs.symlinkSync(path.join(good, 'lib', 'npm', 'bin', 'npm-cli.js'), path.join(good, 'bin', 'npm'));
+    const found = lookup(`.:${project}:${path.join(good, 'bin')}`);
+    assert.deepEqual({ file: found.file, args: found.args }, { file: execPath, args: [fs.realpathSync(path.join(good, 'lib', 'npm', 'bin', 'npm-cli.js'))] });
+    // The npm child's PATH keeps only the trusted entries, so an `env node` shebang cannot reach the project.
+    assert.equal(found.path.split(':').some((dir) => dir === '.' || dir.startsWith(project)), false, found.path);
+    // A non-JS npm (a wrapper binary) outside the project runs itself, with the same filtered PATH.
+    fs.rmSync(path.join(good, 'bin', 'npm'));
+    fs.writeFileSync(path.join(good, 'bin', 'npm'), shim, { mode: 0o755 });
+    const wrapper = lookup(`${project}:${path.join(good, 'bin')}`);
+    assert.equal(wrapper.file, path.join(fs.realpathSync(good), 'bin', 'npm'));
+    // Not executable: skipped.
+    fs.chmodSync(path.join(good, 'bin', 'npm'), 0o644);
+    assert.equal(lookup(path.join(good, 'bin')), null);
+  } finally {
+    for (const dir of [project, good, bare, link]) fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('failure record: only a private record in private directories counts; a loose, linked, future-dated or misplaced one is ignored (the heal runs again); a recorded integrity mismatch holds', async () => {
+  const work = tempDir('marrow-heal-work-');
+  const genuine = packPackage(work, 'genuine', GENUINE_CLI);
+  const registry = await startRegistry(work, { '@getmarrow/mcp': { [PIN]: genuine } });
+  const root = plantedProject('http://127.0.0.1:9/');
+  const homes = [];
+  try {
+    const forged = (mutate) => {
+      const home = ownerHome(registry.url);
+      homes.push(home);
+      const mcpRoot = path.join(home, '.marrow', 'runtime', 'mcp');
+      fs.mkdirSync(mcpRoot, { recursive: true, mode: 0o700 });
+      for (const dir of [path.join(home, '.marrow'), path.join(home, '.marrow', 'runtime'), mcpRoot]) fs.chmodSync(dir, 0o700);
+      const mark = path.join(mcpRoot, `.heal-${PIN}.failed`);
+      fs.writeFileSync(mark, JSON.stringify({ at: Date.now(), reason: 'npm_install_failed' }), { mode: 0o600 });
+      mutate({ home, mark, mcpRoot });
+      return home;
+    };
+    // Untrusted records: ignored, so the hook heals and the genuine package decides.
+    for (const [label, mutate] of [
+      ['mode 644 (as git checks a file out)', ({ mark }) => fs.chmodSync(mark, 0o644)],
+      ['a link to a record elsewhere', ({ mark }) => { const other = path.join(work, `mark-${crypto.randomBytes(3).toString('hex')}`); fs.renameSync(mark, other); fs.symlinkSync(other, mark); }],
+      ['dated in the future', ({ mark }) => fs.writeFileSync(mark, JSON.stringify({ at: Date.now() + 3_600_000, reason: 'npm_install_failed' }))],
+      ['a loose ~/.marrow', ({ home }) => fs.chmodSync(path.join(home, '.marrow'), 0o755)],
+    ]) {
+      const home = forged(mutate);
+      const result = runHook(hook(genuine.integrity), root, hookEnv(home, root));
+      assert.equal(result.status, 0, `${label}: ${result.stderr}`);
+      assert.match(result.stdout, /"genuine":true/, label);
+      await waitForHeal(home);
+      nothingPlantedRan(home, root);
+    }
+    // A trusted record of an outage: warn at once, no registry request.
+    const outage = forged(() => {});
+    const before = registry.requests().length;
+    const warned = runHook(hook(genuine.integrity), root, hookEnv(outage, root));
+    assert.equal(warned.status, 1);
+    assert.equal(warned.stderr, `${WARN_TEXT}\n`);
+    assert.equal(registry.requests().length, before);
+    // A trusted record of an integrity mismatch (or any reason that is not an outage): held.
+    for (const reason of ['integrity_mismatch', 'sdk_integrity_mismatch', 'unverified_dependency', 'package_mismatch', 'install_error', 'something_new']) {
+      const home = forged(({ mark }) => fs.writeFileSync(mark, JSON.stringify({ at: Date.now(), reason })));
+      const held = runHook(hook(genuine.integrity), root, hookEnv(home, root));
+      assert.equal(held.status, 2, reason);
+      assert.equal(held.stderr, `${HOLD_TEXT}\n`, reason);
+    }
+  } finally {
+    registry.stop();
+    for (const dir of [work, root, ...homes]) fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a registry that lies (announces the pinned integrity, serves another tarball): npm refuses it (EINTEGRITY), recorded as integrity_mismatch: held, not an outage', async () => {
+  const work = tempDir('marrow-heal-work-');
+  const genuine = packPackage(work, 'genuine', GENUINE_CLI);
+  const tampered = packPackage(work, 'tampered', PLANTED_CLI);
+  const registry = await startRegistry(work, { '@getmarrow/mcp': { [PIN]: { ...tampered, integrity: genuine.integrity } } });
+  const home = ownerHome(registry.url);
+  const root = plantedProject('http://127.0.0.1:9/');
+  try {
+    const held = runHook(hook(genuine.integrity), root, hookEnv(home, root));
+    assert.equal(held.status, 2, held.stderr);
+    assert.equal(held.stderr, `${HOLD_TEXT}\n`);
+    await waitForHeal(home);
+    const mcpRoot = path.join(home, '.marrow', 'runtime', 'mcp');
+    assert.deepEqual(fs.readdirSync(mcpRoot), [`.heal-${PIN}.failed`]);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(mcpRoot, `.heal-${PIN}.failed`), 'utf8')).reason, 'integrity_mismatch');
+    const again = runHook(hook(genuine.integrity, 'gemini-pre-action-hook'), root, hookEnv(home, root));
+    assert.equal(again.status, 2);
+    nothingPlantedRan(home, root);
+  } finally {
+    registry.stop();
+    for (const dir of [work, home, root]) fs.rmSync(dir, { recursive: true, force: true });
   }
 });

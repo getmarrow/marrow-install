@@ -10,12 +10,17 @@
 // builtins only, no outer variables, no comments and no string spanning lines inside it.
 //
 // Install rules: npm runs as `node <npm-cli.js next to node>` (Windows: only that; POSIX: `npm`
-// on PATH when no npm-cli.js exists), shell:false, --ignore-scripts, --no-bin-links, an explicit
+// found on PATH as the hooks find node, never a relative entry or one inside the project, when no
+// npm-cli.js exists), shell:false, --ignore-scripts, --no-bin-links, an explicit
 // private --prefix stage that is also the working directory, every npm_* override removed, and
 // the pinned sha512 integrity, version and entry checked before the stage is renamed into place.
 // Self-heal: one lock per version (a directory created atomically), a detached child that does
 // the install so a host timeout cannot kill it half way, a bounded wait in the hook, and a
-// failure record so an offline machine holds at once instead of retrying on every call.
+// failure record so an offline machine answers at once instead of retrying on every call.
+// Outage rule: when the heal fails for an outage (no npm, npm failed, the wait ran out), a
+// pre-action hook warns and lets the action run (exit 1, as npx failing did before); any other
+// failure (a tarball whose integrity does not match, an unsafe directory or package) holds it.
+// No copy that is not verified ever runs in either case.
 function runtimeCore() {
   const fs = require('node:fs');
   const path = require('node:path');
@@ -33,6 +38,8 @@ function runtimeCore() {
   const REPAIR = 'The owner can repair it by running npx -y @getmarrow/install@latest --repair --cwd <project folder> from a terminal outside the project.';
   const HOLD = 'Marrow held this action: its verified local runtime could not start. ' + REPAIR;
   const UNAVAILABLE = 'Marrow could not start its verified local runtime. ' + REPAIR;
+  const WARN = 'Marrow warning: it could not load its verified runtime, so this action was not checked. ' + REPAIR;
+  const OUTAGE = ['npm_unavailable', 'npm_install_failed', 'heal_timeout'];
   const uid = () => (typeof process.getuid === 'function' ? process.getuid() : null);
   const rootOf = (home) => path.join(home, '.marrow', 'runtime', 'mcp');
   const dirOf = (home, version) => path.join(rootOf(home), version);
@@ -144,7 +151,37 @@ function runtimeCore() {
         continue;
       }
     }
-    return platform === 'win32' ? null : { file: 'npm', args: [] };
+    if (platform === 'win32') return null;
+    const env = (options && options.env) || process.env;
+    const project = [String(env.PWD || process.cwd())];
+    try {
+      project.push(fs.realpathSync(project[0]));
+    } catch {
+      project.push(project[0]);
+    }
+    const inside = (dir) => project.some((root) => !path.isAbsolute(root) || dir === root || dir.startsWith(root.replace(/\/+$/, '') + '/'));
+    const dirs = [];
+    for (const dir of [...String(env.PATH || '').split(':'), '/usr/local/bin', '/opt/homebrew/bin']) {
+      if (!path.isAbsolute(dir) || inside(dir)) continue;
+      try {
+        if (inside(fs.realpathSync(dir))) continue;
+      } catch {
+        continue;
+      }
+      dirs.push(dir);
+    }
+    for (const dir of dirs) {
+      try {
+        const file = path.join(dir, 'npm');
+        const real = fs.realpathSync(file);
+        const stat = fs.statSync(real);
+        if (!stat.isFile() || (stat.mode & 0o111) === 0 || inside(real)) continue;
+        return /\.js$/.test(real) ? { file: execPath, args: [real], path: dirs.join(':') } : { file: real, args: [], path: dirs.join(':') };
+      } catch {
+        continue;
+      }
+    }
+    return null;
   }
   function npmEnvironment(source) {
     const env = {};
@@ -156,17 +193,20 @@ function runtimeCore() {
   }
   function npmInstall(stage, specs, options) {
     const npm = npmInvocation(options);
-    if (!npm) return false;
+    if (!npm) return 'npm_unavailable';
     const timeout = Math.max(1000, Math.min(NPM_TIMEOUT_MS, Number((options && options.timeout) || NPM_TIMEOUT_MS)));
+    const env = npmEnvironment((options && options.env) || process.env);
     const result = cp().spawnSync(npm.file, [...npm.args, 'install', '--no-audit', '--no-fund', '--ignore-scripts', '--no-bin-links', '--loglevel=error', '--prefix=' + stage, ...specs], {
       cwd: stage,
-      env: npmEnvironment((options && options.env) || process.env),
-      stdio: 'ignore',
+      env: npm.path ? { ...env, PATH: npm.path } : env,
+      stdio: ['ignore', 'ignore', 'pipe'],
+      maxBuffer: 1 << 20,
       timeout,
       windowsHide: true,
       shell: false,
     });
-    return result.status === 0;
+    if (result.status === 0) return true;
+    return /EINTEGRITY/.test(String(result.stderr || '')) ? 'integrity_mismatch' : false;
   }
   function removeOtherRuntimes(home, keep) {
     const root = rootOf(home);
@@ -213,7 +253,8 @@ function runtimeCore() {
       fs.writeFileSync(path.join(stage, 'package.json'), JSON.stringify({ name: 'marrow-mcp-runtime', private: true, dependencies }, null, 2) + '\n', { mode: 0o600 });
       const specs = Object.entries(dependencies).map(([name, spec]) => name + '@' + spec);
       if (typeof onProgress === 'function') onProgress('Installing a local copy of @getmarrow/mcp@' + version + ' for Marrow\'s hooks (up to ' + NPM_TIMEOUT_MS / 1000 + ' s; until it is installed, hooks install it themselves or hold protected actions)...\n');
-      if (!install(stage, specs, { platform, execPath: npmExecPath, timeout: options && options.timeout })) return { state: 'failed', reason: 'npm_install_failed' };
+      const installed = install(stage, specs, { platform, execPath: npmExecPath, timeout: options && options.timeout });
+      if (!installed || typeof installed === 'string') return { state: 'failed', reason: installed || 'npm_install_failed' };
       const lock = JSON.parse(fs.readFileSync(path.join(stage, 'package-lock.json'), 'utf8'));
       const packages = lock && typeof lock.packages === 'object' && lock.packages ? lock.packages : {};
       const mcp = packages['node_modules/@getmarrow/mcp'] || {};
@@ -224,9 +265,9 @@ function runtimeCore() {
         if (key === '') continue;
         if (!entry || typeof entry.integrity !== 'string' || !/^sha512-/.test(entry.integrity)) return { state: 'failed', reason: 'unverified_dependency' };
       }
-      const installed = JSON.parse(fs.readFileSync(path.join(stage, 'node_modules', '@getmarrow', 'mcp', 'package.json'), 'utf8'));
-      if (installed.name !== '@getmarrow/mcp' || installed.version !== version) return { state: 'failed', reason: 'package_mismatch' };
-      const binRelative = typeof installed.bin === 'object' && installed.bin ? installed.bin['marrow-mcp'] : null;
+      const manifest = JSON.parse(fs.readFileSync(path.join(stage, 'node_modules', '@getmarrow', 'mcp', 'package.json'), 'utf8'));
+      if (manifest.name !== '@getmarrow/mcp' || manifest.version !== version) return { state: 'failed', reason: 'package_mismatch' };
+      const binRelative = typeof manifest.bin === 'object' && manifest.bin ? manifest.bin['marrow-mcp'] : null;
       if (typeof binRelative !== 'string' || !/^[A-Za-z0-9._/-]+$/.test(binRelative) || binRelative.includes('..')) return { state: 'failed', reason: 'package_entry_missing' };
       const bin = 'node_modules/@getmarrow/mcp/' + binRelative.replace(/^\.\//, '');
       let files;
@@ -269,13 +310,19 @@ function runtimeCore() {
     }
   }
   const healPaths = (home, version) => ({ lock: path.join(rootOf(home), '.heal-' + version + '.lock'), mark: path.join(rootOf(home), '.heal-' + version + '.failed') });
-  function failedAt(mark) {
+  function failure(home, mark) {
+    const none = { at: 0, reason: '' };
     try {
+      const platform = process.platform;
+      if (![path.join(home, '.marrow'), path.dirname(rootOf(home)), rootOf(home)].every((dir) => privateDirectoryOk(dir, platform))) return none;
       const stat = fs.lstatSync(mark);
-      if (!stat.isFile()) return 0;
-      return Number(JSON.parse(fs.readFileSync(mark, 'utf8')).at) || 0;
+      const me = uid();
+      if (!stat.isFile() || (me !== null && stat.uid !== me) || (platform !== 'win32' && (stat.mode & 0o077) !== 0)) return none;
+      const record = JSON.parse(fs.readFileSync(mark, 'utf8'));
+      const at = Number(record.at) || 0;
+      return at > Date.now() + 5000 ? none : { at, reason: String(record.reason || '') };
     } catch {
-      return 0;
+      return none;
     }
   }
   function lockBusy(lock) {
@@ -322,17 +369,20 @@ function runtimeCore() {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
   }
   function awaitHeal(cfg, home, sub, loader) {
-    if (!VERSION_RE.test(cfg.version) || !INTEGRITY_RE.test(String(cfg.integrity || '')) || typeof loader !== 'string') return null;
+    const held = { state: 'failed', outage: false };
+    const outage = (reason) => ({ state: 'failed', outage: OUTAGE.includes(reason) });
+    if (!VERSION_RE.test(cfg.version) || !INTEGRITY_RE.test(String(cfg.integrity || '')) || typeof loader !== 'string') return held;
     const { lock, mark } = healPaths(home, cfg.version);
     const started = Date.now();
     if (!lockBusy(lock)) {
-      if (started - failedAt(mark) < RETRY_MS) return null;
+      const last = failure(home, mark);
+      if (started - last.at < RETRY_MS) return outage(last.reason);
       try {
-        const child = cp().spawn(process.execPath, ['-e', loader, '--', '--marrow-heal', '--package=@getmarrow/mcp@' + cfg.version, 'marrow-mcp'], { cwd: home, detached: true, stdio: 'ignore', windowsHide: true });
+        const child = cp().spawn(process.execPath, ['-e', loader, '--', '--marrow-heal', '--package=@getmarrow/mcp@' + cfg.version, 'marrow-mcp'], { cwd: home, env: { ...process.env, PWD: process.cwd() }, detached: true, stdio: 'ignore', windowsHide: true });
         child.on('error', () => {});
         child.unref();
       } catch {
-        return null;
+        return held;
       }
     }
     const budget = budgetFor(sub);
@@ -340,9 +390,10 @@ function runtimeCore() {
       sleep(100);
       const runtime = verify(home, cfg.version, cfg.integrity);
       if (runtime) return runtime;
-      if (failedAt(mark) >= started) return null;
+      const last = failure(home, mark);
+      if (last.at >= started) return outage(last.reason);
     }
-    return null;
+    return outage('heal_timeout');
   }
   function main(cfg, loader) {
     const args = process.argv.slice(1);
@@ -356,15 +407,16 @@ function runtimeCore() {
     }
     let runtime = args[0] === spec && args[1] === 'marrow-mcp' ? verify(home, cfg.version, cfg.integrity) : null;
     if (!runtime && args[0] === spec && args[1] === 'marrow-mcp') runtime = awaitHeal(cfg, home, args[2], loader);
-    if (!runtime) {
-      process.stderr.write((pre ? HOLD : UNAVAILABLE) + '\n');
-      process.exitCode = pre ? 2 : 1;
+    if (!runtime || runtime.state !== 'verified') {
+      const warn = pre && runtime && runtime.outage === true;
+      process.stderr.write((warn ? WARN : pre ? HOLD : UNAVAILABLE) + '\n');
+      process.exitCode = pre && !warn ? 2 : 1;
       return;
     }
     process.argv = [process.argv[0], runtime.bin, ...args.slice(2)];
     require(runtime.bin);
   }
-  return { SCHEMA, HOLD, UNAVAILABLE, NPM_TIMEOUT_MS, LOCK_STALE_MS, RETRY_MS, configOf, verify, ensure, heal, npmInvocation, npmEnvironment, npmInstall, removeOtherRuntimes, budgetFor, healPaths, main };
+  return { SCHEMA, HOLD, UNAVAILABLE, WARN, OUTAGE, NPM_TIMEOUT_MS, LOCK_STALE_MS, RETRY_MS, configOf, verify, ensure, heal, npmInvocation, npmEnvironment, npmInstall, removeOtherRuntimes, budgetFor, healPaths, main };
 }
 
 module.exports = { runtimeCore };

@@ -19,6 +19,7 @@ const {
 } = require('../src/installer');
 const {
   HOLD_TEXT,
+  WARN_TEXT,
   NPM_INSTALL_TIMEOUT_MS,
   UNAVAILABLE_TEXT,
   delocalizeHookCommand,
@@ -292,6 +293,35 @@ function assertEveryPreActionHolds(root, home, env) {
   assertNothingPlantedRan(home);
 }
 
+// Outage (no verified copy, the self-heal cannot reach a registry): every Marrow pre-action
+// command of every host warns and lets the call run exactly as its canonical npx form did when npx
+// failed (exit 1): the same exit status and stdout per host, never an allow, nothing planted runs.
+function assertEveryPreActionWarnsLikeFailedNpx(root, home, env) {
+  const failing = tempDir('marrow-runtime-failing-npx-');
+  fs.writeFileSync(path.join(failing, 'npx'), '#!/bin/sh\necho "npm error network" >&2\nexit 1\n', { mode: 0o755 });
+  let warned = 0;
+  try {
+    for (const [host, filePath] of Object.entries(hookFiles(root, home))) {
+      for (const command of marrowCommands(filePath).filter((entry) => /pre-action-hook/.test(entry))) {
+        const result = runProjectHook(command, root, env);
+        const master = runProjectHook(delocalizeHookCommand(command), root, { ...env, PATH: `${failing}:${path.dirname(process.execPath)}:/usr/bin:/bin` });
+        assert.notEqual(delocalizeHookCommand(command), command, host);
+        assert.equal(result.status, master.status, `${host}: same status as a failed npx (${master.status}): ${result.stderr} ${command.slice(0, 100)}`);
+        assert.equal(result.stdout, master.stdout, host);
+        assert.doesNotMatch(result.stdout, /allow/, host);
+        assert.equal(result.stderr.includes(home), false, `${host}: no path echoed`);
+        // The warning reaches the host wherever npx's own error did (some wrappers print their own text).
+        assert.equal(result.stderr.includes(WARN_TEXT), master.stderr.includes('npm error network'), `${host}: the fixed warning: ${result.stderr}`);
+        warned += 1;
+      }
+    }
+  } finally {
+    fs.rmSync(failing, { recursive: true, force: true });
+  }
+  assert.ok(warned >= 8, String(warned));
+  assertNothingPlantedRan(home);
+}
+
 test('without a verified copy every pre-action hook holds with the fixed repair text, and npx or a planted copy never runs', async () => {
   const { root, home } = allHostsProject();
   const shimDir = plantProject(root);
@@ -308,7 +338,16 @@ test('without a verified copy every pre-action hook holds with the fixed repair 
     const claude = hookFiles(root, home).claude;
     assert.ok(fs.readFileSync(claude, 'utf8').includes('/.marrow/runtime/'));
     assert.equal(hookTextUsesNpx(fs.readFileSync(claude, 'utf8')), false);
+    // The hooks' own self-heal cannot reach a registry here (outage): warn and run, as npx did.
+    assertEveryPreActionWarnsLikeFailedNpx(root, home, env);
+    // A recorded integrity mismatch (an attack signal, not an outage) holds every one of them.
+    const mcpRoot = path.join(home, '.marrow', 'runtime', 'mcp');
+    for (const deadline = Date.now() + 60_000; Date.now() < deadline && fs.readdirSync(mcpRoot).some((name) => name.endsWith('.lock'));) await new Promise((resolve) => setTimeout(resolve, 100));
+    const mark = path.join(mcpRoot, `.heal-${PIN}.failed`);
+    fs.rmSync(mark, { force: true });
+    fs.writeFileSync(mark, JSON.stringify({ at: Date.now(), reason: 'integrity_mismatch' }), { mode: 0o600 });
     assertEveryPreActionHolds(root, home, env);
+    fs.rmSync(mark);
     // Every other entrypoint fails without starting anything (exit 1, or the host wrapper's own
     // neutral or non-blocking result), and nothing planted runs.
     for (const [host, filePath] of Object.entries(hookFiles(root, home))) {
@@ -330,13 +369,13 @@ test('without a verified copy every pre-action hook holds with the fixed repair 
     assert.equal(good.status, 0, good.stderr);
     assert.equal(good.stdout, '{"local":true}');
     assertNothingPlantedRan(home);
-    // One of its files changes: held, never npx.
+    // One of its files changes: it never runs, and never npx (the self-heal is offline here: warn).
     fs.appendFileSync(path.join(runtimeDir(home, PIN), 'node_modules', '@getmarrow', 'mcp', 'dist', 'cli.js'), '\n// changed\n');
     assert.equal(verifyMcpRuntime(home, PIN, PINS.MCP_ADAPTER_INTEGRITY), null);
     const changed = runProjectHook(preAction, root, env);
-    assert.equal(changed.status, 2, changed.stderr);
+    assert.equal(changed.status, 1, changed.stderr);
     assert.equal(changed.stdout, '');
-    assert.equal(changed.stderr, `${HOLD_TEXT}\n`);
+    assert.equal(changed.stderr, `${WARN_TEXT}\n`);
     const changedResult = runProjectHook(marrowCommands(claude).find((command) => / marrow-mcp claude-hook;/.test(command)), root, env);
     assert.equal(changedResult.status, 1);
     assert.equal(changedResult.stderr, `${UNAVAILABLE_TEXT}\n`);
@@ -360,9 +399,9 @@ test('without a verified copy every pre-action hook holds with the fixed repair 
     assert.equal(noNodeAtAll.stderr, `${HOLD_TEXT}\n`);
     assert.doesNotMatch(noNodeAtAll.stdout, /allow|via/);
 
-    // The copy is gone: every kind of pre-action command holds.
+    // The copy is gone (offline self-heal): every kind of pre-action command warns as a failed npx did.
     fs.rmSync(path.join(home, '.marrow', 'runtime'), { recursive: true, force: true });
-    assertEveryPreActionHolds(root, home, env);
+    assertEveryPreActionWarnsLikeFailedNpx(root, home, env);
   } finally {
     for (const directory of [root, home, shimDir]) fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -507,7 +546,7 @@ test('Windows (simulated): node + npm-cli.js next to node.exe installs the copy;
     process.chdir(project);
     // No npm-cli.js next to node: nothing is installed, and nothing on PATH is tried instead.
     assert.equal(npmInvocation({ platform: 'win32', execPath: path.join(home, 'node.exe') }), null);
-    assert.deepEqual(ensureMcpRuntime({ home, version: PIN, integrity: PINS.MCP_ADAPTER_INTEGRITY, platform: 'win32', npmExecPath: path.join(home, 'node.exe') }), { state: 'failed', reason: 'npm_install_failed' });
+    assert.deepEqual(ensureMcpRuntime({ home, version: PIN, integrity: PINS.MCP_ADAPTER_INTEGRITY, platform: 'win32', npmExecPath: path.join(home, 'node.exe') }), { state: 'failed', reason: 'npm_unavailable' });
     const result = ensureMcpRuntime({ home, version: PIN, integrity: PINS.MCP_ADAPTER_INTEGRITY, platform: 'win32', npmExecPath: node });
     assert.equal(result.state, 'installed', JSON.stringify(result));
     const dir = runtimeDir(home, PIN);
@@ -524,8 +563,8 @@ test('Windows (simulated): node + npm-cli.js next to node.exe installs the copy;
     assert.equal(ran.stdout, '{"local":true}');
     fs.rmSync(path.join(home, '.marrow'), { recursive: true, force: true });
     const held = spawnSync('/bin/sh', ['-c', command], { cwd: project, env, input: '{}', encoding: 'utf8', timeout: 30_000 });
-    assert.equal(held.status, 2);
-    assert.equal(held.stderr, `${HOLD_TEXT}\n`);
+    assert.equal(held.status, 1, 'offline: warn and run, as npx.cmd failing did');
+    assert.equal(held.stderr, `${WARN_TEXT}\n`);
     assert.deepEqual(fs.readdirSync(home).filter((name) => name.startsWith('shim-')), []);
     // The installer writes that form for every plain hook when it runs on Windows.
     fs.writeFileSync(path.join(project, 'CLAUDE.md'), '# Claude\n');
@@ -686,7 +725,7 @@ test('runtime guards: unsafe paths, loose or linked directories and records, FIF
     // launcher on every start (which then holds).
     fs.chmodSync(dir, 0o750);
     assert.equal(verify(), null);
-    assert.equal(start().status, 2);
+    assert.equal(start().status, 1, 'offline: warn and run, the loose copy never runs');
     fs.chmodSync(dir, 0o700);
     assert.ok(verify());
     // LR28: a .verified others can read, or one that is a link, is not trusted.
@@ -694,7 +733,7 @@ test('runtime guards: unsafe paths, loose or linked directories and records, FIF
     fs.chmodSync(record, 0o644);
     assert.equal(verify(), null);
     const loose = start();
-    assert.equal(loose.status, 2, 'the launcher holds on a loose record too');
+    assert.equal(loose.status, 1, 'the launcher never runs a copy with a loose record (offline: warn)');
     assert.equal(loose.stdout, '');
     fs.chmodSync(record, 0o600);
     fs.renameSync(record, `${record}.real`);
@@ -717,9 +756,9 @@ test('runtime guards: unsafe paths, loose or linked directories and records, FIF
       fs.writeFileSync(file, 'module.exports = 1;\n');
       assert.equal(verify(), null, added.join('/'));
       const shadowed = start();
-      assert.equal(shadowed.status, 2, shadowed.stderr);
+      assert.equal(shadowed.status, 1, shadowed.stderr);
       assert.equal(shadowed.stdout, '', added.join('/'));
-      assert.equal(shadowed.stderr, `${HOLD_TEXT}\n`, added.join('/'));
+      assert.equal(shadowed.stderr, `${WARN_TEXT}\n`, added.join('/'));
       fs.rmSync(file);
       assert.ok(verify(), added.join('/'));
     }
@@ -746,8 +785,8 @@ test('runtime guards: unsafe paths, loose or linked directories and records, FIF
       apply();
       assert.equal(verify(), null, label);
       const held = start();
-      assert.equal(held.status, 2, `${label}: ${held.stdout}`);
-      assert.equal(held.stdout, '', label);
+      assert.equal(held.status, 1, `${label}: ${held.stdout}`);
+      assert.equal(held.stdout, '', `${label}: the changed copy never runs (offline: warn and run)`);
       undo();
       assert.ok(statBefore);
       assert.ok(verify(), `${label} restored`);
@@ -875,7 +914,7 @@ test('collisions: an edited loader, configuration, entrypoint or server entry is
     assert.equal(delocalizeHookCommand(local.split(loader).join(other)), canonical, `${platform}: recompressed`);
     // Any change to the code it runs, even after a valid configuration line, is not.
     for (const edited of [
-      launcherSource(cfg).replace('process.exitCode = pre ? 2 : 1;', 'process.exitCode = 0;'),
+      launcherSource(cfg).replace('process.exitCode = pre && !warn ? 2 : 1;', 'process.exitCode = 0;'),
       `${launcherSource(cfg)}\n;require('child_process').execSync('true');`,
       launcherSource(cfg).replace('const NPM_TIMEOUT_MS = 30000;', 'const NPM_TIMEOUT_MS = 30001;'),
     ]) {

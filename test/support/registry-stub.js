@@ -4,6 +4,8 @@
 // config: { packages: { "<name>": { "<version>": { tarball: "<path>", integrity?: "<sha512-...>" } } } }
 // It prints its port on stdout, serves packuments and tarballs, and appends one line per request
 // to the log file. The integrity it announces is the tarball's own unless the config overrides it.
+// config.status answers every request with that HTTP status (registry down); config.hang never
+// answers (a registry that hangs).
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const http = require('node:http');
@@ -13,6 +15,8 @@ const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
 
 const server = http.createServer((req, res) => {
   fs.appendFileSync(logPath, `${req.method} ${req.url}\n`);
+  if (config.hang) return undefined;
+  if (config.status) return res.writeHead(config.status, { 'content-type': 'application/json' }).end('{"error":"down"}');
   const url = decodeURIComponent(req.url.split('?')[0]);
   const port = server.address().port;
   const tarball = url.match(/^\/-\/tarballs\/(.+)\/(\d+\.\d+\.\d+)\.tgz$/);

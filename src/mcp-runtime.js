@@ -15,8 +15,10 @@
 // Every hook command carries the runtime loader inline (runtime-core.js, compressed): it checks
 // the installed files against the record and runs the entry. When the copy is missing or changed,
 // it installs the pinned version itself, with the installer's own rules and the pinned integrity
-// it carries, and only when that fails does a pre-action hook hold the call (exit 2 with a fixed
-// repair message; every other entrypoint exits 1). Nothing ever reads the project or starts npx.
+// it carries. When that fails for an outage (offline, registry down, the wait ran out) a
+// pre-action hook warns and lets the call run (exit 1, as npx failing did); any other failure,
+// such as an integrity mismatch, holds it (exit 2 with a fixed repair message; every other
+// entrypoint exits 1). Nothing ever reads the project or starts npx.
 // Hook commands reach the runtime through the home directory, so project hook files stay the same
 // for every user and name no local path.
 
@@ -30,6 +32,7 @@ const core = runtimeCore();
 const RUNTIME_SCHEMA = core.SCHEMA;
 const HOLD_TEXT = core.HOLD;
 const UNAVAILABLE_TEXT = core.UNAVAILABLE;
+const WARN_TEXT = core.WARN;
 const NPM_INSTALL_TIMEOUT_MS = core.NPM_TIMEOUT_MS;
 const VERSION_RE = /^\d+\.\d+\.\d+$/;
 const PRE_ACTION_SUB_RE = /-pre-action-hook$/;
@@ -458,6 +461,7 @@ module.exports = {
   NPM_INSTALL_TIMEOUT_MS,
   RUNTIME_SCHEMA,
   UNAVAILABLE_TEXT,
+  WARN_TEXT,
   RUN,
   defaultNpmInstall,
   delocalizeHookCommand,
