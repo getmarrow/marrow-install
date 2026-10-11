@@ -121,7 +121,7 @@ Earlier release notes are in the [CHANGELOG](https://github.com/getmarrow/marrow
 
 The installer detects these from project and home-directory signals:
 
-- Claude Code (`.claude/settings.json` or `CLAUDE.md` in the project, or your installation: `~/.claude/`, `~/.claude.json` or `claude` on `PATH`; a project marker of another host still ranks first), Cursor and Cursor Composer (`.cursor`), Cline (`.clinerules`), Windsurf (`.windsurf`), Gemini CLI (`.gemini`), Grok (`~/.grok` only: its hooks are global, so a project-only `.grok` does not make the installer write `~/.grok/hooks/marrow.json`), Codex (a `.codex` directory or an `AGENTS.md` with owner content; one holding only the Marrow block is not a signal), Hermes (see above) and OpenClaw;
+- Claude Code (`.claude/settings.json` or `CLAUDE.md` in the project, or your installation: `~/.claude/`, `~/.claude.json` or `claude` on `PATH`; a project marker of another host still ranks first), Cursor and Cursor Composer (`.cursor`), Cline (`.clinerules`), Windsurf (`.windsurf`), Gemini CLI (`.gemini`), Grok (`~/.grok` or `.grok`), Codex (a `.codex` directory or an `AGENTS.md` with owner content; one holding only the Marrow block is not a signal), Hermes (see above) and OpenClaw;
 - MCP client configuration, Node.js and Python projects.
 
 Which hook files the installer writes, and when (a host is written only when its row's signal is present):
@@ -132,7 +132,7 @@ Which hook files the installer writes, and when (a host is written only when its
 | Codex | a `.codex` directory, or an `AGENTS.md` with owner content | `.codex/hooks.json`, `AGENTS.md` |
 | Cursor and Composer | a `.cursor` directory | `.cursor/hooks.json`, `.cursor/mcp.json` |
 | Cline, Windsurf, Gemini CLI | `.clinerules`, `.windsurf`, `.gemini` | `.clinerules/hooks/*`, `.windsurf/hooks.json`, `.gemini/settings.json` |
-| Grok | `~/.grok` exists | `~/.grok/hooks/marrow.json` |
+| Grok | `~/.grok` or a project `.grok` exists | `~/.grok/hooks/marrow.json` |
 
 Claude Code is detected from your installation as well as the project on purpose, so a project that also has `.codex` or `.cursor` gets Claude Code hooks when `claude` is installed: the installer cannot tell which host you open there, and leaving Claude Code unprotected would be the worse mistake. The project marker only decides which host the summary names first.
 

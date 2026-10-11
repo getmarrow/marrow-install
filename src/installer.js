@@ -1195,8 +1195,7 @@ function detectEnvironment(cwd = process.cwd(), env = process.env) {
     cline: exists(path.join(root, '.clinerules')),
     windsurf: exists(path.join(root, '.windsurf')),
     gemini: exists(path.join(root, '.gemini')),
-    // Grok hooks are written to the global ~/.grok/hooks, so only a user-level ~/.grok counts.
-    grok: exists(path.join(home, '.grok')),
+    grok: exists(path.join(home, '.grok')) || exists(path.join(root, '.grok')),
     codexProject,
     codex: codexProject || agentsMdHasOwnerContent(paths.agentsMd),
     hermes: homeHarnesses.hermes === true,
@@ -4928,7 +4927,10 @@ async function runCli(argv) {
     else printUninstallReport(report);
     return;
   }
+  // An empty or whitespace-only key from any source (environment, --key, owner file) is missing.
+  options.apiKey = String(options.apiKey || '').trim();
   const stored = readOwnerApiKey(options.home);
+  stored.apiKey = String(stored.apiKey || '').trim();
   const keyInfo = { source: options.apiKey ? 'environment' : null, path: null, owner_files_disagree: stored.conflict };
   if (!options.apiKey && stored.apiKey) {
     options.apiKey = stored.apiKey;

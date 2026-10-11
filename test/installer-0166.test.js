@@ -1243,6 +1243,38 @@ test('keyless --yes stops the same way when hooks already exist, and --dry-run a
   }
 });
 
+test('keyless guard treats empty or whitespace-only keys (env, ~/.marrow/env, --key) as missing: exit 2, zero files', async () => {
+  for (const blank of ['', ' ', '\t\n']) {
+    for (const source of ['env', 'owner-file', 'key-flag']) {
+      const home = tempDir('marrow-yes-blank-home-');
+      const project = tempDir('marrow-yes-blank-proj-');
+      try {
+        fs.mkdirSync(path.join(project, '.claude'));
+        fs.writeFileSync(path.join(project, '.claude', 'settings.json'), '{}\n');
+        const env = { PATH: process.env.PATH, HOME: home };
+        const args = ['--yes', '--no-self-test', '--no-controller', '--no-local-runtime'];
+        if (source === 'env') env.MARROW_API_KEY = blank;
+        if (source === 'key-flag') args.push('--key', blank);
+        if (source === 'owner-file') {
+          fs.mkdirSync(path.join(home, '.marrow'), { mode: 0o700 });
+          fs.writeFileSync(path.join(home, '.marrow', 'env'), `MARROW_API_KEY=${blank}\n`, { mode: 0o600 });
+        }
+        const beforeHome = snapshotTree(home);
+        const beforeProject = snapshotTree(project);
+        const label = `${source} ${JSON.stringify(blank)}`;
+        const run = await runBin(args, { cwd: project, env });
+        assert.equal(run.status, 2, `${label}: ${run.stderr}`);
+        assert.equal(run.stdout, KEYLESS_MESSAGE_ACTIVATE, label);
+        assert.deepEqual(snapshotTree(home), beforeHome, label);
+        assert.deepEqual(snapshotTree(project), beforeProject, label);
+      } finally {
+        fs.rmSync(home, { recursive: true, force: true });
+        fs.rmSync(project, { recursive: true, force: true });
+      }
+    }
+  }
+});
+
 test('with a key, --yes still writes hooks as before (offline: self-test skipped, no controller)', async () => {
   const home = tempDir('marrow-yes-key-home-');
   const project = tempDir('marrow-yes-key-proj-');
@@ -1263,7 +1295,7 @@ test('with a key, --yes still writes hooks as before (offline: self-test skipped
   }
 });
 
-test('Grok hooks are written only when ~/.grok exists, never for a project-only .grok or for Claude/Codex/Cursor users', () => {
+test('Grok is detected from ~/.grok or a project .grok as at base; maintenance restores missing global Grok hooks for a project-marked user', () => {
   const grokPath = (home) => path.join(home, '.grok', 'hooks', 'marrow.json');
   for (const layout of ['none', 'project-grok', 'home-grok']) {
     const root = tempDir('marrow-grok-proj-');
@@ -1273,11 +1305,23 @@ test('Grok hooks are written only when ~/.grok exists, never for a project-only 
       fs.writeFileSync(path.join(root, '.claude', 'settings.json'), '{}\n');
       if (layout === 'project-grok') fs.mkdirSync(path.join(root, '.grok'), { mode: 0o700 });
       if (layout === 'home-grok') fs.mkdirSync(path.join(home, '.grok'), { mode: 0o700 });
-      const detection = detectEnvironment(root, { HOME: home, PATH: process.env.PATH });
-      assert.equal(detection.grok, layout === 'home-grok', layout);
+      const env = { HOME: home, PATH: process.env.PATH };
+      const detection = detectEnvironment(root, env);
+      assert.equal(detection.grok, layout !== 'none', layout);
       applyPlan(buildPlan(detection, { mode: 'auto' }), { yes: true, dryRun: false, doctor: false });
-      assert.equal(fs.existsSync(grokPath(home)), layout === 'home-grok', layout);
-      if (layout !== 'home-grok') assert.equal(fs.existsSync(path.join(home, '.grok')), false, layout);
+      assert.equal(fs.existsSync(grokPath(home)), layout !== 'none', layout);
+      if (layout === 'none') assert.equal(fs.existsSync(path.join(home, '.grok')), false, layout);
+      if (layout === 'project-grok') {
+        // The global ~/.grok is lost while the project marker survives: controller maintenance
+        // (detect, plan with maintenance, apply) must write the hooks back, exactly as at base.
+        fs.rmSync(path.join(home, '.grok'), { recursive: true, force: true });
+        assert.equal(fs.existsSync(grokPath(home)), false);
+        const again = detectEnvironment(root, env);
+        assert.equal(again.grok, true);
+        const changes = applyPlan(buildPlan(again, { mode: 'auto', maintenance: true }), { yes: true, dryRun: false, doctor: false });
+        assert.equal(fs.existsSync(grokPath(home)), true, 'maintenance restored the global Grok hooks');
+        assert.ok(changes.some((change) => change.applied && /grok/i.test(`${change.label} ${change.path}`)));
+      }
       // Claude hooks are unaffected in every layout.
       assert.match(fs.readFileSync(path.join(root, '.claude', 'settings.json'), 'utf8'), /claude-pre-action-hook/);
     } finally {
