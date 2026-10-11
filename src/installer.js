@@ -281,8 +281,8 @@ const CURSOR_ACTION_RESULT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} 
 const CURSOR_SESSION_END_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp cursor-session-hook`;
 const CURSOR_CONTEXT_HOOK_COMMAND = `npx -y --package=${MCP_PACKAGE_SPEC} marrow-mcp cursor-context-hook`;
 // Cursor's beforeMCPExecution takes no matcher, so this guard answers allow at once for
-// Marrow's own tools (server "marrow", tools marrow_*), as the old preToolUse matcher exempted
-// them, without starting npx. Every other call goes to the MCP entrypoint with its input
+// Marrow's own tools (server exactly "marrow", tool one of the registered names in
+// marrow-own-tools.js), as the preToolUse matcher exempts them, without starting npx. Every other call goes to the MCP entrypoint with its input
 // unchanged; a crash, a non-zero exit or output that is not a JSON object blocks (exit 2).
 const CURSOR_MCP_GUARD_FAILURE = 'Marrow governance adapter was unavailable; this MCP call is blocked.';
 const CURSOR_MCP_PRE_ACTION_GUARD_SOURCE = [
