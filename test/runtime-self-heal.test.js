@@ -234,6 +234,11 @@ test('a registry that serves another tarball (integrity mismatch) never gets a c
     assert.equal(JSON.parse(fs.readFileSync(path.join(mcpRoot, `.heal-${PIN}.failed`), 'utf8')).reason, 'integrity_mismatch');
     nothingPlantedRan(home, root);
     assert.equal(fs.readdirSync(home).some((name) => name.startsWith('planted-')), false, 'the tampered package never ran');
+    // The failure is remembered: the next start holds at once and asks the registry nothing.
+    const asked = registry.requests().length;
+    const next = runHook(hook(genuine.integrity), root, hookEnv(home, root));
+    assert.equal(next.status, 2);
+    assert.equal(registry.requests().length, asked, 'no new install attempt within the back-off');
     // A registry announcing the genuine integrity for the tampered bytes: npm itself refuses.
     const lying = await startRegistry(work, { '@getmarrow/mcp': { [PIN]: { ...tampered, integrity: genuine.integrity } } });
     const home2 = ownerHome(lying.url);

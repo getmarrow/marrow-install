@@ -922,6 +922,24 @@ test('a hook\'s self-heal never removes another version\'s runtime (another proj
     assert.deepEqual(healed.removed_versions, []);
     assert.ok(verifyMcpRuntime(home, AHEAD, fakeIntegrity('ahead')), 'the other version is kept');
     assert.deepEqual(fs.readdirSync(path.join(home, '.marrow', 'runtime', 'mcp')).sort(), [PIN, AHEAD].sort());
+    // No integrity, no trust: verify needs the expected integrity, and a loader that carries none
+    // (an unknown version) holds even when a copy is present.
+    assert.equal(verifyMcpRuntime(home, AHEAD, null), null);
+    assert.equal(verifyMcpRuntime(home, AHEAD, undefined), null);
+    const noIntegrity = spawnSync(process.execPath, ['-e', loaderFor(runtimeConfig(AHEAD)), '--', `--package=@getmarrow/mcp@${AHEAD}`, 'marrow-mcp', 'codex-pre-action-hook'], {
+      env: { HOME: home, PATH: '/nonexistent-marrow-path' }, input: '{}', encoding: 'utf8', timeout: 30_000,
+    });
+    assert.equal(runtimeConfig(AHEAD).integrity, null);
+    assert.equal(noIntegrity.status, 2, noIntegrity.stdout);
+    assert.equal(noIntegrity.stdout, '');
+    // An install whose package has no entry file is refused.
+    const noEntry = (stage, specs) => { fakeNpmInstall()(stage, specs); fs.rmSync(path.join(stage, 'node_modules', '@getmarrow', 'mcp', 'dist', 'cli.js')); return true; };
+    const other = deadRegistryHome(tempDir('marrow-runtime-noentry-'));
+    try {
+      assert.deepEqual(ensureMcpRuntime({ home: other, version: PIN, integrity: PINS.MCP_ADAPTER_INTEGRITY, npmInstall: noEntry }), { state: 'failed', reason: 'package_entry_missing' });
+    } finally {
+      fs.rmSync(other, { recursive: true, force: true });
+    }
     // A heal while another holds the lock does nothing.
     fs.rmSync(runtimeDir(home, PIN), { recursive: true, force: true });
     fs.mkdirSync(path.join(home, '.marrow', 'runtime', 'mcp', `.heal-${PIN}.lock`));
