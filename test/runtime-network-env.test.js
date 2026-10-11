@@ -211,6 +211,10 @@ test('B1 integrity proof: with a network setting from env, the install must be e
       assert.deepEqual(run(fake(opts), net), { state: 'failed', reason: 'unverified_dependency' }, label);
     }
     assert.deepEqual(run(fake({ sdkIntegrity: other }), net), { state: 'failed', reason: 'sdk_integrity_mismatch' });
+    // Any allowlisted setting turns the closure check on: a proxy or CA alone can redirect content too.
+    for (const only of [{ npm_config_proxy: 'http://127.0.0.1:9' }, { 'npm_config_https-proxy': 'http://127.0.0.1:9' }, { npm_config_cafile: '/nonexistent/ca.pem' }, { 'npm_config_@getmarrow:registry': 'http://127.0.0.1:9/' }]) {
+      assert.deepEqual(run(fake({ lockExtra: { 'node_modules/evil-dep': { version: '1.0.0', integrity: other } } }), only), { state: 'failed', reason: 'unverified_dependency' }, Object.keys(only)[0]);
+    }
     // No network setting in env: r3 rules exactly (an extra verified dependency is accepted).
     assert.equal(run(fake({ lockExtra: { 'node_modules/evil-dep': { version: '1.0.0', integrity: other } } }), {}).state, 'installed');
     // No SDK pin: the closure cannot be proven, so no network setting is passed at all.
@@ -276,6 +280,8 @@ test('B1 end to end (real npm): a registry set only in npm_config_registry / NPM
     await waitForHeal(home);
     assert.equal(fs.existsSync(runtimeCore.healPaths(home, PIN, a).mark), true);
     assert.equal(fs.existsSync(runtimeCore.healPaths(home, PIN, b).mark), false, 'A\'s record is not B\'s');
+    // A private outage record under the old per-user name (r3) is not B's record either.
+    fs.writeFileSync(path.join(home, '.marrow', 'runtime', 'mcp', `.heal-${PIN}.failed`), JSON.stringify({ at: Date.now(), reason: 'npm_install_failed' }), { mode: 0o600 });
     const decided = runHook(hookFor(pk), b, envFor(home, b));
     assert.equal(decided.status, 0, decided.stderr);
     assert.match(decided.stdout, /"genuine":true/);
