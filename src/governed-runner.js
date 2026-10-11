@@ -1480,7 +1480,7 @@ async function recommendGovernanceMode(options, project = detectProjectSignals()
       skipped: true,
       reason: 'MARROW_API_KEY missing',
       project,
-      exact_fix: 'export MARROW_API_KEY=mrw_live_... && npx @getmarrow/install govern',
+      exact_fix: 'Put MARROW_API_KEY=<your_key> in ~/.marrow/env (chmod 600), then run npx @getmarrow/install govern. Fallback: MARROW_API_KEY=<your_key> npx @getmarrow/install govern',
     };
   }
   const action = 'configure Marrow governance mode for this project';
@@ -3582,7 +3582,7 @@ async function fleetSnapshot(options) {
         data: {
           enabled: false,
           missed_hooks: ['api_key'],
-          recommended_fix: 'export MARROW_API_KEY=mrw_live_... && npx @getmarrow/install fleet',
+          recommended_fix: 'Put MARROW_API_KEY=<your_key> in ~/.marrow/env (chmod 600), then run npx @getmarrow/install fleet. Fallback: MARROW_API_KEY=<your_key> npx @getmarrow/install fleet',
         },
       },
       capacity: { ok: false, error: 'MARROW_API_KEY missing', data: {} },
@@ -3646,19 +3646,24 @@ function fleetPanel(snapshot) {
 
 // Governed commands never name an invented agent id. MARROW_AGENT_ID, when set, is a registered
 // agent; otherwise Marrow resolves the key's bound agent or the plan seat.
-const GENERIC_GOVERNED_COMMAND = 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --profile production --policy warn -- <harness-command>';
+// Commands read the key from ~/.marrow/env; the env-prefixed form is the labelled fallback.
+const KEY_FILE_SETUP = 'Put MARROW_API_KEY=<your_key> in ~/.marrow/env and run chmod 600 ~/.marrow/env.';
+const KEY_ENV_FALLBACK_PREFIX = 'MARROW_API_KEY=<your_key> ';
+const isRunnableCommand = (command) => String(command).startsWith('npx ');
+
+const GENERIC_GOVERNED_COMMAND = 'npx @getmarrow/install run --profile production --policy warn -- <harness-command>';
 
 function localSupportedHarnesses() {
   const harnesses = [
-    { display_name: 'OpenAI Codex', client_label: 'codex', category: 'agent_harness', support_level: 'governed_runner', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run -- codex' },
-    { display_name: 'Claude Code', client_label: 'claude-code', category: 'agent_harness', support_level: 'native_mcp_or_sdk', install_command: `MARROW_API_KEY=mrw_live_xxx ${MCP_SETUP_COMMAND}` },
-    { display_name: 'Cursor', client_label: 'cursor', category: 'ide_agent', support_level: 'native_mcp_or_sdk', install_command: `MARROW_API_KEY=mrw_live_xxx ${MCP_SETUP_COMMAND}` },
-    { display_name: 'Cursor Composer', client_label: 'composer', category: 'ide_agent', support_level: 'native_mcp_or_sdk', install_command: `MARROW_API_KEY=mrw_live_xxx ${MCP_SETUP_COMMAND}` },
-    { display_name: 'Windsurf', client_label: 'windsurf', category: 'ide_agent', support_level: 'native_mcp_or_sdk', install_command: `MARROW_API_KEY=mrw_live_xxx ${MCP_SETUP_COMMAND}` },
-    { display_name: 'Cline', client_label: 'cline', category: 'ide_agent', support_level: 'native_mcp_or_sdk', install_command: `MARROW_API_KEY=mrw_live_xxx ${MCP_SETUP_COMMAND}` },
-    { display_name: 'OpenCode', client_label: 'opencode', category: 'agent_harness', support_level: 'governed_runner', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run -- opencode' },
-    { display_name: 'Hermes Agent', client_label: 'hermes', category: 'agent_harness', support_level: 'first_class_addon', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install hermes' },
-    { display_name: 'OpenClaw', client_label: 'openclaw', category: 'agent_harness', support_level: 'first_class_addon', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install openclaw' },
+    { display_name: 'OpenAI Codex', client_label: 'codex', category: 'agent_harness', support_level: 'governed_runner', install_command: 'npx @getmarrow/install run -- codex' },
+    { display_name: 'Claude Code', client_label: 'claude-code', category: 'agent_harness', support_level: 'native_mcp_or_sdk', install_command: `${MCP_SETUP_COMMAND}` },
+    { display_name: 'Cursor', client_label: 'cursor', category: 'ide_agent', support_level: 'native_mcp_or_sdk', install_command: `${MCP_SETUP_COMMAND}` },
+    { display_name: 'Cursor Composer', client_label: 'composer', category: 'ide_agent', support_level: 'native_mcp_or_sdk', install_command: `${MCP_SETUP_COMMAND}` },
+    { display_name: 'Windsurf', client_label: 'windsurf', category: 'ide_agent', support_level: 'native_mcp_or_sdk', install_command: `${MCP_SETUP_COMMAND}` },
+    { display_name: 'Cline', client_label: 'cline', category: 'ide_agent', support_level: 'native_mcp_or_sdk', install_command: `${MCP_SETUP_COMMAND}` },
+    { display_name: 'OpenCode', client_label: 'opencode', category: 'agent_harness', support_level: 'governed_runner', install_command: 'npx @getmarrow/install run -- opencode' },
+    { display_name: 'Hermes Agent', client_label: 'hermes', category: 'agent_harness', support_level: 'first_class_addon', install_command: 'npx @getmarrow/install hermes' },
+    { display_name: 'OpenClaw', client_label: 'openclaw', category: 'agent_harness', support_level: 'first_class_addon', install_command: 'npx @getmarrow/install openclaw' },
     { display_name: 'Gemini CLI', client_label: 'gemini', category: 'model_cli', support_level: 'governed_runner', install_command: GENERIC_GOVERNED_COMMAND },
     { display_name: 'Grok CLI', client_label: 'grok', category: 'model_cli', support_level: 'governed_runner', install_command: GENERIC_GOVERNED_COMMAND },
     { display_name: 'DeepSeek', client_label: 'deepseek', category: 'model_cli', support_level: 'governed_runner', install_command: GENERIC_GOVERNED_COMMAND },
@@ -3666,14 +3671,17 @@ function localSupportedHarnesses() {
     { display_name: 'Kimi', client_label: 'kimi', category: 'model_cli', support_level: 'governed_runner', install_command: GENERIC_GOVERNED_COMMAND },
     { display_name: 'MiniMax', client_label: 'minimax', category: 'model_cli', support_level: 'governed_runner', install_command: GENERIC_GOVERNED_COMMAND },
     { display_name: 'GLM', client_label: 'glm', category: 'model_cli', support_level: 'governed_runner', install_command: GENERIC_GOVERNED_COMMAND },
-    { display_name: 'MCP-compatible clients', client_label: 'mcp', category: 'mcp_client', support_level: 'native_mcp_or_sdk', install_command: `MARROW_API_KEY=mrw_live_xxx ${MCP_SETUP_COMMAND}` },
-    { display_name: 'CI scripts and deploy runners', client_label: 'ci', category: 'ci_runner', support_level: 'governed_runner', install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --profile production --policy enforce -- <ci-or-deploy-command>' },
+    { display_name: 'MCP-compatible clients', client_label: 'mcp', category: 'mcp_client', support_level: 'native_mcp_or_sdk', install_command: `${MCP_SETUP_COMMAND}` },
+    { display_name: 'CI scripts and deploy runners', client_label: 'ci', category: 'ci_runner', support_level: 'governed_runner', install_command: 'npx @getmarrow/install run --profile production --policy enforce -- <ci-or-deploy-command>' },
     { display_name: 'Custom shell/API harness', client_label: 'custom', category: 'custom_runner', support_level: 'event_contract', install_command: 'POST /v1/agent/integrations/events with harness, event_type, agent_id, and action' },
   ];
   return harnesses.map((harness) => {
     const capability = HARNESS_CAPABILITY_REGISTRY.find((entry) => entry.client === harness.client_label)
       || HARNESS_CAPABILITY_REGISTRY.find((entry) => entry.client === 'custom');
-    return { ...harness, capability_level: capability.capability_level };
+    const fallback = isRunnableCommand(harness.install_command)
+      ? { install_command_env_fallback: `${KEY_ENV_FALLBACK_PREFIX}${harness.install_command}` }
+      : {};
+    return { ...harness, ...fallback, key_setup: KEY_FILE_SETUP, capability_level: capability.capability_level };
   });
 }
 
@@ -3780,8 +3788,8 @@ function localIntegrationManifest(name) {
       title: 'Marrow + Hermes Agent',
       client_label: 'hermes',
       command: 'hermes',
-      install_command: 'MARROW_API_KEY=mrw_live_xxx npx -y @getmarrow/install@latest update',
-      governed_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --profile production --policy enforce -- hermes',
+      install_command: 'npx -y @getmarrow/install@latest update',
+      governed_command: 'npx @getmarrow/install run --profile production --policy enforce -- hermes',
       agent_identity: 'Leave MARROW_AGENT_ID unset: Marrow uses the API key\'s bound agent or the Free plan seat. On paid plans, register the agent with POST /v1/agents or bind the key to exactly one agent before setting MARROW_AGENT_ID.',
       capture_points: [
         '/goal -> Marrow completion contract',
@@ -3799,8 +3807,8 @@ function localIntegrationManifest(name) {
       title: 'Marrow + OpenClaw',
       client_label: 'openclaw',
       command: 'openclaw agent',
-      install_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install openclaw',
-      governed_command: 'MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run --profile production --policy enforce -- openclaw agent',
+      install_command: 'npx @getmarrow/install openclaw',
+      governed_command: 'npx @getmarrow/install run --profile production --policy enforce -- openclaw agent',
       capture_points: [
         'agent sessions -> workflow sessions',
         'handoff/result files -> proof packs',
@@ -3838,6 +3846,9 @@ function renderIntegrationPanel(name, manifest, source = 'local', detectedHarnes
   const installCommands = Array.isArray(manifest.install_commands)
     ? manifest.install_commands
     : [manifest.install_command, manifest.governed_command].filter(Boolean);
+  const keyLines = installCommands.some((command) => isRunnableCommand(command))
+    ? ['', `Key: ${KEY_FILE_SETUP}`, `Fallback: prefix a command above with ${KEY_ENV_FALLBACK_PREFIX.trim()}`]
+    : [];
   const detected = detectedHarnesses.find((harness) => harness.name.toLowerCase().includes(name === 'openclaw' ? 'openclaw' : 'hermes'))?.detected;
   const lines = [
     title,
@@ -3851,6 +3862,7 @@ function renderIntegrationPanel(name, manifest, source = 'local', detectedHarnes
     '',
     'Install / run:',
     ...installCommands.map((command) => `  ${displayText(command, 140)}`),
+    ...keyLines,
     '',
     'Why this matters:',
     `  ${displayText(manifest.marrow_positioning || 'Keep the harness. Add Marrow governance, proof packs, outcomes, and buyer-grade fleet value.', 140)}`,
@@ -3992,7 +4004,7 @@ function commandForSelection(state, options) {
   }
   const command = harness.command === '<your-agent-command>' ? '<your-command>' : harness.command;
   const renderedCommand = command.split(/\s+/).filter(Boolean).map(shellQuote).join(' ');
-  return `MARROW_API_KEY=mrw_live_xxx npx @getmarrow/install run ${options.agentId ? `--agent ${shellQuoteDisplay(options.agentId)} ` : ''}--profile ${shellQuoteDisplay(options.profile)} --policy ${shellQuoteDisplay(mode.policy)} -- ${renderedCommand}`;
+  return `npx @getmarrow/install run ${options.agentId ? `--agent ${shellQuoteDisplay(options.agentId)} ` : ''}--profile ${shellQuoteDisplay(options.profile)} --policy ${shellQuoteDisplay(mode.policy)} -- ${renderedCommand}`;
 }
 
 function buildGovernState(options, cwd = process.cwd()) {
@@ -4097,6 +4109,9 @@ function renderGovernTui(state, options) {
   });
   lines.push('Recommended command:');
   lines.push(`  ${commandForSelection(state, options)}`);
+  if (state.modes[state.modeIndex]?.id !== 'passive') {
+    lines.push(`  Key: ${KEY_FILE_SETUP} Fallback: prefix with ${KEY_ENV_FALLBACK_PREFIX.trim()}`);
+  }
   if (state.status) {
     lines.push('');
     lines.push(`Status: ${displayText(state.status, 120)}`);

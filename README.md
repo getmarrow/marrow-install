@@ -20,11 +20,11 @@ Use `@getmarrow/install` as the default entry point. It detects supported agent 
 
    Fallback, only if you cannot write that file: `MARROW_API_KEY=<your_key> npx -y @getmarrow/install@latest activate`. A key typed on a command line lands in your shell history. The installer also accepts `--key`, which is visible in process listings; do not use it.
 3. **Restart** the host the summary names (for example "Restart Claude Code").
-4. **Check.** `npx -y @getmarrow/install@latest doctor --self-test`
+4. **Check.** `npx -y @getmarrow/install@latest doctor --self-test` (the same check as plain `doctor`, which also runs the server self-test)
 
 With no key, `activate`, the bare command and every `--yes` write run print what to do and exit 2 before writing anything. `--dry-run`, `doctor` and `uninstall` need no key.
 
-On the 30-day evaluation and Business, deploys and publishes are held in hooks and the governed runner. Team and Free warn. If Marrow is unreachable, most actions run with a warning. Over MCP, the agent gets the decision and is expected to follow it.
+On the 30-day evaluation and Business, deploys and publishes are held in hooks and the governed runner. Team and Free warn. If Marrow is unreachable, hooks let actions run with a warning, and the governed runner stops protected actions it cannot verify. Over MCP, the agent gets the decision and is expected to follow it.
 
 ## Install
 
@@ -40,13 +40,13 @@ Hooks start a verified local copy of the pinned MCP from `~/.marrow/runtime/mcp/
 
 Where the key comes from:
 
-- The installer reads `MARROW_API_KEY`. When that is unset it reads the owner-only `~/.marrow/env.local`, then `~/.marrow/env`, and names the file it used. It warns when those two files hold different keys.
-- With no key, `activate`, the bare command, `update`, `--repair` and every `--yes` run (including `--mcp --yes` and `--sdk --yes`) print what to do (create a key at https://getmarrow.ai/signup, save it in `~/.marrow/env`, run `activate`), exit 2 and write nothing. The message holds no key, command line or path. `--dry-run`, `doctor` and `uninstall` need no key.
+- The installer reads `MARROW_API_KEY` (or `MARROW_KEY`). When those are unset it reads the owner-only `~/.marrow/env.local`, then `~/.marrow/env`, and names the file it used. It warns when those two files hold different keys.
+- With no key, `activate`, the bare command, `update`, `--repair` and every `--yes` run (including `--mcp --yes` and `--sdk --yes`) print what to do (create a key at https://getmarrow.ai/signup, save it in `~/.marrow/env`, run `activate`), exit 2 and write nothing. The message holds nothing from your environment, arguments or project. `--dry-run`, `doctor` and `uninstall` need no key.
 - On a first install whose key came from `MARROW_API_KEY`, once the self-test passes, the installer stores it in the owner-only `~/.marrow/env` (mode 600) when no key is stored there yet, and says so in one line, so Claude Code opened from the desktop app, an IDE or a new terminal finds it. This holds with `--json` and `--verbose` too. A key passed with `--key` is not stored, and a different stored key is left unchanged and named.
 - The governed runner and `controller` commands read the key from `MARROW_API_KEY` or `MARROW_KEY`, else from the same owner-only files (the runner also accepts `--key`, which is visible in process listings; prefer the variable). With no key the runner stops with: "Marrow can't find your key: run `npx @getmarrow/install` once in this machine's terminal."
 - The key is never written to generated configuration, controller state or logs. It is written only to the owner-only `~/.marrow/env`: on a first install as above, and for Hermes wiring, described under Trust and Data Boundaries.
 
-Flags: `--dry-run` previews without writing, `doctor` is a read-only health check (it prints to the terminal and writes no log), `--no-controller` installs and self-tests without starting the controller, `--no-self-test` skips the API self-test, `--mode auto|mcp|sdk|both|md` limits what is written, `--no-local-runtime` (or `MARROW_LOCAL_RUNTIME=0`) keeps hooks on `npx`, and `--yes` writes detected configuration (it needs a key, as above). Run `npx @getmarrow/install --help` for the installer options and `npx @getmarrow/install run --help` for the runner.
+Flags: `--dry-run` previews without writing, `doctor` is a read-only health check (it prints to the terminal and writes no log), `--no-controller` installs and self-tests without starting the controller, `--no-self-test` skips the API self-test, `--mode auto|mcp|sdk|both|md` limits what is written, `--no-local-runtime` (or `MARROW_LOCAL_RUNTIME=0`) keeps hooks on `npx`, and `--yes` writes detected configuration (it needs a key, as above). An option that takes a value (`--key`, `--cwd`, `--mode`, `--base-url`, `--agent-id`) never consumes a following word that starts with `-`; such a value is refused (for example `--agent-id -x`; use `MARROW_AGENT_ID` or `--cwd ./-dir`). `--key` also never takes a subcommand word (`activate`, `update`, `doctor` and so on) as the key, so an unset variable in `--key $VAR activate` counts as a missing key and exits 2 writing nothing. `MARROW_KEY` is read when `MARROW_API_KEY` is absent. A blank value in `~/.marrow/env.local` is ignored, not used over a valid key elsewhere. Run `npx @getmarrow/install --help` for the installer options and `npx @getmarrow/install run --help` for the runner.
 
 ### MCP tool profiles
 
@@ -124,7 +124,7 @@ The installer detects these from project and home-directory signals:
 - Claude Code (`.claude/settings.json` or `CLAUDE.md` in the project, or your installation: `~/.claude/`, `~/.claude.json` or `claude` on `PATH`; a project marker of another host still ranks first), Cursor and Cursor Composer (`.cursor`), Cline (`.clinerules`), Windsurf (`.windsurf`), Gemini CLI (`.gemini`), Grok (`~/.grok` or `.grok`), Codex (a `.codex` directory that is empty, holds another entry besides `hooks.json`, or whose `hooks.json` has a non-Marrow hook; or an `AGENTS.md` with owner content. A directory holding only Marrow's own `hooks.json`, or an `AGENTS.md` holding only the Marrow block, is not a signal), Hermes (see above) and OpenClaw;
 - MCP client configuration, Node.js and Python projects.
 
-Which hook files the installer writes, and when (a host is written only when its row's signal is present):
+Which hook files the installer writes, and when. A host's hook file is written only when its row's signal is present; `AGENTS.md` is also written when any AGENTS.md-reading host is detected or with `--md`/`--both`, and `.mcp.json` is written for MCP installs without a Claude signal:
 
 | Host | Written when | File |
 |---|---|---|

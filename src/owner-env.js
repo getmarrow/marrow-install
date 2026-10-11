@@ -71,7 +71,8 @@ function readOwnerApiKey(home) {
     if (!fs.existsSync(filePath) || !isPrivateOwnerFile(filePath, home)) continue;
     try {
       const values = parseKeyLines(fs.readFileSync(filePath, 'utf8'));
-      const apiKey = values.MARROW_API_KEY || values.MARROW_KEY || '';
+      // Blank (quoted whitespace) values are absent: they never shadow a valid key in another file.
+      const apiKey = String(values.MARROW_API_KEY || '').trim() || String(values.MARROW_KEY || '').trim();
       if (apiKey) found.push({ apiKey, source: filePath });
     } catch {
       // An unreadable owner file is treated as absent.

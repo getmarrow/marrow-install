@@ -839,6 +839,9 @@ function argumentLabel(arg) {
   return /^[a-z][a-z-]{0,23}$/.test(text) ? text : '(a value that is not an option; not shown)';
 }
 
+// Operation words parseArgs accepts. A --key value equal to one of these is a missing key.
+const SUBCOMMAND_WORDS = new Set(['activate', 'update', 'repair', 'uninstall', 'doctor', 'check']);
+
 function parseArgs(argv, env = process.env) {
   const options = {
     cwd: process.cwd(),
@@ -848,7 +851,8 @@ function parseArgs(argv, env = process.env) {
     doctor: false,
     repair: false,
     mode: 'auto',
-    apiKey: env.MARROW_API_KEY || '',
+    // MARROW_KEY is accepted when MARROW_API_KEY is absent or blank, as the runner and owner files do.
+    apiKey: String(env.MARROW_API_KEY || '').trim() || String(env.MARROW_KEY || '').trim(),
     baseUrl: env.MARROW_BASE_URL || DEFAULT_BASE_URL,
     agentId: env.MARROW_FLEET_AGENT_ID || env.MARROW_AGENT_ID || '',
     toolProfile: resolveToolProfile(env.MARROW_TOOL_PROFILE),
@@ -867,9 +871,11 @@ function parseArgs(argv, env = process.env) {
   // Value of the option at argv[i]. Only consumes the next argument when it exists and is not an
   // option itself, so a missing value never swallows a following flag.
   let i = 0;
-  const optionValue = () => {
+  const optionValue = (refuseWords = false) => {
     const next = argv[i + 1];
     if (next === undefined || String(next).startsWith('-')) return '';
+    // `--key $UNSET activate` must not take the subcommand word as the key.
+    if (refuseWords && SUBCOMMAND_WORDS.has(String(next))) return '';
     i += 1;
     return next;
   };
@@ -920,7 +926,7 @@ function parseArgs(argv, env = process.env) {
     }
     else if (arg === '--key') {
       // A missing value (end of argv, or another option next) is a missing key, never a key.
-      options.apiKey = optionValue() || options.apiKey;
+      options.apiKey = optionValue(true) || options.apiKey;
       options.keyFromArg = true;
     }
     else if (arg === '--base-url') options.baseUrl = optionValue() || options.baseUrl;
@@ -990,7 +996,7 @@ Options:
   activate           Detect, install, self-test, and return a server-confirmed activation receipt
   --dry-run          Print planned changes without writing
   --doctor           Check install health without writing
-  doctor --self-test Same check, plus the server self-test: run it after restarting the harness
+  doctor --self-test Same as doctor, which already runs the server self-test: run it after restarting the harness
   --repair           Write missing hooks/config, then run self-test and status check
   update             Same as --repair: refresh exact MCP/SDK/install package pins after owner approval
   --yes, -y          Write detected config files (needs your API key; stops before writing without one)

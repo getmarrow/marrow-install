@@ -1413,3 +1413,167 @@ test('Grok is detected from ~/.grok or a project .grok as at base; maintenance r
     }
   }
 });
+
+// r4 ---------------------------------------------------------------------------------------
+
+async function runKeylessCase(args, prepare) {
+  const home = tempDir('marrow-r4-home-');
+  const project = tempDir('marrow-r4-proj-');
+  try {
+    fs.mkdirSync(path.join(project, '.claude'));
+    fs.writeFileSync(path.join(project, '.claude', 'settings.json'), '{}\n');
+    fs.mkdirSync(path.join(project, '.codex'));
+    const env = { PATH: process.env.PATH, HOME: home };
+    if (prepare) prepare({ home, project, env });
+    const beforeHome = snapshotTree(home);
+    const beforeProject = snapshotTree(project);
+    const run = await runBin(args, { cwd: project, env });
+    return { run, homeUnchanged: snapshotTree(home).join('\n') === beforeHome.join('\n'), projectUnchanged: snapshotTree(project).join('\n') === beforeProject.join('\n') };
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+}
+
+test('--key followed by a subcommand word is a missing key: exit 2, zero files (unset $VAR in `--key $VAR activate`)', async () => {
+  const quiet = ['--no-self-test', '--no-controller', '--no-local-runtime'];
+  const writing = [
+    ['--key', 'activate'],
+    ['--key', 'update'],
+    ['--key', 'repair'],
+    ['--yes', '--no-controller', '--key', 'activate'],
+    ['--yes', ...quiet, '--key', 'update'],
+    ['--key', 'activate', '--yes', '--no-controller'],
+    ['--mcp', '--yes', ...quiet, '--key', 'repair'],
+    ['--md', '--yes', '--no-controller', '--key', 'activate'],
+    ['--key', 'activate', 'activate'],
+    ['activate', '--key', 'update'],
+  ];
+  for (const args of writing) {
+    const { run, homeUnchanged, projectUnchanged } = await runKeylessCase(args);
+    const label = args.join(' ');
+    assert.equal(run.status, 2, `${label}: ${run.stderr}`);
+    assert.match(run.stdout, /^Marrow needs your API key\. Nothing was written\./, label);
+    assert.equal(homeUnchanged && projectUnchanged, true, label);
+  }
+  // The subcommand word is still parsed as the subcommand: read-only ones stay read-only.
+  for (const args of [['--yes', ...quiet, '--key', 'doctor'], ['--key', 'doctor', '--yes'], ['--key', 'check']]) {
+    const { run, homeUnchanged, projectUnchanged } = await runKeylessCase(args);
+    assert.notEqual(run.status, 2, args.join(' '));
+    assert.equal(homeUnchanged && projectUnchanged, true, args.join(' '));
+  }
+  // A real key after --key is untouched, and a subcommand word after the key is the subcommand.
+  const dummyKey = `mrw_dummy_${crypto.randomBytes(12).toString('hex')}`;
+  const parsed = parseArgs(['--key', dummyKey, 'update'], { HOME: '/nonexistent-home' });
+  assert.equal(parsed.apiKey, dummyKey);
+  assert.equal(parsed.update, true);
+  const missing = parseArgs(['--key', 'activate'], { HOME: '/nonexistent-home' });
+  assert.equal(missing.apiKey, '');
+  assert.equal(missing.activate, true);
+});
+
+test('a quoted-whitespace key in ~/.marrow/env or env.local is missing: exit 2, zero files', async () => {
+  for (const name of ['env', 'env.local']) {
+    const { run, homeUnchanged, projectUnchanged } = await runKeylessCase(
+      ['--yes', '--no-self-test', '--no-controller', '--no-local-runtime'],
+      ({ home }) => {
+        fs.mkdirSync(path.join(home, '.marrow'), { mode: 0o700 });
+        fs.writeFileSync(path.join(home, '.marrow', name), 'MARROW_API_KEY="   "\n', { mode: 0o600 });
+      },
+    );
+    assert.equal(run.status, 2, name);
+    assert.equal(run.stdout, KEYLESS_MESSAGE_ACTIVATE, name);
+    assert.equal(homeUnchanged && projectUnchanged, true, name);
+  }
+});
+
+test('a blank value in env.local, or a blank env var, never shadows a valid key elsewhere', async () => {
+  const dummyKey = `mrw_dummy_${crypto.randomBytes(12).toString('hex')}`;
+  const home = tempDir('marrow-r4-shadow-home-');
+  try {
+    fs.mkdirSync(path.join(home, '.marrow'), { mode: 0o700 });
+    fs.writeFileSync(path.join(home, '.marrow', 'env.local'), 'MARROW_API_KEY="   "\n', { mode: 0o600 });
+    fs.writeFileSync(path.join(home, '.marrow', 'env'), `MARROW_API_KEY=${dummyKey}\n`, { mode: 0o600 });
+    const stored = readOwnerApiKey(home);
+    assert.equal(stored.apiKey, dummyKey);
+    assert.equal(stored.source, path.join(home, '.marrow', 'env'));
+    assert.equal(stored.conflict, false);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+  // End to end: the valid stored key is used and the run writes.
+  const project = tempDir('marrow-r4-shadow-proj-');
+  const home2 = tempDir('marrow-r4-shadow-home2-');
+  try {
+    fs.mkdirSync(path.join(project, '.claude'));
+    fs.writeFileSync(path.join(project, '.claude', 'settings.json'), '{}\n');
+    fs.mkdirSync(path.join(home2, '.marrow'), { mode: 0o700 });
+    fs.writeFileSync(path.join(home2, '.marrow', 'env.local'), 'MARROW_API_KEY="  "\n', { mode: 0o600 });
+    fs.writeFileSync(path.join(home2, '.marrow', 'env'), `MARROW_API_KEY=${dummyKey}\n`, { mode: 0o600 });
+    const run = await runBin(['--yes', '--no-self-test', '--no-controller', '--no-local-runtime'], {
+      cwd: project, env: { PATH: process.env.PATH, HOME: home2, MARROW_API_KEY: '   ' },
+    });
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(fs.readFileSync(path.join(project, '.claude', 'settings.json'), 'utf8'), /claude-pre-action-hook/);
+    assert.doesNotMatch(`${run.stdout}${run.stderr}`, new RegExp(dummyKey));
+  } finally {
+    fs.rmSync(project, { recursive: true, force: true });
+    fs.rmSync(home2, { recursive: true, force: true });
+  }
+});
+
+test('MARROW_KEY alone is accepted when MARROW_API_KEY is absent or blank; MARROW_API_KEY wins when set', async () => {
+  const dummyKey = `mrw_dummy_${crypto.randomBytes(12).toString('hex')}`;
+  const other = `mrw_dummy_${crypto.randomBytes(12).toString('hex')}`;
+  assert.equal(parseArgs([], { HOME: '/nonexistent-home', MARROW_KEY: dummyKey }).apiKey, dummyKey);
+  assert.equal(parseArgs([], { HOME: '/nonexistent-home', MARROW_API_KEY: '  ', MARROW_KEY: dummyKey }).apiKey, dummyKey);
+  assert.equal(parseArgs([], { HOME: '/nonexistent-home', MARROW_API_KEY: other, MARROW_KEY: dummyKey }).apiKey, other);
+  assert.equal(parseArgs([], { HOME: '/nonexistent-home', MARROW_KEY: '   ' }).apiKey, '');
+  const home = tempDir('marrow-r4-mk-home-');
+  const project = tempDir('marrow-r4-mk-proj-');
+  try {
+    fs.mkdirSync(path.join(project, '.claude'));
+    fs.writeFileSync(path.join(project, '.claude', 'settings.json'), '{}\n');
+    const run = await runBin(['--yes', '--no-self-test', '--no-controller', '--no-local-runtime'], {
+      cwd: project, env: { PATH: process.env.PATH, HOME: home, MARROW_KEY: dummyKey },
+    });
+    assert.equal(run.status, 0, run.stderr);
+    assert.match(fs.readFileSync(path.join(project, '.claude', 'settings.json'), 'utf8'), /claude-pre-action-hook/);
+    assert.doesNotMatch(`${run.stdout}${run.stderr}`, new RegExp(dummyKey));
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('--mode never swallows a following option or accepts a dash value', async () => {
+  const noEnv = { HOME: '/nonexistent-home' };
+  let o = parseArgs(['--mode', '--yes'], noEnv);
+  assert.equal(o.mode, 'auto');
+  assert.equal(o.yes, true);
+  o = parseArgs(['--mode', '--mcp'], noEnv);
+  assert.equal(o.mode, 'mcp');
+  o = parseArgs(['--mode'], noEnv);
+  assert.equal(o.mode, 'auto');
+  assert.throws(() => parseArgs(['--mode', 'bogus'], noEnv), /--mode must be one of/);
+  for (const args of [['--mode', '--yes'], ['--yes', '--mode'], ['--mode', '--no-controller', '--yes']]) {
+    const { run, homeUnchanged, projectUnchanged } = await runKeylessCase(args);
+    assert.equal(run.status, 2, args.join(' '));
+    assert.equal(homeUnchanged && projectUnchanged, true, args.join(' '));
+  }
+});
+
+test('keyless `--md --yes` exits 2 with zero files; `doctor --yes` is read-only and not the key message', async () => {
+  for (const args of [['--md', '--yes'], ['--md', '--yes', '--no-self-test', '--no-controller'], ['--both', '--yes']]) {
+    const { run, homeUnchanged, projectUnchanged } = await runKeylessCase(args);
+    assert.equal(run.status, 2, args.join(' '));
+    assert.equal(run.stdout, KEYLESS_MESSAGE_ACTIVATE, args.join(' '));
+    assert.equal(homeUnchanged && projectUnchanged, true, args.join(' '));
+  }
+  for (const args of [['doctor', '--yes'], ['--yes', 'doctor']]) {
+    const { run, homeUnchanged, projectUnchanged } = await runKeylessCase(args);
+    assert.notEqual(run.status, 2, args.join(' '));
+    assert.notEqual(run.stdout, KEYLESS_MESSAGE_ACTIVATE, args.join(' '));
+    assert.equal(homeUnchanged && projectUnchanged, true, args.join(' '));
+  }
+});

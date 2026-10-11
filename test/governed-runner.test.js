@@ -1433,3 +1433,24 @@ test('requestJson aborts a hung request only when a timeout is given', async () 
     globalThis.fetch = originalFetch;
   }
 });
+
+test('commands shown to the owner never start with a key assignment; the env form is the labelled fallback', () => {
+  const options = { agentId: 'codex-bob', profile: 'production', policy: 'enforce', apiKey: '' };
+  const state = buildGovernState(options, process.cwd());
+  for (let index = 0; index < state.modes.length; index += 1) {
+    state.modeIndex = index;
+    assert.doesNotMatch(commandForSelection(state, options), /MARROW_API_KEY=/);
+  }
+  const catalog = localSupportedHarnesses();
+  const runnable = catalog.filter((item) => item.install_command.startsWith('npx '));
+  assert.ok(runnable.length >= 8);
+  for (const item of catalog) {
+    assert.doesNotMatch(item.install_command, /MARROW_API_KEY=/, item.client_label);
+    assert.doesNotMatch(item.install_command, /mrw_live/, item.client_label);
+  }
+  for (const item of runnable) {
+    assert.equal(item.install_command_env_fallback, `MARROW_API_KEY=<your_key> ${item.install_command}`);
+  }
+  const panel = renderGovernTui(state, options);
+  assert.match(panel, /~\/\.marrow\/env/);
+});
