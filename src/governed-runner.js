@@ -4269,7 +4269,7 @@ function waitForAnyKey(input = process.stdin) {
 
 async function runSetupSelfTest(options, input, output) {
   if (!options.apiKey) {
-    return 'MARROW_API_KEY is missing. Create a key at https://getmarrow.ai/signup, save it in ~/.marrow/env (mode 600), then rerun setup.';
+    return 'MARROW_API_KEY is missing. Create a key at https://getmarrow.ai/signup, save it in ~/.marrow/env, then run chmod 700 ~/.marrow && chmod 600 ~/.marrow/env, then rerun setup.';
   }
   const binPath = path.resolve(__dirname, '..', 'bin', 'marrow-install.js');
   output.write('\x1b[2J\x1b[HRunning Marrow passive setup and self-test...\n\n');

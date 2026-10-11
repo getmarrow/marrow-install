@@ -783,7 +783,7 @@ test('self-test writes stop at their time limits instead of hanging the install'
   assert.ok(Date.now() - started < 2_000);
 });
 
-const KEYLESS_MESSAGE_ACTIVATE = 'Marrow needs your API key. Nothing was written. Create a key at https://getmarrow.ai/signup, save it as MARROW_API_KEY=your_key in the owner-only file ~/.marrow/env (mode 600), then run: npx -y @getmarrow/install@latest activate  (fallback: MARROW_API_KEY=your_key npx -y @getmarrow/install@latest activate)\n';
+const KEYLESS_MESSAGE_ACTIVATE = 'Marrow needs your API key. Nothing was written. Create a key at https://getmarrow.ai/signup, save it as MARROW_API_KEY=your_key in the owner-only file ~/.marrow/env, then run chmod 700 ~/.marrow && chmod 600 ~/.marrow/env, then run: npx -y @getmarrow/install@latest activate  (fallback: MARROW_API_KEY=your_key npx -y @getmarrow/install@latest activate)\n';
 
 function snapshotTree(root) {
   const out = [];
@@ -1576,4 +1576,23 @@ test('keyless `--md --yes` exits 2 with zero files; `doctor --yes` is read-only 
     assert.notEqual(run.stdout, KEYLESS_MESSAGE_ACTIVATE, args.join(' '));
     assert.equal(homeUnchanged && projectUnchanged, true, args.join(' '));
   }
+});
+
+test('every by-hand key-file instruction carries the canonical chmod 700 ~/.marrow step', async () => {
+  const canonical = 'chmod 700 ~/.marrow && chmod 600 ~/.marrow/env';
+  const home = tempDir('marrow-0169-keyfile-');
+  try {
+    const env = { PATH: process.env.PATH, HOME: home };
+    const keyless = await runBin([], { cwd: home, env });
+    assert.ok(keyless.stdout.includes(canonical));
+    const help = await runBin(['--help'], { cwd: home, env });
+    assert.ok(help.stdout.includes(canonical), 'help text');
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+  const installerSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'installer.js'), 'utf8');
+  const runnerSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'governed-runner.js'), 'utf8');
+  assert.ok(installerSource.includes(`then run ${canonical}, then run npx -y @getmarrow/install@latest activate`), 'self-test exact_fix');
+  assert.ok(runnerSource.includes(`const KEY_FILE_SETUP = 'Put MARROW_API_KEY=<your_key> in ~/.marrow/env, then run ${canonical}.';`), 'runner KEY_FILE_SETUP');
+  assert.ok(runnerSource.includes(`save it in ~/.marrow/env, then run ${canonical}, then rerun setup.`), 'runner setup message');
 });

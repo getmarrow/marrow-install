@@ -1011,8 +1011,8 @@ Options:
                      the local MCP runtime; add --yes to remove them. Your own hooks and settings
                      are kept.
 
-Get a key at https://getmarrow.ai/signup. Put it in the owner-only ~/.marrow/env (mode 600) as
-MARROW_API_KEY=your_key, or export MARROW_API_KEY. Keep it off the command line: command-line
+Get a key at https://getmarrow.ai/signup. Put it in the owner-only ~/.marrow/env as
+MARROW_API_KEY=your_key, then run chmod 700 ~/.marrow && chmod 600 ~/.marrow/env, or export MARROW_API_KEY. Keep it off the command line: command-line
 arguments land in shell history and process listings.
 
 Environment:
@@ -3688,7 +3688,7 @@ async function runSelfTest(options) {
     return {
       skipped: true,
       reason: 'missing MARROW_API_KEY',
-      exact_fix: 'Create a key at https://getmarrow.ai/signup, save it as MARROW_API_KEY=your_key in the owner-only ~/.marrow/env (mode 600), then run npx -y @getmarrow/install@latest activate',
+      exact_fix: 'Create a key at https://getmarrow.ai/signup, save it as MARROW_API_KEY=your_key in the owner-only ~/.marrow/env, then run chmod 700 ~/.marrow && chmod 600 ~/.marrow/env, then run npx -y @getmarrow/install@latest activate',
       mcp_tool_profile: initialProfile,
     };
   }
@@ -4838,7 +4838,7 @@ function installCommandFor(options) {
 // because a key typed on a command line lands in shell history.
 function missingKeyMessage(options) {
   const command = installCommandFor(options);
-  return `Marrow needs your API key. Nothing was written. Create a key at https://getmarrow.ai/signup, save it as MARROW_API_KEY=your_key in the owner-only file ~/.marrow/env (mode 600), then run: ${command}  (fallback: MARROW_API_KEY=your_key ${command})`;
+  return `Marrow needs your API key. Nothing was written. Create a key at https://getmarrow.ai/signup, save it as MARROW_API_KEY=your_key in the owner-only file ~/.marrow/env, then run chmod 700 ~/.marrow && chmod 600 ~/.marrow/env, then run: ${command}  (fallback: MARROW_API_KEY=your_key ${command})`;
 }
 
 // One summary for the one-command paths (first install and update). The full report goes to a
