@@ -660,3 +660,40 @@ test('a registry that lies (announces the pinned integrity, serves another tarba
     for (const dir of [work, home, root]) fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('change 2: the npm child gets only the trusted PATH entries, and a heal started without a shell (no PWD) still skips the project npm', () => {
+  const project = plantedProject('http://127.0.0.1:9/');
+  const good = tempDir('marrow-npm-good-');
+  const link = tempDir('marrow-npm-link-');
+  const bare = tempDir('marrow-npm-bare-');
+  const home = ownerHome('http://127.0.0.1:9/');
+  try {
+    const seen = path.join(good, 'seen-path');
+    fs.writeFileSync(path.join(good, 'npm'), `#!/bin/sh\nprintf '%s' "$PATH" > '${seen}'\nexit 1\n`, { mode: 0o755 });
+    fs.symlinkSync(project, path.join(link, 'proj'));
+    const PATH = `.:${project}:${path.join(link, 'proj')}:${path.join(project, 'node_modules', '.bin')}:${good}`;
+    const stage = tempDir('marrow-npm-stage-');
+    assert.equal(runtimeCore.npmInstall(stage, ['@getmarrow/mcp@1.0.0'], { platform: 'linux', execPath: path.join(bare, 'node'), env: { PATH, PWD: project } }), false);
+    fs.rmSync(stage, { recursive: true, force: true });
+    const childPath = fs.readFileSync(seen, 'utf8').split(':');
+    assert.ok(childPath.includes(good), childPath.join(':'));
+    for (const dir of childPath) assert.ok(dir.startsWith('/') && !dir.startsWith(project) && !dir.startsWith(link), `npm child PATH has ${dir}`);
+    // The loader started directly by node (as a node guard does), cwd = the project, no PWD: the
+    // heal child is told the project directory, so the project's npm shim never runs.
+    if (!['/usr/local/bin/npm', '/opt/homebrew/bin/npm', '/usr/share/nodejs/npm/bin/npm-cli.js', '/usr/lib/node_modules/npm/bin/npm-cli.js'].some((file) => fs.existsSync(file))) {
+      fs.copyFileSync(process.execPath, path.join(bare, 'node'));
+      fs.chmodSync(path.join(bare, 'node'), 0o755);
+      const loader = hook('sha512-' + 'A'.repeat(86) + '==').match(/"(eval\([^"]+\))"/)[1];
+      const result = spawnSync(path.join(bare, 'node'), ['-e', loader, '--', `--package=@getmarrow/mcp@${PIN}`, 'marrow-mcp', 'claude-pre-action-hook'], {
+        cwd: project, env: { HOME: home, PATH: `${project}:${bare}` }, input: EVENT, encoding: 'utf8', timeout: 60_000,
+      });
+      for (const deadline = Date.now() + 30_000; Date.now() < deadline && fs.existsSync(path.join(home, '.marrow', 'runtime', 'mcp', `.heal-${PIN}.lock`));) spawnSync('sleep', ['0.2']);
+      assert.equal(result.status, 1, result.stderr);
+      assert.equal(result.stderr, `${WARN_TEXT}\n`);
+      assert.equal(JSON.parse(fs.readFileSync(path.join(home, '.marrow', 'runtime', 'mcp', `.heal-${PIN}.failed`), 'utf8')).reason, 'npm_unavailable');
+      nothingPlantedRan(home, project);
+    }
+  } finally {
+    for (const dir of [project, good, link, bare, home]) fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
