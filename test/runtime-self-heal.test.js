@@ -28,6 +28,33 @@ const {
 const PIN = PINS.MCP_ADAPTER_VERSION;
 const STUB = path.join(__dirname, 'support', 'registry-stub.js');
 
+// System-npm awareness. npmInvocation tries fixed root-owned places before it searches PATH, so on a
+// host that has a system npm the PATH-filter tests cannot reach the PATH search unless that npm is
+// hidden. fixedSystemNpm() names the one npmInvocation will pick (null where there is none);
+// withoutSystemNpm() hides only those two absolute files from fs.statSync (the fixed lookup), so the
+// PATH search is still tested everywhere; hostile-input assertions are never skipped.
+const SYSTEM_NPM_CLIS = ['/usr/share/nodejs/npm/bin/npm-cli.js', '/usr/lib/node_modules/npm/bin/npm-cli.js'];
+const PATH_FALLBACK_NPMS = ['/usr/local/bin/npm', '/opt/homebrew/bin/npm'];
+const isFile = (file) => { try { return fs.statSync(file).isFile(); } catch { return false; } };
+const fixedSystemNpm = () => SYSTEM_NPM_CLIS.find(isFile) || null;
+const anySystemNpm = () => Boolean(fixedSystemNpm()) || PATH_FALLBACK_NPMS.some((file) => fs.existsSync(file));
+// Directories the hook's node search looks in besides the project: its PATH fallbacks plus whatever
+// the test puts on PATH.
+const HOOK_NODE_DIRS = ['/usr/local/bin', '/opt/homebrew/bin'];
+const nodeIn = (dirs) => dirs.some((dir) => { try { fs.accessSync(path.join(dir, 'node'), fs.constants.X_OK); return fs.statSync(path.join(dir, 'node')).isFile(); } catch { return false; } });
+function withoutSystemNpm(fn) {
+  const real = fs.statSync;
+  fs.statSync = function statSync(file, ...rest) {
+    if (SYSTEM_NPM_CLIS.includes(String(file))) throw Object.assign(new Error('ENOENT (hidden by test)'), { code: 'ENOENT' });
+    return real.call(this, file, ...rest);
+  };
+  try {
+    return fn();
+  } finally {
+    fs.statSync = real;
+  }
+}
+
 function tempDir(prefix) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   fs.chmodSync(dir, 0o700);
@@ -209,10 +236,25 @@ test('offline with no copy: the pre-action hook warns and lets the call run (exi
     assert.equal(result.stderr, `${UNAVAILABLE_TEXT}\n`);
     nothingPlantedRan(home, root);
     // No node anywhere: the fixed hold, never anything from the project.
+    // (system npm aware: where a node sits in /usr/bin, /bin or the hook's fixed directories the
+    // hook finds it and, offline, takes the warn path; the project's node is never what it finds.)
     const noNode = runHook(hook(genuine.integrity), root, { HOME: home, PATH: `${root}:/usr/bin:/bin` });
-    assert.equal(noNode.status, 2);
-    assert.equal(noNode.stderr, `${HOLD_TEXT}\n`);
+    if (nodeIn(['/usr/bin', '/bin', ...HOOK_NODE_DIRS])) {
+      assert.equal(noNode.status, 1, noNode.stderr);
+      assert.equal(noNode.stderr, `${WARN_TEXT}\n`);
+      assert.equal(noNode.stdout, '');
+    } else {
+      assert.equal(noNode.status, 2);
+      assert.equal(noNode.stderr, `${HOLD_TEXT}\n`);
+    }
     nothingPlantedRan(home, root);
+    // And the hold itself, wherever the hook has no node to find (only the project's on PATH).
+    if (!nodeIn(HOOK_NODE_DIRS)) {
+      const hold = runHook(hook(genuine.integrity), root, { HOME: home, PATH: `${root}:/nonexistent` });
+      assert.equal(hold.status, 2);
+      assert.equal(hold.stderr, `${HOLD_TEXT}\n`);
+      nothingPlantedRan(home, root);
+    }
     await waitForHeal(home);
   } finally {
     for (const dir of [work, home, root]) fs.rmSync(dir, { recursive: true, force: true });
@@ -521,9 +563,25 @@ test('outage rule: a registry that answers 500, a heal that cannot finish within
     const noNpm = ownerHome('http://127.0.0.1:9/');
     homes.push(noNpm, bare, linkToProject);
     const env = { HOME: noNpm, PATH: `.:${root}:${bare}:/nonexistent` };
-    assert.equal(runtimeCore.npmInvocation({ platform: 'linux', execPath: path.join(bare, 'node'), env: { PATH: `.:${root}:${path.join(linkToProject, 'bin')}:${bare}`, PWD: root } }), null);
-    // (Only where no system npm sits in the fixed places the search also tries.)
-    if (!['/usr/local/bin/npm', '/opt/homebrew/bin/npm', '/usr/share/nodejs/npm/bin/npm-cli.js', '/usr/lib/node_modules/npm/bin/npm-cli.js'].some((file) => fs.existsSync(file))) {
+    const hostile = { platform: 'linux', execPath: path.join(bare, 'node'), env: { PATH: `.:${root}:${path.join(linkToProject, 'bin')}:${bare}`, PWD: root } };
+    // (system npm aware) The PATH search finds nothing usable in every environment (fixed places hidden) ...
+    assert.equal(withoutSystemNpm(() => runtimeCore.npmInvocation(hostile)), null);
+    // ... and where a root-owned system npm exists it is the one picked, run on the trusted node.
+    const systemNpm = fixedSystemNpm();
+    if (systemNpm) {
+      assert.deepEqual(runtimeCore.npmInvocation(hostile), { file: path.join(bare, 'node'), args: [systemNpm] });
+    } else if (!anySystemNpm()) {
+      assert.equal(runtimeCore.npmInvocation(hostile), null);
+    }
+    if (systemNpm) {
+      // The system npm is used, against the dead registry: warn (exit 1), remembered as an install failure.
+      const noNpmRun = runHook(hook(genuine.integrity), root, env);
+      await waitForHeal(noNpm);
+      assert.equal(noNpmRun.status, 1, noNpmRun.stderr);
+      assert.equal(noNpmRun.stderr, `${WARN_TEXT}\n`);
+      assert.equal(JSON.parse(fs.readFileSync(healOf(noNpm, root).mark, 'utf8')).reason, 'npm_install_failed');
+      nothingPlantedRan(noNpm, root);
+    } else if (!anySystemNpm()) {
       const noNpmRun = runHook(hook(genuine.integrity), root, env);
       await waitForHeal(noNpm);
       assert.equal(noNpmRun.status, 1, noNpmRun.stderr);
@@ -552,26 +610,33 @@ test('change 2: the POSIX npm fallback uses the filtered PATH search (no relativ
     fs.symlinkSync(path.join(project, 'bin'), path.join(link, 'projbin'));
     const execPath = path.join(bare, 'node');
     const lookup = (PATH) => runtimeCore.npmInvocation({ platform: 'linux', execPath, env: { PATH, PWD: project } });
+    // (system npm aware) Where a root-owned system npm exists, every hostile PATH resolves to it, run on the
+    // trusted node, never to the project's shim or a link into the project; with it hidden the PATH
+    // search must find nothing.
+    const systemNpm = fixedSystemNpm();
     for (const PATH of ['.', 'bin', project, `${project}/bin`, `${project}/`, link, path.join(link, 'projbin'), `.:${project}:${link}`]) {
-      assert.equal(lookup(PATH), null, PATH);
+      assert.equal(withoutSystemNpm(() => lookup(PATH)), null, PATH);
+      if (systemNpm) assert.deepEqual(lookup(PATH), { file: execPath, args: [systemNpm] }, PATH);
+      else if (!anySystemNpm()) assert.equal(lookup(PATH), null, PATH);
     }
+    const lookupOnPath = (PATH) => withoutSystemNpm(() => lookup(PATH));
     // A genuine npm (a link to npm-cli.js) after the project's: runs as <trusted node> <npm-cli.js>.
     fs.mkdirSync(path.join(good, 'lib', 'npm', 'bin'), { recursive: true });
     fs.writeFileSync(path.join(good, 'lib', 'npm', 'bin', 'npm-cli.js'), '', { mode: 0o755 });
     fs.mkdirSync(path.join(good, 'bin'));
     fs.symlinkSync(path.join(good, 'lib', 'npm', 'bin', 'npm-cli.js'), path.join(good, 'bin', 'npm'));
-    const found = lookup(`.:${project}:${path.join(good, 'bin')}`);
+    const found = lookupOnPath(`.:${project}:${path.join(good, 'bin')}`);
     assert.deepEqual({ file: found.file, args: found.args }, { file: execPath, args: [fs.realpathSync(path.join(good, 'lib', 'npm', 'bin', 'npm-cli.js'))] });
     // The npm child's PATH keeps only the trusted entries, so an `env node` shebang cannot reach the project.
     assert.equal(found.path.split(':').some((dir) => dir === '.' || dir.startsWith(project)), false, found.path);
     // A non-JS npm (a wrapper binary) outside the project runs itself, with the same filtered PATH.
     fs.rmSync(path.join(good, 'bin', 'npm'));
     fs.writeFileSync(path.join(good, 'bin', 'npm'), shim, { mode: 0o755 });
-    const wrapper = lookup(`${project}:${path.join(good, 'bin')}`);
+    const wrapper = lookupOnPath(`${project}:${path.join(good, 'bin')}`);
     assert.equal(wrapper.file, path.join(fs.realpathSync(good), 'bin', 'npm'));
     // Not executable: skipped.
     fs.chmodSync(path.join(good, 'bin', 'npm'), 0o644);
-    assert.equal(lookup(path.join(good, 'bin')), null);
+    assert.equal(lookupOnPath(path.join(good, 'bin')), null);
   } finally {
     for (const dir of [project, good, bare, link]) fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -681,14 +746,19 @@ test('change 2: the npm child gets only the trusted PATH entries, and a heal sta
     fs.symlinkSync(project, path.join(link, 'proj'));
     const PATH = `.:${project}:${path.join(link, 'proj')}:${path.join(project, 'node_modules', '.bin')}:${good}`;
     const stage = tempDir('marrow-npm-stage-');
-    assert.equal(runtimeCore.npmInstall(stage, ['@getmarrow/mcp@1.0.0'], { platform: 'linux', execPath: path.join(bare, 'node'), env: { PATH, PWD: project } }), false);
+    const hostile = { platform: 'linux', execPath: path.join(bare, 'node'), env: { PATH, PWD: project } };
+    // (system npm aware) Where a root-owned system npm exists it is what npmInstall would run (on the
+    // trusted node); the fake npm on PATH is never reached. The filtered-PATH run below hides it.
+    const systemNpm = fixedSystemNpm();
+    if (systemNpm) assert.deepEqual(runtimeCore.npmInvocation(hostile), { file: path.join(bare, 'node'), args: [systemNpm] });
+    assert.equal(withoutSystemNpm(() => runtimeCore.npmInstall(stage, ['@getmarrow/mcp@1.0.0'], hostile)), false);
     fs.rmSync(stage, { recursive: true, force: true });
     const childPath = fs.readFileSync(seen, 'utf8').split(':');
     assert.ok(childPath.includes(good), childPath.join(':'));
     for (const dir of childPath) assert.ok(dir.startsWith('/') && !dir.startsWith(project) && !dir.startsWith(link), `npm child PATH has ${dir}`);
     // The loader started directly by node (as a node guard does), cwd = the project, no PWD: the
     // heal child is told the project directory, so the project's npm shim never runs.
-    if (!['/usr/local/bin/npm', '/opt/homebrew/bin/npm', '/usr/share/nodejs/npm/bin/npm-cli.js', '/usr/lib/node_modules/npm/bin/npm-cli.js'].some((file) => fs.existsSync(file))) {
+    if (!anySystemNpm() || systemNpm) {
       fs.copyFileSync(process.execPath, path.join(bare, 'node'));
       fs.chmodSync(path.join(bare, 'node'), 0o755);
       const loader = hook('sha512-' + 'A'.repeat(86) + '==').match(/"(eval\([^"]+\))"/)[1];
@@ -698,7 +768,8 @@ test('change 2: the npm child gets only the trusted PATH entries, and a heal sta
       for (const deadline = Date.now() + 30_000; Date.now() < deadline && fs.existsSync(path.join(home, '.marrow', 'runtime', 'mcp', `.heal-${PIN}.lock`));) spawnSync('sleep', ['0.2']);
       assert.equal(result.status, 1, result.stderr);
       assert.equal(result.stderr, `${WARN_TEXT}\n`);
-      assert.equal(JSON.parse(fs.readFileSync(healOf(home, project).mark, 'utf8')).reason, 'npm_unavailable');
+      // (system npm aware) with a system npm the heal runs it against the dead registry instead.
+      assert.equal(JSON.parse(fs.readFileSync(healOf(home, project).mark, 'utf8')).reason, systemNpm ? 'npm_install_failed' : 'npm_unavailable');
       nothingPlantedRan(home, project);
     }
   } finally {
