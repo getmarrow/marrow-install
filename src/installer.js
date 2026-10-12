@@ -68,6 +68,7 @@ const MCP_REGISTRY_LATEST_URL = 'https://registry.npmjs.org/%40getmarrow%2Fmcp/l
 const MCP_REGISTRY_VERIFICATION_COMMAND = 'npm view @getmarrow/mcp@latest name version dist.integrity dist.tarball --json --registry=https://registry.npmjs.org';
 const INSTALLER_UPDATE_COMMAND = 'npx -y @getmarrow/install@latest update';
 const INSTALLER_DOCTOR_COMMAND = 'npx -y @getmarrow/install@latest doctor --self-test';
+const STALE_CODEX_HOOKS_FIX = 'npx @getmarrow/install@latest update';
 const INSTALLER_RESTART_INSTRUCTION = 'After the update completes, restart the detected owning harnesses once. Running Marrow MCP processes remain unchanged until that restart.';
 const MCP_STABLE_VERSION_RE = /^(\d{1,6})\.(\d{1,6})\.(\d{1,9})$/;
 const SHA512_INTEGRITY_RE = /^sha512-[A-Za-z0-9+/]+={0,2}$/;
@@ -1124,6 +1125,43 @@ function codexDirectoryIsOwnerConfigured(directory) {
   )));
 }
 
+// Marrow's own Codex handlers in the file an earlier install wrote at .codex/hooks.json. A
+// project that holds only this file is not a Codex project by the rule above, yet 0.1.70 left
+// exactly that layout with a matcher Codex rejects, so the file is a signal to refresh and to
+// report (never a project marker: an earlier installer could write it where Codex was not used).
+function regularCodexHooksFile(filePath) {
+  // The installer refuses to write through a link, so a link must not turn a run that used to
+  // skip Codex into a refused one: only a regular file in a real .codex folder counts.
+  try {
+    return !fs.lstatSync(path.dirname(filePath)).isSymbolicLink() && fs.lstatSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function codexHooksCarryMarrow(filePath) {
+  if (!regularCodexHooksFile(filePath)) return false;
+  const hooks = safeJsonObject(filePath).hooks;
+  if (!hooks || typeof hooks !== 'object' || Array.isArray(hooks)) return false;
+  return Object.values(hooks).some((groups) => Array.isArray(groups) && groups.some((group) => (
+    group && typeof group === 'object' && Array.isArray(group.hooks) && group.hooks.some(isMarrowCommandHandler)
+  )));
+}
+
+// Codex compiles a hook matcher with Rust `regex`, which has no look-around, and drops a group
+// whose matcher fails to compile, so a Marrow tool-hook group that still carries 0.1.69/0.1.70's
+// look-ahead matcher checks nothing. Returns the events that hold one.
+const CODEX_REJECTED_MATCHER = /\(\?<?[=!]/;
+function staleCodexHookEvents(filePath) {
+  if (!regularCodexHooksFile(filePath)) return [];
+  const hooks = safeJsonObject(filePath).hooks;
+  if (!hooks || typeof hooks !== 'object' || Array.isArray(hooks)) return [];
+  return ['PreToolUse', 'PostToolUse'].filter((eventName) => Array.isArray(hooks[eventName]) && hooks[eventName].some((group) => (
+    group && typeof group === 'object' && typeof group.matcher === 'string' && CODEX_REJECTED_MATCHER.test(group.matcher)
+    && Array.isArray(group.hooks) && group.hooks.some(isMarrowCommandHandler)
+  )));
+}
+
 function exists(filePath) {
   return fs.existsSync(filePath);
 }
@@ -1234,7 +1272,7 @@ function detectEnvironment(cwd = process.cwd(), env = process.env) {
     gemini: exists(path.join(root, '.gemini')),
     grok: exists(path.join(home, '.grok')) || exists(path.join(root, '.grok')),
     codexProject,
-    codex: codexProject || agentsMdHasOwnerContent(paths.agentsMd),
+    codex: codexProject || codexHooksCarryMarrow(paths.codexHooks) || agentsMdHasOwnerContent(paths.agentsMd),
     hermes: homeHarnesses.hermes === true,
     hermesConfig: exists(paths.hermesConfig),
     mcpConfig: exists(paths.mcpJson) || exists(paths.cursorMcp) || exists(paths.claudeSettings),
@@ -4392,6 +4430,7 @@ function printReport(report, sink) {
     if (!plugins.length) out('- agent plugins: none\n');
     for (const plugin of plugins) out(`- agent plugin: ${plugin.summary}\n`);
     for (const duplicate of report.doctor.duplicate_hooks || []) out(`- duplicate hooks: ${duplicate}\n`);
+    for (const stale of report.doctor.stale_hooks || []) out(`- stale hooks: ${stale.file} (${stale.events.join(', ')}): ${stale.reason} Fix: ${stale.exact_fix}\n`);
     out(`- loop guard configured: ${report.doctor.loop_guard_configured ? 'yes' : 'no'}\n`);
     out(`- loop guard isolated self-test: ${report.doctor.loop_guard_self_tested ? 'passed' : 'not passed'}\n`);
     out(`- loop guard observed after reload/trust: ${report.doctor.loop_guard_observed ? 'yes' : 'no'}\n`);
@@ -4707,6 +4746,15 @@ async function install(options) {
   // Doctor only: Marrow's agent plugins at the host's own install location (src/agent-plugins.js).
   const agentPlugins = options.doctor ? detectAgentPlugins({ home: detection.home, env: process.env, project: detection.root }) : [];
   const pluginHookLabels = new Set(agentPlugins.filter((plugin) => plugin.counted).map((plugin) => plugin.hook_label));
+  // Doctor only: a Codex hooks file that still carries the look-ahead matcher Codex rejects.
+  const staleCodexEvents = options.doctor ? staleCodexHookEvents(detection.paths.codexHooks) : [];
+  const staleHooks = staleCodexEvents.length ? [{
+    host: 'codex',
+    file: detection.paths.codexHooks,
+    events: staleCodexEvents,
+    reason: 'Marrow\'s Codex tool hooks still use the old look-ahead matcher. Codex rejects it, so no Codex tool call is checked.',
+    exact_fix: STALE_CODEX_HOOKS_FIX,
+  }] : [];
   const duplicateHooks = agentPlugins.filter((plugin) => plugin.counted && installerHooksPresent(detection, plugin.host))
     .map((plugin) => `${plugin.name}: the Marrow plugin and this project's installer hooks (${plugin.host === 'codex' ? detection.paths.codexHooks : detection.paths.claudeSettings}) both run, so every action is checked and recorded twice. Keep one: \`npx @getmarrow/install uninstall\` previews removing the installer's copy from this project and \`npx @getmarrow/install uninstall --yes\` removes it; or \`${plugin.remove_plugin}\` removes the plugin.`);
   const plannedHarnessReload = harnessReloadPlan(detection, options.doctor ? [] : changes);
@@ -4873,6 +4921,7 @@ async function install(options) {
       missingHooks: changes.filter((change) => change.changed && !pluginHookLabels.has(change.label)).map((change) => change.label),
       agent_plugins: agentPlugins.map((plugin) => ({ host: plugin.host, counted: plugin.counted, version: plugin.version || null, path: plugin.path || null, hooks: plugin.events || [], summary: describeAgentPlugin(plugin) })),
       duplicate_hooks: duplicateHooks,
+      stale_hooks: staleHooks,
       mcpProcesses: reportedMcpProcesses,
       mcpConfigurations,
       ahead_unverified_versions: aheadUnverifiedVersions,

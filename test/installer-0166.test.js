@@ -231,7 +231,10 @@ test('an AGENTS.md holding only the Marrow block no longer makes the project Cod
     fs.writeFileSync(path.join(root, '.codex', 'hooks.json'), JSON.stringify({
       hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: command('codex-pre-action-hook') }] }] },
     }));
-    assert.equal(detectEnvironment(root, env).codex, false);
+    // Marrow's own hooks file is a signal to refresh and report it (0.1.70 left that layout with a
+    // matcher Codex rejects), but not a project marker: another host's marker still ranks first.
+    assert.equal(detectEnvironment(root, env).codex, true);
+    assert.equal(detectEnvironment(root, env).codexProject, false);
 
     fs.writeFileSync(path.join(root, '.codex', 'config.toml'), 'model = "x"\n');
     assert.equal(detectEnvironment(root, env).codex, true);
