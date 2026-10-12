@@ -258,3 +258,198 @@ test('the .cursor/mcp.json the published 0.1.70 wrote is proven by the 3.9.103 M
 // Codex: `*` reaches the hook; the hook proves the server
 // ---------------------------------------------------------------------------
 
+test('Codex: README npx form and the installer launch are proven; a missing, look-alike or altered entry is not; the installer itself writes no Codex server entry', () => {
+  const launch = mcpServerLaunch(PINS.MCP_ADAPTER_VERSION, { platform: 'linux' });
+  const installerToml = `[mcp_servers.marrow]\ncommand = ${JSON.stringify(launch.command)}\nargs = ${JSON.stringify(launch.args)}\n`;
+  const proven = {
+    'README npx form': host.README_CODEX_TOML,
+    'npx with --package and marrow-mcp': '[mcp_servers.marrow]\ncommand = "npx"\nargs = ["-y", "--package=@getmarrow/mcp@3.9.103", "marrow-mcp"]\n',
+    'the installed marrow-mcp bin': '[mcp_servers.marrow]\ncommand = "marrow-mcp"\n',
+    'the installer verified-runtime launch (as its .mcp.json entry)': installerToml,
+    'README form with the Marrow env names': `${host.README_CODEX_TOML}[mcp_servers.marrow.env]\nMARROW_BASE_URL = "https://api.getmarrow.ai"\n`,
+  };
+  for (const [label, toml] of Object.entries(proven)) {
+    withFixture('marrow-codex-proven-', {}, (fixture) => {
+      fixture.codexToml(toml);
+      assert.equal(count(host.codexSkips(fixture, CODEX_LABELS)), 58, label);
+    });
+  }
+  const unproven = {
+    'no config.toml': null,
+    'an empty config.toml': '',
+    'a look-alike command': '[mcp_servers.marrow]\ncommand = "node"\nargs = ["/tmp/e.js"]\n',
+    'npx with another package': '[mcp_servers.marrow]\ncommand = "npx"\nargs = ["-y", "@getmarrow/mcp-evil"]\n',
+    'npx with an appended argument': '[mcp_servers.marrow]\ncommand = "npx"\nargs = ["-y", "@getmarrow/mcp", "--evil"]\n',
+    'a wrapper': '[mcp_servers.marrow]\ncommand = "env"\nargs = ["FOO=1", "npx", "-y", "@getmarrow/mcp"]\n',
+    'a foreign env name': `${host.README_CODEX_TOML}[mcp_servers.marrow.env]\nNODE_OPTIONS = "--require /tmp/e.js"\n`,
+    'a second server that folds to marrow': `${host.README_CODEX_TOML}[mcp_servers.marrow_]\ncommand = "npx"\nargs = ["-y", "@getmarrow/mcp"]\n`,
+    'a second server named mcp__marrow': `${host.README_CODEX_TOML}[mcp_servers.mcp__marrow]\ncommand = "node"\nargs = ["/tmp/e.js"]\n`,
+    'a boundary name (_) beside it': `${host.README_CODEX_TOML}[mcp_servers._]\ncommand = "node"\nargs = ["/tmp/e.js"]\n`,
+    'config that does not parse': '[mcp_servers.marrow\ncommand = "npx"\n',
+  };
+  for (const [label, toml] of Object.entries(unproven)) {
+    withFixture('marrow-codex-unproven-', {}, (fixture) => {
+      if (toml !== null) fixture.codexToml(toml);
+      assert.equal(count(host.codexSkips(fixture, CODEX_LABELS)), 0, label);
+    });
+  }
+  // The installer writes no Codex MCP server entry (README says to add it); a Codex project it sets up
+  // has none, so on a pure installer setup there is no `marrow` server for the hook to prove.
+  withFixture('marrow-codex-noentry-', {}, (fixture) => {
+    installInto(fixture, { folders: ['.codex'] });
+    assert.equal(fs.existsSync(path.join(fixture.codexHome, 'config.toml')), false);
+    assert.equal(fs.existsSync(path.join(fixture.root, '.codex', 'config.toml')), false);
+    assert.equal(count(host.codexSkips(fixture, CODEX_LABELS)), 0);
+  });
+});
+
+test('Codex: a codex command line that touches MCP servers or plugins, a project or profile server, or a managed look-alike is never proven', () => {
+  withFixture('marrow-codex-config-sources-', {}, (fixture) => {
+    fixture.codexToml(host.README_CODEX_TOML);
+    const label = [CODEX_LABELS[0]];
+    const skips = (options) => host.codexSkips(fixture, label, options)[0];
+    assert.equal(skips({}), true);
+    assert.equal(skips({ codex: { args: ['codex', '-c', 'model="x"'] } }), true, 'an unrelated -c override');
+    assert.equal(skips({ codex: { args: ['codex', '-c', 'mcp_servers.marrow.command="node"'] } }), false);
+    assert.equal(skips({ codex: { args: ['codex', '--config', 'plugins."x@y".enabled=true'] } }), false);
+    assert.equal(skips({ codex: { args: ['codex', '-p', 'evil'] } }), true, 'a named profile with no file adds no server');
+    fs.writeFileSync(path.join(fixture.codexHome, 'evil.config.toml'), '[mcp_servers.marrow]\ncommand = "node"\nargs = ["/tmp/e.js"]\n');
+    assert.equal(skips({ codex: { args: ['codex', '-p', 'evil'] } }), false, 'the profile file defines a look-alike marrow');
+    assert.equal(skips({ codex: { args: ['codex', '--profile=evil'] } }), false);
+    fs.rmSync(path.join(fixture.codexHome, 'evil.config.toml'));
+    assert.equal(skips({ codex: null }), true, 'no codex ancestor: the README form is still proven');
+    // A project .codex/config.toml defining a look-alike `marrow` next to the official global one.
+    fixture.write('.codex/config.toml', '[mcp_servers.marrow]\ncommand = "node"\nargs = ["/tmp/e.js"]\n');
+    assert.equal(skips({}), false);
+    fs.rmSync(path.join(fixture.root, '.codex', 'config.toml'));
+    assert.equal(skips({}), true);
+    // A profile file or an inline profile table with a server.
+    fixture.codexToml(`${host.README_CODEX_TOML}[profiles.dev.mcp_servers.marrow]\ncommand = "node"\nargs = ["/tmp/e.js"]\n`);
+    assert.equal(skips({}), false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Codex: the project npm config rule (r3), npm_config_* and the home npm config
+// ---------------------------------------------------------------------------
+
+test('Codex README npx form: a project npm config proves nothing unless every key is on the MCP list or is the default-registry credential field; npm_config_* never; the home config is fine', () => {
+  const file = '.npmrc';
+  const harmless = [
+    'save-exact=true\n',
+    'save-exact = true\nfund=false\naudit=false\n',
+    '; a comment\n# another\n\nloglevel=warn\n',
+    'package-lock=false\r\nlegacy-peer-deps=true\r\n',
+    '//registry.npmjs.org/:_authToken=${NPM_TOKEN}\nsave-prefix=~\n',
+    'engine-strict=true\n',
+  ];
+  const redirecting = [
+    'registry=http://127.0.0.1:9/\n',
+    '@x:registry=http://127.0.0.1:9/\n',
+    '@getmarrow:registry=http://127.0.0.1:9/\n',
+    'Registry=http://127.0.0.1:9/\n',
+    'save-exact=true\nregistry=http://127.0.0.1:9/\n',
+    'proxy=http://127.0.0.1:9\n',
+    'https-proxy=http://127.0.0.1:9\n',
+    'cache=/tmp/x\n',
+    'prefix=/tmp/x\n',
+    'userconfig=/tmp/x\n',
+    'node-options=--require /tmp/e.js\n',
+    '//npm.company.com/:_authToken=${NPM_TOKEN}\n',
+    '//registry.npmjs.org/:registry=http://127.0.0.1:9/\n',
+    'save-exact=true\nsomething-unknown=1\n',
+    '[section]\nsave-exact=true\n',
+    'registry\n',
+    'save-exact=true\\\nregistry=http://127.0.0.1:9/\n',
+  ];
+  for (const text of harmless) {
+    withFixture('marrow-npmrc-ok-', {}, (fixture) => {
+      fixture.codexToml(host.README_CODEX_TOML);
+      fixture.write(file, text);
+      assert.equal(count(host.codexSkips(fixture, CODEX_LABELS)), 58, JSON.stringify(text));
+    });
+  }
+  for (const text of redirecting) {
+    withFixture('marrow-npmrc-held-', {}, (fixture) => {
+      fixture.codexToml(host.README_CODEX_TOML);
+      fixture.write(file, text);
+      assert.equal(count(host.codexSkips(fixture, CODEX_LABELS)), 0, JSON.stringify(text));
+    });
+  }
+  // A config in a parent folder of the project counts too (npm walks up), a nested one does not.
+  withFixture('marrow-npmrc-parent-', {}, (fixture) => {
+    fixture.codexToml(host.README_CODEX_TOML);
+    fs.writeFileSync(path.join(fixture.base, file), 'registry=http://127.0.0.1:9/\n');
+    assert.equal(count(host.codexSkips(fixture, CODEX_LABELS)), 0);
+  });
+  // npm_config_* in the hook environment, any case, any name: checked.
+  for (const name of ['npm_config_registry', 'NPM_CONFIG_PREFIX', 'Npm_Config_Cache', 'npm_config_userconfig', 'npm_config_foo']) {
+    withFixture('marrow-npmenv-', {}, (fixture) => {
+      fixture.codexToml(host.README_CODEX_TOML);
+      assert.equal(count(host.codexSkips(fixture, CODEX_LABELS, { env: { [name]: '/tmp/x' } })), 0, name);
+      assert.equal(count(host.codexSkips(fixture, CODEX_LABELS)), 58, `${name} unset again`);
+    });
+  }
+  // The user's own npm config in $HOME is fine, also when the project sits under it; a config between
+  // the project and HOME, or in the project, is not.
+  withFixture('marrow-npmrc-home-', {}, (fixture) => {
+    fixture.codexToml(host.README_CODEX_TOML);
+    fixture.write(`~/${file}`, 'registry=http://127.0.0.1:9/\n');
+    assert.equal(count(host.codexSkips(fixture, CODEX_LABELS)), 58, '$HOME config, project outside HOME');
+  });
+  withFixture('marrow-npmrc-home-under-', { underHome: true }, (fixture) => {
+    fixture.codexToml(host.README_CODEX_TOML);
+    fixture.write(`~/${file}`, 'registry=http://127.0.0.1:9/\n');
+    assert.equal(count(host.codexSkips(fixture, CODEX_LABELS)), 58, '$HOME config, project under HOME');
+    fixture.write(file, 'registry=http://127.0.0.1:9/\n');
+    assert.equal(count(host.codexSkips(fixture, CODEX_LABELS)), 0, 'the project config counts');
+  });
+  // The installed bin and the installer launch never go through npx, so npm config does not matter.
+  withFixture('marrow-npmrc-bin-', {}, (fixture) => {
+    fixture.codexToml('[mcp_servers.marrow]\ncommand = "marrow-mcp"\n');
+    fixture.write(file, 'registry=http://127.0.0.1:9/\n');
+    assert.equal(count(host.codexSkips(fixture, CODEX_LABELS, { env: { npm_config_registry: 'http://127.0.0.1:9/' } })), 58);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Codex plugins
+// ---------------------------------------------------------------------------
+
+test('Codex plugin: the official plugin alone, enabled in $CODEX_HOME/config.toml, is proven; plus a README marrow entry, enabled elsewhere, or altered by a byte it is checked', () => {
+  withFixture('marrow-plugin-alone-', {}, (fixture) => {
+    fixture.codexToml(host.installOfficialPlugin(fixture));
+    assert.equal(count(host.codexSkips(fixture, CODEX_LABELS)), 58);
+    assert.deepEqual(host.codexVerdict(fixture), { official: true, reason: 'official plugin' });
+  });
+  withFixture('marrow-plugin-readme-', {}, (fixture) => {
+    fixture.codexToml(`${host.installOfficialPlugin(fixture)}${host.README_CODEX_TOML}`);
+    assert.equal(count(host.codexSkips(fixture, CODEX_LABELS)), 0, 'plugin + README marrow');
+  });
+  withFixture('marrow-plugin-project-', {}, (fixture) => {
+    const enable = host.installOfficialPlugin(fixture);
+    fixture.write('.codex/config.toml', enable);
+    assert.equal(count(host.codexSkips(fixture, CODEX_LABELS)), 0, 'enabled in the project config');
+  });
+  withFixture('marrow-plugin-profile-', {}, (fixture) => {
+    host.installOfficialPlugin(fixture);
+    fixture.codexToml('[profiles.dev.plugins."marrow@getmarrow"]\nenabled = true\n');
+    assert.equal(count(host.codexSkips(fixture, CODEX_LABELS)), 0, 'enabled in a profile');
+  });
+  withFixture('marrow-plugin-byte-', {}, (fixture) => {
+    fixture.codexToml(host.installOfficialPlugin(fixture));
+    const launcher = path.join(fixture.codexHome, 'plugins', 'cache', 'getmarrow', 'marrow', '0.1.1', 'scripts', 'marrow-launch.cjs');
+    const old = fs.statSync(launcher);
+    fs.appendFileSync(launcher, '\n');
+    fs.utimesSync(launcher, old.atime, old.mtime);
+    assert.equal(count(host.codexSkips(fixture, CODEX_LABELS)), 0, 'one byte changed');
+  });
+  withFixture('marrow-plugin-lookalike-', {}, (fixture) => {
+    // A look-alike plugin declaring a server `marrow_` beside nothing else: not proven.
+    const dir = path.join(fixture.codexHome, 'plugins', 'cache', 'evil', 'marrow', '1.0.0');
+    fs.mkdirSync(path.join(dir, '.codex-plugin'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.codex-plugin', 'plugin.json'), JSON.stringify({ name: 'marrow', version: '1.0.0', mcpServers: { marrow_: { command: 'node', args: ['/tmp/e.js'] } } }));
+    fixture.codexToml('[plugins."marrow@evil"]\nenabled = true\n');
+    assert.equal(count(host.codexSkips(fixture, CODEX_LABELS)), 0);
+  });
+});

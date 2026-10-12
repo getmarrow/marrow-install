@@ -10,6 +10,7 @@ const PINS = require('../src/pins');
 const installer = require('../src/installer');
 const own = require('../src/marrow-own-tools');
 const { fakeRuntime } = require('./support/fake-runtime');
+const host = require('./support/mcp-host');
 
 // The registered names, as @getmarrow/mcp fix/own-tool-exact (4311df21) lists them.
 const NAMES_JSON = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'marrow-own-tool-names.json'), 'utf8'));
@@ -85,18 +86,35 @@ function codexSelects(matcher, tool) {
   return new RegExp(matcher).test(tool);
 }
 // The Codex matcher is `*`, so the hook alone decides what is skipped. That decision is the real
-// @getmarrow/mcp 3.9.102 one: test/fixtures/mcp-3.9.102/own-tool.js is dist/own-tool.js of the pinned
-// package, byte for byte (the checksum test below pins it), not a copy of its rules written here.
-const MCP_FIXTURES = path.join(__dirname, 'fixtures', 'mcp-3.9.102');
-const mcpOwnTool = require(path.join(MCP_FIXTURES, 'own-tool.js'));
-const hookSkipsEvent = (event) => mcpOwnTool.isOfficialMarrowMcpEvent(event);
-const hookSkips = (tool) => hookSkipsEvent({ tool_name: tool });
-// The label forms the real hook takes for a registered name, found by asking it (these are only
-// the candidates; the hook's own list is not read from here). Codex never sends the last three: its
-// MCP labels always start `mcp__` (core/src/tools/handlers/mcp.rs ensure_mcp_prefix) and its tool
-// names hold only [A-Za-z0-9_-].
+// @getmarrow/mcp 3.9.103 one (marrow-mcp 038cf8d9): test/fixtures/mcp-3.9.103/ holds dist/ of the pinned
+// package, byte for byte (the checksum test below pins it), not a copy of its rules written here. A label
+// is skipped only when it is exactly `mcp__marrow__<own>` AND the host's own Codex configuration proves the
+// `marrow` server is the official one. PROVEN is a temporary CODEX_HOME whose config.toml is the README
+// `npx` form and nothing else (HOME, CODEX_HOME, the working directory and npm_config_* are all hermetic:
+// test/support/mcp-host.js).
+const MCP_FIXTURES = host.MCP_FIXTURES;
+const mcpOwnTool = host.ownTool;
+const PROVEN = host.hostFixture('marrow-own-proven-');
+PROVEN.codexToml(host.README_CODEX_TOML);
+test.after(() => PROVEN.cleanup());
+const skipMemo = new Map();
+const hookSkips = (tool) => {
+  if (!skipMemo.has(tool)) skipMemo.set(tool, host.codexSkips(PROVEN, tool)[0]);
+  return skipMemo.get(tool);
+};
+const hookSkipsEvent = (event) => host.withHost(PROVEN, () => host.identity.isOfficialMarrowMcpEventOnHost('codex', event, event));
+// What the published 0.1.70 pinned (MCP 3.9.102, a label-only decision): the baseline the Codex
+// results below are compared with. test/fixtures/mcp-3.9.102/own-tool.js is its dist/own-tool.js.
+const MCP_FIXTURES_0170 = path.join(__dirname, 'fixtures', 'mcp-3.9.102');
+const mcpOwnTool0170 = require(path.join(MCP_FIXTURES_0170, 'own-tool.js'));
+const hookSkips0170 = (tool) => mcpOwnTool0170.isOfficialMarrowMcpEvent({ tool_name: tool });
+// The label forms a hook takes for a registered name, found by asking it (these are only the
+// candidates; no hook list is read from here). Codex never sends the last three: its MCP labels
+// always start `mcp__` (core/src/tools/handlers/mcp.rs ensure_mcp_prefix) and its tool names hold
+// only [A-Za-z0-9_-].
 const HOOK_PREFIX_CANDIDATES = ['mcp__marrow__', 'functions.mcp__marrow__', 'MCP:marrow:', 'MCP:', 'mcp__Marrow__', 'mcp__marrow_', 'mcp__marrow', 'functions.', 'MCP: ', 'marrow__', ''];
 const HOOK_OWN_PREFIXES = HOOK_PREFIX_CANDIDATES.filter((prefix) => NAMES.every((name) => hookSkips(`${prefix}${name}`)));
+const HOOK_OWN_PREFIXES_0170 = HOOK_PREFIX_CANDIDATES.filter((prefix) => NAMES.every((name) => hookSkips0170(`${prefix}${name}`)));
 // Whether a host checks a label: the matcher selects it, and for Codex the hook does not skip it.
 function checks(key, matcher, tool, mode) {
   return key === 'codex' ? codexSelects(matcher, tool) && !hookSkips(tool) : reaches(matcher, tool, mode);
@@ -198,8 +216,23 @@ function probes(key) {
 }
 
 // sha256 of each vendored file, written here as well as in MANIFEST.json so that editing one of
-// the two is caught. They are dist/ of @getmarrow/mcp 3.9.102 (marrow-mcp 3a2bf85e).
+// the two is caught. They are dist/ of @getmarrow/mcp 3.9.103 (marrow-mcp 038cf8d9; none of these
+// files changes with the 3.9.103 version bump), and the 3.9.102 baseline (3a2bf85e) the published
+// 0.1.70 pinned.
 const VENDORED_MCP = {
+  sourceSha: '038cf8d9bdc580e486a3e2914d90b3078b9780f0',
+  files: {
+    'own-tool.js': 'abcfcb24d7f4d55fb3f766528aee72a40c4e8a090e8b26271d5aaf234bb69d17',
+    'tool-catalog.js': '2300444b94dca126261b26d5767212811a95699ff742b0a0b5ebc9a01074f326',
+    'model-usage.js': 'c7ddbc3482d5a7514453d0be38fa7c51e2f228a50039f3392544319b8defc577',
+    'redact.js': '64312088e39e24aa520e7703f25bfb1723cd1fbd03378a10135e07f2140ba5e1',
+    'own-server-identity.js': 'c8efc9b000c697c6ce0d91a17348d9b47b1667d0928f657135da8822465176c0',
+    'codex-plugins.js': '697e0444c1dc8856ed61ffa169fb39707b76c9a0f4752f6cb4121e315f4b107f',
+    'codex-plugin-pins.js': 'b44c256251c9ce623f3ea7773fb711e5d4cd6a6da11277b2f1af1a6fbbc892fb',
+    'host-session.js': '422544dfaf4f75a5e78a607ea8565050f8b11368f9ed275f298f8c1b1b7b350e',
+  },
+};
+const VENDORED_MCP_0170 = {
   sourceSha: '3a2bf85e22b6b9f7e266383ed2011b1c10ca5f97',
   files: {
     'own-tool.js': '2af4baf43d4cce5fa27b6169df628f8f5eaa0f4c17b78cc8b69f19dc1816e679',
@@ -209,23 +242,43 @@ const VENDORED_MCP = {
   },
 };
 
-test('the vendored MCP hook files are byte for byte the pinned @getmarrow/mcp, and the real hook lists the registered names', () => {
-  const manifest = JSON.parse(fs.readFileSync(path.join(MCP_FIXTURES, 'MANIFEST.json'), 'utf8'));
-  assert.equal(manifest.source_sha, VENDORED_MCP.sourceSha);
-  assert.equal(manifest.version, '3.9.102', 'the vendored files are the 3.9.102 baseline; the 3.9.103 files are test/fixtures/mcp-3.9.103 (test/mcp-pin.test.js)');
-  assert.equal(manifest.integrity, 'sha512-hTs4jTJmySLk8hHgsGIZksMo9+eO5kjQmU1EJyDX8Qqm9Z+V+yDkauop19roasVvOAFsK3dJjqLoIh7gRhoXJQ==');
-  assert.deepEqual(Object.keys(manifest.files).sort(), Object.keys(VENDORED_MCP.files).sort());
-  for (const [name, sha256] of Object.entries(VENDORED_MCP.files)) {
-    const bytes = fs.readFileSync(path.join(MCP_FIXTURES, name));
+function checkVendored(directory, vendored, version) {
+  const manifest = JSON.parse(fs.readFileSync(path.join(directory, 'MANIFEST.json'), 'utf8'));
+  assert.equal(manifest.source_sha, vendored.sourceSha);
+  assert.equal(manifest.version, version);
+  assert.deepEqual(Object.keys(manifest.files).sort(), Object.keys(vendored.files).sort());
+  for (const [name, sha256] of Object.entries(vendored.files)) {
+    const bytes = fs.readFileSync(path.join(directory, name));
     assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'), sha256, `${name} is the pinned file`);
     assert.equal(manifest.files[name].sha256, sha256, `${name} in MANIFEST.json`);
     assert.equal(manifest.files[name].bytes, bytes.length, `${name} size`);
   }
+  return manifest;
+}
+
+test('the vendored MCP 3.9.103 files are byte for byte the pinned @getmarrow/mcp, and the real hook lists the registered names', () => {
+  const manifest = checkVendored(MCP_FIXTURES, VENDORED_MCP, '3.9.103');
+  assert.equal(manifest.source_sha, PINS.MCP_ADAPTER_SOURCE_SHA, 'the vendored files are for the pinned MCP source');
+  assert.equal(manifest.version, PINS.MCP_ADAPTER_VERSION);
+  assert.equal(manifest.integrity, PINS.MCP_ADAPTER_INTEGRITY);
+  // The pin itself: 3.9.103 from marrow-mcp 038cf8d9. A pin left at 3.9.102 (or moved without the
+  // vendored files) fails here and in the manifest checks above.
+  assert.equal(PINS.MCP_ADAPTER_VERSION, '3.9.103');
+  assert.equal(PINS.MCP_ADAPTER_SOURCE_SHA, '038cf8d9bdc580e486a3e2914d90b3078b9780f0');
+  assert.match(PINS.MCP_ADAPTER_INTEGRITY, /^sha512-[A-Za-z0-9+/]{86}==$/);
+  assert.notEqual(PINS.MCP_ADAPTER_INTEGRITY, 'sha512-hTs4jTJmySLk8hHgsGIZksMo9+eO5kjQmU1EJyDX8Qqm9Z+V+yDkauop19roasVvOAFsK3dJjqLoIh7gRhoXJQ==', 'not the 3.9.102 integrity');
   // The registered names the real module derives from its own catalog are the installer's 58.
   assert.deepEqual([...mcpOwnTool.MARROW_OWN_TOOL_NAMES].sort(), [...NAMES].sort());
   assert.equal(mcpOwnTool.MARROW_OWN_SERVER_NAME, own.MARROW_OWN_SERVER);
-  // The forms the real hook takes for a registered name: exactly these four.
-  assert.deepEqual(HOOK_OWN_PREFIXES, ['mcp__marrow__', 'functions.mcp__marrow__', 'MCP:marrow:', 'MCP:']);
+  // With a proven configuration the real hook skips exactly the label `mcp__marrow__<own>`: no
+  // `functions.`, `MCP:marrow:` or `MCP:` form (published 0.1.70 / MCP 3.9.102 took all four).
+  assert.deepEqual(HOOK_OWN_PREFIXES, ['mcp__marrow__']);
+  assert.deepEqual(HOOK_OWN_PREFIXES_0170, ['mcp__marrow__', 'functions.mcp__marrow__', 'MCP:marrow:', 'MCP:']);
+});
+
+test('the vendored MCP 3.9.102 baseline (what the published 0.1.70 pinned) is byte for byte its dist', () => {
+  const manifest = checkVendored(MCP_FIXTURES_0170, VENDORED_MCP_0170, '3.9.102');
+  assert.equal(manifest.integrity, 'sha512-hTs4jTJmySLk8hHgsGIZksMo9+eO5kjQmU1EJyDX8Qqm9Z+V+yDkauop19roasVvOAFsK3dJjqLoIh7gRhoXJQ==');
 });
 
 test('the real hook decision on Codex labels: exact own labels skipped; case, padding, suffix and look-alikes are not', () => {
@@ -244,17 +297,31 @@ test('the real hook decision on Codex labels: exact own labels skipped; case, pa
   // Not strings, and missing names, are never own.
   for (const value of [undefined, null, 0, {}, [], ['mcp__marrow__marrow_commit']]) assert.equal(hookSkipsEvent({ tool_name: value }), false);
   assert.equal(hookSkipsEvent({}), false);
+  // The other forms the 3.9.102 hook took (published 0.1.70) never skip on Codex any more, even with
+  // a proven configuration: only the exact `mcp__marrow__<own>` does.
+  for (const name of NAMES) {
+    for (const prefix of ['functions.mcp__marrow__', 'MCP:marrow:', 'MCP:', 'functions.', 'mcp__marrow_', 'mcp__marrow', '']) {
+      assert.equal(hookSkips(`${prefix}${name}`), false, `${prefix}${name}`);
+    }
+  }
+  // Whatever the 3.9.103 hook skips, the 3.9.102 hook skipped: never looser than 0.1.70's decision.
+  for (const name of NAMES) {
+    for (const label of [`mcp__marrow__${name}`, `mcp__Marrow__${name}`, `mcp__marrow__${name} `, `functions.mcp__marrow__${name}`, `MCP:${name}`]) {
+      if (hookSkips(label)) assert.equal(hookSkips0170(label), true, label);
+    }
+  }
 });
 
-test('the real hook also skips a nested use_tool call to server marrow; no Codex label can be that tool name', () => {
+test('nested use_tool forms never skip on Codex, with or without proof; the 3.9.102 hook skipped them; no Codex label can be that tool name', () => {
   const nested = (tool_name, tool_input) => hookSkipsEvent({ tool_name, tool_input });
   for (const tool_name of ['use_mcp_tool', 'use_tool', 'mcp', 'mcp_tool']) {
-    assert.equal(nested(tool_name, { serverName: 'marrow', toolName: 'marrow_commit' }), true, tool_name);
-    assert.equal(nested(tool_name, { server_name: 'marrow', tool_name: 'marrow_commit' }), true, tool_name);
-    for (const input of [{ serverName: 'Marrow', toolName: 'marrow_commit' }, { serverName: 'marrow', toolName: 'marrow_delete_all' }, { serverName: 'marrow ', toolName: 'marrow_commit' },
+    for (const input of [{ serverName: 'marrow', toolName: 'marrow_commit' }, { server_name: 'marrow', tool_name: 'marrow_commit' },
+      { serverName: 'Marrow', toolName: 'marrow_commit' }, { serverName: 'marrow', toolName: 'marrow_delete_all' }, { serverName: 'marrow ', toolName: 'marrow_commit' },
       { serverName: 'marrow', toolName: 'marrow_commit', server_name: 'evil' }, { serverName: 'marrow' }, {}, null, [], 'marrow']) {
       assert.equal(nested(tool_name, input), false, `${tool_name} ${JSON.stringify(input)}`);
     }
+    // The published 0.1.70 hook (MCP 3.9.102) did skip the exact nested call.
+    assert.equal(mcpOwnTool0170.isOfficialMarrowMcpEvent({ tool_name, tool_input: { serverName: 'marrow', toolName: 'marrow_commit' } }), true, tool_name);
   }
   assert.equal(nested('use_tool_x', { serverName: 'marrow', toolName: 'marrow_commit' }), false);
   assert.equal(nested('Bash', { serverName: 'marrow', toolName: 'marrow_commit' }), false);
@@ -321,18 +388,26 @@ test('each matcher skips exactly the labels its host proves are own, and nothing
   }
 });
 
-// Codex labels are not one-to-one: these server names give the label `mcp__marrow__<tool>` too, so
-// the hook (which sees only the label) skips their own-named tools. Measured on codex-cli 0.161.0:
-// a namespace ending in `_` (`marrow_`, and every server that sanitizes to it) cannot be called at
-// all ("unsupported call"), and `mcp__marrow` is callable and skipped when no `marrow` server is
-// configured (with one, Codex hashes both namespaces and the own tools are checked). An open
-// finding for @getmarrow/mcp (RESULT.md); pinned here so the list cannot grow unnoticed.
-const CODEX_KNOWN_COLLISIONS = new Set(['marrow_', 'marrow__', 'marrow-', 'marrow.', 'marrow ', 'marrow\u200b', 'mcp__marrow', 'mcp__marrow_', 'mcp__marrow__']);
+// Codex labels are not one-to-one: these server names give the label `mcp__marrow__<tool>` too (with a
+// tool `<own>`, or `marrow__<own>` for the names whose namespace trims to `mcp`), so a hook that
+// sees only the label cannot tell them from the real `marrow` server. Measured on codex-cli 0.161.0:
+// a namespace ending in `_` (`marrow_`, and every server that sanitizes to it) and `mcp__marrow` are
+// callable and take the real server's label. The 3.9.103 hook does not trust the label: it skips only
+// after reading the host configuration (the real decision is run against every name below in
+// 'a look-alike Codex server never proves...'). Pinned here so the list cannot grow unnoticed. The
+// last five are the B1 boundary names of the MCP audit (038cf8d9): a namespace that trims to `mcp`
+// plus the tool `marrow__<own>` (and the empty name, which Codex turns into `_`).
+const CODEX_KNOWN_COLLISIONS = new Set(['marrow_', 'marrow__', 'marrow-', 'marrow.', 'marrow ', 'marrow\u200b', 'mcp__marrow', 'mcp__marrow_', 'mcp__marrow__',
+  '_', '-', '__', 'mcp___', '']);
+// Boundary names whose label differs on codex 0.161 (case, `mcp` inside) but which the MCP also
+// counts as able to produce the marrow label: the hook never proves `marrow` next to or instead of them.
+const CODEX_BOUNDARY_ONLY = new Set(['mcp', 'mcp_', 'MCP__', 'MCP', 'Mcp__']);
+const codexTool = (name) => codexSanitize(name).replace(/^_+/, '');
 
 test('collisions: a label is skipped only when no (server, tool) pair but (marrow, an own name) can produce it', () => {
   const matchers = own.buildOwnToolMatchers();
-  const servers = ['marrow', ...SERVER_VARIANTS];
-  const tools = [...NAMES, ...TOOL_VARIANTS];
+  const servers = ['marrow', ...SERVER_VARIANTS, ...CODEX_KNOWN_COLLISIONS, ...CODEX_BOUNDARY_ONLY];
+  const tools = [...NAMES, ...TOOL_VARIANTS, ...NAMES.slice(0, 4).map((name) => `marrow__${name}`)];
   for (const [key, label] of Object.entries(HOST_LABELS)) {
     for (const mode of MODES) {
       for (const server of servers) {
@@ -340,9 +415,12 @@ test('collisions: a label is skipped only when no (server, tool) pair but (marro
           for (const value of label(server, tool)) {
             const skipped = !checks(key, matchers[key], value, mode);
             // Claude Code and Codex: only server `marrow` (the trust anchor) reaches `mcp__marrow__`;
-            // on it the tool part must be an own name after the host's own normalisation.
+            // on it the tool part must be an own name after the host's own normalisation. Codex:
+            // the label is shared with the known collisions (tool `<own>` or `marrow__<own>`).
+            const clean = codexTool(tool);
+            const ownCodex = NAMES.includes(clean) || (clean.startsWith('marrow__') && NAMES.includes(clean.slice('marrow__'.length)));
             const allowed = (key === 'claude' && server === 'marrow' && NAMES.includes(claudeIn(tool)))
-              || (key === 'codex' && (server === 'marrow' || CODEX_KNOWN_COLLISIONS.has(server)) && NAMES.includes(codexSanitize(tool).replace(/^_+/, '')));
+              || (key === 'codex' && (server === 'marrow' || CODEX_KNOWN_COLLISIONS.has(server)) && ownCodex);
             if (skipped) assert.equal(allowed, true, `${key}/${mode}: (${JSON.stringify(server)}, ${JSON.stringify(tool)}) -> ${JSON.stringify(value)} skipped`);
             if ((key === 'claude' || key === 'codex') && server === 'marrow' && NAMES.includes(tool)) assert.equal(skipped, true, `${key}/${mode}: own ${tool}`);
           }
@@ -374,6 +452,58 @@ test('collisions: a label is skipped only when no (server, tool) pair but (marro
   }
 });
 
+test('a look-alike Codex server never proves the marrow server: none of the 58 labels is skipped, alone or next to the official one', () => {
+  const OFFICIAL = 'command = "npx"\nargs = ["-y", "@getmarrow/mcp"]\n';
+  const LOOKALIKE = 'command = "node"\nargs = ["/tmp/e.js"]\n';
+  const labels = NAMES.map((name) => `mcp__marrow__${name}`);
+  const quoted = (name) => JSON.stringify(name);
+  // Names that fold to `marrow` the way the MCP folds them (case, a leading `mcp`) are counted as able to
+  // produce the label, so next to the official entry they unprove it too.
+  // (A name outside the plain ASCII form, such as `marrow:marrow`, counts as able to produce it on Codex.)
+  const names = [...CODEX_KNOWN_COLLISIONS, ...CODEX_BOUNDARY_ONLY, 'Marrow', 'MARROW', 'mcp-marrow', 'marrow:marrow'];
+  // Names that cannot produce the label (`mcp__marrow_evil__...`, `mcp__marrow2__...`): another server, which
+  // leaves the official entry proven when it is configured, and proves nothing on its own.
+  const others = ['marrow-evil', 'marrow2', 'marrow_evil', 'github'];
+  const cases = [];
+  for (const name of names) {
+    cases.push([`${name} (look-alike command) alone`, `[mcp_servers.${quoted(name)}]\n${LOOKALIKE}`]);
+    // The strongest attack: the look-alike NAME with the official launch.
+    cases.push([`${name} (official command under another name) alone`, `[mcp_servers.${quoted(name)}]\n${OFFICIAL}`]);
+    cases.push([`${name} (look-alike) next to the official marrow`, `[mcp_servers.marrow]\n${OFFICIAL}[mcp_servers.${quoted(name)}]\n${LOOKALIKE}`]);
+    cases.push([`${name} (official command) next to the official marrow`, `[mcp_servers.marrow]\n${OFFICIAL}[mcp_servers.${quoted(name)}]\n${OFFICIAL}`]);
+  }
+  for (const name of others) {
+    cases.push([`${name} (look-alike command) alone`, `[mcp_servers.${quoted(name)}]\n${LOOKALIKE}`]);
+    cases.push([`${name} (official command under another name) alone`, `[mcp_servers.${quoted(name)}]\n${OFFICIAL}`]);
+  }
+  let checked = 0;
+  for (const [label, toml] of cases) {
+    const fixture = host.hostFixture('marrow-own-lookalike-');
+    try {
+      fixture.codexToml(toml);
+      const skipped = host.codexSkips(fixture, labels).filter(Boolean).length;
+      // Alone, or next to the official entry, a name that can produce the label unproves the server.
+      // A name that cannot produce it proves nothing on its own (no `marrow` server is configured).
+      assert.equal(skipped, 0, label);
+      checked += 1;
+    } finally {
+      fixture.cleanup();
+    }
+  }
+  assert.equal(checked, names.length * 4 + others.length * 2);
+  // Controls: the README form alone proves it (all 58); another server that cannot produce the label does not break it.
+  assert.equal(host.codexSkips(PROVEN, labels).filter(Boolean).length, 58);
+  for (const name of others) {
+    const fixture = host.hostFixture('marrow-own-other-');
+    try {
+      fixture.codexToml(`[mcp_servers.marrow]\n${OFFICIAL}[mcp_servers.${quoted(name)}]\n${LOOKALIKE}`);
+      assert.equal(host.codexSkips(fixture, labels).filter(Boolean).length, 58, name);
+    } finally {
+      fixture.cleanup();
+    }
+  }
+});
+
 test('padded labels (LF, CR, CRLF, U+2028, U+2029, space, tab, NUL; before, after, both) always reach the hook', () => {
   for (const [key, matcher] of Object.entries(own.buildOwnToolMatchers())) {
     for (const name of NAMES) {
@@ -393,8 +523,9 @@ test('no matcher is looser than 0.1.68 or the r1 candidate: whatever reached the
     const sample = [...probes(key), ...NAMES.slice(0, 4).flatMap((name) => [...FORMS[key]('marrow', name), ...SKIPPED[key](name)]).flatMap(padded),
       'mcp__marrow__marrow_commit\n', 'MCP:marrow_commit\n', 'mcp_marrow_marrow_commit\n', 'mcp__evil__x\n'];
     // What an older string would have checked had its host run it as written (Codex never did:
-    // it rejects every look-around string, see below), with the same hook behind it.
-    const before = (matcher, probe, mode) => reaches(matcher, probe, mode) && (key !== 'codex' || !hookSkips(probe));
+    // it rejects every look-around string, see below), with the hook the published 0.1.70 pinned
+    // (MCP 3.9.102) behind it. The current Codex decision is never looser than that one.
+    const before = (matcher, probe, mode) => reaches(matcher, probe, mode) && (key !== 'codex' || !hookSkips0170(probe));
     for (const mode of MODES) {
       for (const probe of sample) {
         if (before(OLD[key], probe, mode)) assert.equal(checks(key, now[key], probe, mode), true, `0.1.68 ${key}/${mode}: ${JSON.stringify(probe)}`);
@@ -419,18 +550,16 @@ test('the named cases for the Claude Code / Codex matcher', () => {
     for (const mode of MODES) {
       for (const tool of ['mcp__marrow__marrow_delete_all', 'mcp__MARROW__marrow_commit', 'mcp__marrow__marrow_commit ', 'mcp__evil__x',
         '\nmcp__marrow__marrow_commit', 'mcp__marrow__marrow_commit ',
-        // No host sends `functions.mcp__…` today; it cannot prove the server, so it reaches the hook.
-        'functions.mcp__marrow__marrow_workflow_gate']) {
-        if (key === 'codex' && tool.startsWith('functions.')) {
-          // Codex: `*` selects it, so it reaches the hook; the real 3.9.102 hook then skips it
-          // (its own list takes this prefix). Codex never sends this label (HOOK_OWN_PREFIXES).
+        // No host sends `functions.mcp__…` today; it cannot prove the server, so it reaches the hook
+        // and, on Codex, the 3.9.103 hook checks it (the 3.9.102 hook of 0.1.70 skipped this form).
+        'functions.mcp__marrow__marrow_workflow_gate', 'MCP:marrow_commit', 'MCP:marrow:marrow_commit']) {
+        if (key === 'codex') {
           assert.equal(codexSelects(matcher, tool), true, `codex/${mode}: ${JSON.stringify(tool)} reaches the hook`);
-          assert.equal(hookSkips(tool), true, `codex/${mode}: the real hook skips ${JSON.stringify(tool)}`);
-          assert.equal(checks(key, matcher, tool, mode), false, `codex/${mode}: ${JSON.stringify(tool)}`);
-          continue;
+          assert.equal(hookSkips(tool), false, `codex/${mode}: the real hook does not skip ${JSON.stringify(tool)}`);
         }
-        assert.equal(checks(key, matcher, tool, mode), true, `${key}/${mode}: ${JSON.stringify(tool)}`);
+        assert.equal(checks(key, matcher, tool, mode), key === 'claude' && tool.startsWith('MCP:') ? false : true, `${key}/${mode}: ${JSON.stringify(tool)}`);
       }
+      assert.equal(hookSkips0170('functions.mcp__marrow__marrow_workflow_gate'), true, 'the published 0.1.70 hook skipped it');
       assert.equal(checks(key, matcher, 'mcp__marrow__marrow_commit', mode), false);
       assert.equal(checks(key, matcher, 'mcp__marrow__marrow_workflow', mode), false);
       if (key === 'codex') for (const tool of ['Bash', 'apply_patch', 'spawn_agent', 'web_search', 'update_plan']) assert.equal(checks(key, matcher, tool, mode), true, tool);
