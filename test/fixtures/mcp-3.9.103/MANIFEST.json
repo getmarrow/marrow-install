@@ -1,0 +1,50 @@
+{
+  "package": "@getmarrow/mcp",
+  "version": "3.9.103",
+  "source": "marrow-mcp",
+  "source_sha": "038cf8d9bdc580e486a3e2914d90b3078b9780f0",
+  "integrity": "sha512-EYEgwRiZI0yC5+7GBedcl/fIZiV8doeCnbLcAb6JCISPD6v1+fj6F+EDr8pDAvIj4l6lXeqWPFTC3RzV6zvbbg==",
+  "note": "dist/ files of the 3.9.103 tarball packed from marrow-mcp 038cf8d9 with the version set as the release does (see src/pins.js), byte for byte; none of them changes with the version bump, so they equal dist/ of 038cf8d9. The closure of own-server-identity.js and own-tool.js: nothing outside it is vendored. The release chain must re-verify the integrity against the published tarball and these files against its dist/.",
+  "files": {
+    "own-tool.js": {
+      "from": "dist/own-tool.js",
+      "sha256": "abcfcb24d7f4d55fb3f766528aee72a40c4e8a090e8b26271d5aaf234bb69d17",
+      "bytes": 9416
+    },
+    "tool-catalog.js": {
+      "from": "dist/tool-catalog.js",
+      "sha256": "2300444b94dca126261b26d5767212811a95699ff742b0a0b5ebc9a01074f326",
+      "bytes": 55432
+    },
+    "model-usage.js": {
+      "from": "dist/model-usage.js",
+      "sha256": "c7ddbc3482d5a7514453d0be38fa7c51e2f228a50039f3392544319b8defc577",
+      "bytes": 4976
+    },
+    "redact.js": {
+      "from": "dist/redact.js",
+      "sha256": "64312088e39e24aa520e7703f25bfb1723cd1fbd03378a10135e07f2140ba5e1",
+      "bytes": 12097
+    },
+    "own-server-identity.js": {
+      "from": "dist/own-server-identity.js",
+      "sha256": "c8efc9b000c697c6ce0d91a17348d9b47b1667d0928f657135da8822465176c0",
+      "bytes": 46881
+    },
+    "codex-plugins.js": {
+      "from": "dist/codex-plugins.js",
+      "sha256": "697e0444c1dc8856ed61ffa169fb39707b76c9a0f4752f6cb4121e315f4b107f",
+      "bytes": 10077
+    },
+    "codex-plugin-pins.js": {
+      "from": "dist/codex-plugin-pins.js",
+      "sha256": "b44c256251c9ce623f3ea7773fb711e5d4cd6a6da11277b2f1af1a6fbbc892fb",
+      "bytes": 2721
+    },
+    "host-session.js": {
+      "from": "dist/host-session.js",
+      "sha256": "422544dfaf4f75a5e78a607ea8565050f8b11368f9ed275f298f8c1b1b7b350e",
+      "bytes": 32538
+    }
+  }
+}

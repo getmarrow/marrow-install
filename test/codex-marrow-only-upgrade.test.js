@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const installer = require('../src/installer');
+const PINS = require('../src/pins');
 
 // The pair of files the published 0.1.70 wrote into an empty `.codex` folder (test/fixtures/
 // installer-0170): Marrow's own hooks.json with the look-ahead matcher Codex rejects, and an
@@ -105,7 +106,9 @@ test('--yes and update rewrite the 0.1.70 matcher once, with no duplicate entrie
         assert.deepEqual(groups.map((group) => [group.matcher, group.hooks.length]), [['*', 1]], event);
       }
       for (const event of ['UserPromptSubmit', 'SessionEnd']) assert.equal(marrowGroups(after, event).length, 1, event);
-      assert.equal(fs.readFileSync(path.join(ws.root, 'AGENTS.md'), 'utf8'), agentsBefore, 'AGENTS.md keeps its bytes');
+      // The Marrow block names the pinned MCP in its setup command: only that version moves (the 0.1.70
+      // fixture names 3.9.102); every other byte stays.
+      assert.equal(fs.readFileSync(path.join(ws.root, 'AGENTS.md'), 'utf8'), agentsBefore.replaceAll('@getmarrow/mcp@3.9.102', `@getmarrow/mcp@${PINS.MCP_ADAPTER_VERSION}`), 'AGENTS.md keeps its bytes but for the pin');
 
       const bytes = fs.readFileSync(hooksFile(ws), 'utf8');
       const again = await installer.install(options(ws, flags));

@@ -212,9 +212,8 @@ const VENDORED_MCP = {
 test('the vendored MCP hook files are byte for byte the pinned @getmarrow/mcp, and the real hook lists the registered names', () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(MCP_FIXTURES, 'MANIFEST.json'), 'utf8'));
   assert.equal(manifest.source_sha, VENDORED_MCP.sourceSha);
-  assert.equal(manifest.source_sha, PINS.MCP_ADAPTER_SOURCE_SHA, 'the vendored files are for the pinned MCP source');
-  assert.equal(manifest.version, PINS.MCP_ADAPTER_VERSION);
-  assert.equal(manifest.integrity, PINS.MCP_ADAPTER_INTEGRITY);
+  assert.equal(manifest.version, '3.9.102', 'the vendored files are the 3.9.102 baseline; the 3.9.103 files are test/fixtures/mcp-3.9.103 (test/mcp-pin.test.js)');
+  assert.equal(manifest.integrity, 'sha512-hTs4jTJmySLk8hHgsGIZksMo9+eO5kjQmU1EJyDX8Qqm9Z+V+yDkauop19roasVvOAFsK3dJjqLoIh7gRhoXJQ==');
   assert.deepEqual(Object.keys(manifest.files).sort(), Object.keys(VENDORED_MCP.files).sort());
   for (const [name, sha256] of Object.entries(VENDORED_MCP.files)) {
     const bytes = fs.readFileSync(path.join(MCP_FIXTURES, name));
