@@ -258,6 +258,36 @@ test('the .cursor/mcp.json the published 0.1.70 wrote is proven by the 3.9.103 M
 // Codex: `*` reaches the hook; the hook proves the server
 // ---------------------------------------------------------------------------
 
+test('Codex hooks written by the installer: PreToolUse and PostToolUse match `*`, so mcp__marrow__<own> reaches the hook; no own name or look-around is in any Marrow matcher', () => {
+  withFixture('marrow-codex-matcher-', {}, (fixture) => {
+    installInto(fixture, { folders: ['.codex'] });
+    const settings = readJson(path.join(fixture.root, '.codex', 'hooks.json'));
+    let marrowGroups = 0;
+    for (const event of ['PreToolUse', 'PostToolUse']) {
+      for (const group of settings.hooks[event]) {
+        if (!group.hooks.some((hook) => isMarrowCommand(hook.command))) continue;
+        marrowGroups += 1;
+        assert.equal(group.matcher, '*', event);
+        for (const label of [...CODEX_LABELS, ...NAMES.map((name) => `functions.mcp__marrow__${name}`), 'mcp__evil__marrow_commit', 'Bash', 'apply_patch', 'mcp__marrow__marrow_unregistered']) {
+          assert.equal(codexSelects(group.matcher, label), true, `${event}: ${label} reaches the hook`);
+        }
+        // No exemption in any form: no own name, no negative look-around, no complement, no anchor.
+        assert.equal(NAMES.some((name) => group.matcher.includes(name)), false);
+        assert.equal(/\(\?[=!<]/.test(group.matcher) || group.matcher.includes('mcp__') || group.matcher.includes('^') || group.matcher.includes('['), false);
+      }
+    }
+    assert.equal(marrowGroups, 2, 'one Marrow group per event');
+    assert.equal(installer.CODEX_NATIVE_HOOK_MATCHER, '*');
+    assert.equal(own.buildOwnToolMatchers().codex, '*');
+    // The written hook is the verified runtime's pre-action entrypoint, started from HOME (never npx).
+    const pre = settings.hooks.PreToolUse.flatMap((group) => group.hooks).find((hook) => isMarrowCommand(hook.command));
+    assert.equal(pre.command.includes(`.marrow/runtime/mcp/${PINS.MCP_ADAPTER_VERSION}/`), true);
+    assert.equal(pre.command.includes('codex-pre-action-hook'), true);
+    assert.equal(pre.command.startsWith("/bin/sh -c '") || pre.command.startsWith('node -e '), true, 'the verified-runtime launcher form');
+    assert.equal(/exec npx|spawn\(.*npx/.test(pre.command), false, 'the written hook never starts npx');
+  });
+});
+
 test('Codex hooks: own tools reach the runtime, and with no runtime they get the loader\'s own answer like every tool (no by-name or label exemption)', () => {
   withFixture('marrow-codex-runtime-', {}, (fixture) => {
     installInto(fixture, { folders: ['.codex'] });
