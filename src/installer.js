@@ -20,7 +20,7 @@ const {
   planHermesMcpConfig,
 } = require('./hermes-config');
 const { ensureOwnerApiKey, readOwnerApiKey } = require('./owner-env');
-const { buildOwnToolMatchers, cursorOwnToolGuardCondition } = require('./marrow-own-tools');
+const { buildOwnToolMatchers } = require('./marrow-own-tools');
 const { detectAgentPlugins, describeAgentPlugin } = require('./agent-plugins');
 const {
   delocalizeHookCommand,
@@ -300,8 +300,7 @@ const CURSOR_MCP_PRE_ACTION_GUARD_SOURCE = [
   `const fail=()=>{if(done)return;done=true;process.exitCode=2;process.stderr.write(${JSON.stringify(`${CURSOR_MCP_GUARD_FAILURE}\n`)},()=>process.exit(2));};`,
   'process.stdin.on("error",fail);',
   'process.stdin.on("data",c=>{size+=c.length;if(size>16777216){over=true;return;}chunks.push(c);});',
-  'process.stdin.on("end",()=>{if(over){fail();return;}const raw=Buffer.concat(chunks);let ev=null;try{ev=JSON.parse(raw.toString("utf8"));}catch{ev=null;}',
-  `if(ev&&typeof ev==="object"&&${cursorOwnToolGuardCondition()}){done=true;process.stdout.write("{\\"permission\\":\\"allow\\"}\\n");return;}`,
+  'process.stdin.on("end",()=>{if(over){fail();return;}const raw=Buffer.concat(chunks);',
   'let child;try{',
   `child=spawn(process.platform==="win32"?"npx.cmd":"npx",${JSON.stringify(['-y', `--package=${MCP_PACKAGE_SPEC}`, 'marrow-mcp', 'cursor-pre-action-hook'])},{stdio:["pipe","pipe","ignore"]});`,
   '}catch{fail();return;}',

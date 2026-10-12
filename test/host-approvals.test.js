@@ -299,7 +299,7 @@ test('Cursor: ask on the execution hooks (failClosed, 15 s), MCP still gated in 
   }
 });
 
-test('Cursor beforeMCPExecution guard: Marrow\'s own tools pass at once without npx; every other call reaches the hook unchanged; failures block', () => {
+test('Cursor beforeMCPExecution guard: allows nothing by name, so Marrow\'s own tools reach the hook like every other call, unchanged; failures block', () => {
   const ws = workspace('marrow-ha-cursor-guard-');
   try {
     fs.mkdirSync(path.join(ws.root, '.cursor'));
@@ -327,10 +327,18 @@ esac
       if (fs.existsSync(spawned)) fs.rmSync(spawned);
       return spawnSync(guard, { shell: true, env: { ...process.env, HOME: ws.base, PATH: `${bin}:${process.env.PATH}`, FAKE_NPX_MODE: mode }, input: JSON.stringify(event), encoding: 'utf8', timeout: 20_000 });
     };
-    const own = run('fail', { hook_event_name: 'beforeMCPExecution', mcp_server_name: 'marrow', tool_name: 'marrow_agent_runtime', tool_input: '{}' });
-    assert.equal(own.status, 0, own.stderr);
-    assert.equal(own.stdout, '{"permission":"allow"}\n');
-    assert.equal(fs.existsSync(spawned), false, 'no npx for Marrow\'s own tools');
+    // Marrow's own tools are not answered by the guard: they reach the MCP entrypoint (which proves
+    // the server from Cursor's own configuration) with the input unchanged, and when it fails they
+    // are blocked like any other call.
+    const ownEvent = { hook_event_name: 'beforeMCPExecution', mcp_server_name: 'marrow', tool_name: 'marrow_agent_runtime', tool_input: '{}' };
+    const ownAsked = run('ask', ownEvent);
+    assert.equal(ownAsked.status, 0, ownAsked.stderr);
+    assert.equal(ownAsked.stdout, '{"permission":"ask","user_message":"Approve?","agent_message":"asked"}\n');
+    assert.equal(fs.readFileSync(spawned, 'utf8').trim(), `--package=${spec()} marrow-mcp cursor-pre-action-hook`, 'the own tool reached the hook');
+    const ownFailed = run('fail', ownEvent);
+    assert.equal(ownFailed.status, 2, 'an own tool is blocked when the hook fails (no by-name allow)');
+    assert.equal(ownFailed.stdout, '');
+    assert.equal(ownFailed.stderr, 'Marrow governance adapter was unavailable; this MCP call is blocked.\n');
     for (const event of [
       { mcp_server_name: 'marrow', tool_name: 'deploy_service' },
       { mcp_server_name: 'marrow-tools', tool_name: 'marrow_commit' },

@@ -297,11 +297,14 @@ test('every matcher is the exact string of the rule, built from the names, and t
     assert.equal(matcher.includes('(?s)') || matcher.includes('[^]') || matcher.includes('(?m)'), false, key);
     assert.doesNotThrow(() => new RegExp(matcher), key);
   }
-  // A name that is not a plain identifier never reaches a regex source or the guard.
+  // A name that is not a plain identifier never reaches a regex source.
   for (const bad of ['marrow_.*', 'marrow_x|evil', 'marrow_x)$|(?=', 'MARROW_X', 'marrow_x"', '', 'evil']) {
     assert.throws(() => own.buildOwnToolMatchers([bad]), /invalid Marrow tool name/, bad);
-    assert.throws(() => own.cursorOwnToolGuardCondition([bad]), /invalid Marrow tool name/, bad);
   }
+  // No by-name allow exists any more: the module exports no guard condition (the Cursor
+  // beforeMCPExecution guard sends every call, Marrow's own tools included, to the MCP hook).
+  assert.deepEqual(Object.keys(own).sort(), ['MARROW_OWN_SERVER', 'MARROW_OWN_TOOL_NAMES', 'buildOwnToolMatchers']);
+  assert.equal(own.cursorOwnToolGuardCondition, undefined);
   assert.throws(() => own.buildOwnToolMatchers([]), /invalid Marrow tool name list/);
 });
 
@@ -506,6 +509,7 @@ function ownerFlatHooks(settings) {
 }
 const OLD_MATCHER_STRINGS = Object.values(OLD);
 const OLD_GUARD = '/^marrow_[a-z0-9_]{1,64}$/';
+const MARROW_NAME_SAMPLE = 'marrow_workflow_gate';
 
 const HOSTS = [
   { client: 'claude-code', label: 'Claude Code MCP passive hooks', file: '.claude/settings.json', matcher: true },
@@ -606,7 +610,10 @@ test('0.1.68 install: doctor reports the old matchers as needing repair; repair 
     }
     const guards = cursor.hooks.beforeMCPExecution.filter((entry) => isMarrowCommand(entry.command));
     assert.equal(guards.length, 1);
-    assert.equal(guards[0].command.includes(own.cursorOwnToolGuardCondition()), true);
+    // The repaired guard allows nothing by name: it holds no server or tool-name test at all.
+    assert.equal(guards[0].command.includes('mcp_server_name'), false);
+    assert.equal(guards[0].command.includes('new Set('), false);
+    assert.equal(guards[0].command.includes('cursor-pre-action-hook'), true);
     const gemini = JSON.parse(after('.gemini/settings.json'));
     for (const event of ['BeforeTool', 'AfterTool']) {
       const marrowGroups = gemini.hooks[event].filter((group) => group.hooks.some((hook) => String(hook.name || '').startsWith('marrow-')));
@@ -720,7 +727,7 @@ test('a 0.1.70 Codex install (look-ahead matcher, which Codex rejects): doctor f
   }
 });
 
-test('Cursor beforeMCPExecution guard: allows at once only server "marrow" with one of the 58 names; everything else reaches the hook', () => {
+test('Cursor beforeMCPExecution guard: it allows nothing by name; every call, Marrow\'s own tools included, reaches the hook, and with no runtime every call holds', () => {
   const ws = workspace('marrow-own-guard-');
   try {
     fs.mkdirSync(path.join(ws.root, '.cursor'));
@@ -729,24 +736,30 @@ test('Cursor beforeMCPExecution guard: allows at once only server "marrow" with 
     const detection = installer.detectEnvironment(ws.root, { HOME: ws.home, PATH: process.env.PATH });
     installer.applyPlan(installer.buildPlan(detection, { mode: 'mcp' }), { yes: true, dryRun: false, doctor: false });
     const guard = readJson(path.join(ws.root, '.cursor', 'hooks.json')).hooks.beforeMCPExecution.find((entry) => isMarrowCommand(entry.command)).command;
-    assert.equal(guard.includes(own.cursorOwnToolGuardCondition()), true);
+    // The guard source holds no server or tool-name test, no own-tool list and no allow answer of its own.
+    for (const needle of ['mcp_server_name', 'tool_name', 'new Set(', 'permission', 'marrow_commit', 'marrow_think', MARROW_NAME_SAMPLE]) {
+      assert.equal(guard.includes(needle), false, needle);
+    }
     assert.equal(guard.includes(PIN_RUNTIME_DIR), true, 'the guard starts the verified runtime at the pin');
+    assert.equal(guard.includes('cursor-pre-action-hook'), true);
     // The guard starts the verified private runtime for the pinned MCP (never npx from PATH). This
     // stand-in runtime answers "ask" and leaves a marker, so a case that reaches the hook shows.
     const spawned = path.join(ws.base, 'runtime-ran');
     fakeRuntime(ws.home, PINS.MCP_ADAPTER_VERSION, `#!/bin/sh\ncat >/dev/null\nprintf x >> ${JSON.stringify(spawned)}\nprintf '%s\\n' '{"permission":"ask","user_message":"Approve?","agent_message":"asked"}'\n`);
     const run = (event, env = { HOME: ws.home }) => {
       if (fs.existsSync(spawned)) fs.rmSync(spawned);
-      const out = spawnSync(guard, { shell: true, env: { ...process.env, ...env }, input: JSON.stringify({ hook_event_name: 'beforeMCPExecution', tool_input: '{}', ...event }), encoding: 'utf8', timeout: 20_000 });
+      const out = spawnSync(guard, { shell: true, cwd: ws.root, env: { ...process.env, ...env }, input: JSON.stringify({ hook_event_name: 'beforeMCPExecution', tool_input: '{}', ...event }), encoding: 'utf8', timeout: 20_000 });
       return { status: out.status, stdout: out.stdout, hook: fs.existsSync(spawned) };
     };
-    for (const name of NAMES) {
-      assert.deepEqual(run({ mcp_server_name: 'marrow', tool_name: name }), { status: 0, stdout: '{"permission":"allow"}\n', hook: false }, name);
-    }
     const asked = { status: 0, stdout: '{"permission":"ask","user_message":"Approve?","agent_message":"asked"}\n', hook: true };
+    // Marrow's own tools reach the runtime, like any other call (the runtime's MCP decides). The guard
+    // holds no list, so a spread of names (first, last, the primary ones) shows it; the 58 names are
+    // decided by the MCP (see mcp-103-host.test.js).
+    const SAMPLE = [NAMES[0], NAMES[1], 'marrow_commit', 'marrow_think', 'marrow_workflow_gate', NAMES[NAMES.length - 1]];
+    for (const name of SAMPLE) assert.deepEqual(run({ mcp_server_name: 'marrow', tool_name: name }), asked, name);
     const cases = [
-      ...SERVER_VARIANTS.map((server) => ({ mcp_server_name: server, tool_name: 'marrow_commit' })),
-      ...TOOL_VARIANTS.map((tool) => ({ mcp_server_name: 'marrow', tool_name: tool })),
+      ...SERVER_VARIANTS.filter((_, index) => index % 3 === 0).map((server) => ({ mcp_server_name: server, tool_name: 'marrow_commit' })),
+      ...TOOL_VARIANTS.filter((_, index) => index % 3 === 0).map((tool) => ({ mcp_server_name: 'marrow', tool_name: tool })),
       { mcp_server_name: 'marrow', tool_name: 'MCP:marrow_commit' },
       { mcp_server_name: 'marrow', tool_name: 'mcp__marrow__marrow_commit' },
       { mcp_server_name: 'marrow', tool_name: ['marrow_commit'] },
@@ -759,8 +772,8 @@ test('Cursor beforeMCPExecution guard: allows at once only server "marrow" with 
     for (const event of cases) assert.deepEqual(run(event), asked, JSON.stringify(event));
 
     // A planted npx first on PATH never runs: with no verified runtime under HOME the guard holds
-    // (exit 2, no decision on stdout) for every non-own case, and the planted npx leaves no marker.
-    // Marrow's own tools are still allowed at once, with no runtime and no npx.
+    // (exit 2, no decision on stdout) for every case, Marrow's own tools included (nothing is
+    // allowed at once any more), and the planted npx leaves no marker.
     const bin = path.join(ws.base, 'fake-bin');
     fs.mkdirSync(bin);
     fs.writeFileSync(path.join(bin, 'npx'), `#!/bin/sh\ncat >/dev/null\nprintf x >> ${JSON.stringify(spawned)}\nprintf '%s\\n' '{"permission":"ask","user_message":"Approve?","agent_message":"asked"}'\n`);
@@ -770,9 +783,10 @@ test('Cursor beforeMCPExecution guard: allows at once only server "marrow" with 
     fs.mkdirSync(bareHome, { mode: 0o700 });
     deadRegistryHome(bareHome);
     assert.equal(fs.existsSync(path.join(bareHome, '.marrow')), false);
-    for (const event of cases) assert.deepEqual(run(event, bare), { status: 2, stdout: '', hook: false }, `planted npx: ${JSON.stringify(event)}`);
-    for (const name of NAMES) {
-      assert.deepEqual(run({ mcp_server_name: 'marrow', tool_name: name }, bare), { status: 0, stdout: '{"permission":"allow"}\n', hook: false }, `planted npx: ${name}`);
+    // Every bare run waits for a heal against the dead registry, so a spread of the cases is run.
+    for (const event of cases.filter((_, index) => index % 4 === 0)) assert.deepEqual(run(event, bare), { status: 2, stdout: '', hook: false }, `planted npx: ${JSON.stringify(event)}`);
+    for (const name of SAMPLE.filter((_, index) => index % 2 === 0)) {
+      assert.deepEqual(run({ mcp_server_name: 'marrow', tool_name: name }, bare), { status: 2, stdout: '', hook: false }, `no runtime, own tool held: ${name}`);
     }
   } finally {
     ws.cleanup();

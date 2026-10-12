@@ -109,16 +109,8 @@ function buildOwnToolMatchers(names = MARROW_OWN_TOOL_NAMES) {
   };
 }
 
-// Cursor beforeMCPExecution has no matcher: its guard allows at once only when the server is
-// exactly `marrow` and the tool is exactly one of the names (a Set, so no regex and no prototype
-// keys). The source runs inside `node -e '...'`.
-function cursorOwnToolGuardCondition(names = MARROW_OWN_TOOL_NAMES) {
-  return `ev.mcp_server_name===${JSON.stringify(MARROW_OWN_SERVER)}&&typeof ev.tool_name==="string"&&new Set(${JSON.stringify(checkedNames(names))}).has(ev.tool_name)`;
-}
-
 module.exports = {
   MARROW_OWN_TOOL_NAMES,
   MARROW_OWN_SERVER,
   buildOwnToolMatchers,
-  cursorOwnToolGuardCondition,
 };
