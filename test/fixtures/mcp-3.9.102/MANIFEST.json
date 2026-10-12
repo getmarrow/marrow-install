@@ -1,0 +1,33 @@
+{
+  "package": "@getmarrow/mcp",
+  "version": "3.9.102",
+  "source": "marrow-mcp",
+  "source_sha": "3a2bf85e22b6b9f7e266383ed2011b1c10ca5f97",
+  "integrity": "sha512-hTs4jTJmySLk8hHgsGIZksMo9+eO5kjQmU1EJyDX8Qqm9Z+V+yDkauop19roasVvOAFsK3dJjqLoIh7gRhoXJQ==",
+  "note": "dist/ files of the published tarball, byte for byte; they equal dist/ of the source SHA. The closure of own-tool.js: nothing outside it is vendored.",
+  "files": {
+    "own-tool.js": {
+      "from": "dist/own-tool.js",
+      "sha256": "2af4baf43d4cce5fa27b6169df628f8f5eaa0f4c17b78cc8b69f19dc1816e679",
+      "bytes": 9120
+    },
+    "tool-catalog.js": {
+      "from": "dist/tool-catalog.js",
+      "sha256": "2300444b94dca126261b26d5767212811a95699ff742b0a0b5ebc9a01074f326",
+      "bytes": 55432
+    },
+    "model-usage.js": {
+      "from": "dist/model-usage.js",
+      "sha256": "c7ddbc3482d5a7514453d0be38fa7c51e2f228a50039f3392544319b8defc577",
+      "bytes": 4976
+    },
+    "redact.js": {
+      "from": "dist/redact.js",
+      "sha256": "303bb8b6b05ee66e672f4d32c31b54bc0a6a7c2213f7acdb2408637b0179558d",
+      "bytes": 2310
+    }
+  },
+  "source_files": {
+    "src/own-tool.ts": "133614d14e21ba747892eb35bb204685fd4109eab5d103f28ca9a5b5eb328317"
+  }
+}

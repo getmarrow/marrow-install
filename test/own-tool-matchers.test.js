@@ -84,12 +84,19 @@ function codexSelects(matcher, tool) {
   if (/\(\?<?[=!]/.test(matcher)) return false;
   return new RegExp(matcher).test(tool);
 }
-// @getmarrow/mcp 3.9.102 isOfficialMarrowMcpEvent (src/own-tool.ts): the hook allows at once only
-// these prefixes followed by exactly a registered name. Codex never sends the last three: its MCP
-// labels always start `mcp__` (core/src/tools/handlers/mcp.rs ensure_mcp_prefix) and its tool
+// The Codex matcher is `*`, so the hook alone decides what is skipped. That decision is the real
+// @getmarrow/mcp 3.9.102 one: test/fixtures/mcp-3.9.102/own-tool.js is dist/own-tool.js of the pinned
+// package, byte for byte (the checksum test below pins it), not a copy of its rules written here.
+const MCP_FIXTURES = path.join(__dirname, 'fixtures', 'mcp-3.9.102');
+const mcpOwnTool = require(path.join(MCP_FIXTURES, 'own-tool.js'));
+const hookSkipsEvent = (event) => mcpOwnTool.isOfficialMarrowMcpEvent(event);
+const hookSkips = (tool) => hookSkipsEvent({ tool_name: tool });
+// The label forms the real hook takes for a registered name, found by asking it (these are only
+// the candidates; the hook's own list is not read from here). Codex never sends the last three: its
+// MCP labels always start `mcp__` (core/src/tools/handlers/mcp.rs ensure_mcp_prefix) and its tool
 // names hold only [A-Za-z0-9_-].
-const HOOK_OWN_PREFIXES = ['mcp__marrow__', 'functions.mcp__marrow__', 'MCP:marrow:', 'MCP:'];
-const hookSkips = (tool) => HOOK_OWN_PREFIXES.some((prefix) => tool.startsWith(prefix) && NAMES.includes(tool.slice(prefix.length)));
+const HOOK_PREFIX_CANDIDATES = ['mcp__marrow__', 'functions.mcp__marrow__', 'MCP:marrow:', 'MCP:', 'mcp__Marrow__', 'mcp__marrow_', 'mcp__marrow', 'functions.', 'MCP: ', 'marrow__', ''];
+const HOOK_OWN_PREFIXES = HOOK_PREFIX_CANDIDATES.filter((prefix) => NAMES.every((name) => hookSkips(`${prefix}${name}`)));
 // Whether a host checks a label: the matcher selects it, and for Codex the hook does not skip it.
 function checks(key, matcher, tool, mode) {
   return key === 'codex' ? codexSelects(matcher, tool) && !hookSkips(tool) : reaches(matcher, tool, mode);
@@ -189,6 +196,75 @@ function probes(key) {
   }
   return [...new Set(out)];
 }
+
+// sha256 of each vendored file, written here as well as in MANIFEST.json so that editing one of
+// the two is caught. They are dist/ of @getmarrow/mcp 3.9.102 (marrow-mcp 3a2bf85e).
+const VENDORED_MCP = {
+  sourceSha: '3a2bf85e22b6b9f7e266383ed2011b1c10ca5f97',
+  files: {
+    'own-tool.js': '2af4baf43d4cce5fa27b6169df628f8f5eaa0f4c17b78cc8b69f19dc1816e679',
+    'tool-catalog.js': '2300444b94dca126261b26d5767212811a95699ff742b0a0b5ebc9a01074f326',
+    'model-usage.js': 'c7ddbc3482d5a7514453d0be38fa7c51e2f228a50039f3392544319b8defc577',
+    'redact.js': '303bb8b6b05ee66e672f4d32c31b54bc0a6a7c2213f7acdb2408637b0179558d',
+  },
+};
+
+test('the vendored MCP hook files are byte for byte the pinned @getmarrow/mcp, and the real hook lists the registered names', () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(MCP_FIXTURES, 'MANIFEST.json'), 'utf8'));
+  assert.equal(manifest.source_sha, VENDORED_MCP.sourceSha);
+  assert.equal(manifest.source_sha, PINS.MCP_ADAPTER_SOURCE_SHA, 'the vendored files are for the pinned MCP source');
+  assert.equal(manifest.version, PINS.MCP_ADAPTER_VERSION);
+  assert.equal(manifest.integrity, PINS.MCP_ADAPTER_INTEGRITY);
+  assert.deepEqual(Object.keys(manifest.files).sort(), Object.keys(VENDORED_MCP.files).sort());
+  for (const [name, sha256] of Object.entries(VENDORED_MCP.files)) {
+    const bytes = fs.readFileSync(path.join(MCP_FIXTURES, name));
+    assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'), sha256, `${name} is the pinned file`);
+    assert.equal(manifest.files[name].sha256, sha256, `${name} in MANIFEST.json`);
+    assert.equal(manifest.files[name].bytes, bytes.length, `${name} size`);
+  }
+  // The registered names the real module derives from its own catalog are the installer's 58.
+  assert.deepEqual([...mcpOwnTool.MARROW_OWN_TOOL_NAMES].sort(), [...NAMES].sort());
+  assert.equal(mcpOwnTool.MARROW_OWN_SERVER_NAME, own.MARROW_OWN_SERVER);
+  // The forms the real hook takes for a registered name: exactly these four.
+  assert.deepEqual(HOOK_OWN_PREFIXES, ['mcp__marrow__', 'functions.mcp__marrow__', 'MCP:marrow:', 'MCP:']);
+});
+
+test('the real hook decision on Codex labels: exact own labels skipped; case, padding, suffix and look-alikes are not', () => {
+  for (const name of NAMES) {
+    assert.equal(hookSkips(`mcp__marrow__${name}`), true, name);
+    for (const bad of [`mcp__Marrow__${name}`, `mcp__MARROW__${name}`, `mcp__marrow__${name} `, ` mcp__marrow__${name}`, `mcp__marrow__${name}\n`,
+      `mcp__marrow__${name}\u0000`, `mcp__marrow__${name}x`, `mcp__marrow__${name.toUpperCase()}`, `mcp__marrow-evil__${name}`, `mcp__marrow_evil__${name}`,
+      `mcp__evil__mcp__marrow__${name}`, `mcp__marrow__marrow__${name}`, `xmcp__marrow__${name}`, `mcp__marrow${name}`]) {
+      assert.equal(hookSkips(bad), false, JSON.stringify(bad));
+    }
+  }
+  for (const label of ['mcp__marrow__marrow_delete_all', 'mcp__marrow__marrow_', 'mcp__marrow__', 'mcp__marrow__constructor', 'mcp__marrow____proto__', 'mcp__marrow__toString',
+    'Bash', 'exec_command', 'apply_patch', 'web_search', 'spawn_agent', 'update_plan', 'view_image']) {
+    assert.equal(hookSkips(label), false, label);
+  }
+  // Not strings, and missing names, are never own.
+  for (const value of [undefined, null, 0, {}, [], ['mcp__marrow__marrow_commit']]) assert.equal(hookSkipsEvent({ tool_name: value }), false);
+  assert.equal(hookSkipsEvent({}), false);
+});
+
+test('the real hook also skips a nested use_tool call to server marrow; no Codex label can be that tool name', () => {
+  const nested = (tool_name, tool_input) => hookSkipsEvent({ tool_name, tool_input });
+  for (const tool_name of ['use_mcp_tool', 'use_tool', 'mcp', 'mcp_tool']) {
+    assert.equal(nested(tool_name, { serverName: 'marrow', toolName: 'marrow_commit' }), true, tool_name);
+    assert.equal(nested(tool_name, { server_name: 'marrow', tool_name: 'marrow_commit' }), true, tool_name);
+    for (const input of [{ serverName: 'Marrow', toolName: 'marrow_commit' }, { serverName: 'marrow', toolName: 'marrow_delete_all' }, { serverName: 'marrow ', toolName: 'marrow_commit' },
+      { serverName: 'marrow', toolName: 'marrow_commit', server_name: 'evil' }, { serverName: 'marrow' }, {}, null, [], 'marrow']) {
+      assert.equal(nested(tool_name, input), false, `${tool_name} ${JSON.stringify(input)}`);
+    }
+  }
+  assert.equal(nested('use_tool_x', { serverName: 'marrow', toolName: 'marrow_commit' }), false);
+  assert.equal(nested('Bash', { serverName: 'marrow', toolName: 'marrow_commit' }), false);
+  // Codex names an MCP tool `mcp__<server>__<tool>` (codexLabel), so none of its labels is one of those names.
+  const labels = [];
+  for (const server of ['marrow', ...SERVER_VARIANTS]) for (const tool of [...NAMES.slice(0, 5), ...TOOL_VARIANTS]) labels.push(codexLabel(server, tool));
+  for (const label of labels) assert.equal(label.startsWith('mcp__'), true, label);
+  for (const tool_name of ['use_mcp_tool', 'use_tool', 'mcp', 'mcp_tool']) assert.equal(labels.includes(tool_name), false, tool_name);
+});
 
 test('src/marrow-own-tools.js holds exactly the 58 registered names, in file order', () => {
   assert.equal(NAMES_JSON.count, 58);
@@ -343,8 +419,14 @@ test('the named cases for the Claude Code / Codex matcher', () => {
         '\nmcp__marrow__marrow_commit', 'mcp__marrow__marrow_commit ',
         // No host sends `functions.mcp__…` today; it cannot prove the server, so it reaches the hook.
         'functions.mcp__marrow__marrow_workflow_gate']) {
-        // Codex: the hook also skips the `functions.` form, which Codex never sends (see HOOK_OWN_PREFIXES).
-        if (key === 'codex' && tool.startsWith('functions.')) continue;
+        if (key === 'codex' && tool.startsWith('functions.')) {
+          // Codex: `*` selects it, so it reaches the hook; the real 3.9.102 hook then skips it
+          // (its own list takes this prefix). Codex never sends this label (HOOK_OWN_PREFIXES).
+          assert.equal(codexSelects(matcher, tool), true, `codex/${mode}: ${JSON.stringify(tool)} reaches the hook`);
+          assert.equal(hookSkips(tool), true, `codex/${mode}: the real hook skips ${JSON.stringify(tool)}`);
+          assert.equal(checks(key, matcher, tool, mode), false, `codex/${mode}: ${JSON.stringify(tool)}`);
+          continue;
+        }
         assert.equal(checks(key, matcher, tool, mode), true, `${key}/${mode}: ${JSON.stringify(tool)}`);
       }
       assert.equal(checks(key, matcher, 'mcp__marrow__marrow_commit', mode), false);
