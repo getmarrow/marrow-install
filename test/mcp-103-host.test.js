@@ -258,6 +258,53 @@ test('the .cursor/mcp.json the published 0.1.70 wrote is proven by the 3.9.103 M
 // Codex: `*` reaches the hook; the hook proves the server
 // ---------------------------------------------------------------------------
 
+test('Codex hooks: own tools reach the runtime, and with no runtime they get the loader\'s own answer like every tool (no by-name or label exemption)', () => {
+  withFixture('marrow-codex-runtime-', {}, (fixture) => {
+    installInto(fixture, { folders: ['.codex'] });
+    const settings = readJson(path.join(fixture.root, '.codex', 'hooks.json'));
+    const pre = settings.hooks.PreToolUse.flatMap((group) => group.hooks).find((hook) => isMarrowCommand(hook.command)).command;
+    const ran = path.join(fixture.base, 'runtime-ran');
+    // A stand-in for the pinned MCP's hook: it records that it was started and answers `{}` (no objection).
+    fakeRuntime(fixture.home, PINS.MCP_ADAPTER_VERSION, `#!/bin/sh\ncat >/dev/null\nprintf x >> ${JSON.stringify(ran)}\nprintf '{}'\n`);
+    const run = (tool_name, env) => {
+      if (fs.existsSync(ran)) fs.rmSync(ran);
+      const out = spawnSync(pre, {
+        shell: true, cwd: fixture.root, env: { ...process.env, ...env },
+        input: JSON.stringify({ hook_event_name: 'PreToolUse', tool_name, tool_input: {}, cwd: fixture.root, session_id: 's', turn_id: 't', tool_use_id: 'u' }), encoding: 'utf8', timeout: 30_000,
+      });
+      return { status: out.status, stdout: out.stdout, stderr: out.stderr, ran: fs.existsSync(ran) };
+    };
+    for (const tool of ['mcp__marrow__marrow_commit', 'mcp__marrow__marrow_think', 'mcp__marrow__marrow_workflow_gate', 'mcp__evil__marrow_commit', 'exec_command']) {
+      const result = run(tool, { HOME: fixture.home });
+      assert.equal(result.status, 0, `${tool}: ${result.stderr}`);
+      assert.equal(result.ran, true, `${tool} reaches the runtime`);
+    }
+    // No verified runtime and a dead registry: the hook never reaches the MCP, for Marrow's own tools
+    // exactly as for any other tool (no label or name is answered locally): the loader's outage
+    // answer (a warning on stderr and exit 1, which Codex runs through) or its hold (exit 2).
+    const bare = path.join(fixture.base, 'bare-home');
+    fs.mkdirSync(bare, { mode: 0o700 });
+    deadRegistryHome(bare);
+    const foreign = run('mcp__evil__deploy', { HOME: bare });
+    assert.notEqual(foreign.status, 0);
+    assert.equal(foreign.ran, false);
+    assert.equal(foreign.stdout, '', 'the loader answers no allow of its own');
+    assert.notEqual(foreign.stderr.trim(), '', 'it says why');
+    for (const tool of ['mcp__marrow__marrow_commit', 'mcp__marrow__marrow_think', 'mcp__marrow__marrow_workflow_gate']) {
+      const result = run(tool, { HOME: bare });
+      assert.equal(result.status, foreign.status, `${tool}: the same answer as a foreign tool`);
+      assert.equal(result.ran, false, tool);
+      assert.equal(result.stdout, '', tool);
+      assert.equal(result.stderr, foreign.stderr, tool);
+    }
+    assert.equal(fs.existsSync(runtimeDir(bare, PINS.MCP_ADAPTER_VERSION)), false, 'a failed heal leaves no runtime behind');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Codex: what proves the `marrow` server (the real MCP decision)
+// ---------------------------------------------------------------------------
+
 test('Codex: README npx form and the installer launch are proven; a missing, look-alike or altered entry is not; the installer itself writes no Codex server entry', () => {
   const launch = mcpServerLaunch(PINS.MCP_ADAPTER_VERSION, { platform: 'linux' });
   const installerToml = `[mcp_servers.marrow]\ncommand = ${JSON.stringify(launch.command)}\nargs = ${JSON.stringify(launch.args)}\n`;
