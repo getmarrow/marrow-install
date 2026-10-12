@@ -48,6 +48,13 @@ for (const name of ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_CHILD_S
   'CODEX_HOME']) {
   delete process.env[name];
 }
+// `npm test` exports npm_config_* names (any case) to the process it starts. The installer's heal
+// and the pinned MCP's own-tool identity check both read them as npm configuration (one makes
+// the launch of `npx -y @getmarrow/mcp` unproven), so no test inherits one: a case that needs
+// one sets it on the child or host fixture it builds (test/support/mcp-host.js withHost).
+for (const name of Object.keys(process.env)) {
+  if (/^npm_config_/i.test(name)) delete process.env[name];
+}
 // A harness executable on the operator's PATH (`hermes`, `claude`) is a detection signal. Tests
 // must not depend on what this machine has installed. A PATH directory holding one is replaced
 // by a directory of links to everything else in it, because node, npm and npx often live next

@@ -811,10 +811,28 @@ function snapshotTree(root) {
   return out;
 }
 
+// After it writes, the installer runs `npx -y --package=@getmarrow/mcp@<pin> marrow-mcp loop-guard-self-test`.
+// These runs stay offline and must not depend on the pinned MCP being published (the pin moves ahead of
+// its publication), so a stand-in `npx` answers that one call with the passing proof and fails any other.
+// A run whose PATH already starts with a directory holding its own `npx` keeps it.
+let loopGuardStubDir = null;
+function withLoopGuardStub(env) {
+  if (!env || typeof env.PATH !== 'string') return env;
+  const first = env.PATH.split(path.delimiter)[0];
+  if (first && fs.existsSync(path.join(first, 'npx'))) return env;
+  if (!loopGuardStubDir) {
+    loopGuardStubDir = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-loop-guard-npx-'));
+    const proof = JSON.stringify({ pass: true, isolated: true, live_hook_observed: false, repeat_denied: true, mutation_reset: true, owner_disabled_bypass: true });
+    fs.writeFileSync(path.join(loopGuardStubDir, 'npx'), `#!/bin/sh\ncase " $* " in\n  *" loop-guard-self-test "*) printf '%s' '${proof}'; exit 0 ;;\nesac\necho "npx is not available in these tests" >&2\nexit 127\n`, { mode: 0o755 });
+    process.once('exit', () => fs.rmSync(loopGuardStubDir, { recursive: true, force: true }));
+  }
+  return { ...env, PATH: `${loopGuardStubDir}${path.delimiter}${env.PATH}` };
+}
+
 function runBin(args, { cwd, env, input } = {}) {
   return new Promise((resolve) => {
     // These runs stay offline: the local MCP runtime (an npm install) is tested on its own.
-    const child = spawn(process.execPath, [BIN, ...args], { cwd, env: { MARROW_LOCAL_RUNTIME: '0', ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [BIN, ...args], { cwd, env: { MARROW_LOCAL_RUNTIME: '0', ...withLoopGuardStub(env) }, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (chunk) => { stdout += chunk; });
