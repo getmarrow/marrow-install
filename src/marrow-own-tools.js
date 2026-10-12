@@ -64,8 +64,11 @@ const MARROW_OWN_TOOL_NAMES = Object.freeze([
   'marrow_workflow_gate',
 ]);
 
-// A matcher or guard skips only these names on a server named exactly `marrow` (case-sensitive),
-// and only where the host's label or payload proves that server. Any other tool, including an
+// A matcher skips only these names on a server named exactly `marrow` (case-sensitive), and only
+// where the host's own label proves that server (Claude Code). Codex and Cursor labels do not prove
+// it, so no matcher and no guard of this installer skips a name there: every call reaches the
+// @getmarrow/mcp hook, which skips an own tool only after reading the host's MCP configuration
+// (own-server-identity.ts isOfficialMarrowMcpEventOnHost). Any other tool, including an
 // unregistered marrow_* name, a case variant or a padded name, still reaches the hook.
 const MARROW_OWN_SERVER = 'marrow';
 
@@ -91,14 +94,19 @@ function buildOwnToolMatchers(names = MARROW_OWN_TOOL_NAMES) {
   // other label holding `mcp__` or `functions.` anywhere reaches the hook.
   const mcpTail = `^(?!mcp__${MARROW_OWN_SERVER}__${own}$)[\\s\\S]*(?:functions\\.|mcp__)[\\s\\S]*`;
   // Cursor preToolUse names an MCP tool `MCP:<tool>`, without its server, so no MCP label is
-  // skipped; Marrow's own tools are told apart in the hook (beforeMCPExecution carries the server).
+  // skipped here, and the beforeMCPExecution guard allows nothing by name either: Marrow's own
+  // tools reach @getmarrow/mcp `cursor-pre-action-hook`, which skips one only when Cursor's own
+  // MCP configuration proves the server `marrow` is the official Marrow MCP server (at preToolUse
+  // also only when it is the only server, with at most 8 usable absolute workspace roots).
   const cursorMcp = '[\\s\\S]*MCP:[\\s\\S]*';
   return {
     claude: `Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|${mcpTail}`,
     // Codex compiles matchers with Rust `regex`, which has no look-around, and drops a hook whose
     // matcher fails to compile (codex-rs/hooks/src/engine/discovery.rs). `*` is Codex's match-all
-    // (engine/matcher.rs), so every tool reaches the hook and the hook skips exactly
-    // `mcp__marrow__<own>` itself (@getmarrow/mcp isOfficialMarrowMcpEvent).
+    // (engine/matcher.rs), so every tool reaches the hook. No own-name exemption may come back in
+    // any form (regex, Rust expansion): the label `mcp__marrow__<own>` is also produced by
+    // look-alike servers, so the hook alone decides, and it skips an exact `mcp__marrow__<own>`
+    // only with a proven Codex configuration (@getmarrow/mcp isOfficialMarrowMcpEventOnHost).
     codex: '*',
     cursor: `Shell|Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|${cursorMcp}`,
     cursorPreToolUseHostApproval: `Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|${cursorMcp}`,

@@ -2,11 +2,22 @@
 
 Release notes for `@getmarrow/install`, newest first. The README describes only the current version.
 
+## Unreleased
+
+The next release installs MCP `3.9.103` (source `038cf8d9bdc580e486a3e2914d90b3078b9780f0`, packed integrity `sha512-EYEgwRiZI0yC5+7GBedcl/fIZiV8doeCnbLcAb6JCISPD6v1+fj6F+EDr8pDAvIj4l6lXeqWPFTC3RzV6zvbbg==`; the release re-verifies it against the published tarball). SDK is `3.7.65`. Update once, restart the owning harness, review hook trust (Codex `/hooks`) and run `doctor --self-test`.
+
+- **Codex tool calls are checked.** The Codex `PreToolUse` and `PostToolUse` hooks match `*`; the v0.1.70 matcher used look-ahead, which Codex rejects, so none of its hooks ran. `update` and `--yes` rewrite it in place, once, also for a project whose `.codex` holds only Marrow's own `hooks.json`; `doctor` reports a stale file. No own-tool name is in any Codex matcher.
+- **Own tools on Codex are skipped only with proof.** The hook skips exactly `mcp__marrow__<name>` (58 registered names) only when the Codex configuration proves the `marrow` server is the official Marrow MCP server (README entry, installed `marrow-mcp`, the installer's launch, or the official plugin installed alone). `functions.`, `MCP:`, `MCP:marrow:` and nested forms are never skipped. Servers whose names produce the same label (`mcp__marrow`, `marrow_`, `marrow-`, `_`, `-`, `__`, `mcp___`, …) no longer get their own-named tools skipped.
+- **The Cursor guard allows nothing by name.** Every MCP call, Marrow's own tools included, goes to `cursor-pre-action-hook`, which proves the server from Cursor's `.cursor/mcp.json`. A look-alike `marrow` entry is held. `update` replaces the v0.1.70 guard. At `preToolUse`, an own tool is skipped only when the official `marrow` is the only configured server.
+- **Held on day one, stated:** an own tool on Codex when no `marrow` server entry is in the Codex configuration (the installer writes none), when any `npm_config_*` variable is in the hook's environment, or when a project `.npmrc` holds a key outside a short harmless list (`npx` form only); an own tool on Cursor at `preToolUse` when a second MCP server is configured.
+- **MCP 3.9.103.** The npm-config rule, the redactor and the approval keys of 3.9.103 apply; see its release notes.
+- **Tests.** The Codex and Cursor own-tool decisions run against the real 3.9.103 `dist/` (vendored, pinned by sha256); a test fails on any change to `src/runtime-core.js` until MCP `INSTALLER_RUNTIME_CORE_SHA256` carries its hash.
+
 ## v0.1.70
 
 v0.1.70 installs MCP `3.9.102` (source `3a2bf85e22b6b9f7e266383ed2011b1c10ca5f97`, packed integrity `sha512-hTs4jTJmySLk8hHgsGIZksMo9+eO5kjQmU1EJyDX8Qqm9Z+V+yDkauop19roasVvOAFsK3dJjqLoIh7gRhoXJQ==`). SDK is `3.7.65`. Update once, restart the owning harness, review hook trust and run `doctor --self-test`.
 
-- **Own-tool names are exact.** Hook matchers and the Cursor guard skip the pre-action gate only for Marrow's registered tools on server `marrow`, by exact name. Look-alike servers, other case, extra spaces or suffixes go through the gate.
+- **Own-tool names are exact.** The Claude Code hook matcher skips the pre-action gate only for Marrow's registered tools on server `marrow`, by the exact name `mcp__marrow__<name>`. Other case, extra spaces, suffixes and look-alike names go through the gate. The Cursor guard allowed a call at once when the server was named `marrow` and the tool was a registered name, without checking which server that is (removed in the next release). The Codex tool hooks it wrote use a look-ahead matcher that Codex rejects, so no Codex tool call was checked (fixed in the next release).
 - **Hooks run only the verified local MCP runtime.** They never start `npx`. With no verified copy, the hook heals it from the pinned, integrity-checked package; if that cannot finish because of an outage (no npm, npm failed, the wait ran out), pre-action hooks warn and let the action run. An integrity mismatch and every other failure hold.
 - **Fallback npm install keeps your npm login private.** It sends npm auth only when network settings come from the owner's own npm config, refuses owner registry URLs that could carry a credential, and installs exactly the pinned MCP and SDK. Outage records are per project.
 - **MCP 3.9.102.** A project's `.env` cannot supply `MARROW_*` settings, so a cloned project cannot redirect the MCP server.

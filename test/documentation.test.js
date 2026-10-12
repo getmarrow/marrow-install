@@ -5,6 +5,7 @@ const path = require('node:path');
 const test = require('node:test');
 const installer = require('../src/installer');
 const own = require('../src/marrow-own-tools');
+const PINS = require('../src/pins');
 
 const root = path.resolve(__dirname, '..');
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
@@ -96,7 +97,10 @@ test('README documents chat and terminal approvals and never makes a dashboard l
   assert.doesNotMatch(whatsNew, /Previous release|^### v/m, 'one entry, no older versions');
   assert.match(whatsNew, /https:\/\/github\.com\/getmarrow\/marrow-install\/blob\/master\/CHANGELOG\.md/);
   const changelog = fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8');
-  assert.match(changelog.split('\n').find((line) => line.startsWith('## ')), new RegExp(`^## v${pkg.version.replaceAll('.', '\\.')}$`), 'the newest entry is this version');
+  // The newest entry is this version, or the unreleased entry that precedes it (named at release).
+  const headings = changelog.split('\n').filter((line) => line.startsWith('## '));
+  const versionHeading = new RegExp(`^## v${pkg.version.replaceAll('.', '\\.')}$`);
+  assert.ok(versionHeading.test(headings[0]) || (headings[0] === '## Unreleased' && versionHeading.test(headings[1])), headings.slice(0, 2).join(' | '));
   assert.match(changelog, new RegExp(`^## v${pkg.version.replaceAll('.', '\\.')}$`, 'm'));
   // Approval hooks are tied to the MCP version that answers them, not to this published version.
   assert.match(readme, /These hooks are written with MCP `3\.9\.99` and later/);
@@ -121,13 +125,20 @@ test('README: the Codex text is in the next-release section, exact, and not in t
   // 1. The matcher is the one the installer writes, and the old one is named as rejected.
   assert.equal(installer.CODEX_NATIVE_HOOK_MATCHER, '*');
   assert.match(next, /matcher `\*` for `PreToolUse` and `PostToolUse`/);
+  assert.match(next, /no own-tool name is in any Marrow matcher for Codex/);
   assert.match(next, /v0\.1\.70 wrote uses look-ahead, which Codex rejects/);
   assert.match(next, /npx @getmarrow\/install@latest update/);
-  // 2. Own tools are skipped by exact label: the name list is the module's 58.
+  // 2. The pin the text names is the pin in src/pins.js.
+  assert.equal(PINS.MCP_ADAPTER_VERSION, '3.9.103');
+  assert.match(next, /`@getmarrow\/mcp` 3\.9\.103 \(built from marrow-mcp `038cf8d9`/);
+  assert.equal(PINS.MCP_ADAPTER_SOURCE_SHA.startsWith('038cf8d9'), true);
+  // 3. Own tools are skipped only with proof: exact label, the module's 58 names, the proven forms, the never forms.
   assert.equal(own.MARROW_OWN_TOOL_NAMES.length, 58);
+  assert.match(next, /skipped only when the configuration proves the server/);
   assert.match(next, /exactly `mcp__marrow__<name>`/);
   assert.match(next, /one of the 58 tool names the `marrow` server registers/);
-  // 3. The collision gap is stated plainly, for exactly the three server names that give the real label.
+  assert.match(next, /`functions\.mcp__marrow__<name>`, `MCP:marrow:<name>` and `MCP:<name>` and a nested `use_tool` form are never skipped on Codex/);
+  // 4. The collision gap is stated closed, for exactly the server names whose label is the real one.
   const codexLabel = (server, tool) => {
     const clean = (value) => value.replace(/[^A-Za-z0-9_]/g, '_') || '_';
     const namespace = clean(server).startsWith('mcp__') ? clean(server) : `mcp__${clean(server)}`;
@@ -135,7 +146,7 @@ test('README: the Codex text is in the next-release section, exact, and not in t
   };
   const real = codexLabel('marrow', 'marrow_commit');
   assert.equal(real, 'mcp__marrow__marrow_commit');
-  const named = (next.match(/A Codex MCP server named (`[^`]+`), (`[^`]+`) or (`[^`]+`) gets the same label/) || []).slice(1).map((item) => item.replace(/`/g, ''));
+  const named = (next.match(/a Codex MCP server named (`[^`]+`), (`[^`]+`) or (`[^`]+`) gets the same label/) || []).slice(1).map((item) => item.replace(/`/g, ''));
   assert.deepEqual(named, ['mcp__marrow', 'marrow-', 'marrow_']);
   for (const server of named) assert.equal(codexLabel(server, 'marrow_commit'), real, server);
   // The other names the text gives are the same label by the same clean-up (measured on codex-cli 0.161.0).
@@ -143,17 +154,46 @@ test('README: the Codex text is in the next-release section, exact, and not in t
     assert.ok(next.includes(`\`${server}\``), server);
     assert.equal(codexLabel(server, 'marrow_commit'), real, server);
   }
+  // Names that trim to `mcp` give it with a tool `marrow__<name>`.
+  for (const server of ['_', '-', '__', 'mcp___']) {
+    assert.ok(next.includes(`\`${server}\``), server);
+    assert.equal(codexLabel(server, 'marrow__marrow_commit'), real, server);
+  }
   for (const server of ['Marrow', 'MARROW', 'marrow2', 'marrow-evil', 'marrow_evil', 'xmarrow']) assert.notEqual(codexLabel(server, 'marrow_commit'), real, server);
-  assert.match(next, /Until the MCP-side server-identity fix ships|until the MCP-side server-identity fix ships/);
-  assert.match(next, /is skipped, not checked/);
-  assert.match(next, /The fix is in `@getmarrow\/mcp`, not in this installer/);
-  // 4. The trust step and the loop guard.
+  assert.match(next, /The label-collision gap is closed/);
+  assert.match(next, /With 3\.9\.103 the hook no longer trusts the label/);
+  assert.match(next, /no own-named tool is skipped/);
+  assert.doesNotMatch(next, /is skipped, not checked|Known gap until|The fix is in `@getmarrow\/mcp`, not in this installer/, 'the old gap text is gone');
+  // 5. What is held on day one is stated: no server entry, npm_config_*, a project .npmrc, the second Cursor server.
+  assert.match(next, /What is held on day one/);
+  assert.match(next, /holds no `marrow` server entry \(the installer writes none/);
+  assert.match(next, /any `npm_config_\*` variable, in any case/);
+  assert.match(next, /a `\.npmrc` in the project or above it, other than your own `~\/\.npmrc`/);
+  assert.match(next, /with any other MCP server configured, Marrow's own tools are held at `preToolUse`/);
+  // 6. The Cursor guard allows nothing by name.
+  assert.match(next, /guard allows nothing by name/);
+  assert.match(next, /to `cursor-pre-action-hook`/);
+  assert.equal(own.cursorOwnToolGuardCondition, undefined);
+  // 7. The trust step and the loop guard.
   assert.match(next, /one-time `\/hooks` trust step/i);
   assert.match(next, /Until you do, Codex does not run them and no tool call is checked/);
   assert.match(next, /loop guard can hold a repeated command/);
   assert.match(next, /this operation already passed with an unchanged result/);
-  // 5. No claim the code does not support.
+  // 8. No claim the code does not support.
   for (const claim of [/cannot call/i, /unsupported call/i, /never (?:held|checked|locked)/i, /every look-alike/i, /fully (?:covered|protected)/i]) {
     assert.doesNotMatch(next, claim, String(claim));
   }
+});
+
+test('the runtime-core pin test exists and still pins the MCP list; a removed test is a failing test', () => {
+  const file = path.join(__dirname, 'runtime-core-pin.test.js');
+  assert.ok(fs.existsSync(file), 'test/runtime-core-pin.test.js');
+  const text = fs.readFileSync(file, 'utf8');
+  assert.match(text, /INSTALLER_RUNTIME_CORE_SHA256/);
+  assert.match(text, /const RUNTIME_CORE_FILE_SHA256 = '[0-9a-f]{64}'/);
+  assert.match(text, /const RUNTIME_CORE_SOURCE_SHA256 = '[0-9a-f]{64}'/);
+  assert.ok((text.match(/^test\(/gm) || []).length >= 3);
+  // The constants are the file's: the pin test and this test cannot both be edited away unnoticed.
+  const core = fs.readFileSync(path.join(root, 'src', 'runtime-core.js'));
+  assert.ok(text.includes(require('node:crypto').createHash('sha256').update(core).digest('hex')));
 });
