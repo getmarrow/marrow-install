@@ -3050,11 +3050,18 @@ function assertContainedManagedTarget(root, targetPath) {
   return { resolvedRoot, resolvedTarget };
 }
 
-function atomicWriteManagedFile(root, targetPath, contents) {
+// A creation mode is filtered through the process umask, so it cannot be the mode a plan
+// compares against. A write that has an intended mode (`intendedMode`) sets it on the
+// descriptor before the rename: the file is never visible at another mode, under any umask.
+// Without one the file keeps its own mode (0600 when new) minus group and world write, so a
+// rewritten file is never more open than before under any umask (the umask still only removes
+// further bits).
+function atomicWriteManagedFile(root, targetPath, contents, intendedMode) {
   const { resolvedTarget } = assertContainedManagedTarget(root, targetPath);
   const parent = path.dirname(resolvedTarget);
   fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
   assertContainedManagedTarget(root, resolvedTarget);
+  const explicitMode = Number.isInteger(intendedMode) ? intendedMode & 0o777 : null;
   const existingMode = fs.existsSync(resolvedTarget)
     ? fs.lstatSync(resolvedTarget).mode & 0o777
     : 0o600;
@@ -3062,11 +3069,17 @@ function atomicWriteManagedFile(root, targetPath, contents) {
     parent,
     `.${path.basename(resolvedTarget)}.marrow-${process.pid}-${crypto.randomBytes(6).toString('hex')}`,
   );
+  let descriptor = -1;
   try {
-    fs.writeFileSync(tempPath, contents, { flag: 'wx', mode: existingMode });
+    descriptor = fs.openSync(tempPath, 'wx', explicitMode === null ? existingMode & ~0o022 : 0o600);
+    if (explicitMode !== null) fs.fchmodSync(descriptor, explicitMode);
+    fs.writeFileSync(descriptor, contents);
+    fs.closeSync(descriptor);
+    descriptor = -1;
     assertContainedManagedTarget(root, resolvedTarget);
     fs.renameSync(tempPath, resolvedTarget);
   } finally {
+    if (descriptor !== -1) fs.closeSync(descriptor);
     if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
   }
 }
@@ -3141,7 +3154,8 @@ function applyPlan(plan, options) {
       throw new Error(`Unknown write type: ${write.type}`);
     }
 
-    const beforeMode = fileExists ? fs.lstatSync(write.path).mode & 0o777 : null;
+    // The whole permission word, special bits included, against the exact planned mode.
+    const beforeMode = fileExists ? fs.lstatSync(write.path).mode & 0o7777 : null;
     const modeChanged = !hookConflict && typeof write.mode === 'number' && beforeMode !== write.mode;
     return {
       write,
@@ -3196,7 +3210,7 @@ function applyPlan(plan, options) {
       ...(write.identityDivergence?.length && changed ? { identity_divergence: write.identityDivergence } : {}),
     });
     if (contentChanged && writeApplied) {
-      atomicWriteManagedFile(path.resolve(write.root || root), write.path, after);
+      atomicWriteManagedFile(path.resolve(write.root || root), write.path, after, write.mode);
     }
     if (modeChanged && writeApplied) {
       assertContainedManagedTarget(path.resolve(write.root || root), write.path);
