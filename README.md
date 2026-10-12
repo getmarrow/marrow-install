@@ -116,12 +116,23 @@ These behaviors shipped in v0.1.69 and still apply.
 
 v0.1.70 installs MCP `3.9.102`. In short (the full entry is in the [CHANGELOG](https://github.com/getmarrow/marrow-install/blob/master/CHANGELOG.md)):
 
-- **Own-tool names are exact.** Hook matchers and the Cursor guard skip the gate only for Marrow's registered tools on server `marrow`, by exact name. Look-alike servers or names go through the gate. Codex matchers cannot use look-ahead, so the Codex tool hooks match every tool (`*`) and the hook itself lets through only those exact names. Re-run `update` to refresh hooks written with the old matcher. See [Hooks the installer writes](#hooks-the-installer-writes).
+- **Own-tool names are exact.** Hook matchers and the Cursor guard skip the gate only for Marrow's registered tools on server `marrow`, by exact name. Look-alike servers or names go through the gate. Re-run `update` to refresh hooks written with the old matcher. See [Hooks the installer writes](#hooks-the-installer-writes).
 - **Hooks run only the verified local MCP runtime.** They no longer start `npx`; when the runtime is missing, they heal it from the pinned, integrity-checked package, and hold if they cannot. When npm or the network is down, pre-action hooks warn and let the action run; an integrity mismatch or any other failure holds. See [Local MCP runtime](#local-mcp-runtime).
 - **Fallback npm install protects your npm login.** It sends npm auth only when the network settings come from your own npm config, and installs exactly the pinned MCP and SDK.
 - **MCP 3.9.102.** A cloned project's `.env` can no longer point the MCP server at another account or server.
 
 Earlier release notes are in the [CHANGELOG](https://github.com/getmarrow/marrow-install/blob/master/CHANGELOG.md).
+
+## Next release (not yet published)
+
+This section describes changes in this source tree that are not in the published v0.1.70. They reach you with the next release, and the Codex checks below need that release plus the one-time `/hooks` step.
+
+- **Codex tool calls are checked.** The Codex hooks in `.codex/hooks.json` use the matcher `*` for `PreToolUse` and `PostToolUse`, so every tool call Codex sends to its hooks reaches Marrow's hook, which decides whether to hold it. The matcher itself skips nothing. The matcher v0.1.70 wrote uses look-ahead, which Codex rejects (it reports `invalid matcher` and loads no `PreToolUse` hook), so with v0.1.70 no Codex tool call is checked.
+- **Upgrade with `update`.** Run `npx @getmarrow/install@latest update` once. A project whose `.codex` holds only Marrow's own `hooks.json` counts as a Codex project, so `--yes`, `update` and `doctor` find it and rewrite the old matcher in place, once and without duplicate entries; your own hook groups are kept. `doctor` lists a Codex hooks file that still has the old matcher as stale and names the same command.
+- **Marrow's own tools are skipped by exact label.** For a label Codex sends, the hook (`@getmarrow/mcp` 3.9.102) skips the call without a check only when the label is exactly `mcp__marrow__<name>` and `<name>` is one of the 58 tool names the `marrow` server registers (`src/marrow-own-tools.js`). Another case, padding, a suffix, an unregistered `marrow_*` name or any other label goes through the hook's normal path. The hook's own list also takes the prefixes `functions.mcp__marrow__`, `MCP:marrow:` and `MCP:` and a nested `use_tool` form; Codex 0.161.0 sends none of them.
+- **Known gap until the MCP-side server-identity fix ships.** The hook sees only the label, and Codex builds the label from the server name. A Codex MCP server named `mcp__marrow`, `marrow-` or `marrow_` gets the same label as the real `marrow` server, and so does any other name that Codex cleans up to that label (on Codex 0.161.0 also `marrow.`, `marrow__` and `mcp__marrow_`). A tool on such a server that carries one of Marrow's own tool names is skipped, not checked. Other tools on such a server go through the hook's normal path. The fix is in `@getmarrow/mcp`, not in this installer, and v0.1.70 did not check these calls either. Do not run a Codex MCP server with one of those names.
+- **One-time `/hooks` trust step.** Codex runs a project hook only after you have trusted it. After `update`, start a new Codex session, open `/hooks` and review and trust the Marrow hooks once. Until you do, Codex does not run them and no tool call is checked. Look at `/hooks` again after any update that rewrites `.codex/hooks.json`.
+- **The loop guard can hold a repeated command.** Because every Codex tool call now reaches the hook, the local loop guard applies there as it does for Claude Code: a command that repeats with an unchanged successful result, such as a second identical `ls` in one session, is held with "this operation already passed with an unchanged result". A changed command runs. The guard does not apply to Marrow's own tools, which are skipped first.
 
 ## What It Detects
 

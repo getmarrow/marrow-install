@@ -1,7 +1,10 @@
+require('./support/isolated-environment');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
+const installer = require('../src/installer');
+const own = require('../src/marrow-own-tools');
 
 const root = path.resolve(__dirname, '..');
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
@@ -98,4 +101,59 @@ test('README documents chat and terminal approvals and never makes a dashboard l
   // Approval hooks are tied to the MCP version that answers them, not to this published version.
   assert.match(readme, /These hooks are written with MCP `3\.9\.99` and later/);
   assert.match(readme, /### Local MCP runtime/);
+});
+
+// The Codex text describes what the source does now, so it must sit under the unreleased heading,
+// not under the published version, and each statement is tied to the code it describes.
+test('README: the Codex text is in the next-release section, exact, and not in the v0.1.70 section', () => {
+  const sections = readme.split(/^## /m).slice(1).map((text) => ({ title: text.slice(0, text.indexOf('\n')), body: text }));
+  const titles = sections.map((section) => section.title);
+  const published = sections.find((section) => section.title === "What's New in v0.1.70");
+  assert.ok(published, "the What's New in v0.1.70 section exists");
+  assert.doesNotMatch(published.body, /codex/i, 'the published version\'s notes make no Codex claim');
+
+  const nextIndex = titles.findIndex((title) => /^Next release \(not yet published\)$/.test(title));
+  assert.notEqual(nextIndex, -1, 'a next-release section exists');
+  assert.equal(titles.filter((title) => /^Next release/.test(title)).length, 1);
+  assert.equal(titles[nextIndex - 1], "What's New in v0.1.70", 'it follows the published version\'s notes');
+  const next = sections[nextIndex].body;
+
+  // 1. The matcher is the one the installer writes, and the old one is named as rejected.
+  assert.equal(installer.CODEX_NATIVE_HOOK_MATCHER, '*');
+  assert.match(next, /matcher `\*` for `PreToolUse` and `PostToolUse`/);
+  assert.match(next, /v0\.1\.70 wrote uses look-ahead, which Codex rejects/);
+  assert.match(next, /npx @getmarrow\/install@latest update/);
+  // 2. Own tools are skipped by exact label: the name list is the module's 58.
+  assert.equal(own.MARROW_OWN_TOOL_NAMES.length, 58);
+  assert.match(next, /exactly `mcp__marrow__<name>`/);
+  assert.match(next, /one of the 58 tool names the `marrow` server registers/);
+  // 3. The collision gap is stated plainly, for exactly the three server names that give the real label.
+  const codexLabel = (server, tool) => {
+    const clean = (value) => value.replace(/[^A-Za-z0-9_]/g, '_') || '_';
+    const namespace = clean(server).startsWith('mcp__') ? clean(server) : `mcp__${clean(server)}`;
+    return `${namespace.replace(/_+$/, '')}__${clean(tool).replace(/^_+/, '')}`;
+  };
+  const real = codexLabel('marrow', 'marrow_commit');
+  assert.equal(real, 'mcp__marrow__marrow_commit');
+  const named = (next.match(/A Codex MCP server named (`[^`]+`), (`[^`]+`) or (`[^`]+`) gets the same label/) || []).slice(1).map((item) => item.replace(/`/g, ''));
+  assert.deepEqual(named, ['mcp__marrow', 'marrow-', 'marrow_']);
+  for (const server of named) assert.equal(codexLabel(server, 'marrow_commit'), real, server);
+  // The other names the text gives are the same label by the same clean-up (measured on codex-cli 0.161.0).
+  for (const server of ['marrow.', 'marrow__', 'mcp__marrow_']) {
+    assert.ok(next.includes(`\`${server}\``), server);
+    assert.equal(codexLabel(server, 'marrow_commit'), real, server);
+  }
+  for (const server of ['Marrow', 'MARROW', 'marrow2', 'marrow-evil', 'marrow_evil', 'xmarrow']) assert.notEqual(codexLabel(server, 'marrow_commit'), real, server);
+  assert.match(next, /Until the MCP-side server-identity fix ships|until the MCP-side server-identity fix ships/);
+  assert.match(next, /is skipped, not checked/);
+  assert.match(next, /The fix is in `@getmarrow\/mcp`, not in this installer/);
+  // 4. The trust step and the loop guard.
+  assert.match(next, /one-time `\/hooks` trust step/i);
+  assert.match(next, /Until you do, Codex does not run them and no tool call is checked/);
+  assert.match(next, /loop guard can hold a repeated command/);
+  assert.match(next, /this operation already passed with an unchanged result/);
+  // 5. No claim the code does not support.
+  for (const claim of [/cannot call/i, /unsupported call/i, /never (?:held|checked|locked)/i, /every look-alike/i, /fully (?:covered|protected)/i]) {
+    assert.doesNotMatch(next, claim, String(claim));
+  }
 });
