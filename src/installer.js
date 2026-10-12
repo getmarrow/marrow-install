@@ -21,6 +21,7 @@ const {
 } = require('./hermes-config');
 const { ensureOwnerApiKey, readOwnerApiKey } = require('./owner-env');
 const { buildOwnToolMatchers, cursorOwnToolGuardCondition } = require('./marrow-own-tools');
+const { detectAgentPlugins, describeAgentPlugin } = require('./agent-plugins');
 const {
   delocalizeHookCommand,
   delocalizeHookScriptText,
@@ -1652,6 +1653,12 @@ function upsertClaudeHooks(settingsPath, options = {}) {
   }
 
   return JSON.stringify(settings, null, 2) + '\n';
+}
+
+// Whether this project's hook file holds a Marrow pre-action hook the installer writes (any version).
+function installerHooksPresent(detection, host) {
+  const file = host === 'codex' ? detection.paths.codexHooks : detection.paths.claudeSettings;
+  return marrowHookDescriptors(safeJsonObject(file), 'PreToolUse', 'pre-action-hook').length > 0;
 }
 
 function codexNativeHookFingerprint(settings) {
@@ -4367,6 +4374,10 @@ function printReport(report, sink) {
     out(`- missing env: ${report.doctor.missingEnv.length ? report.doctor.missingEnv.join(', ') : 'none'}\n`);
     if (report.doctor.envHints.length) out(`- possible env files: ${report.doctor.envHints.join(', ')}\n`);
     out(`- missing hooks/config: ${report.doctor.missingHooks.length ? report.doctor.missingHooks.join('; ') : 'none'}\n`);
+    const plugins = report.doctor.agent_plugins || [];
+    if (!plugins.length) out('- agent plugins: none\n');
+    for (const plugin of plugins) out(`- agent plugin: ${plugin.summary}\n`);
+    for (const duplicate of report.doctor.duplicate_hooks || []) out(`- duplicate hooks: ${duplicate}\n`);
     out(`- loop guard configured: ${report.doctor.loop_guard_configured ? 'yes' : 'no'}\n`);
     out(`- loop guard isolated self-test: ${report.doctor.loop_guard_self_tested ? 'passed' : 'not passed'}\n`);
     out(`- loop guard observed after reload/trust: ${report.doctor.loop_guard_observed ? 'yes' : 'no'}\n`);
@@ -4679,6 +4690,11 @@ async function install(options) {
     throw new Error('Marrow activation failed: server confirmation was not returned');
   }
   const hermes = hermesWiringReport(detection, changes, options, plan.mode);
+  // Doctor only: Marrow's agent plugins at the host's own install location (src/agent-plugins.js).
+  const agentPlugins = options.doctor ? detectAgentPlugins({ home: detection.home, env: process.env, project: detection.root }) : [];
+  const pluginHookLabels = new Set(agentPlugins.filter((plugin) => plugin.counted).map((plugin) => plugin.hook_label));
+  const duplicateHooks = agentPlugins.filter((plugin) => plugin.counted && installerHooksPresent(detection, plugin.host))
+    .map((plugin) => `${plugin.name}: the Marrow plugin and this project's installer hooks (${plugin.host === 'codex' ? detection.paths.codexHooks : detection.paths.claudeSettings}) both run, so every action is checked and recorded twice. Keep one: \`npx @getmarrow/install uninstall\` previews removing the installer's copy from this project and \`npx @getmarrow/install uninstall --yes\` removes it; or \`${plugin.remove_plugin}\` removes the plugin.`);
   const plannedHarnessReload = harnessReloadPlan(detection, options.doctor ? [] : changes);
   const updateNeedsRestart = Boolean(options.update
     && !automaticMcpRepairSuppressed
@@ -4839,7 +4855,10 @@ async function install(options) {
       active: Boolean(!selfTest.skipped && selfTest.active),
       missingEnv: options.apiKey ? [] : ['MARROW_API_KEY'],
       envHints,
-      missingHooks: changes.filter((change) => change.changed).map((change) => change.label),
+      // A host whose Marrow plugin supplies the hooks is not missing them (doctor reports it instead).
+      missingHooks: changes.filter((change) => change.changed && !pluginHookLabels.has(change.label)).map((change) => change.label),
+      agent_plugins: agentPlugins.map((plugin) => ({ host: plugin.host, counted: plugin.counted, version: plugin.version || null, path: plugin.path || null, hooks: plugin.events || [], summary: describeAgentPlugin(plugin) })),
+      duplicate_hooks: duplicateHooks,
       mcpProcesses: reportedMcpProcesses,
       mcpConfigurations,
       ahead_unverified_versions: aheadUnverifiedVersions,

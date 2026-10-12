@@ -12,7 +12,9 @@ for (const name of Object.keys(process.env)) {
 // An agent host's markers make the governed runner treat its terminal as unattended. Tests must
 // not depend on whether they run inside one, so the markers are removed (CI too).
 for (const name of ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_CHILD_SESSION', 'GEMINI_CLI', 'CODEX_SANDBOX',
-  'CODEX_SANDBOX_NETWORK_DISABLED', 'CODEX_MANAGED_BY_NPM', 'CODEX_THREAD_ID', 'CURSOR_AGENT', 'OPENCODE', 'CI']) {
+  'CODEX_SANDBOX_NETWORK_DISABLED', 'CODEX_MANAGED_BY_NPM', 'CODEX_THREAD_ID', 'CURSOR_AGENT', 'OPENCODE', 'CI',
+  // Doctor reads the Codex plugin under CODEX_HOME; tests use their own home's .codex.
+  'CODEX_HOME']) {
   delete process.env[name];
 }
 // A harness executable on the operator's PATH (`hermes`, `claude`) is a detection signal. Tests
