@@ -95,8 +95,11 @@ function buildOwnToolMatchers(names = MARROW_OWN_TOOL_NAMES) {
   const cursorMcp = '[\\s\\S]*MCP:[\\s\\S]*';
   return {
     claude: `Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|${mcpTail}`,
-    // Codex keeps its own native tools (apply_patch included) and the shared MCP part.
-    codex: `Bash|apply_patch|Edit|Write|MultiEdit|${mcpTail}`,
+    // Codex compiles matchers with Rust `regex`, which has no look-around, and drops a hook whose
+    // matcher fails to compile (codex-rs/hooks/src/engine/discovery.rs). `*` is Codex's match-all
+    // (engine/matcher.rs), so every tool reaches the hook and the hook skips exactly
+    // `mcp__marrow__<own>` itself (@getmarrow/mcp isOfficialMarrowMcpEvent).
+    codex: '*',
     cursor: `Shell|Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|${cursorMcp}`,
     cursorPreToolUseHostApproval: `Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|${cursorMcp}`,
     // Gemini names an MCP tool `mcp_<server>_<tool>`, which other server/tool pairs can also

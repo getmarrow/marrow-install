@@ -116,7 +116,7 @@ These behaviors shipped in v0.1.69 and still apply.
 
 v0.1.70 installs MCP `3.9.102`. In short (the full entry is in the [CHANGELOG](https://github.com/getmarrow/marrow-install/blob/master/CHANGELOG.md)):
 
-- **Own-tool names are exact.** Hook matchers and the Cursor guard skip the gate only for Marrow's registered tools on server `marrow`, by exact name. Look-alike servers or names go through the gate. Re-run `update` to refresh hooks written with the old matcher. See [Hooks the installer writes](#hooks-the-installer-writes).
+- **Own-tool names are exact.** Hook matchers and the Cursor guard skip the gate only for Marrow's registered tools on server `marrow`, by exact name. Look-alike servers or names go through the gate. Codex matchers cannot use look-ahead, so the Codex tool hooks match every tool (`*`) and the hook itself lets through only those exact names. Re-run `update` to refresh hooks written with the old matcher. See [Hooks the installer writes](#hooks-the-installer-writes).
 - **Hooks run only the verified local MCP runtime.** They no longer start `npx`; when the runtime is missing, they heal it from the pinned, integrity-checked package, and hold if they cannot. When npm or the network is down, pre-action hooks warn and let the action run; an integrity mismatch or any other failure holds. See [Local MCP runtime](#local-mcp-runtime).
 - **Fallback npm install protects your npm login.** It sends npm auth only when the network settings come from your own npm config, and installs exactly the pinned MCP and SDK.
 - **MCP 3.9.102.** A cloned project's `.env` can no longer point the MCP server at another account or server.

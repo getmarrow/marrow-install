@@ -42,13 +42,17 @@ const R1 = (() => {
   };
 })();
 
+// The Codex string 0.1.69 and 0.1.70 wrote: Codex rejects it (look-ahead), so it never ran.
+const V0170_CODEX = `Bash|apply_patch|Edit|Write|MultiEdit|^(?!mcp__marrow__(?:${OWN})$)[\\s\\S]*(?:functions\\.|mcp__)[\\s\\S]*`;
+
 // The exact strings of the rule, assembled here from the JSON (not from the module).
 function expectedStrings() {
   const tail = `^(?!mcp__marrow__(?:${OWN})$)[\\s\\S]*(?:functions\\.|mcp__)[\\s\\S]*`;
   const cursorMcp = '[\\s\\S]*MCP:[\\s\\S]*';
   return {
     claude: `Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|${tail}`,
-    codex: `Bash|apply_patch|Edit|Write|MultiEdit|${tail}`,
+    // Codex: every tool reaches the hook, which skips the exact own names itself.
+    codex: '*',
     cursor: `Shell|Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|${cursorMcp}`,
     cursorPreToolUseHostApproval: `Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|${cursorMcp}`,
     gemini: `^(?:${GEMINI_BUILTINS}|mcp_[\\s\\S]*)$|^[^A-Za-z_][\\s\\S]*`,
@@ -70,6 +74,27 @@ function reaches(matcher, tool, mode) {
   return COMPILED.get(key).test(tool);
 }
 
+// Codex (codex-cli 0.161.0, codex-rs/hooks/src/engine/matcher.rs): "" and "*" select every tool,
+// a matcher of only [A-Za-z0-9_|] is an exact list, anything else is a Rust `regex` searched with
+// is_match. Rust `regex` has no look-around: such a matcher fails to compile and Codex drops the
+// hook group (engine/discovery.rs), so it selects nothing.
+function codexSelects(matcher, tool) {
+  if (matcher === '' || matcher === '*') return true;
+  if (/^[A-Za-z0-9_|]+$/.test(matcher)) return matcher.split('|').includes(tool);
+  if (/\(\?<?[=!]/.test(matcher)) return false;
+  return new RegExp(matcher).test(tool);
+}
+// @getmarrow/mcp 3.9.102 isOfficialMarrowMcpEvent (src/own-tool.ts): the hook allows at once only
+// these prefixes followed by exactly a registered name. Codex never sends the last three: its MCP
+// labels always start `mcp__` (core/src/tools/handlers/mcp.rs ensure_mcp_prefix) and its tool
+// names hold only [A-Za-z0-9_-].
+const HOOK_OWN_PREFIXES = ['mcp__marrow__', 'functions.mcp__marrow__', 'MCP:marrow:', 'MCP:'];
+const hookSkips = (tool) => HOOK_OWN_PREFIXES.some((prefix) => tool.startsWith(prefix) && NAMES.includes(tool.slice(prefix.length)));
+// Whether a host checks a label: the matcher selects it, and for Codex the hook does not skip it.
+function checks(key, matcher, tool, mode) {
+  return key === 'codex' ? codexSelects(matcher, tool) && !hookSkips(tool) : reaches(matcher, tool, mode);
+}
+
 // Labels a host might send for a (server, tool) pair, written raw.
 const FORMS = {
   claude: (server, tool) => [`mcp__${server}__${tool}`, `functions.mcp__${server}__${tool}`],
@@ -83,7 +108,7 @@ const FORMS = {
 // prove the server, so no label is skipped there.
 const SKIPPED = {
   claude: (name) => [`mcp__marrow__${name}`],
-  codex: (name) => [`mcp__marrow__${name}`],
+  codex: (name) => HOOK_OWN_PREFIXES.map((prefix) => `${prefix}${name}`),
   cursor: () => [],
   cursorPreToolUseHostApproval: () => [],
   gemini: () => [],
@@ -107,8 +132,19 @@ function geminiLabel(server, tool) {
   if (name.length > 63) name = `${name.slice(0, 30)}...${name.slice(-30)}`;
   return name;
 }
+// Codex 0.161.0: the namespace is the sanitized server name (every char outside [A-Za-z0-9_]
+// becomes `_`, codex-mcp/src/mcp/mod.rs) with `mcp__` added unless it starts with it
+// (connection_manager tool_catalog / tools.rs); the hook label trims `_` off the end of the
+// namespace and the start of the tool before joining with `__` (core/src/tools/handlers/mcp.rs).
+const codexSanitize = (value) => value.replace(/[^A-Za-z0-9_]/g, '_') || '_';
+function codexLabel(server, tool) {
+  const namespace = codexSanitize(server).startsWith('mcp__') ? codexSanitize(server) : `mcp__${codexSanitize(server)}`;
+  const label = `${namespace.replace(/_+$/, '')}__${codexSanitize(tool).replace(/^_+/, '')}`;
+  return label.startsWith('mcp__') ? label : `mcp__${label}`;
+}
 const HOST_LABELS = {
   claude: (server, tool) => [`mcp__${claudeIn(server)}__${claudeIn(tool)}`],
+  codex: (server, tool) => [codexLabel(server, tool)],
   // Cursor CLI 2026.10.01: preToolUse/postToolUse send `MCP:${toolName}`, never the server.
   cursor: (server, tool) => [`MCP:${tool}`],
   cursorPreToolUseHostApproval: (server, tool) => [`MCP:${tool}`],
@@ -117,7 +153,7 @@ const HOST_LABELS = {
 
 const SERVER_VARIANTS = ['MARROW', 'Marrow', 'mARROW', 'marroW', 'marrow2', 'marrow_', '_marrow', 'xmarrow', 'marrowx', 'marrow-evil', 'evil', 'plugin_marrow_marrow',
   'mаrrow', 'ｍarrow', 'marrow​', 'marrow ', ' marrow', 'marrow_marrow', 'marrow-', 'marrow.', 'marrow marrow', 'mcp_marrow', 'marrow__marrow', 'marrow:marrow',
-  'claude.ai marrow', 'evil-server', 'evil_server'];
+  'claude.ai marrow', 'evil-server', 'evil_server', 'marrow__', 'mcp__marrow', 'mcp__marrow_', 'mcp__marrow__', 'mcp__evil'];
 const TOOL_VARIANTS = ['MARROW_COMMIT', 'Marrow_commit', 'marrow_Commit', 'marrow_delete_all', 'marrow_exec', 'marrow_x', 'marrow_', 'marrow', 'marrow_commitx',
   'marrow_commit ', ' marrow_commit', 'marrow_commit\t', 'marrow_workflow_', 'marrow_workflow_gatex', 'marrow_workflowgate', 'marrow_commit|marrow_ask',
   'marrow_x__deploy_prod', 'marrow_commit__mcp__github__push', 'constructor', '__proto__', 'delete_all', 'x', 'xmarrow_commit', 'commit', '_marrow_commit',
@@ -140,7 +176,7 @@ function probes(key) {
       'functions.exec', 'functions.apply_patch', 'Bash', 'Write', 'Edit', 'MultiEdit');
   }
   if (key === 'claude') out.push('Read', 'Glob', 'Grep', 'Search', 'WebSearch', 'Task');
-  if (key === 'codex') out.push('apply_patch');
+  if (key === 'codex') out.push('apply_patch', 'spawn_agent', 'view_image', 'web_search', 'update_plan', 'request_user_input', 'write_stdin', 'list_mcp_resources', 'read_mcp_resource');
   if (key.startsWith('cursor')) {
     out.push('MCP:marrow_commit', 'MCP:marrow:marrow_commit', 'MCP:evil:marrow_commit', 'MCP:marrow_delete_all', 'MCP:MARROW:marrow_commit',
       'MCP:Marrow:marrow_commit', 'MCP:marrow:marrow_commit ', 'MCP:marrow_commit ', 'MCP::marrow_commit', 'MCP:marrow:marrow:marrow_commit', 'MCP:',
@@ -175,7 +211,12 @@ test('every matcher is the exact string of the rule, built from the names, and t
   // Byte-identical with @getmarrow/mcp NATIVE_HOOK_MATCHER (MCP_SYNC_STRING in the r2 result).
   assert.equal(installer.NATIVE_HOOK_MATCHER,
     `Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|^(?!mcp__marrow__(?:${OWN})$)[\\s\\S]*(?:functions\\.|mcp__)[\\s\\S]*`);
+  assert.equal(installer.CODEX_NATIVE_HOOK_MATCHER, '*');
+  // Codex (Rust `regex`) has no look-around; its string is its match-all and no regex at all.
+  assert.equal(/\(\?<?[=!]/.test(expected.codex), false);
+  assert.equal(codexSelects(V0170_CODEX, 'Bash'), false, 'the 0.1.70 string is one Codex rejects');
   for (const [key, matcher] of Object.entries(expected)) {
+    if (key === 'codex') continue;
     // Every consuming part is exactly `[\s\S]*`: no `.*`, `(?s)`, `[^]` or m flag that a line terminator could escape.
     assert.equal(/(^|[^\\])\.[*+]/.test(matcher), false, key);
     assert.equal(matcher.includes('(?s)') || matcher.includes('[^]') || matcher.includes('(?m)'), false, key);
@@ -192,15 +233,23 @@ test('every matcher is the exact string of the rule, built from the names, and t
 test('each matcher skips exactly the labels its host proves are own, and nothing else, under search and full match', () => {
   for (const [key, matcher] of Object.entries(own.buildOwnToolMatchers())) {
     const skipped = skippedSet(key);
-    assert.equal(skipped.size, key === 'claude' || key === 'codex' ? 58 : 0, key);
+    assert.equal(skipped.size, key === 'claude' ? 58 : key === 'codex' ? 58 * HOOK_OWN_PREFIXES.length : 0, key);
     for (const mode of MODES) {
-      for (const label of skipped) assert.equal(reaches(matcher, label, mode), false, `${key}/${mode}: own ${JSON.stringify(label)} must be skipped`);
+      for (const label of skipped) assert.equal(checks(key, matcher, label, mode), false, `${key}/${mode}: own ${JSON.stringify(label)} must be skipped`);
       for (const probe of probes(key)) {
-        assert.equal(reaches(matcher, probe, mode), !skipped.has(probe), `${key}/${mode}: ${JSON.stringify(probe)}`);
+        assert.equal(checks(key, matcher, probe, mode), !skipped.has(probe), `${key}/${mode}: ${JSON.stringify(probe)}`);
       }
     }
   }
 });
+
+// Codex labels are not one-to-one: these server names give the label `mcp__marrow__<tool>` too, so
+// the hook (which sees only the label) skips their own-named tools. Measured on codex-cli 0.161.0:
+// a namespace ending in `_` (`marrow_`, and every server that sanitizes to it) cannot be called at
+// all ("unsupported call"), and `mcp__marrow` is callable and skipped when no `marrow` server is
+// configured (with one, Codex hashes both namespaces and the own tools are checked). An open
+// finding for @getmarrow/mcp (RESULT.md); pinned here so the list cannot grow unnoticed.
+const CODEX_KNOWN_COLLISIONS = new Set(['marrow_', 'marrow__', 'marrow-', 'marrow.', 'marrow ', 'marrow\u200b', 'mcp__marrow', 'mcp__marrow_', 'mcp__marrow__']);
 
 test('collisions: a label is skipped only when no (server, tool) pair but (marrow, an own name) can produce it', () => {
   const matchers = own.buildOwnToolMatchers();
@@ -211,12 +260,13 @@ test('collisions: a label is skipped only when no (server, tool) pair but (marro
       for (const server of servers) {
         for (const tool of tools) {
           for (const value of label(server, tool)) {
-            const skipped = !reaches(matchers[key], value, mode);
-            // Claude Code: only server `marrow` (the trust anchor) reaches `mcp__marrow__`; on it the
-            // tool part must be an own name after the host's own normalisation.
-            const allowed = key === 'claude' && server === 'marrow' && NAMES.includes(claudeIn(tool));
+            const skipped = !checks(key, matchers[key], value, mode);
+            // Claude Code and Codex: only server `marrow` (the trust anchor) reaches `mcp__marrow__`;
+            // on it the tool part must be an own name after the host's own normalisation.
+            const allowed = (key === 'claude' && server === 'marrow' && NAMES.includes(claudeIn(tool)))
+              || (key === 'codex' && (server === 'marrow' || CODEX_KNOWN_COLLISIONS.has(server)) && NAMES.includes(codexSanitize(tool).replace(/^_+/, '')));
             if (skipped) assert.equal(allowed, true, `${key}/${mode}: (${JSON.stringify(server)}, ${JSON.stringify(tool)}) -> ${JSON.stringify(value)} skipped`);
-            if (key === 'claude' && server === 'marrow' && NAMES.includes(tool)) assert.equal(skipped, true, `${key}/${mode}: own ${tool}`);
+            if ((key === 'claude' || key === 'codex') && server === 'marrow' && NAMES.includes(tool)) assert.equal(skipped, true, `${key}/${mode}: own ${tool}`);
           }
         }
       }
@@ -252,7 +302,7 @@ test('padded labels (LF, CR, CRLF, U+2028, U+2029, space, tab, NUL; before, afte
       const labels = [...FORMS[key]('marrow', name), ...SKIPPED[key](name), ...(key === 'gemini' ? [geminiLabel('marrow', name)] : [])];
       for (const label of new Set(labels)) {
         for (const value of padded(label)) {
-          for (const mode of MODES) assert.equal(reaches(matcher, value, mode), true, `${key}/${mode}: ${JSON.stringify(value)}`);
+          for (const mode of MODES) assert.equal(checks(key, matcher, value, mode), true, `${key}/${mode}: ${JSON.stringify(value)}`);
         }
       }
     }
@@ -264,14 +314,22 @@ test('no matcher is looser than 0.1.68 or the r1 candidate: whatever reached the
   for (const key of Object.keys(OLD)) {
     const sample = [...probes(key), ...NAMES.slice(0, 4).flatMap((name) => [...FORMS[key]('marrow', name), ...SKIPPED[key](name)]).flatMap(padded),
       'mcp__marrow__marrow_commit\n', 'MCP:marrow_commit\n', 'mcp_marrow_marrow_commit\n', 'mcp__evil__x\n'];
+    // What an older string would have checked had its host run it as written (Codex never did:
+    // it rejects every look-around string, see below), with the same hook behind it.
+    const before = (matcher, probe, mode) => reaches(matcher, probe, mode) && (key !== 'codex' || !hookSkips(probe));
     for (const mode of MODES) {
       for (const probe of sample) {
-        if (reaches(OLD[key], probe, mode)) assert.equal(reaches(now[key], probe, mode), true, `0.1.68 ${key}/${mode}: ${JSON.stringify(probe)}`);
-        if (reaches(R1[key], probe, mode)) assert.equal(reaches(now[key], probe, mode), true, `r1 ${key}/${mode}: ${JSON.stringify(probe)}`);
+        if (before(OLD[key], probe, mode)) assert.equal(checks(key, now[key], probe, mode), true, `0.1.68 ${key}/${mode}: ${JSON.stringify(probe)}`);
+        if (before(R1[key], probe, mode)) assert.equal(checks(key, now[key], probe, mode), true, `r1 ${key}/${mode}: ${JSON.stringify(probe)}`);
+        if (key === 'codex' && before(V0170_CODEX, probe, mode)) assert.equal(checks(key, now[key], probe, mode), true, `0.1.70 codex/${mode}: ${JSON.stringify(probe)}`);
       }
     }
+    if (key === 'codex') {
+      // On the real host the old Codex strings checked nothing at all.
+      for (const old of [OLD.codex, R1.codex, V0170_CODEX]) for (const probe of sample) assert.equal(codexSelects(old, probe), false, probe);
+    }
     // And labels that 0.1.68 and r1 skipped now reach the hook.
-    const opened = (base) => sample.filter((probe) => !reaches(base[key], probe, 'search') && reaches(now[key], probe, 'search'));
+    const opened = (base) => sample.filter((probe) => !before(base[key], probe, 'search') && checks(key, now[key], probe, 'search'));
     assert.ok(opened(OLD).length >= 5, `${key}: ${opened(OLD).length}`);
     assert.ok(opened(R1).length >= 5, `${key}: ${opened(R1).length}`);
   }
@@ -285,10 +343,13 @@ test('the named cases for the Claude Code / Codex matcher', () => {
         '\nmcp__marrow__marrow_commit', 'mcp__marrow__marrow_commit ',
         // No host sends `functions.mcp__…` today; it cannot prove the server, so it reaches the hook.
         'functions.mcp__marrow__marrow_workflow_gate']) {
-        assert.equal(reaches(matcher, tool, mode), true, `${key}/${mode}: ${JSON.stringify(tool)}`);
+        // Codex: the hook also skips the `functions.` form, which Codex never sends (see HOOK_OWN_PREFIXES).
+        if (key === 'codex' && tool.startsWith('functions.')) continue;
+        assert.equal(checks(key, matcher, tool, mode), true, `${key}/${mode}: ${JSON.stringify(tool)}`);
       }
-      assert.equal(reaches(matcher, 'mcp__marrow__marrow_commit', mode), false);
-      assert.equal(reaches(matcher, 'mcp__marrow__marrow_workflow', mode), false);
+      assert.equal(checks(key, matcher, 'mcp__marrow__marrow_commit', mode), false);
+      assert.equal(checks(key, matcher, 'mcp__marrow__marrow_workflow', mode), false);
+      if (key === 'codex') for (const tool of ['Bash', 'apply_patch', 'spawn_agent', 'web_search', 'update_plan']) assert.equal(checks(key, matcher, tool, mode), true, tool);
     }
   }
 });
@@ -507,7 +568,9 @@ test('an install written with the r1 candidate matchers: doctor reports it for r
     // Put the r1 strings where the current ones are (the longer Cursor string first: it contains the other).
     for (const relative of files) {
       let text = fs.readFileSync(wsPath(ws, relative), 'utf8');
-      for (const key of ['claude', 'codex', 'cursor', 'cursorPreToolUseHostApproval', 'gemini']) text = text.split(escaped(now[key])).join(escaped(R1[key]));
+      // Codex's `*` is replaced as the whole matcher value only (a bare `*` is in other strings too).
+      text = text.split(`"matcher": ${JSON.stringify(now.codex)}`).join(`"matcher": "${escaped(R1.codex)}"`);
+      for (const key of ['claude', 'cursor', 'cursorPreToolUseHostApproval', 'gemini']) text = text.split(escaped(now[key])).join(escaped(R1[key]));
       assert.ok(Object.values(R1).some((value) => text.includes(escaped(value))), relative);
       fs.writeFileSync(wsPath(ws, relative), text);
     }
@@ -526,6 +589,51 @@ test('an install written with the r1 candidate matchers: doctor reports it for r
     const again = installer.applyPlan(current, { yes: true, dryRun: false, doctor: false });
     assert.deepEqual(again.filter((change) => change.changed).map((change) => change.label), []);
     for (const host of HOSTS) assert.equal(installer.activationProfile(detection, current, again, host.client).observed_hooks.includes('pre_action'), true, host.client);
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('a 0.1.70 Codex install (look-ahead matcher, which Codex rejects): doctor flags it, repair rewrites only the Marrow groups, once', () => {
+  const ws = workspace('marrow-own-0170-codex-');
+  try {
+    load0168(ws);
+    let { detection, plan: current } = plan(ws);
+    installer.applyPlan(current, { yes: true, dryRun: false, doctor: false });
+    const codexFile = wsPath(ws, '.codex/hooks.json');
+    // The 0.1.70 layout: the Marrow tool groups carry the 0.1.70 string, next to an owner group.
+    const settings = readJson(codexFile);
+    for (const event of ['PreToolUse', 'PostToolUse']) {
+      for (const group of settings.hooks[event]) if (group.matcher === '*') group.matcher = V0170_CODEX;
+    }
+    settings.hooks.PreToolUse.unshift({ matcher: 'Bash', hooks: [{ type: 'command', command: 'owner-check.sh' }] });
+    fs.writeFileSync(codexFile, `${JSON.stringify(settings, null, 2)}\n`);
+    const owner = ownerGroupedHooks(readJson(codexFile));
+    const others = ['.claude/settings.json', '.cursor/hooks.json', '.gemini/settings.json', '.windsurf/hooks.json', '~/.grok/hooks/marrow.json'];
+    const otherBytes = Object.fromEntries(others.map((relative) => [relative, fs.readFileSync(wsPath(ws, relative), 'utf8')]));
+
+    ({ detection, plan: current } = plan(ws));
+    const dry = installer.applyPlan(current, { yes: false, dryRun: true, doctor: false });
+    assert.equal(installer.activationProfile(detection, current, dry, 'codex').observed_hooks.includes('pre_action'), false);
+    assert.equal(installer.activationProfile(detection, current, dry, 'codex').observed_hooks.includes('action_result'), false);
+    assert.deepEqual(dry.filter((change) => change.changed).map((change) => change.label), ['Codex native hooks']);
+
+    installer.applyPlan(current, { yes: true, dryRun: false, doctor: false });
+    const after = readJson(codexFile);
+    assert.equal(JSON.stringify(after).includes('(?!'), false, 'no look-around left');
+    for (const event of ['PreToolUse', 'PostToolUse']) {
+      const marrow = after.hooks[event].filter((group) => group.hooks.some((hook) => isMarrowCommand(hook.command)));
+      assert.deepEqual(marrow.map((group) => [group.matcher, group.hooks.length]), [['*', 1]], event);
+    }
+    assert.deepEqual(ownerGroupedHooks(after), owner, 'owner groups untouched');
+    for (const relative of others) assert.equal(fs.readFileSync(wsPath(ws, relative), 'utf8'), otherBytes[relative], `${relative} byte-unchanged`);
+
+    ({ detection, plan: current } = plan(ws));
+    const again = installer.applyPlan(current, { yes: true, dryRun: false, doctor: false });
+    assert.deepEqual(again.filter((change) => change.changed).map((change) => change.label), []);
+    assert.deepEqual(readJson(codexFile), after, 'second run writes nothing');
+    const profile = installer.activationProfile(detection, current, again, 'codex');
+    assert.equal(profile.observed_hooks.includes('pre_action') && profile.observed_hooks.includes('action_result'), true);
   } finally {
     ws.cleanup();
   }
