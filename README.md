@@ -103,15 +103,23 @@ Persistent controller lifecycle is currently Linux-only. On macOS or Windows, ac
 
 The controller is not a boot service. After a host restart, or any exit that skips its shutdown handler, doctor reports it as `stale` until the next install, update, or `controller ensure`. Local control can be inspected and changed with `npx @getmarrow/install control status|disable --yes|enable`. While local control is disabled, the controller is not started, and doctor reports a stopped or stale controller as not required instead of recommending `controller ensure`; missing state means enabled, and an explicit owner disable is preserved. Unsafe controller state or an unverified or unresponsive controller process keeps its exact fix.
 
-## What's New in v0.1.69
+## Key handling at install
 
-v0.1.69 installs MCP `3.9.101`. In short (the full entry is in the [CHANGELOG](https://github.com/getmarrow/marrow-install/blob/master/CHANGELOG.md)):
+These behaviors shipped in v0.1.69 and still apply.
 
-- **No key, no half install.** With no API key, `activate` and every `--yes` run now stop, write nothing and print how to get a key. Before, they wrote hooks that blocked every commit.
-- **A blank key no longer hides a saved one.** An empty `MARROW_API_KEY` value no longer hides a valid key saved in `~/.marrow/env`.
+- **No key, no half install.** With no API key, `activate` and every `--yes` run stop, write nothing and print how to get a key.
+- **A blank key does not hide a saved one.** An empty `MARROW_API_KEY` value does not hide a valid key saved in `~/.marrow/env`.
 - **`MARROW_KEY` works on its own.** It is used when `MARROW_API_KEY` is absent.
-- **Key-file steps.** They now include `chmod 700 ~/.marrow` as well as `chmod 600 ~/.marrow/env`. See [Get started](#get-started).
-- **MCP 3.9.101.** The installer pins MCP `3.9.101`.
+- **Key-file steps.** They include `chmod 700 ~/.marrow` as well as `chmod 600 ~/.marrow/env`. See [Get started](#get-started).
+
+## What's New in v0.1.70
+
+v0.1.70 installs MCP `3.9.102`. In short (the full entry is in the [CHANGELOG](https://github.com/getmarrow/marrow-install/blob/master/CHANGELOG.md)):
+
+- **Own-tool names are exact.** Hook matchers and the Cursor guard skip the gate only for Marrow's registered tools on server `marrow`, by exact name. Look-alike servers or names go through the gate. Re-run `update` to refresh hooks written with the old matcher. See [Hooks the installer writes](#hooks-the-installer-writes).
+- **Hooks run only the verified local MCP runtime.** They no longer start `npx`; when the runtime is missing, they heal it from the pinned, integrity-checked package, and hold if they cannot. When npm or the network is down, pre-action hooks warn and let the action run; an integrity mismatch or any other failure holds. See [Local MCP runtime](#local-mcp-runtime).
+- **Fallback npm install protects your npm login.** It sends npm auth only when the network settings come from your own npm config, and installs exactly the pinned MCP and SDK.
+- **MCP 3.9.102.** A cloned project's `.env` can no longer point the MCP server at another account or server.
 
 Earlier release notes are in the [CHANGELOG](https://github.com/getmarrow/marrow-install/blob/master/CHANGELOG.md).
 
@@ -267,7 +275,7 @@ Never connect an agent to the email inbox that receives Marrow approval mail. An
 
 ### Hooks the installer writes
 
-These hooks are written with MCP `3.9.99` and later (`MCP_HOST_APPROVAL_HOOKS_SINCE` in `src/pins.js`). v0.1.69 installs MCP `3.9.101`, so `install` and `update` write them; with an older MCP the earlier layout stays. `update` also uses a registry-verified MCP at or above that version.
+These hooks are written with MCP `3.9.99` and later (`MCP_HOST_APPROVAL_HOOKS_SINCE` in `src/pins.js`). v0.1.70 installs MCP `3.9.102`, so `install` and `update` write them; with an older MCP the earlier layout stays. `update` also uses a registry-verified MCP at or above that version.
 
 | Host | Hooks for approvals | How the operator answers |
 | --- | --- | --- |

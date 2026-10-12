@@ -2,6 +2,15 @@
 
 Release notes for `@getmarrow/install`, newest first. The README describes only the current version.
 
+## v0.1.70
+
+v0.1.70 installs MCP `3.9.102` (source `3a2bf85e22b6b9f7e266383ed2011b1c10ca5f97`, packed integrity `sha512-hTs4jTJmySLk8hHgsGIZksMo9+eO5kjQmU1EJyDX8Qqm9Z+V+yDkauop19roasVvOAFsK3dJjqLoIh7gRhoXJQ==`). SDK is `3.7.65`. Update once, restart the owning harness, review hook trust and run `doctor --self-test`.
+
+- **Own-tool names are exact.** Hook matchers and the Cursor guard skip the pre-action gate only for Marrow's registered tools on server `marrow`, by exact name. Look-alike servers, other case, extra spaces or suffixes go through the gate.
+- **Hooks run only the verified local MCP runtime.** They never start `npx`. With no verified copy, the hook heals it from the pinned, integrity-checked package; if that cannot finish because of an outage (no npm, npm failed, the wait ran out), pre-action hooks warn and let the action run. An integrity mismatch and every other failure hold.
+- **Fallback npm install keeps your npm login private.** It sends npm auth only when network settings come from the owner's own npm config, refuses owner registry URLs that could carry a credential, and installs exactly the pinned MCP and SDK. Outage records are per project.
+- **MCP 3.9.102.** A project's `.env` cannot supply `MARROW_*` settings, so a cloned project cannot redirect the MCP server.
+
 ## v0.1.69
 
 v0.1.69 installs MCP `3.9.101` (source `53a63889f94712a81c18afe00393ad4f16cde72b`). SDK is `3.7.65`. Update once, restart the owning harness, review hook trust and run `doctor --self-test`.
