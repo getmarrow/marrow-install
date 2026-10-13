@@ -914,6 +914,9 @@ function parseArgs(argv, env = process.env) {
       options.repair = true;
       options.yes = true;
       options.update = true;
+      // `update` refreshes what Marrow already configured; `repair` restores every managed
+      // surface as before (a repair word anywhere wins).
+      options.updateOnly = (arg === 'update' || arg === '--update') && options.updateOnly !== false;
     }
     else if (arg === '--dry-run') {
       explicitOperation = true;
@@ -951,7 +954,13 @@ function parseArgs(argv, env = process.env) {
       options.keyFromArg = true;
     }
     else if (arg === '--base-url') options.baseUrl = optionValue() || options.baseUrl;
-    else if (arg === '--agent-id') options.agentId = optionValue() || options.agentId;
+    else if (arg === '--agent-id') {
+      const value = optionValue();
+      if (value) {
+        options.agentId = value;
+        options.agentIdFromArg = true;
+      }
+    }
     else if (arg === '--mcp') {
       explicitOperation = true;
       options.mode = 'mcp';
@@ -2542,24 +2551,20 @@ function identityAllowlist(env = process.env) {
 }
 
 // The agent id each write run applied to each managed MCP config, keyed by the file's realpath.
-// It is read only from an owner-only regular file in an owner-only ~/.marrow; anything else
-// counts as no record. Base URLs are never recorded: they are kept only as before (configured
-// or allowlisted), because a redirected base URL sends the key elsewhere.
+// Base URLs are never recorded: they are kept only as before (configured or allowlisted),
+// because a redirected base URL sends the key elsewhere. The record is 'absent' only when
+// ~/.marrow or the record file does not exist; a record that exists but is not an owner-only,
+// single-link regular file of the expected shape in an owner-only ~/.marrow is 'invalid'. An
+// invalid record keeps nothing (identities reset as before), opens no migration, and is never
+// written over.
 const IDENTITY_RECORD_FILE = 'identity-record.json';
 const IDENTITY_RECORD_MAX_BYTES = 64 * 1024;
+const IDENTITY_RECORD_INVALID_LINE = 'identity record ~/.marrow/identity-record.json is unsafe or unreadable (it must be an owner-only file in an owner-only ~/.marrow); ignored: agent ids were reset as before';
+const UPDATE_SKIPPED_FIX = 'run npx -y @getmarrow/install@latest --repair to add or restore it';
 
 function ownerOnly(stat, mask) {
   const uid = typeof process.getuid === 'function' ? process.getuid() : null;
   return (uid === null || stat.uid === uid) && (stat.mode & mask) === 0;
-}
-
-function identityRecordDirectorySafe(directory) {
-  try {
-    const stat = fs.lstatSync(directory);
-    return stat.isDirectory() && !stat.isSymbolicLink() && ownerOnly(stat, 0o022);
-  } catch {
-    return false;
-  }
 }
 
 function identityRecordPath(home) {
@@ -2567,31 +2572,41 @@ function identityRecordPath(home) {
 }
 
 function readIdentityRecord(home) {
-  const empty = { entries: {}, text: null };
-  if (!home) return empty;
+  const absent = { state: 'absent', entries: {}, text: null };
+  const invalid = { state: 'invalid', entries: {}, text: null };
+  if (!home) return invalid;
   const filePath = identityRecordPath(home);
-  if (!identityRecordDirectorySafe(path.dirname(filePath))) return empty;
+  try {
+    const directory = fs.lstatSync(path.dirname(filePath));
+    if (!directory.isDirectory() || !ownerOnly(directory, 0o022)) return invalid;
+  } catch (error) {
+    return error?.code === 'ENOENT' ? absent : invalid;
+  }
   let descriptor = -1;
   try {
     descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+  } catch (error) {
+    return error?.code === 'ENOENT' ? absent : invalid;
+  }
+  try {
     const stat = fs.fstatSync(descriptor);
-    if (!stat.isFile() || !ownerOnly(stat, 0o077) || stat.size > IDENTITY_RECORD_MAX_BYTES) return empty;
+    if (!stat.isFile() || stat.nlink !== 1 || !ownerOnly(stat, 0o077) || stat.size > IDENTITY_RECORD_MAX_BYTES) return invalid;
     const text = fs.readFileSync(descriptor, 'utf8');
     const parsed = JSON.parse(text);
-    const entries = parsed && parsed.version === 1 && parsed.entries && typeof parsed.entries === 'object'
-      && !Array.isArray(parsed.entries) ? parsed.entries : {};
-    const valid = {};
-    for (const [key, entry] of Object.entries(entries)) {
-      if (!path.isAbsolute(key) || !entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
-      valid[key] = typeof entry.MARROW_FLEET_AGENT_ID === 'string' && AGENT_ID_RE.test(entry.MARROW_FLEET_AGENT_ID)
-        ? { MARROW_FLEET_AGENT_ID: entry.MARROW_FLEET_AGENT_ID }
-        : {};
+    if (!parsed || parsed.version !== 1 || !parsed.entries || typeof parsed.entries !== 'object'
+      || Array.isArray(parsed.entries)) return invalid;
+    const entries = {};
+    for (const [key, entry] of Object.entries(parsed.entries)) {
+      if (!path.isAbsolute(key) || !entry || typeof entry !== 'object' || Array.isArray(entry)) return invalid;
+      const agentId = entry.MARROW_FLEET_AGENT_ID;
+      if (agentId !== undefined && (typeof agentId !== 'string' || !AGENT_ID_RE.test(agentId))) return invalid;
+      entries[key] = agentId === undefined ? {} : { MARROW_FLEET_AGENT_ID: agentId };
     }
-    return { entries: valid, text };
+    return { state: 'valid', entries, text };
   } catch {
-    return empty;
+    return invalid;
   } finally {
-    if (descriptor >= 0) fs.closeSync(descriptor);
+    fs.closeSync(descriptor);
   }
 }
 
@@ -2611,24 +2626,19 @@ function identityRecordKey(filePath) {
 function writeIdentityRecord(home, updates) {
   const filePath = identityRecordPath(home);
   const directory = path.dirname(filePath);
-  if (!exists(directory)) fs.mkdirSync(directory, { mode: 0o700 });
-  if (!identityRecordDirectorySafe(directory)) return false;
-  // Never replace a record we would not read (a link, another owner's file, a shared mode).
-  let stat = null;
-  try {
-    stat = fs.lstatSync(filePath);
-  } catch (error) {
-    if (error?.code !== 'ENOENT') return false;
-  }
-  if (stat && (stat.isSymbolicLink() || !stat.isFile() || !ownerOnly(stat, 0o077))) return false;
-  // Rewritten from what was read and validated, so nothing else in an older file survives; a
-  // record that already holds exactly these bytes is left alone (a second run writes nothing).
+  // An invalid record is never written over or through: it stays, and keeps nothing.
   const record = readIdentityRecord(home);
+  if (record.state === 'invalid') return false;
+  if (!exists(directory)) fs.mkdirSync(directory, { mode: 0o700 });
+  const folder = fs.lstatSync(directory);
+  if (!folder.isDirectory() || !ownerOnly(folder, 0o022)) return false;
+  // Rewritten from what was read and validated; a record that already holds exactly these bytes
+  // is left alone (a second run writes nothing).
   for (const [key, applied] of Object.entries(updates)) {
     record.entries[key] = applied && AGENT_ID_RE.test(applied) ? { MARROW_FLEET_AGENT_ID: applied } : {};
   }
   const text = `${JSON.stringify({ version: 1, entries: record.entries }, null, 2)}\n`;
-  if (stat && record.text === text) return true;
+  if (record.state === 'valid' && record.text === text) return true;
   const tempPath = path.join(directory, `.${IDENTITY_RECORD_FILE}.${process.pid}-${crypto.randomBytes(6).toString('hex')}`);
   let descriptor = -1;
   try {
@@ -2645,10 +2655,13 @@ function writeIdentityRecord(home, updates) {
   return true;
 }
 
-// Installs made before identities were recorded keep an agent id only when the file could
-// only have been set by the owner: a plain owner-only home config (no linked folder or file on
-// the way to it) outside any git work tree, one MARROW_FLEET_AGENT_ID key and a well-formed id.
-// Anything uncertain is reset as before.
+// Installs made before identities were recorded (no record file at all) keep an agent id only
+// when the file could only have been set by the owner: a plain owner-only home config (no linked
+// folder, symlink or hard link on the way to it) outside any git work tree, one
+// MARROW_FLEET_AGENT_ID key and a well-formed id that is not an installer-derived
+// <client>-<hash>. Anything uncertain is reset as before.
+const DERIVED_AGENT_ID_RE = new RegExp(`^(?:${[...SOURCE_CLIENTS].join('|')})-[0-9a-f]{12}$`);
+
 function gitTracksFile(filePath) {
   const directory = path.dirname(filePath);
   if (!findUp(directory, ['.git'], 64)) return false;
@@ -2665,6 +2678,7 @@ function gitTracksFile(filePath) {
 
 function preRecordAgentIdEligible(filePath, rawValue, { homeScope, home }) {
   if (!homeScope || !home || typeof rawValue !== 'string' || !AGENT_ID_RE.test(rawValue)) return false;
+  if (DERIVED_AGENT_ID_RE.test(rawValue)) return false;
   let realPath;
   try {
     const relative = path.relative(path.resolve(home), path.resolve(filePath));
@@ -2672,7 +2686,7 @@ function preRecordAgentIdEligible(filePath, rawValue, { homeScope, home }) {
     realPath = fs.realpathSync(filePath);
     if (realPath !== path.join(fs.realpathSync(home), relative)) return false;
     const stat = fs.lstatSync(realPath);
-    if (!stat.isFile() || stat.isSymbolicLink() || !ownerOnly(stat, 0o022)) return false;
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || !ownerOnly(stat, 0o022)) return false;
     const raw = fs.readFileSync(realPath, 'utf8');
     if (raw.includes('\\u') || raw.split('"MARROW_FLEET_AGENT_ID"').length !== 2) return false;
   } catch {
@@ -2692,9 +2706,13 @@ function upsertMcpServerConfig(filePath, options = {}) {
   const allowlist = options.allowlist || identityAllowlist();
   const report = typeof options.onDivergence === 'function' ? options.onDivergence : () => {};
   const reportKept = typeof options.onKept === 'function' ? options.onKept : () => {};
-  // Update and repair only: the identity this installer recorded for this exact file, or (with
-  // no record for it yet) an owner-set agent id that passes preRecordAgentIdEligible.
-  const recorded = options.identityRecord?.entries?.[identityRecordKey(filePath)] || null;
+  // Update, repair and doctor only: the id this installer recorded for this exact file in a valid
+  // record, or (with no record file at all) an owner-set id that passes preRecordAgentIdEligible.
+  // An explicit --agent-id is the operator's choice and replaces either.
+  const recordState = options.identityRecord?.state;
+  const recorded = recordState === 'valid' ? options.identityRecord.entries[identityRecordKey(filePath)] || null : null;
+  if (recordState === 'invalid' && typeof options.onRecordInvalid === 'function') options.onRecordInvalid();
+  const explicit = options.explicitAgentId === true;
   const config = parseJsonObject(filePath);
   const servers = config.mcpServers && typeof config.mcpServers === 'object' && !Array.isArray(config.mcpServers)
     ? config.mcpServers
@@ -2728,10 +2746,10 @@ function upsertMcpServerConfig(filePath, options = {}) {
       keptAgentId = existingAgentId;
       recordAgentId = recorded?.MARROW_FLEET_AGENT_ID === existingAgentId ? existingAgentId : '';
     }
-    else if (options.identityRecord && recorded?.MARROW_FLEET_AGENT_ID === existingAgentId) {
+    else if (!explicit && recordState === 'valid' && recorded?.MARROW_FLEET_AGENT_ID === existingAgentId) {
       keptAgentId = existingAgentId;
       reportKept({ field: 'MARROW_FLEET_AGENT_ID', value: existingAgentId, reason: 'recorded' });
-    } else if (options.identityRecord && !recorded && options.preRecordScope
+    } else if (!explicit && recordState === 'absent' && options.preRecordScope
       && preRecordAgentIdEligible(filePath, existingEnv.MARROW_FLEET_AGENT_ID, options.preRecordScope)) {
       keptAgentId = existingAgentId;
       reportKept({ field: 'MARROW_FLEET_AGENT_ID', value: existingAgentId, reason: 'pre_record' });
@@ -2740,6 +2758,7 @@ function upsertMcpServerConfig(filePath, options = {}) {
         field: 'MARROW_FLEET_AGENT_ID',
         replaced: safeIdentityValue('MARROW_FLEET_AGENT_ID', existingAgentId),
         applied: agentId ? safeIdentityValue('MARROW_FLEET_AGENT_ID', agentId) : 'unset (resolved by Marrow)',
+        ...(explicit && options.identityRecord ? { via: '--agent-id' } : {}),
       });
     }
   }
@@ -3065,12 +3084,14 @@ function buildPlan(detection, options) {
       homeScope: identityRecordKey(detection.root) === identityRecordKey(detection.home),
       home: detection.home,
     };
+    mcpConfigOptions.explicitAgentId = options.agentIdFromArg === true && Boolean(agentId);
   }
   const mcpConfigWrite = (filePath, label) => {
     const write = { type: 'json-transform', path: filePath, label, identityDivergence: [], identityKept: [] };
     write.transform = (target) => {
       write.identityDivergence = [];
       write.identityKept = [];
+      write.identityRecordInvalid = false;
       return retarget(upsertMcpServerConfig(target, {
         ...mcpConfigOptions,
         mcpVersion: mcpTargetVersion,
@@ -3078,6 +3099,7 @@ function buildPlan(detection, options) {
         hookPlatform,
         onDivergence: (divergence) => write.identityDivergence.push(divergence),
         onKept: (kept) => write.identityKept.push(kept),
+        onRecordInvalid: () => { write.identityRecordInvalid = true; },
         onApplied: (agentId) => { write.appliedAgentId = agentId; },
       }));
     };
@@ -3172,7 +3194,7 @@ function buildPlan(detection, options) {
         root: detection.home,
         label: 'Grok native hooks',
         isManaged: managedGrokHooksFile,
-        conflict_fix: 'Preserve or move the unmanaged owner Grok hook file after owner review, then rerun npx @getmarrow/install update.',
+        conflict_fix: 'Preserve or move the unmanaged owner Grok hook file after owner review, then rerun npx @getmarrow/install --repair.',
         transform: (filePath) => localize(retarget(upsertGrokHooks(filePath)), filePath),
       });
     }
@@ -3223,18 +3245,23 @@ function buildPlan(detection, options) {
     });
   }
 
+  const updateOnly = update && options.updateOnly === true;
+  const planned = updateOnly ? updateWrites(writes, detection, options) : writes;
+  const skipped = writes.filter((write) => !planned.includes(write)).map((write) => ({ label: write.label, path: write.path }));
   return {
     mode,
     root: detection.root,
-    writes: update ? updateWrites(writes, detection, options) : writes,
+    writes: planned,
+    ...(skipped.length ? { update_skipped: skipped } : {}),
     mcp_target_version: mcpTargetVersion,
     host_approval_hooks: hostApprovals,
     ...(options.maintenance !== true ? { identityRecordHome: detection.home } : {}),
   };
 }
 
-// Update refreshes what Marrow already configured: no host gets its first Marrow file, and an
-// AGENTS.md without Marrow's block gets none (an explicit --md or --both still may).
+// The word `update` refreshes what Marrow already configured: no host gets its first Marrow file,
+// and an AGENTS.md without Marrow's block gets none (an explicit --md or --both still may). What
+// it leaves alone is reported; `repair` (and install/activate) still write it, as before.
 function updateWrites(writes, detection, options) {
   const { paths } = detection;
   const hosts = [
@@ -3462,6 +3489,7 @@ function applyPlan(plan, options) {
       ...(undo && contentChanged ? { undo } : {}),
       ...(write.identityDivergence?.length && changed ? { identity_divergence: write.identityDivergence } : {}),
       ...(write.identityKept?.length ? { identity_kept: write.identityKept } : {}),
+      ...(write.identityRecordInvalid ? { identity_record_invalid: true } : {}),
       ...(changed ? { change_class: changeClass(write, fileExists, before, after) } : {}),
     });
     if (write.appliedAgentId !== undefined && writeApplied && !hookConflict) {
@@ -3489,6 +3517,7 @@ function applyPlan(plan, options) {
 function changeClass(write, fileExists, before, after) {
   if (!fileExists) return 'new file';
   if (write.type === 'md-block') return 'managed block only';
+  if (write.identityDivergence?.length) return 'identity reset + managed entries';
   const unpinned = (text) => String(text).replace(/sha512-[A-Za-z0-9+/=]+/g, '').replace(/\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?/g, '');
   return unpinned(before) === unpinned(after) ? 'pin only' : 'managed entries';
 }
@@ -4469,9 +4498,11 @@ function printReport(report, sink) {
   }
 
   // Identity decisions come first: a reset changes who the agent is to Marrow.
-  const identityChanges = report.changes.filter((change) => change.identity_kept?.length || (change.changed && change.identity_divergence?.length));
+  const identityChanges = report.changes.filter((change) => change.identity_kept?.length || change.identity_record_invalid
+    || (change.changed && change.identity_divergence?.length));
   if (identityChanges.length) {
     out('\nIdentity:\n');
+    if (identityChanges.some((change) => change.identity_record_invalid)) out(`- ${IDENTITY_RECORD_INVALID_LINE}\n`);
     for (const change of identityChanges) {
       for (const kept of change.identity_kept || []) {
         out(kept.reason === 'pre_record'
@@ -4479,7 +4510,7 @@ function printReport(report, sink) {
           : `- kept ${kept.field} ${kept.value} (recorded by this installer) in ${change.path}\n`);
       }
       for (const divergence of change.identity_divergence || []) {
-        out(`- reset ${divergence.field} ${divergence.replaced} -> ${divergence.applied} in ${change.path}\n`);
+        out(`- reset ${divergence.field} ${divergence.replaced} -> ${divergence.applied} in ${change.path}${divergence.via ? ` (${divergence.via})` : ''}\n`);
       }
     }
   }
@@ -4501,6 +4532,9 @@ function printReport(report, sink) {
     for (const divergence of change.identity_divergence || []) {
       out(`  identity reset: ${divergence.field} ${divergence.replaced} -> ${divergence.applied}. If the previous value was intended, add it to ${divergence.field === 'MARROW_BASE_URL' ? 'MARROW_ALLOWED_BASE_URLS' : 'MARROW_ALLOWED_AGENT_IDS'} and rerun.\n`);
     }
+  }
+  for (const skipped of report.update_skipped || []) {
+    out(`- left alone by update: ${skipped.label} (${skipped.path}) has no Marrow config; ${UPDATE_SKIPPED_FIX}\n`);
   }
 
   if (report.mcp_runtime) {
@@ -5167,6 +5201,7 @@ async function install(options) {
     hermes,
     mcp_runtime: mcpRuntimeReport(mcpRuntime, { legacyNpxHooks: legacyNpxHookFiles(detection), switchIgnored: options.localRuntimeSwitchIgnored === true }),
     changes,
+    ...(plan.update_skipped ? { update_skipped: plan.update_skipped } : {}),
     doctor: {
       active: Boolean(!selfTest.skipped && selfTest.active),
       missingEnv: options.apiKey ? [] : ['MARROW_API_KEY'],
@@ -5301,10 +5336,16 @@ function installSummaryLines(report, options) {
   } else if (hermes.owner_key_storage?.state === 'different_key_present') {
     lines.push('Note: ~/.marrow/env already holds a different Marrow key; the Hermes MCP server will use that one.');
   }
+  if ((report.changes || []).some((change) => change.identity_record_invalid)) lines.push(`Note: ${IDENTITY_RECORD_INVALID_LINE}.`);
   for (const change of report.changes || []) {
     for (const kept of change.identity_kept || []) {
-      if (kept.reason === 'pre_record') lines.push(`Kept agent identity ${kept.value} (set before this installer recorded identities) in ${change.path}.`);
+      lines.push(kept.reason === 'pre_record'
+        ? `Kept agent identity ${kept.value} (set before this installer recorded identities) in ${change.path}.`
+        : `Kept agent identity ${kept.value} (recorded by this installer) in ${change.path}.`);
     }
+  }
+  if (report.update_skipped?.length) {
+    lines.push(`Update left ${report.update_skipped.length} file(s) alone that have no Marrow config (${report.update_skipped.map((skipped) => skipped.label).join(', ')}); ${UPDATE_SKIPPED_FIX}.`);
   }
   const divergences = (report.changes || []).flatMap((change) => (change.identity_divergence || []).map((divergence) => ({ ...divergence, path: change.path })));
   if (divergences.length) {

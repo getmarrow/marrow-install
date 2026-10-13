@@ -13,6 +13,7 @@ const {
   detectEnvironment,
   install,
   installSummaryLines,
+  parseArgs,
   printReport,
 } = require('../src/installer');
 const PINS = require('../src/pins');
@@ -387,7 +388,7 @@ test('update keeps owner files: only the Marrow block of AGENTS.md changes, owne
     const tail = '\n\n## After the block\nMore owner text.\n';
     fs.writeFileSync(agentsMd, `${head}<!-- marrow:passive-start -->\nold @getmarrow/mcp@${OLD_PIN}\n<!-- marrow:passive-end -->${tail}`);
     fs.mkdirSync(path.join(home, '.cursor'));
-    run(home, home, { mode: 'auto' });
+    const updated = run(home, home, { mode: 'auto', updateOnly: true });
     const after = fs.readFileSync(agentsMd, 'utf8');
     assert.ok(after.startsWith(`${head}<!-- marrow:passive-start -->`), 'owner bytes before the block are identical');
     assert.ok(after.endsWith(`<!-- marrow:passive-end -->${tail}`), 'owner bytes after the block are identical');
@@ -395,10 +396,15 @@ test('update keeps owner files: only the Marrow block of AGENTS.md changes, owne
     for (const file of ['mcp.json', 'hooks.json', path.join('rules', 'marrow.mdc')]) {
       assert.equal(fs.existsSync(path.join(home, '.cursor', file)), false, `update created .cursor/${file}`);
     }
+    // What update leaves alone is named, with the command that writes it.
+    const skippedLabels = updated.plan.update_skipped.map((skipped) => skipped.label);
+    for (const label of ['Cursor MCP server config', 'Cursor Marrow rule', 'Cursor native hooks']) {
+      assert.ok(skippedLabels.includes(label), `update names ${label} as left alone`);
+    }
 
     const ownerOnly = `${head}No Marrow here.\n`;
     fs.writeFileSync(agentsMd, ownerOnly);
-    const { changes } = run(home, home, { mode: 'auto' });
+    const { changes } = run(home, home, { mode: 'auto', updateOnly: true });
     assert.equal(fs.readFileSync(agentsMd, 'utf8'), ownerOnly);
     assert.equal(changes.some((change) => change.path === agentsMd), false);
 
@@ -444,7 +450,7 @@ test('ops-host layout: dry-run and real update keep cliff, write no Cursor file,
     const ownerPrefix = agentsBefore.slice(0, agentsBefore.indexOf('<!-- marrow:passive-start -->'));
 
     const before = hashes();
-    const dry = await install(options({ agentId: 'codex-bob', update: true, repair: true, dryRun: true }));
+    const dry = await install(options({ agentId: 'codex-bob', update: true, repair: true, updateOnly: true, dryRun: true }));
     assert.deepEqual(hashes(), before, 'a dry run writes nothing');
     const dryText = [];
     printReport(dry, (text) => dryText.push(text));
@@ -454,7 +460,7 @@ test('ops-host layout: dry-run and real update keep cliff, write no Cursor file,
     assert.ok(printed.indexOf('Identity:') < printed.indexOf('Planned changes:'));
     assert.equal(dry.changes.some((change) => change.path.includes(`${path.sep}.cursor${path.sep}`)), false);
 
-    const real = await install(options({ agentId: 'codex-bob', update: true, repair: true }));
+    const real = await install(options({ agentId: 'codex-bob', update: true, repair: true, updateOnly: true }));
     const after = hashes();
     const mcp = JSON.parse(fs.readFileSync(path.join(home, '.mcp.json'), 'utf8')).mcpServers.marrow.env;
     assert.equal(mcp.MARROW_FLEET_AGENT_ID, 'cliff');
@@ -472,6 +478,279 @@ test('ops-host layout: dry-run and real update keep cliff, write no Cursor file,
     if (process.env.IDENTITY_EVIDENCE_OUT) {
       fs.writeFileSync(process.env.IDENTITY_EVIDENCE_OUT, `${['| file | before | after | class |', '|---|---|---|---|', ...table].join('\n')}\n\nDRY RUN:\n${printed}\nREAL RUN:\n${realText.join('')}`);
     }
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Patch round 1 (audit 647f330a F1-F7). Fake homes only; installs run in-process with the
+// self-test, controller and network off and no key.
+
+function hostLayout(home, hosts = {}) {
+  fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+  fs.mkdirSync(path.join(home, '.grok', 'hooks'), { recursive: true });
+  if (hosts.codex) {
+    fs.mkdirSync(path.join(home, '.codex'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.codex', 'config.toml'), '# owner\n');
+  }
+  for (const name of ['cursor', 'gemini', 'windsurf']) if (hosts[name]) fs.mkdirSync(path.join(home, `.${name}`), { recursive: true });
+  if (hosts.cline) fs.mkdirSync(path.join(home, '.clinerules'), { recursive: true });
+  fs.writeFileSync(path.join(home, 'AGENTS.md'), '# Fleet process\n\nOwner text.\n');
+}
+
+function installOptions(home, extra = {}) {
+  return {
+    cwd: home, home, mode: 'auto', yes: true, dryRun: false, doctor: false, selfTest: false, loopGuardSelfTest: false,
+    controller: false, apiKey: '', baseUrl: DEFAULT_URL, mcpLocalRuntime: false, mcpRegistryMetadata: null,
+    processCommands: [], mcpConfigPaths: [], identityAllowlist: NO_ALLOWLIST, ...extra,
+  };
+}
+
+async function installHome(home, extra = {}) {
+  const report = await install(installOptions(home, extra));
+  const lines = [];
+  printReport(report, (text) => lines.push(text));
+  return { report, printed: lines.join(''), summary: installSummaryLines(report, installOptions(home, extra)).lines };
+}
+
+const homeMcp = (home) => path.join(home, '.mcp.json');
+const homeMcpId = (home) => JSON.parse(fs.readFileSync(homeMcp(home), 'utf8')).mcpServers.marrow.env.MARROW_FLEET_AGENT_ID;
+function setHomeMcpId(home, id) {
+  const config = JSON.parse(fs.readFileSync(homeMcp(home), 'utf8'));
+  config.mcpServers.marrow.env.MARROW_FLEET_AGENT_ID = id;
+  fs.writeFileSync(homeMcp(home), `${JSON.stringify(config, null, 2)}\n`);
+}
+function readRecordBytes(home) {
+  try {
+    return fs.readFileSync(recordPath(home));
+  } catch {
+    return null;
+  }
+}
+
+test('F1: on the home config, a record that exists but is unsafe, unreadable or lacks the entry keeps nothing and opens no migration', async () => {
+  const cases = [
+    ['entry removed (A03)', (home) => fs.writeFileSync(recordPath(home), JSON.stringify({ version: 1, entries: {} }), { mode: 0o600 }), false],
+    ['record 0644 (A04)', (home) => fs.chmodSync(recordPath(home), 0o644), true],
+    ['record is a symlink (A05)', (home) => {
+      const other = path.join(home, 'elsewhere.json');
+      fs.writeFileSync(other, JSON.stringify({ version: 1, entries: { [homeMcp(home)]: { MARROW_FLEET_AGENT_ID: 'devon' } } }), { mode: 0o600 });
+      fs.rmSync(recordPath(home));
+      fs.symlinkSync(other, recordPath(home));
+    }, true],
+    ['record is a hard link (A07)', (home) => {
+      const other = path.join(home, 'linked-record.json');
+      fs.writeFileSync(other, JSON.stringify({ version: 1, entries: { [homeMcp(home)]: { MARROW_FLEET_AGENT_ID: 'devon' } } }), { mode: 0o600 });
+      fs.rmSync(recordPath(home));
+      fs.linkSync(other, recordPath(home));
+    }, true],
+    ['~/.marrow 0775 (A08)', (home) => fs.chmodSync(path.join(home, '.marrow'), 0o775), true],
+    ['bad JSON (A09)', (home) => fs.writeFileSync(recordPath(home), '{not json'), true],
+    ['over 64 KiB (A10)', (home) => fs.writeFileSync(recordPath(home), JSON.stringify({ version: 1, entries: { [homeMcp(home)]: { MARROW_FLEET_AGENT_ID: 'cliff' } }, pad: 'x'.repeat(70000) })), true],
+    ['unreadable (mode 0000)', (home) => fs.chmodSync(recordPath(home), 0o000), true],
+    ['wrong version', (home) => fs.writeFileSync(recordPath(home), JSON.stringify({ version: 2, entries: {} })), true],
+    ['malformed id in an entry', (home) => fs.writeFileSync(recordPath(home), JSON.stringify({ version: 1, entries: { [homeMcp(home)]: { MARROW_FLEET_AGENT_ID: 'de von' } } })), true],
+    ['record copied from another home (C03)', (home) => {
+      fs.writeFileSync(recordPath(home), JSON.stringify({ version: 1, entries: { '/home/other/.mcp.json': { MARROW_FLEET_AGENT_ID: 'cliff' } } }), { mode: 0o600 });
+    }, false],
+  ];
+  for (const [name, tamper, invalid] of cases) {
+    const home = tempDir('marrow-f1-');
+    try {
+      hostLayout(home);
+      await installHome(home, { agentId: 'cliff' });
+      assert.equal(readRecord(home)[homeMcp(home)].MARROW_FLEET_AGENT_ID, 'cliff', `${name}: fixture recorded cliff`);
+      setHomeMcpId(home, 'devon');
+      tamper(home);
+      const before = readRecordBytes(home);
+      for (const round of [1, 2]) {
+        const { report, printed, summary } = await installHome(home, { agentId: 'codex-bob', update: true, repair: true, updateOnly: true });
+        assert.equal(homeMcpId(home), 'codex-bob', `${name} round ${round}: reset as master`);
+        const change = report.changes.find((entry) => entry.path === homeMcp(home));
+        if (round === 1) {
+          assert.equal(change.identity_divergence?.[0]?.replaced, 'devon', `${name}: reset reported`);
+          assert.match(printed, /reset MARROW_FLEET_AGENT_ID devon -> codex-bob/, name);
+        }
+        assert.equal(change.identity_kept, undefined, `${name} round ${round}: nothing kept`);
+        assert.doesNotMatch(printed, /kept agent identity/, name);
+        if (invalid) {
+          assert.equal(change.identity_record_invalid, true, name);
+          assert.match(printed, /identity record ~\/\.marrow\/identity-record\.json is unsafe or unreadable/, name);
+          assert.ok(summary.some((line) => /identity record .* is unsafe or unreadable/.test(line)), `${name}: summary says so`);
+          // Never written over or through, so nothing is re-recorded from it.
+          assert.deepEqual(readRecordBytes(home), before, `${name} round ${round}: record untouched`);
+        }
+        setHomeMcpId(home, 'devon');
+      }
+    } finally {
+      try { fs.chmodSync(path.join(home, '.marrow'), 0o700); } catch {}
+      try { fs.chmodSync(recordPath(home), 0o600); } catch {}
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  }
+});
+
+test('F1 residual: with the record file deleted, the one-time keep runs again (same-uid writer), and says so', async () => {
+  const home = tempDir('marrow-f1-');
+  try {
+    hostLayout(home);
+    await installHome(home, { agentId: 'cliff' });
+    setHomeMcpId(home, 'devon');
+    fs.rmSync(recordPath(home));
+    const { summary } = await installHome(home, { agentId: 'codex-bob', update: true, repair: true, updateOnly: true });
+    assert.equal(homeMcpId(home), 'devon');
+    assert.ok(summary.some((line) => /^Kept agent identity devon \(set before this installer recorded identities\)/.test(line)));
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('F2: repair restores every deleted or stripped Marrow surface as before, and doctor lists exactly what repair writes', async () => {
+  const hosts = { codex: true, cursor: true, gemini: true, windsurf: true, cline: true };
+  const surfaces = [
+    ['Grok (U01)', (home) => fs.rmSync(path.join(home, '.grok', 'hooks', 'marrow.json')), (home) => path.join(home, '.grok', 'hooks', 'marrow.json')],
+    ['Codex (U02)', (home) => fs.rmSync(path.join(home, '.codex', 'hooks.json')), (home) => path.join(home, '.codex', 'hooks.json')],
+    ['Gemini (U03)', (home) => fs.rmSync(path.join(home, '.gemini', 'settings.json')), (home) => path.join(home, '.gemini', 'settings.json')],
+    ['Cursor (U04)', (home) => { for (const file of ['mcp.json', 'hooks.json', path.join('rules', 'marrow.mdc')]) fs.rmSync(path.join(home, '.cursor', file)); }, (home) => path.join(home, '.cursor', 'hooks.json')],
+    ['Claude (U05)', (home) => { fs.rmSync(path.join(home, '.claude', 'settings.json')); fs.rmSync(homeMcp(home)); }, (home) => path.join(home, '.claude', 'settings.json')],
+    ['AGENTS.md block (U06)', (home) => {
+      const file = path.join(home, 'AGENTS.md');
+      const text = fs.readFileSync(file, 'utf8');
+      const start = text.indexOf('<!-- marrow:passive-start -->');
+      const end = text.indexOf('<!-- marrow:passive-end -->') + '<!-- marrow:passive-end -->'.length;
+      fs.writeFileSync(file, text.slice(0, start) + text.slice(end));
+    }, (home) => path.join(home, 'AGENTS.md')],
+    ['Windsurf (U07)', (home) => fs.rmSync(path.join(home, '.windsurf', 'hooks.json')), (home) => path.join(home, '.windsurf', 'hooks.json')],
+    ['Cline (U08)', (home) => { for (const file of ['PreToolUse', 'PostToolUse', 'TaskCancel']) fs.rmSync(path.join(home, '.clinerules', 'hooks', file)); }, (home) => path.join(home, '.clinerules', 'hooks', 'PreToolUse')],
+    ['Codex Marrow entries stripped, owner entry kept (U12)', (home) => {
+      fs.writeFileSync(path.join(home, '.codex', 'hooks.json'), `${JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Owner', hooks: [{ type: 'command', command: 'owner-check.sh' }] }] } }, null, 2)}\n`);
+    }, (home) => path.join(home, '.codex', 'hooks.json')],
+  ];
+  for (const [name, remove, probe] of surfaces) {
+    const home = tempDir('marrow-f2-');
+    try {
+      hostLayout(home, hosts);
+      await installHome(home, { agentId: 'cliff' });
+      const installed = fs.readFileSync(probe(home), 'utf8');
+      assert.match(installed, /marrow/i, `${name}: fixture installed`);
+      remove(home);
+
+      // update (the word) leaves a surface with no Marrow config alone, and names the fix.
+      const updated = await installHome(home, { agentId: 'cliff', update: true, repair: true, updateOnly: true });
+      assert.ok(updated.report.update_skipped?.length > 0, `${name}: update names what it left alone`);
+      assert.match(updated.printed, /left alone by update: .*--repair/, name);
+      assert.ok(updated.summary.some((line) => /^Update left \d+ file\(s\) alone .*--repair/.test(line)), name);
+
+      const doctor = await installHome(home, { agentId: 'cliff', doctor: true, yes: false });
+      const wouldWrite = doctor.report.changes.filter((change) => change.changed).map((change) => change.path).sort();
+      const repaired = await installHome(home, { agentId: 'cliff', update: true, repair: true });
+      const wrote = repaired.report.changes.filter((change) => change.applied).map((change) => change.path).sort();
+      assert.deepEqual(wrote, wouldWrite, `${name}: repair writes exactly what doctor lists`);
+      assert.equal(repaired.report.update_skipped, undefined, `${name}: repair skips nothing`);
+      const restored = fs.readFileSync(probe(home), 'utf8');
+      assert.match(restored, /marrow/i, `${name}: restored by repair`);
+      if (/U12/.test(name)) assert.match(restored, /owner-check\.sh/, 'the owner entry is kept');
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  }
+  // The CLI words: only `update` filters; any repair word restores as before.
+  assert.equal(parseArgs(['update']).updateOnly, true);
+  assert.equal(parseArgs(['--update']).updateOnly, true);
+  assert.equal(parseArgs(['repair']).updateOnly, false);
+  assert.equal(parseArgs(['--repair']).updateOnly, false);
+  assert.equal(parseArgs(['update', '--repair']).updateOnly, false);
+  assert.equal(parseArgs(['--repair', 'update']).updateOnly, false);
+});
+
+test('F3: an explicit --agent-id on update replaces a recorded id and updates the record; an env id does not', async () => {
+  const home = tempDir('marrow-f3-');
+  try {
+    hostLayout(home);
+    await installHome(home, { agentId: 'cliff' });
+    const envOnly = await installHome(home, { agentId: 'cliff-2', update: true, repair: true, updateOnly: true });
+    assert.equal(homeMcpId(home), 'cliff', 'an id from the environment does not replace the record');
+    assert.equal(envOnly.report.changes.find((change) => change.path === homeMcp(home)).identity_kept[0].reason, 'recorded');
+
+    const flagged = await installHome(home, { agentId: 'cliff-2', agentIdFromArg: true, update: true, repair: true, updateOnly: true });
+    assert.equal(homeMcpId(home), 'cliff-2');
+    assert.match(flagged.printed, /reset MARROW_FLEET_AGENT_ID cliff -> cliff-2 in .* \(--agent-id\)/);
+    assert.equal(readRecord(home)[homeMcp(home)].MARROW_FLEET_AGENT_ID, 'cliff-2', 'the record follows the operator');
+    assert.equal((await installHome(home, { agentId: 'codex-bob', update: true, repair: true, updateOnly: true }) && homeMcpId(home)), 'cliff-2');
+
+    // With no record yet, --agent-id also wins over the one-time keep.
+    fs.rmSync(recordPath(home));
+    await installHome(home, { agentId: 'cliff-3', agentIdFromArg: true, update: true, repair: true, updateOnly: true });
+    assert.equal(homeMcpId(home), 'cliff-3');
+
+    const args = parseArgs(['update', '--agent-id', 'cliff-4'], { HOME: home });
+    assert.equal(args.agentIdFromArg, true);
+    assert.equal(args.agentId, 'cliff-4');
+    assert.equal(parseArgs(['update'], { HOME: home, MARROW_FLEET_AGENT_ID: 'cliff-5' }).agentIdFromArg, undefined);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('F4: the one-time keep refuses a hard-linked home config (tracked elsewhere or not)', async () => {
+  for (const tracked of [true, false]) {
+    const home = tempDir('marrow-f4-');
+    try {
+      hostLayout(home);
+      await installHome(home, { agentId: 'cliff' });
+      fs.rmSync(recordPath(home));
+      const repo = path.join(home, 'src', 'dotfiles');
+      fs.mkdirSync(repo, { recursive: true });
+      fs.linkSync(homeMcp(home), path.join(repo, 'mcp.json'));
+      if (tracked) {
+        assert.equal(spawnSync('git', ['init', '-q', repo]).status, 0);
+        assert.equal(spawnSync('git', ['-C', repo, 'add', 'mcp.json']).status, 0);
+      }
+      await installHome(home, { agentId: 'codex-bob', update: true, repair: true, updateOnly: true });
+      assert.equal(homeMcpId(home), 'codex-bob', `hard link (tracked: ${tracked}) reset`);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  }
+});
+
+test('F5: an installer-derived <client>-<hash> id from any folder or host is not kept by the one-time keep', async () => {
+  const derivedElsewhere = `claude-code-${crypto.createHash('sha256').update(`/other/root:${os.hostname()}:claude-code`).digest('hex').slice(0, 12)}`;
+  for (const [id, kept] of [[derivedElsewhere, false], ['codex-0123456789ab', false], ['grok-abcdefabcdef', false], ['codex-bob', true], ['claude-code-cliff', true]]) {
+    const home = tempDir('marrow-f5-');
+    try {
+      hostLayout(home);
+      await installHome(home, { agentId: 'cliff' });
+      fs.rmSync(recordPath(home));
+      setHomeMcpId(home, id);
+      await installHome(home, { agentId: 'owner-set', update: true, repair: true, updateOnly: true });
+      assert.equal(homeMcpId(home), kept ? id : 'owner-set', id);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  }
+});
+
+test('F6/F7: an identity reset is never labelled pin only, and the short summary names every kept id and why', async () => {
+  const home = tempDir('marrow-f6-');
+  try {
+    hostLayout(home);
+    await installHome(home, { agentId: 'bot-1.0.0' });
+    fs.rmSync(recordPath(home));
+    fs.chmodSync(homeMcp(home), 0o664);
+    const reset = await installHome(home, { agentId: 'bot-2.0.0', update: true, repair: true, updateOnly: true });
+    const change = reset.report.changes.find((entry) => entry.path === homeMcp(home));
+    assert.equal(change.change_class, 'identity reset + managed entries');
+    assert.doesNotMatch(reset.printed, /\.mcp\.json\) \[pin only\]/);
+
+    fs.chmodSync(homeMcp(home), 0o600);
+    setHomeMcpId(home, 'cliff');
+    fs.rmSync(recordPath(home));
+    const first = await installHome(home, { agentId: 'codex-bob', update: true, repair: true, updateOnly: true });
+    assert.ok(first.summary.some((line) => /^Kept agent identity cliff \(set before this installer recorded identities\)/.test(line)));
+    const second = await installHome(home, { agentId: 'codex-bob', update: true, repair: true, updateOnly: true });
+    assert.ok(second.summary.some((line) => /^Kept agent identity cliff \(recorded by this installer\)/.test(line)));
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
