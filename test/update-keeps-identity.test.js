@@ -12,6 +12,7 @@ const {
   buildPlan,
   detectEnvironment,
   install,
+  installSummaryLines,
   printReport,
 } = require('../src/installer');
 const PINS = require('../src/pins');
@@ -98,7 +99,7 @@ test('pre-record migration: an owner-set home agent id is kept once, printed, an
 
     const real = run(home, home);
     assert.equal(real.env.MARROW_FLEET_AGENT_ID, 'cliff');
-    assert.deepEqual(readRecord(home)[path.join(home, '.mcp.json')], { MARROW_FLEET_AGENT_ID: 'cliff', MARROW_BASE_URL: DEFAULT_URL });
+    assert.deepEqual(readRecord(home)[path.join(home, '.mcp.json')], { MARROW_FLEET_AGENT_ID: 'cliff' });
     assert.equal(fs.statSync(recordPath(home)).mode & 0o777, 0o600);
 
     const again = run(home, home);
@@ -166,35 +167,133 @@ test('migration fails closed: tracked, group-writable, duplicate or escaped key,
   }
 });
 
-test('a base URL is never kept by migration; only a record or the allowlist keeps it, and a credential URL is never recorded', () => {
+test('a base URL is never kept by migration or by a record, only by the allowlist as before, and is never recorded', () => {
   const home = homeWithMcp({ MARROW_BASE_URL: 'https://elsewhere.example.test', MARROW_FLEET_AGENT_ID: 'cliff' });
+  const mcp = path.join(home, '.mcp.json');
   try {
     const reset = run(home, home);
     assert.equal(reset.env.MARROW_BASE_URL, DEFAULT_URL);
     assert.deepEqual(reset.change.identity_divergence, [{ field: 'MARROW_BASE_URL', replaced: 'https://elsewhere.example.test', applied: DEFAULT_URL }]);
     assert.equal(reset.env.MARROW_FLEET_AGENT_ID, 'cliff', 'the agent id still migrates');
+    assert.doesNotMatch(fs.readFileSync(recordPath(home), 'utf8'), /MARROW_BASE_URL|https?:/, 'the record holds no URL');
 
-    fs.writeFileSync(path.join(home, '.mcp.json'), mcpText({ MARROW_BASE_URL: 'https://staging.example.test', MARROW_FLEET_AGENT_ID: 'cliff' }));
-    writeRecord(home, { [path.join(home, '.mcp.json')]: { MARROW_FLEET_AGENT_ID: 'cliff', MARROW_BASE_URL: 'https://staging.example.test' } });
-    const recorded = run(home, home);
-    assert.equal(recorded.env.MARROW_BASE_URL, 'https://staging.example.test');
-    assert.equal(recorded.change.identity_divergence, undefined);
+    // A record entry carrying a base URL (forged, or from an older candidate) keeps nothing.
+    fs.writeFileSync(mcp, mcpText({ MARROW_BASE_URL: 'https://staging.example.test', MARROW_FLEET_AGENT_ID: 'cliff' }));
+    writeRecord(home, { [mcp]: { MARROW_FLEET_AGENT_ID: 'cliff', MARROW_BASE_URL: 'https://staging.example.test' } });
+    const forged = run(home, home);
+    assert.equal(forged.env.MARROW_BASE_URL, DEFAULT_URL);
+    assert.equal(forged.change.identity_divergence[0].field, 'MARROW_BASE_URL');
+    assert.equal(forged.env.MARROW_FLEET_AGENT_ID, 'cliff');
+    assert.deepEqual(readRecord(home)[mcp], { MARROW_FLEET_AGENT_ID: 'cliff' });
 
-    // An allowlisted base URL is kept but not recorded, so it is reset once it leaves the allowlist.
-    fs.writeFileSync(path.join(home, '.mcp.json'), mcpText({ MARROW_BASE_URL: 'https://allowed.example.test', MARROW_FLEET_AGENT_ID: 'cliff' }));
+    // The allowlist keeps it as before, and only while it is on the allowlist.
+    fs.writeFileSync(mcp, mcpText({ MARROW_BASE_URL: 'https://allowed.example.test', MARROW_FLEET_AGENT_ID: 'cliff' }));
     const allowed = run(home, home, { identityAllowlist: { baseUrls: new Set(['https://allowed.example.test']), agentIds: new Set() } });
     assert.equal(allowed.env.MARROW_BASE_URL, 'https://allowed.example.test');
-    assert.equal(readRecord(home)[path.join(home, '.mcp.json')].MARROW_BASE_URL, undefined);
     assert.equal(run(home, home).env.MARROW_BASE_URL, DEFAULT_URL);
 
-    // A URL carrying credentials is applied only by the owner's choice and never stored.
+    // A configured URL carrying credentials is applied by the owner's choice and never stored.
     const user = `u${crypto.randomBytes(4).toString('hex')}`;
     const pass = `p${crypto.randomBytes(8).toString('hex')}`;
-    fs.writeFileSync(path.join(home, '.mcp.json'), mcpText({ MARROW_FLEET_AGENT_ID: 'cliff' }));
-    run(home, home, { baseUrl: `https://${user}:${pass}@staging.example.test` });
-    const stored = fs.readFileSync(recordPath(home), 'utf8');
-    assert.doesNotMatch(stored, new RegExp(`${user}|${pass}`));
-    assert.equal(readRecord(home)[path.join(home, '.mcp.json')].MARROW_BASE_URL, undefined);
+    fs.writeFileSync(mcp, mcpText({ MARROW_FLEET_AGENT_ID: 'cliff' }));
+    const credential = run(home, home, { baseUrl: `https://${user}:${pass}@staging.example.test` });
+    assert.doesNotMatch(fs.readFileSync(recordPath(home), 'utf8'), new RegExp(`${user}|${pass}|staging`));
+    assert.doesNotMatch(report(credential.changes), new RegExp(`${user}|${pass}`));
+    // ...and the next plain update resets it to the configured default, as before.
+    assert.equal(run(home, home).env.MARROW_BASE_URL, DEFAULT_URL);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('an allowlisted agent id is kept as before but not recorded, so it is reset once it leaves the allowlist', () => {
+  const home = homeWithMcp({ MARROW_BASE_URL: DEFAULT_URL, MARROW_FLEET_AGENT_ID: 'devon' });
+  const mcp = path.join(home, '.mcp.json');
+  try {
+    writeRecord(home, { [mcp]: { MARROW_FLEET_AGENT_ID: 'codex-bob' } });
+    const allowed = run(home, home, { identityAllowlist: { baseUrls: new Set(), agentIds: new Set(['devon']) } });
+    assert.equal(allowed.env.MARROW_FLEET_AGENT_ID, 'devon');
+    assert.deepEqual(readRecord(home)[mcp], {}, 'an allowlist keep is not recorded');
+    const after = run(home, home);
+    assert.equal(after.env.MARROW_FLEET_AGENT_ID, 'codex-bob');
+    assert.equal(after.change.identity_divergence[0].replaced, 'devon');
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('migration refuses a home config reached through a link: a linked folder into a repo (tracked or not) or a linked file', () => {
+  const cases = [
+    ['plain home folder (control)', false, 'none'],
+    ['linked folder into a repo that tracks the file', true, 'folder'],
+    ['linked folder to an untracked owner folder', false, 'folder'],
+    ['linked file', false, 'file'],
+  ];
+  for (const [name, tracked, kind] of cases) {
+    const home = tempDir();
+    const elsewhere = tempDir('marrow-elsewhere-');
+    try {
+      fs.writeFileSync(path.join(home, 'package.json'), '{}\n');
+      const cursorReal = kind === 'none' ? path.join(home, '.cursor') : path.join(elsewhere, 'nested', '.cursor');
+      fs.mkdirSync(cursorReal, { recursive: true });
+      fs.writeFileSync(path.join(cursorReal, 'mcp.json'), mcpText({ MARROW_BASE_URL: DEFAULT_URL, MARROW_FLEET_AGENT_ID: 'cliff' }));
+      if (tracked) {
+        const git = (...args) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.test', ...args], { cwd: elsewhere });
+        assert.equal(git('init', '-q').status, 0);
+        assert.equal(git('add', path.join('nested', '.cursor', 'mcp.json')).status, 0);
+      }
+      if (kind === 'folder') fs.symlinkSync(cursorReal, path.join(home, '.cursor'));
+      if (kind === 'file') {
+        fs.mkdirSync(path.join(home, '.cursor'));
+        fs.symlinkSync(path.join(cursorReal, 'mcp.json'), path.join(home, '.cursor', 'mcp.json'));
+      }
+      const detection = detectEnvironment(home, { HOME: home, PATH: process.env.PATH });
+      const plan = buildPlan(detection, { mode: 'mcp', update: true, repair: true, agentId: 'codex-bob', baseUrl: DEFAULT_URL, identityAllowlist: NO_ALLOWLIST });
+      const write = plan.writes.find((entry) => entry.path === path.join(home, '.cursor', 'mcp.json'));
+      assert.ok(write, `${name}: the Cursor MCP config is planned`);
+      if (kind === 'none') {
+        applyPlan(plan, { yes: true, dryRun: true, doctor: false });
+        assert.equal(write.identityKept[0]?.reason, 'pre_record', name);
+        continue;
+      }
+      // The write guard refuses the linked path (as before), and the migration rule refuses it on
+      // its own as well, so it never depends on the guard.
+      assert.throws(() => applyPlan(plan, { yes: true, dryRun: true, doctor: false }), /Refusing installer write/, name);
+      write.transform(write.path);
+      assert.deepEqual(write.identityKept, [], name);
+      assert.equal(write.identityDivergence[0]?.replaced, 'cliff', name);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(elsewhere, { recursive: true, force: true });
+    }
+  }
+});
+
+test('doctor shows the decision update makes, and the one-command summary prints the one-time keep line', () => {
+  const home = homeWithMcp({ MARROW_BASE_URL: DEFAULT_URL, MARROW_FLEET_AGENT_ID: 'cliff' });
+  const doctor = () => {
+    const detection = detectEnvironment(home, { HOME: home, PATH: process.env.PATH });
+    const plan = buildPlan(detection, { mode: 'mcp', doctor: true, agentId: 'codex-bob', baseUrl: DEFAULT_URL, identityAllowlist: NO_ALLOWLIST });
+    return applyPlan(plan, { yes: false, dryRun: false, doctor: true }).find((change) => change.path === path.join(home, '.mcp.json'));
+  };
+  try {
+    const before = doctor();
+    assert.equal(before.identity_kept[0].reason, 'pre_record');
+    assert.equal(before.identity_divergence, undefined);
+    assert.equal(fs.existsSync(recordPath(home)), false, 'doctor records nothing');
+
+    const updated = run(home, home);
+    const { lines } = installSummaryLines({ changes: updated.changes, selfTest: { skipped: true }, warnings: [], nextSteps: [] }, { update: true });
+    assert.equal(lines.filter((line) => /^Kept agent identity cliff \(set before this installer recorded identities\)/.test(line)).length, 1);
+    assert.equal(lines.some((line) => /identity reset/.test(line)), false);
+
+    const after = doctor();
+    assert.equal(after.changed, false, 'doctor plans no identity change after update');
+    assert.equal(after.identity_kept[0].reason, 'recorded');
+
+    // An agent's later edit still shows in doctor as the reset update would make.
+    fs.writeFileSync(path.join(home, '.mcp.json'), mcpText({ MARROW_BASE_URL: DEFAULT_URL, MARROW_FLEET_AGENT_ID: 'devon' }));
+    assert.equal(doctor().identity_divergence[0].replaced, 'devon');
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
@@ -248,8 +347,8 @@ test('an unsafe or foreign record is ignored: link, shared mode, another owner, 
     run(home, home, { agentId: 'cliff', update: false, repair: false });
     run(project, home, { agentId: 'devon', update: false, repair: false });
     assert.deepEqual(readRecord(home), {
-      [path.join(home, '.mcp.json')]: { MARROW_FLEET_AGENT_ID: 'cliff', MARROW_BASE_URL: DEFAULT_URL },
-      [projectMcp]: { MARROW_FLEET_AGENT_ID: 'devon', MARROW_BASE_URL: DEFAULT_URL },
+      [path.join(home, '.mcp.json')]: { MARROW_FLEET_AGENT_ID: 'cliff' },
+      [projectMcp]: { MARROW_FLEET_AGENT_ID: 'devon' },
     });
     assert.equal(run(home, home).env.MARROW_FLEET_AGENT_ID, 'cliff');
     assert.equal(run(project, home).env.MARROW_FLEET_AGENT_ID, 'devon');

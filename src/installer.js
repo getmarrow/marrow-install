@@ -2541,9 +2541,10 @@ function identityAllowlist(env = process.env) {
   };
 }
 
-// The identity each write run applied to each managed MCP config, keyed by the file's realpath.
+// The agent id each write run applied to each managed MCP config, keyed by the file's realpath.
 // It is read only from an owner-only regular file in an owner-only ~/.marrow; anything else
-// counts as no record. Base URLs with credentials, a query or a fragment are never recorded.
+// counts as no record. Base URLs are never recorded: they are kept only as before (configured
+// or allowlisted), because a redirected base URL sends the key elsewhere.
 const IDENTITY_RECORD_FILE = 'identity-record.json';
 const IDENTITY_RECORD_MAX_BYTES = 64 * 1024;
 
@@ -2556,15 +2557,6 @@ function identityRecordDirectorySafe(directory) {
   try {
     const stat = fs.lstatSync(directory);
     return stat.isDirectory() && !stat.isSymbolicLink() && ownerOnly(stat, 0o022);
-  } catch {
-    return false;
-  }
-}
-
-function recordableBaseUrl(value) {
-  try {
-    const url = new URL(value);
-    return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password && !url.search && !url.hash;
   } catch {
     return false;
   }
@@ -2590,14 +2582,9 @@ function readIdentityRecord(home) {
     const valid = {};
     for (const [key, entry] of Object.entries(entries)) {
       if (!path.isAbsolute(key) || !entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
-      const kept = {};
-      if (typeof entry.MARROW_FLEET_AGENT_ID === 'string' && AGENT_ID_RE.test(entry.MARROW_FLEET_AGENT_ID)) {
-        kept.MARROW_FLEET_AGENT_ID = entry.MARROW_FLEET_AGENT_ID;
-      }
-      if (typeof entry.MARROW_BASE_URL === 'string' && recordableBaseUrl(entry.MARROW_BASE_URL)) {
-        kept.MARROW_BASE_URL = entry.MARROW_BASE_URL;
-      }
-      valid[key] = kept;
+      valid[key] = typeof entry.MARROW_FLEET_AGENT_ID === 'string' && AGENT_ID_RE.test(entry.MARROW_FLEET_AGENT_ID)
+        ? { MARROW_FLEET_AGENT_ID: entry.MARROW_FLEET_AGENT_ID }
+        : {};
     }
     return { entries: valid };
   } catch {
@@ -2633,17 +2620,11 @@ function writeIdentityRecord(home, updates) {
     if (error?.code !== 'ENOENT') return false;
   }
   if (stat && (stat.isSymbolicLink() || !stat.isFile() || !ownerOnly(stat, 0o077))) return false;
+  // Rewritten from what was read and validated, so nothing else in an older file survives.
   const record = readIdentityRecord(home);
-  const before = JSON.stringify(record.entries);
   for (const [key, applied] of Object.entries(updates)) {
-    const entry = {};
-    if (applied.MARROW_FLEET_AGENT_ID && AGENT_ID_RE.test(applied.MARROW_FLEET_AGENT_ID)) {
-      entry.MARROW_FLEET_AGENT_ID = applied.MARROW_FLEET_AGENT_ID;
-    }
-    if (applied.MARROW_BASE_URL && recordableBaseUrl(applied.MARROW_BASE_URL)) entry.MARROW_BASE_URL = applied.MARROW_BASE_URL;
-    record.entries[key] = entry;
+    record.entries[key] = applied && AGENT_ID_RE.test(applied) ? { MARROW_FLEET_AGENT_ID: applied } : {};
   }
-  if (stat && JSON.stringify(record.entries) === before) return true;
   const tempPath = path.join(directory, `.${IDENTITY_RECORD_FILE}.${process.pid}-${crypto.randomBytes(6).toString('hex')}`);
   const descriptor = fs.openSync(tempPath, 'wx', 0o600);
   try {
@@ -2657,8 +2638,9 @@ function writeIdentityRecord(home, updates) {
 }
 
 // Installs made before identities were recorded keep an agent id only when the file could
-// only have been set by the owner: a plain owner-only home config outside any git work tree,
-// one MARROW_FLEET_AGENT_ID key and a well-formed id. Anything uncertain is reset as before.
+// only have been set by the owner: a plain owner-only home config (no linked folder or file on
+// the way to it) outside any git work tree, one MARROW_FLEET_AGENT_ID key and a well-formed id.
+// Anything uncertain is reset as before.
 function gitTracksFile(filePath) {
   const directory = path.dirname(filePath);
   if (!findUp(directory, ['.git'], 64)) return false;
@@ -2673,17 +2655,22 @@ function gitTracksFile(filePath) {
   return String(result.stdout || '').trim().length > 0;
 }
 
-function preRecordAgentIdEligible(filePath, rawValue, { homeScope }) {
-  if (!homeScope || typeof rawValue !== 'string' || !AGENT_ID_RE.test(rawValue)) return false;
+function preRecordAgentIdEligible(filePath, rawValue, { homeScope, home }) {
+  if (!homeScope || !home || typeof rawValue !== 'string' || !AGENT_ID_RE.test(rawValue)) return false;
+  let realPath;
   try {
-    const stat = fs.lstatSync(filePath);
+    const relative = path.relative(path.resolve(home), path.resolve(filePath));
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return false;
+    realPath = fs.realpathSync(filePath);
+    if (realPath !== path.join(fs.realpathSync(home), relative)) return false;
+    const stat = fs.lstatSync(realPath);
     if (!stat.isFile() || stat.isSymbolicLink() || !ownerOnly(stat, 0o022)) return false;
-    const raw = fs.readFileSync(filePath, 'utf8');
+    const raw = fs.readFileSync(realPath, 'utf8');
     if (raw.includes('\\u') || raw.split('"MARROW_FLEET_AGENT_ID"').length !== 2) return false;
   } catch {
     return false;
   }
-  return !gitTracksFile(filePath);
+  return !gitTracksFile(realPath);
 }
 
 // The managed MCP entry always carries the configured identity: the base URL and agent id the
@@ -2714,18 +2701,9 @@ function upsertMcpServerConfig(filePath, options = {}) {
   const configuredBaseUrl = String(options.baseUrl || DEFAULT_BASE_URL).trim() || DEFAULT_BASE_URL;
   const existingBaseUrl = concrete(existingEnv.MARROW_BASE_URL);
   let baseUrl = configuredBaseUrl;
-  // Only the configured base URL, or one already recorded, is recorded: an allowlisted one stays
-  // kept only while it is on the allowlist.
-  let recordBaseUrl = true;
   if (existingBaseUrl && existingBaseUrl !== configuredBaseUrl) {
-    if (allowlist.baseUrls.has(existingBaseUrl)) {
-      baseUrl = existingBaseUrl;
-      recordBaseUrl = options.identityRecord ? recorded?.MARROW_BASE_URL === existingBaseUrl : false;
-    }
-    else if (options.identityRecord && recorded?.MARROW_BASE_URL === existingBaseUrl) {
-      baseUrl = existingBaseUrl;
-      reportKept({ field: 'MARROW_BASE_URL', value: safeIdentityValue('MARROW_BASE_URL', existingBaseUrl), reason: 'recorded' });
-    } else {
+    if (allowlist.baseUrls.has(existingBaseUrl)) baseUrl = existingBaseUrl;
+    else {
       report({
         field: 'MARROW_BASE_URL',
         replaced: safeIdentityValue('MARROW_BASE_URL', existingBaseUrl),
@@ -2735,8 +2713,13 @@ function upsertMcpServerConfig(filePath, options = {}) {
   }
   const existingAgentId = concrete(existingEnv.MARROW_FLEET_AGENT_ID);
   let keptAgentId = agentId;
+  // An allowlisted id is recorded only if it was already: it stays kept only while allowlisted.
+  let recordAgentId = null;
   if (existingAgentId && existingAgentId !== agentId && !derivedAgentIds.has(existingAgentId)) {
-    if (allowlist.agentIds.has(existingAgentId)) keptAgentId = existingAgentId;
+    if (allowlist.agentIds.has(existingAgentId)) {
+      keptAgentId = existingAgentId;
+      recordAgentId = recorded?.MARROW_FLEET_AGENT_ID === existingAgentId ? existingAgentId : '';
+    }
     else if (options.identityRecord && recorded?.MARROW_FLEET_AGENT_ID === existingAgentId) {
       keptAgentId = existingAgentId;
       reportKept({ field: 'MARROW_FLEET_AGENT_ID', value: existingAgentId, reason: 'recorded' });
@@ -2770,9 +2753,7 @@ function upsertMcpServerConfig(filePath, options = {}) {
     env,
   };
   config.mcpServers = servers;
-  if (typeof options.onApplied === 'function') {
-    options.onApplied({ ...env, ...(recordBaseUrl ? {} : { MARROW_BASE_URL: undefined }) });
-  }
+  if (typeof options.onApplied === 'function') options.onApplied(recordAgentId ?? keptAgentId);
   return JSON.stringify(config, null, 2) + '\n';
 }
 
@@ -3067,11 +3048,15 @@ function buildPlan(detection, options) {
     allowlist: options.identityAllowlist || identityAllowlist(),
   };
   // Update and repair keep the identity this installer recorded (and, once, an owner-set id from
-  // before it recorded any); the controller's maintenance pass does not.
+  // before it recorded any); doctor shows the same decision; the controller's maintenance pass
+  // does not use the record.
   const update = options.update === true && options.maintenance !== true;
-  if (update) {
+  if (update || (options.doctor === true && options.maintenance !== true)) {
     mcpConfigOptions.identityRecord = readIdentityRecord(detection.home);
-    mcpConfigOptions.preRecordScope = { homeScope: identityRecordKey(detection.root) === identityRecordKey(detection.home) };
+    mcpConfigOptions.preRecordScope = {
+      homeScope: identityRecordKey(detection.root) === identityRecordKey(detection.home),
+      home: detection.home,
+    };
   }
   const mcpConfigWrite = (filePath, label) => {
     const write = { type: 'json-transform', path: filePath, label, identityDivergence: [], identityKept: [] };
@@ -3085,7 +3070,7 @@ function buildPlan(detection, options) {
         hookPlatform,
         onDivergence: (divergence) => write.identityDivergence.push(divergence),
         onKept: (kept) => write.identityKept.push(kept),
-        onApplied: (env) => { write.appliedIdentity = env; },
+        onApplied: (agentId) => { write.appliedAgentId = agentId; },
       }));
     };
     return write;
@@ -3471,7 +3456,9 @@ function applyPlan(plan, options) {
       ...(write.identityKept?.length ? { identity_kept: write.identityKept } : {}),
       ...(changed ? { change_class: changeClass(write, fileExists, before, after) } : {}),
     });
-    if (write.appliedIdentity && writeApplied && !hookConflict) recordIdentities[identityRecordKey(write.path)] = write.appliedIdentity;
+    if (write.appliedAgentId !== undefined && writeApplied && !hookConflict) {
+      recordIdentities[identityRecordKey(write.path)] = write.appliedAgentId;
+    }
     if (contentChanged && writeApplied) {
       atomicWriteManagedFile(path.resolve(write.root || root), write.path, after, write.mode);
     }
@@ -5305,6 +5292,11 @@ function installSummaryLines(report, options) {
     lines.push('Stored your API key in ~/.marrow/env (mode 600) so the Hermes MCP server can read it; Hermes passes no other environment to MCP servers.');
   } else if (hermes.owner_key_storage?.state === 'different_key_present') {
     lines.push('Note: ~/.marrow/env already holds a different Marrow key; the Hermes MCP server will use that one.');
+  }
+  for (const change of report.changes || []) {
+    for (const kept of change.identity_kept || []) {
+      if (kept.reason === 'pre_record') lines.push(`Kept agent identity ${kept.value} (set before this installer recorded identities) in ${change.path}.`);
+    }
   }
   const divergences = (report.changes || []).flatMap((change) => (change.identity_divergence || []).map((divergence) => ({ ...divergence, path: change.path })));
   if (divergences.length) {
