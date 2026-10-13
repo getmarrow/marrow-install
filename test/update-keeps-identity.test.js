@@ -180,6 +180,13 @@ test('a base URL is never kept by migration; only a record or the allowlist keep
     assert.equal(recorded.env.MARROW_BASE_URL, 'https://staging.example.test');
     assert.equal(recorded.change.identity_divergence, undefined);
 
+    // An allowlisted base URL is kept but not recorded, so it is reset once it leaves the allowlist.
+    fs.writeFileSync(path.join(home, '.mcp.json'), mcpText({ MARROW_BASE_URL: 'https://allowed.example.test', MARROW_FLEET_AGENT_ID: 'cliff' }));
+    const allowed = run(home, home, { identityAllowlist: { baseUrls: new Set(['https://allowed.example.test']), agentIds: new Set() } });
+    assert.equal(allowed.env.MARROW_BASE_URL, 'https://allowed.example.test');
+    assert.equal(readRecord(home)[path.join(home, '.mcp.json')].MARROW_BASE_URL, undefined);
+    assert.equal(run(home, home).env.MARROW_BASE_URL, DEFAULT_URL);
+
     // A URL carrying credentials is applied only by the owner's choice and never stored.
     const user = `u${crypto.randomBytes(4).toString('hex')}`;
     const pass = `p${crypto.randomBytes(8).toString('hex')}`;
@@ -277,7 +284,7 @@ test('update keeps owner files: only the Marrow block of AGENTS.md changes, owne
   const home = homeWithMcp({ MARROW_BASE_URL: DEFAULT_URL, MARROW_FLEET_AGENT_ID: 'cliff' });
   const agentsMd = path.join(home, 'AGENTS.md');
   try {
-    const head = '# Fleet process\n\nOwner rules stay here.\n\n';
+    const head = '# Fleet process\n\nOwner rules stay here.  \n\n\n';
     const tail = '\n\n## After the block\nMore owner text.\n';
     fs.writeFileSync(agentsMd, `${head}<!-- marrow:passive-start -->\nold @getmarrow/mcp@${OLD_PIN}\n<!-- marrow:passive-end -->${tail}`);
     fs.mkdirSync(path.join(home, '.cursor'));

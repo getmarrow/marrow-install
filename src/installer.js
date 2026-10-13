@@ -2714,8 +2714,14 @@ function upsertMcpServerConfig(filePath, options = {}) {
   const configuredBaseUrl = String(options.baseUrl || DEFAULT_BASE_URL).trim() || DEFAULT_BASE_URL;
   const existingBaseUrl = concrete(existingEnv.MARROW_BASE_URL);
   let baseUrl = configuredBaseUrl;
+  // Only the configured base URL, or one already recorded, is recorded: an allowlisted one stays
+  // kept only while it is on the allowlist.
+  let recordBaseUrl = true;
   if (existingBaseUrl && existingBaseUrl !== configuredBaseUrl) {
-    if (allowlist.baseUrls.has(existingBaseUrl)) baseUrl = existingBaseUrl;
+    if (allowlist.baseUrls.has(existingBaseUrl)) {
+      baseUrl = existingBaseUrl;
+      recordBaseUrl = options.identityRecord ? recorded?.MARROW_BASE_URL === existingBaseUrl : false;
+    }
     else if (options.identityRecord && recorded?.MARROW_BASE_URL === existingBaseUrl) {
       baseUrl = existingBaseUrl;
       reportKept({ field: 'MARROW_BASE_URL', value: safeIdentityValue('MARROW_BASE_URL', existingBaseUrl), reason: 'recorded' });
@@ -2764,7 +2770,9 @@ function upsertMcpServerConfig(filePath, options = {}) {
     env,
   };
   config.mcpServers = servers;
-  if (typeof options.onApplied === 'function') options.onApplied({ ...env });
+  if (typeof options.onApplied === 'function') {
+    options.onApplied({ ...env, ...(recordBaseUrl ? {} : { MARROW_BASE_URL: undefined }) });
+  }
   return JSON.stringify(config, null, 2) + '\n';
 }
 
