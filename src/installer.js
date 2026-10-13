@@ -2567,7 +2567,7 @@ function identityRecordPath(home) {
 }
 
 function readIdentityRecord(home) {
-  const empty = { entries: {} };
+  const empty = { entries: {}, text: null };
   if (!home) return empty;
   const filePath = identityRecordPath(home);
   if (!identityRecordDirectorySafe(path.dirname(filePath))) return empty;
@@ -2576,7 +2576,8 @@ function readIdentityRecord(home) {
     descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
     const stat = fs.fstatSync(descriptor);
     if (!stat.isFile() || !ownerOnly(stat, 0o077) || stat.size > IDENTITY_RECORD_MAX_BYTES) return empty;
-    const parsed = JSON.parse(fs.readFileSync(descriptor, 'utf8'));
+    const text = fs.readFileSync(descriptor, 'utf8');
+    const parsed = JSON.parse(text);
     const entries = parsed && parsed.version === 1 && parsed.entries && typeof parsed.entries === 'object'
       && !Array.isArray(parsed.entries) ? parsed.entries : {};
     const valid = {};
@@ -2586,7 +2587,7 @@ function readIdentityRecord(home) {
         ? { MARROW_FLEET_AGENT_ID: entry.MARROW_FLEET_AGENT_ID }
         : {};
     }
-    return { entries: valid };
+    return { entries: valid, text };
   } catch {
     return empty;
   } finally {
@@ -2620,20 +2621,27 @@ function writeIdentityRecord(home, updates) {
     if (error?.code !== 'ENOENT') return false;
   }
   if (stat && (stat.isSymbolicLink() || !stat.isFile() || !ownerOnly(stat, 0o077))) return false;
-  // Rewritten from what was read and validated, so nothing else in an older file survives.
+  // Rewritten from what was read and validated, so nothing else in an older file survives; a
+  // record that already holds exactly these bytes is left alone (a second run writes nothing).
   const record = readIdentityRecord(home);
   for (const [key, applied] of Object.entries(updates)) {
     record.entries[key] = applied && AGENT_ID_RE.test(applied) ? { MARROW_FLEET_AGENT_ID: applied } : {};
   }
+  const text = `${JSON.stringify({ version: 1, entries: record.entries }, null, 2)}\n`;
+  if (stat && record.text === text) return true;
   const tempPath = path.join(directory, `.${IDENTITY_RECORD_FILE}.${process.pid}-${crypto.randomBytes(6).toString('hex')}`);
-  const descriptor = fs.openSync(tempPath, 'wx', 0o600);
+  let descriptor = -1;
   try {
+    descriptor = fs.openSync(tempPath, 'wx', 0o600);
     fs.fchmodSync(descriptor, 0o600);
-    fs.writeFileSync(descriptor, `${JSON.stringify({ version: 1, entries: record.entries }, null, 2)}\n`);
-  } finally {
+    fs.writeFileSync(descriptor, text);
     fs.closeSync(descriptor);
+    descriptor = -1;
+    fs.renameSync(tempPath, filePath);
+  } finally {
+    if (descriptor !== -1) fs.closeSync(descriptor);
+    if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
   }
-  fs.renameSync(tempPath, filePath);
   return true;
 }
 
