@@ -318,12 +318,19 @@ test('concurrent self-heals: one lock, one install; every hook runs the verified
       let stderr = '';
       child.stdout.on('data', (chunk) => { stdout += chunk; });
       child.stderr.on('data', (chunk) => { stderr += chunk; });
-      child.on('close', (status) => resolve({ status, stdout, stderr }));
+      child.on('close', (status) => resolve({ status, stdout, stderr, codex: index % 2 === 0 }));
       child.stdin.end(EVENT);
     })));
     for (const result of results) {
       if (result.status === 2) assert.equal(result.stderr, `${HOLD_TEXT}\n`);
-      else {
+      else if (result.status === 1) {
+        // Only the short-budget hook (Codex style: runtime-core budgetFor waits 3.5 s for the one-time
+        // install, Claude 45 s) may stop waiting when a loaded machine makes that install slow. It then
+        // exits 1 with its documented warning and nothing on stdout; any other exit 1, text or hook fails.
+        assert.equal(result.codex, true, `a Claude hook exited 1: ${result.stderr}`);
+        assert.equal(result.stderr, `${WARN_TEXT}\n`);
+        assert.equal(result.stdout, '');
+      } else {
         assert.equal(result.status, 0, result.stderr);
         assert.match(result.stdout, /"genuine":true/);
       }

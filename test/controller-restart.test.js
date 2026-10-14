@@ -72,6 +72,18 @@ function alive(pid) {
   }
 }
 
+// Polls until check() is truthy or the deadline passes, then returns the last value so the caller's
+// assertion still fails (with its own message) when the state never arrives. A loaded machine delays
+// a process start, its first health answer, or its exit; it must not change what is finally true.
+async function waitUntil(check, deadlineMs = 10_000) {
+  const deadline = Date.now() + deadlineMs;
+  for (;;) {
+    const value = await check();
+    if (value || Date.now() >= deadline) return value;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
 test('update restarts a controller from another installer version and keeps local control state', { skip: process.platform !== 'linux' }, async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-restart-project-'));
   fs.writeFileSync(path.join(project, 'package.json'), '{}\n');
@@ -95,9 +107,16 @@ test('update restarts a controller from another installer version and keeps loca
   };
   const legacy = await startLegacyController(project, legacyDirectory);
   try {
-    const found = await projectControllers(options);
+    // The first authenticated health probe has a 1 s limit; under load it can lapse once (status
+    // 'unreachable') before the stand-in answers. Poll until the stand-in is found and active; the
+    // assertions below then run on that state exactly as before.
+    let found = [];
+    await waitUntil(async () => {
+      found = await projectControllers(options);
+      return found.length === 1 && found[0].status.active === true;
+    });
     assert.equal(found.length, 1);
-    assert.equal(found[0].status.active, true);
+    assert.equal(found[0].status.active, true, `legacy controller status: ${found[0] && found[0].status.state}`);
     assert.equal(found[0].status.installer_version, '0.1.63');
     assert.equal(found[0].status.installer_version_reported, false);
 
@@ -106,6 +125,8 @@ test('update restarts a controller from another installer version and keeps loca
     assert.equal(restarted.installer_version, INSTALLER_VERSION);
     assert.equal(restarted.installer_version_reported, true);
     assert.deepEqual(restarted.restarted, { from_versions: ['0.1.63 (legacy)'], to_version: INSTALLER_VERSION, stopped: 1 });
+    // The old controller must end; its exit is awaited for up to 10 s instead of read once.
+    await waitUntil(() => !alive(legacy.child.pid));
     assert.equal(alive(legacy.child.pid), false);
     assert.equal(fs.existsSync(path.join(legacyDirectory, 'active.json')), false);
     const state = readState(options);

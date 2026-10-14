@@ -580,11 +580,41 @@ test('security review: names that say where a secret is (file, name, region) kee
 });
 
 test('security review: URL and JWT redaction stays linear on large inputs', () => {
-  for (const input of ['a.'.repeat(131072), '-eyJ'.repeat(65536), 'x=1&'.repeat(65536), `PASSWORD=${';a'.repeat(65536)}`, '"a" '.repeat(65536)]) {
-    const started = process.hrtime.bigint();
+  // The guard is growth, not wall-clock speed. Each large input is compared with the same shape at
+  // 1/32 of its size: linear work costs about 32x more (measured 22x to 75x, the most on the quote
+  // shape, where larger inputs also wake the parallel garbage collector), quadratic work about
+  // 1024x, so a ratio above 256 is super-linear growth. Time is CPU time (process.cpuUsage): a
+  // loaded machine stretches wall-clock time by 10x or more but leaves CPU time alone (one input:
+  // 3761 ms wall, 138 ms CPU, with 96 busy loops on 16 cores). The large input gets up to 3 tries
+  // and the best counts, since noise only ever slows a run. The 2000 ms ceiling of the old test
+  // stays as a backstop, now on CPU time.
+  const SMALLER_BY = 32;
+  const MAX_RATIO = 256;
+  const MAX_CPU_MS = 2000;
+  const cpuMs = (input) => {
+    const before = process.cpuUsage();
     runner.redact(input);
-    const ms = Number(process.hrtime.bigint() - started) / 1e6;
-    assert.ok(ms < 2000, `${input.slice(0, 8)}... took ${Math.round(ms)} ms`);
+    const used = process.cpuUsage(before);
+    return (used.user + used.system) / 1000;
+  };
+  const shapes = [
+    [(count) => 'a.'.repeat(count), 131072],
+    [(count) => '-eyJ'.repeat(count), 65536],
+    [(count) => 'x=1&'.repeat(count), 65536],
+    [(count) => `PASSWORD=${';a'.repeat(count)}`, 65536],
+    [(count) => '"a" '.repeat(count), 65536],
+  ];
+  for (const [build, count] of shapes) {
+    const large = build(count);
+    const small = build(count / SMALLER_BY);
+    cpuMs(small);
+    // Best of 5 on the small side, floored at 1 ms so timer granularity cannot inflate the ratio.
+    const baseline = Math.max(1, Math.min(...Array.from({ length: 5 }, () => cpuMs(small))));
+    let best = Infinity;
+    for (let attempt = 0; attempt < 3 && (best / baseline > MAX_RATIO || best >= MAX_CPU_MS); attempt += 1) best = Math.min(best, cpuMs(large));
+    const label = `${large.slice(0, 8)}...`;
+    assert.ok(best / baseline <= MAX_RATIO, `${label} cost ${(best / baseline).toFixed(1)}x its ${SMALLER_BY}x smaller baseline (${best.toFixed(1)} ms vs ${baseline.toFixed(1)} ms of CPU); more than ${MAX_RATIO}x is super-linear growth`);
+    assert.ok(best < MAX_CPU_MS, `${label} took ${Math.round(best)} ms of CPU`);
   }
 });
 
