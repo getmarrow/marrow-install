@@ -609,25 +609,25 @@ test('F1 residual: with the record file deleted, the one-time keep runs again (s
 test('F2: repair restores every deleted or stripped Marrow surface as before, and doctor lists exactly what repair writes', async () => {
   const hosts = { codex: true, cursor: true, gemini: true, windsurf: true, cline: true };
   const surfaces = [
-    ['Grok (U01)', (home) => fs.rmSync(path.join(home, '.grok', 'hooks', 'marrow.json')), (home) => path.join(home, '.grok', 'hooks', 'marrow.json')],
-    ['Codex (U02)', (home) => fs.rmSync(path.join(home, '.codex', 'hooks.json')), (home) => path.join(home, '.codex', 'hooks.json')],
-    ['Gemini (U03)', (home) => fs.rmSync(path.join(home, '.gemini', 'settings.json')), (home) => path.join(home, '.gemini', 'settings.json')],
-    ['Cursor (U04)', (home) => { for (const file of ['mcp.json', 'hooks.json', path.join('rules', 'marrow.mdc')]) fs.rmSync(path.join(home, '.cursor', file)); }, (home) => path.join(home, '.cursor', 'hooks.json')],
-    ['Claude (U05)', (home) => { fs.rmSync(path.join(home, '.claude', 'settings.json')); fs.rmSync(homeMcp(home)); }, (home) => path.join(home, '.claude', 'settings.json')],
+    ['Grok (U01)', (home) => fs.rmSync(path.join(home, '.grok', 'hooks', 'marrow.json')), (home) => path.join(home, '.grok', 'hooks', 'marrow.json'), 'Grok'],
+    ['Codex (U02)', (home) => fs.rmSync(path.join(home, '.codex', 'hooks.json')), (home) => path.join(home, '.codex', 'hooks.json'), 'Codex'],
+    ['Gemini (U03)', (home) => fs.rmSync(path.join(home, '.gemini', 'settings.json')), (home) => path.join(home, '.gemini', 'settings.json'), 'Gemini CLI'],
+    ['Cursor (U04)', (home) => { for (const file of ['mcp.json', 'hooks.json', path.join('rules', 'marrow.mdc')]) fs.rmSync(path.join(home, '.cursor', file)); }, (home) => path.join(home, '.cursor', 'hooks.json'), 'Cursor'],
+    ['Claude (U05)', (home) => { fs.rmSync(path.join(home, '.claude', 'settings.json')); fs.rmSync(homeMcp(home)); }, (home) => path.join(home, '.claude', 'settings.json'), 'Claude Code'],
     ['AGENTS.md block (U06)', (home) => {
       const file = path.join(home, 'AGENTS.md');
       const text = fs.readFileSync(file, 'utf8');
       const start = text.indexOf('<!-- marrow:passive-start -->');
       const end = text.indexOf('<!-- marrow:passive-end -->') + '<!-- marrow:passive-end -->'.length;
       fs.writeFileSync(file, text.slice(0, start) + text.slice(end));
-    }, (home) => path.join(home, 'AGENTS.md')],
-    ['Windsurf (U07)', (home) => fs.rmSync(path.join(home, '.windsurf', 'hooks.json')), (home) => path.join(home, '.windsurf', 'hooks.json')],
-    ['Cline (U08)', (home) => { for (const file of ['PreToolUse', 'PostToolUse', 'TaskCancel']) fs.rmSync(path.join(home, '.clinerules', 'hooks', file)); }, (home) => path.join(home, '.clinerules', 'hooks', 'PreToolUse')],
+    }, (home) => path.join(home, 'AGENTS.md'), null],
+    ['Windsurf (U07)', (home) => fs.rmSync(path.join(home, '.windsurf', 'hooks.json')), (home) => path.join(home, '.windsurf', 'hooks.json'), 'Windsurf'],
+    ['Cline (U08)', (home) => { for (const file of ['PreToolUse', 'PostToolUse', 'TaskCancel']) fs.rmSync(path.join(home, '.clinerules', 'hooks', file)); }, (home) => path.join(home, '.clinerules', 'hooks', 'PreToolUse'), 'Cline'],
     ['Codex Marrow entries stripped, owner entry kept (U12)', (home) => {
       fs.writeFileSync(path.join(home, '.codex', 'hooks.json'), `${JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Owner', hooks: [{ type: 'command', command: 'owner-check.sh' }] }] } }, null, 2)}\n`);
-    }, (home) => path.join(home, '.codex', 'hooks.json')],
+    }, (home) => path.join(home, '.codex', 'hooks.json'), 'Codex'],
   ];
-  for (const [name, remove, probe] of surfaces) {
+  for (const [name, remove, probe, host] of surfaces) {
     const home = tempDir('marrow-f2-');
     try {
       hostLayout(home, hosts);
@@ -639,8 +639,16 @@ test('F2: repair restores every deleted or stripped Marrow surface as before, an
       // update (the word) leaves a surface with no Marrow config alone, and names the fix.
       const updated = await installHome(home, { agentId: 'cliff', update: true, repair: true, updateOnly: true });
       assert.ok(updated.report.update_skipped?.length > 0, `${name}: update names what it left alone`);
-      assert.match(updated.printed, /left alone by update: .*--repair/, name);
-      assert.ok(updated.summary.some((line) => /^Update left \d+ file\(s\) alone .*--repair/.test(line)), name);
+      if (host) {
+        // A host whose Marrow hooks are absent is told so in one plain sentence, in the report and the summary.
+        const line = `Marrow hooks for ${host} are missing. If Marrow was set up here, something removed them. Run npx -y @getmarrow/install@latest --repair to restore them.`;
+        assert.ok(updated.printed.split('\n').includes(`- ${line}`), `${name}: report says the hooks are missing`);
+        assert.ok(updated.summary.includes(line), `${name}: summary says the hooks are missing`);
+      } else {
+        // The AGENTS.md block is not a host's hooks: it keeps the older wording.
+        assert.match(updated.printed, /left alone by update: .*--repair/, name);
+        assert.ok(updated.summary.some((line) => /^Update left \d+ file\(s\) alone .*--repair/.test(line)), name);
+      }
 
       const doctor = await installHome(home, { agentId: 'cliff', doctor: true, yes: false });
       const wouldWrite = doctor.report.changes.filter((change) => change.changed).map((change) => change.path).sort();

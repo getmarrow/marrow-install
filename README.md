@@ -24,7 +24,7 @@ Use `@getmarrow/install` as the default entry point. It detects supported agent 
 
 With no key, `activate`, the bare command and every `--yes` write run print what to do and exit 2 before writing anything. `--dry-run`, `doctor` and `uninstall` need no key.
 
-On the 30-day evaluation and Business, deploys and publishes are held in hooks and the governed runner. Team and Free warn. If Marrow is unreachable, hooks let actions run with a warning, and the governed runner stops protected actions it cannot verify. Over MCP, the agent gets the decision and is expected to follow it.
+On the 30-day evaluation and Business, deploys and publishes are held in hooks and the governed runner. Team and Free warn. If Marrow is unreachable, hooks hold high-risk actions and let routine actions run with a warning, and the governed runner stops protected actions it cannot verify. Over MCP, the agent gets the decision and is expected to follow it.
 
 ## Install
 

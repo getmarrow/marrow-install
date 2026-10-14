@@ -2562,6 +2562,29 @@ const IDENTITY_RECORD_MAX_BYTES = 64 * 1024;
 const IDENTITY_RECORD_INVALID_LINE = 'identity record ~/.marrow/identity-record.json is unsafe or unreadable (it must be an owner-only file in an owner-only ~/.marrow); ignored: agent ids were reset as before';
 const UPDATE_SKIPPED_FIX = 'run npx -y @getmarrow/install@latest --repair to add or restore it';
 
+// A host whose Marrow hook config is absent. The installer cannot tell a host that lost its hooks
+// from one that never had them: its identity record names MCP configs only, never a hook file, and
+// installs from 0.1.71 and earlier have no record. So both get this one line, which says "if".
+function missingHooksLine(host) {
+  return `Marrow hooks for ${host} are missing. If Marrow was set up here, something removed them. Run npx -y @getmarrow/install@latest --repair to restore them.`;
+}
+
+// Skipped writes grouped for the report: one entry per host whose hooks are absent, and the
+// writes that belong to no hook host (the AGENTS.md block, the Hermes config) in the older form.
+function groupMissingHosts(entries) {
+  const hosts = new Map();
+  const others = [];
+  for (const entry of entries || []) {
+    if (!entry.host) {
+      others.push(entry);
+    } else {
+      if (!hosts.has(entry.host)) hosts.set(entry.host, []);
+      hosts.get(entry.host).push(entry);
+    }
+  }
+  return { hosts, others };
+}
+
 function ownerOnly(stat, mask) {
   const uid = typeof process.getuid === 'function' ? process.getuid() : null;
   return (uid === null || stat.uid === uid) && (stat.mode & mask) === 0;
@@ -3246,17 +3269,41 @@ function buildPlan(detection, options) {
   }
 
   const updateOnly = update && options.updateOnly === true;
-  const planned = updateOnly ? updateWrites(writes, detection, options) : writes;
-  const skipped = writes.filter((write) => !planned.includes(write)).map((write) => ({ label: write.label, path: write.path }));
+  // Doctor reads the same filter, only to name the hosts whose hooks are absent; it writes nothing.
+  const doctorNamesAbsent = !updateOnly && options.doctor === true && options.maintenance !== true;
+  const retained = updateOnly || doctorNamesAbsent ? updateWrites(writes, detection, options) : writes;
+  const planned = updateOnly ? retained : writes;
+  const hostOf = (write) => {
+    const group = updateHostGroups(detection.paths).find((candidate) => candidate.hooks && candidate.files.includes(write.path));
+    return group ? { host: group.host } : {};
+  };
+  const dropped = writes.filter((write) => !retained.includes(write)).map((write) => ({ label: write.label, path: write.path, ...hostOf(write) }));
+  const skipped = updateOnly ? dropped : [];
+  const absentHosts = doctorNamesAbsent ? dropped.filter((entry) => entry.host) : [];
   return {
     mode,
     root: detection.root,
     writes: planned,
     ...(skipped.length ? { update_skipped: skipped } : {}),
+    ...(absentHosts.length ? { absent_hosts: absentHosts } : {}),
     mcp_target_version: mcpTargetVersion,
     host_approval_hooks: hostApprovals,
     ...(options.maintenance !== true ? { identityRecordHome: detection.home } : {}),
   };
+}
+
+// The files of each host, as `update` reads them. `hooks` is false for a host with no hook file.
+function updateHostGroups(paths) {
+  return [
+    { host: 'Claude Code', hooks: true, files: [paths.claudeSettings, paths.mcpJson] },
+    { host: 'Codex', hooks: true, files: [paths.codexHooks] },
+    { host: 'Cline', hooks: true, files: [paths.clinePreToolUseHook, paths.clinePostToolUseHook, paths.clineTaskCancelHook] },
+    { host: 'Windsurf', hooks: true, files: [paths.windsurfHooks] },
+    { host: 'Gemini CLI', hooks: true, files: [paths.geminiSettings] },
+    { host: 'Grok', hooks: true, files: [paths.grokHooks] },
+    { host: 'Cursor', hooks: true, files: [paths.cursorHooks, paths.cursorMcp, paths.cursorRules] },
+    { host: 'Hermes', hooks: false, files: [paths.hermesConfig] },
+  ];
 }
 
 // The word `update` refreshes what Marrow already configured: no host gets its first Marrow file,
@@ -3264,16 +3311,7 @@ function buildPlan(detection, options) {
 // it leaves alone is reported; `repair` (and install/activate) still write it, as before.
 function updateWrites(writes, detection, options) {
   const { paths } = detection;
-  const hosts = [
-    [paths.claudeSettings, paths.mcpJson],
-    [paths.codexHooks],
-    [paths.clinePreToolUseHook, paths.clinePostToolUseHook, paths.clineTaskCancelHook],
-    [paths.windsurfHooks],
-    [paths.geminiSettings],
-    [paths.grokHooks],
-    [paths.cursorHooks, paths.cursorMcp, paths.cursorRules],
-    [paths.hermesConfig],
-  ];
+  const hosts = updateHostGroups(paths).map((group) => group.files);
   const carriesMarrow = (filePath) => {
     try {
       const stat = fs.lstatSync(filePath);
@@ -4533,7 +4571,12 @@ function printReport(report, sink) {
       out(`  identity reset: ${divergence.field} ${divergence.replaced} -> ${divergence.applied}. If the previous value was intended, add it to ${divergence.field === 'MARROW_BASE_URL' ? 'MARROW_ALLOWED_BASE_URLS' : 'MARROW_ALLOWED_AGENT_IDS'} and rerun.\n`);
     }
   }
-  for (const skipped of report.update_skipped || []) {
+  const missing = groupMissingHosts(report.update_skipped);
+  for (const [host, entries] of missing.hosts) {
+    out(`- ${missingHooksLine(host)}\n`);
+    out(`  not found: ${entries.map((entry) => `${entry.label} (${entry.path})`).join('; ')}\n`);
+  }
+  for (const skipped of missing.others) {
     out(`- left alone by update: ${skipped.label} (${skipped.path}) has no Marrow config; ${UPDATE_SKIPPED_FIX}\n`);
   }
 
@@ -4714,6 +4757,7 @@ function printReport(report, sink) {
     out(`- missing env: ${report.doctor.missingEnv.length ? report.doctor.missingEnv.join(', ') : 'none'}\n`);
     if (report.doctor.envHints.length) out(`- possible env files: ${report.doctor.envHints.join(', ')}\n`);
     out(`- missing hooks/config: ${report.doctor.missingHooks.length ? report.doctor.missingHooks.join('; ') : 'none'}\n`);
+    for (const host of groupMissingHosts(report.doctor.hooks_missing_hosts).hosts.keys()) out(`- ${missingHooksLine(host)}\n`);
     const plugins = report.doctor.agent_plugins || [];
     if (!plugins.length) out('- agent plugins: none\n');
     for (const plugin of plugins) out(`- agent plugin: ${plugin.summary}\n`);
@@ -5034,6 +5078,8 @@ async function install(options) {
   // Doctor only: Marrow's agent plugins at the host's own install location (src/agent-plugins.js).
   const agentPlugins = options.doctor ? detectAgentPlugins({ home: detection.home, env: process.env, project: detection.root }) : [];
   const pluginHookLabels = new Set(agentPlugins.filter((plugin) => plugin.counted).map((plugin) => plugin.hook_label));
+  // A host whose Marrow plugin supplies the hooks is not missing them.
+  const hooksMissingHosts = (plan.absent_hosts || []).filter((entry) => !(plan.absent_hosts || []).some((other) => other.host === entry.host && pluginHookLabels.has(other.label)));
   // Doctor only: a Codex hooks file that still carries the look-ahead matcher Codex rejects.
   const staleCodexEvents = options.doctor ? staleCodexHookEvents(detection.paths.codexHooks) : [];
   const staleHooks = staleCodexEvents.length ? [{
@@ -5203,6 +5249,7 @@ async function install(options) {
     changes,
     ...(plan.update_skipped ? { update_skipped: plan.update_skipped } : {}),
     doctor: {
+      ...(hooksMissingHosts.length ? { hooks_missing_hosts: hooksMissingHosts } : {}),
       active: Boolean(!selfTest.skipped && selfTest.active),
       missingEnv: options.apiKey ? [] : ['MARROW_API_KEY'],
       envHints,
@@ -5344,8 +5391,10 @@ function installSummaryLines(report, options) {
         : `Kept agent identity ${kept.value} (recorded by this installer) in ${change.path}.`);
     }
   }
-  if (report.update_skipped?.length) {
-    lines.push(`Update left ${report.update_skipped.length} file(s) alone that have no Marrow config (${report.update_skipped.map((skipped) => skipped.label).join(', ')}); ${UPDATE_SKIPPED_FIX}.`);
+  const missingHosts = groupMissingHosts(report.update_skipped);
+  for (const host of missingHosts.hosts.keys()) lines.push(missingHooksLine(host));
+  if (missingHosts.others.length) {
+    lines.push(`Update left ${missingHosts.others.length} file(s) alone that have no Marrow config (${missingHosts.others.map((skipped) => skipped.label).join(', ')}); ${UPDATE_SKIPPED_FIX}.`);
   }
   const divergences = (report.changes || []).flatMap((change) => (change.identity_divergence || []).map((divergence) => ({ ...divergence, path: change.path })));
   if (divergences.length) {
