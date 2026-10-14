@@ -2,9 +2,9 @@
 
 Release notes for `@getmarrow/install`, newest first. The README describes only the current version.
 
-## Unreleased
+## v0.1.71
 
-The next release installs MCP `3.9.103` (source `868a9c18530a75fcee5052441d0d3d2383511df4`, packed integrity `sha512-STXL6Zaiqv8Jh0wQpQpNut3bvj5ck0wNokwhy21Y7XuqNK55+MMgCkpYhFzIuVCiuGL2FR7NlytA3EmFlHdS6w==`; the release re-verifies it against the published tarball). SDK is `3.7.65`. Update once, restart the owning harness, review hook trust (Codex `/hooks`) and run `doctor --self-test`.
+v0.1.71 installs MCP `3.9.103` (source `868a9c18530a75fcee5052441d0d3d2383511df4`, packed integrity `sha512-STXL6Zaiqv8Jh0wQpQpNut3bvj5ck0wNokwhy21Y7XuqNK55+MMgCkpYhFzIuVCiuGL2FR7NlytA3EmFlHdS6w==`). SDK is `3.7.65`. Update once, restart the owning harness, review hook trust (Codex `/hooks`) and run `doctor --self-test`.
 
 - **Codex tool calls are checked.** The Codex `PreToolUse` and `PostToolUse` hooks match `*`; the v0.1.70 matcher used look-ahead, which Codex rejects, so none of its hooks ran. `update` and `--yes` rewrite it in place, once, also for a project whose `.codex` holds only Marrow's own `hooks.json`; `doctor` reports a stale file. No own-tool name is in any Codex matcher.
 - **Own tools on Codex are skipped only with proof.** The hook skips exactly `mcp__marrow__<name>` (58 registered names) only when the Codex configuration proves the `marrow` server is the official Marrow MCP server (README entry, installed `marrow-mcp`, the installer's launch, or the official plugin installed alone). `functions.`, `MCP:`, `MCP:marrow:` and nested forms are never skipped. Servers whose names produce the same label (`mcp__marrow`, `marrow_`, `marrow-`, `_`, `-`, `__`, `mcp___`, …) no longer get their own-named tools skipped.

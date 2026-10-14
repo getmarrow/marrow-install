@@ -109,17 +109,19 @@ test('README documents chat and terminal approvals and never makes a dashboard l
 
 // The Codex text describes what the source does now, so it must sit under the unreleased heading,
 // not under the published version, and each statement is tied to the code it describes.
-test('README: the Codex text is in the next-release section, exact, and not in the v0.1.70 section', () => {
+test('README: the Codex text is in the Codex and Cursor section, exact, and not in the v0.1.70 notes', () => {
   const sections = readme.split(/^## /m).slice(1).map((text) => ({ title: text.slice(0, text.indexOf('\n')), body: text }));
   const titles = sections.map((section) => section.title);
-  const published = sections.find((section) => section.title === "What's New in v0.1.70");
-  assert.ok(published, "the What's New in v0.1.70 section exists");
+  const published = sections.find((section) => section.title === 'Hook matching and the local runtime');
+  assert.ok(published, 'the section that carries the v0.1.70 notes exists');
+  assert.match(published.body, /These behaviors shipped in v0\.1\.70 and still apply/);
   assert.doesNotMatch(published.body, /codex/i, 'the published version\'s notes make no Codex claim');
 
-  const nextIndex = titles.findIndex((title) => /^Next release \(not yet published\)$/.test(title));
-  assert.notEqual(nextIndex, -1, 'a next-release section exists');
-  assert.equal(titles.filter((title) => /^Next release/.test(title)).length, 1);
-  assert.equal(titles[nextIndex - 1], "What's New in v0.1.70", 'it follows the published version\'s notes');
+  const nextIndex = titles.findIndex((title) => title === 'Codex and Cursor tool calls');
+  assert.notEqual(nextIndex, -1, 'the Codex and Cursor section exists');
+  assert.equal(titles.filter((title) => /^Codex and Cursor tool calls/.test(title)).length, 1);
+  assert.equal(titles.filter((title) => /^Next release/.test(title)).length, 0, 'no next-release section is left');
+  assert.equal(titles[nextIndex - 1], `What's New in v${pkg.version}`, 'it follows the current version\'s notes');
   const next = sections[nextIndex].body;
 
   // 1. The matcher is the one the installer writes, and the old one is named as rejected.
