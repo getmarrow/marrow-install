@@ -130,8 +130,8 @@ test('README: the Codex text is in the next-release section, exact, and not in t
   assert.match(next, /npx @getmarrow\/install@latest update/);
   // 2. The pin the text names is the pin in src/pins.js.
   assert.equal(PINS.MCP_ADAPTER_VERSION, '3.9.103');
-  assert.match(next, /`@getmarrow\/mcp` 3\.9\.103 \(built from marrow-mcp `038cf8d9`/);
-  assert.equal(PINS.MCP_ADAPTER_SOURCE_SHA.startsWith('038cf8d9'), true);
+  assert.match(next, /`@getmarrow\/mcp` 3\.9\.103 \(built from marrow-mcp `868a9c18`/);
+  assert.equal(PINS.MCP_ADAPTER_SOURCE_SHA.startsWith('868a9c18'), true);
   // 3. Own tools are skipped only with proof: exact label, the module's 58 names, the proven forms, the never forms.
   assert.equal(own.MARROW_OWN_TOOL_NAMES.length, 58);
   assert.match(next, /skipped only when the configuration proves the server/);
