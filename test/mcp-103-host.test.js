@@ -12,7 +12,7 @@ const { mcpServerLaunch, runtimeDir } = require('../src/mcp-runtime');
 const { fakeRuntime } = require('./support/fake-runtime');
 const host = require('./support/mcp-host');
 
-// Installer 0.1.71 against the pinned MCP 3.9.103 (marrow-mcp 868a9c18): what the installer writes
+// Installer 0.1.72 against the pinned MCP 3.9.103 (marrow-mcp 868a9c18): what the installer writes
 // for Codex and Cursor, and what the real MCP decision (test/fixtures/mcp-3.9.103, byte for byte)
 // does with it. Every host here is a temporary HOME/CODEX_HOME and project; npm_config_* is unset
 // unless a case sets it (test/support/mcp-host.js).

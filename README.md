@@ -116,13 +116,13 @@ These behaviors shipped in v0.1.69 and still apply.
 
 These behaviors shipped in v0.1.70 and still apply.
 
-- **Own-tool names are exact.** The Claude Code hook matcher skips the gate only for Marrow's registered tools on server `marrow`, by the exact name `mcp__marrow__<name>`, and v0.1.70's Cursor guard allowed a call at once when the server was named `marrow` and the tool was a registered name, without checking which server that is (v0.1.71 removes that). Look-alike names go through the gate. Re-run `update` to refresh hooks written with the old matcher. See [Hooks the installer writes](#hooks-the-installer-writes).
+- **Own-tool names are exact.** The Claude Code hook matcher skips the gate only for Marrow's registered tools on server `marrow`, by the exact name `mcp__marrow__<name>`, and v0.1.70's Cursor guard allowed a call at once when the server was named `marrow` and the tool was a registered name, without checking which server that is (v0.1.72 removes that). Look-alike names go through the gate. Re-run `update` to refresh hooks written with the old matcher. See [Hooks the installer writes](#hooks-the-installer-writes).
 - **Hooks run only the verified local MCP runtime.** They no longer start `npx`; when the runtime is missing, they heal it from the pinned, integrity-checked package, and hold if they cannot. When npm or the network is down, pre-action hooks warn and let the action run; an integrity mismatch or any other failure holds. See [Local MCP runtime](#local-mcp-runtime).
 - **Fallback npm install protects your npm login.** It sends npm auth only when the network settings come from your own npm config, and installs exactly the pinned MCP and SDK.
 
-## What's New in v0.1.71
+## What's New in v0.1.72
 
-v0.1.71 installs MCP `3.9.103`. In short (the full entry is in the [CHANGELOG](https://github.com/getmarrow/marrow-install/blob/master/CHANGELOG.md)):
+v0.1.72 installs MCP `3.9.103`. In short (the full entry is in the [CHANGELOG](https://github.com/getmarrow/marrow-install/blob/master/CHANGELOG.md)):
 
 - **Codex tool calls are checked.** The Codex hooks use the matcher `*`, so every tool call Codex sends to its hooks reaches Marrow's hook. The v0.1.70 matcher used look-ahead, which Codex rejects, so none of its hooks ran. Run `update` once, then review and trust the hooks in `/hooks`. See [Codex and Cursor tool calls](#codex-and-cursor-tool-calls).
 - **Marrow's own tools are skipped only with proof.** On Codex and Cursor the hook skips an own tool only when the host's own MCP configuration proves that the `marrow` server is the official Marrow MCP server; a look-alike server name no longer gets its tools skipped, and the Cursor guard allows nothing by name. Same section.
@@ -134,9 +134,9 @@ Earlier release notes are in the [CHANGELOG](https://github.com/getmarrow/marrow
 
 ## Codex and Cursor tool calls
 
-These changes shipped in v0.1.71 and still apply. The Codex checks below need v0.1.71 or later plus the one-time `/hooks` step.
+These changes shipped in v0.1.72 and still apply. The Codex checks below need v0.1.72 or later plus the one-time `/hooks` step.
 
-- **MCP 3.9.103.** v0.1.71 installs `@getmarrow/mcp` 3.9.103 (built from marrow-mcp `868a9c18`; `src/pins.js`). It no longer decides Marrow's own tools by label alone on Codex and Cursor: it reads the host's own MCP configuration, as the bullets below describe.
+- **MCP 3.9.103.** v0.1.72 installs `@getmarrow/mcp` 3.9.103 (built from marrow-mcp `868a9c18`; `src/pins.js`). It no longer decides Marrow's own tools by label alone on Codex and Cursor: it reads the host's own MCP configuration, as the bullets below describe.
 - **Codex tool calls are checked.** The Codex hooks in `.codex/hooks.json` use the matcher `*` for `PreToolUse` and `PostToolUse`, so every tool call Codex sends to its hooks reaches Marrow's hook, which decides whether to hold it. The matcher itself skips nothing, and no own-tool name is in any Marrow matcher for Codex. The matcher v0.1.70 wrote uses look-ahead, which Codex rejects (it reports `invalid matcher` and loads no `PreToolUse` hook), so with v0.1.70 no Codex tool call is checked.
 - **Upgrade with `update`.** Run `npx @getmarrow/install@latest update` once. A project whose `.codex` holds only Marrow's own `hooks.json` counts as a Codex project, so `--yes`, `update` and `doctor` find it and rewrite the old matcher in place, once and without duplicate entries; your own hook groups are kept. `doctor` lists a Codex hooks file that still has the old matcher as stale and names the same command. The same `update` replaces the v0.1.70 Cursor guard (below) and moves every Marrow command and MCP entry to 3.9.103.
 - **Codex: Marrow's own tools are skipped only when the configuration proves the server.** The hook (`@getmarrow/mcp` 3.9.103) skips a call without a check only when both are true. The label is exactly `mcp__marrow__<name>` and `<name>` is one of the 58 tool names the `marrow` server registers (`src/marrow-own-tools.js`). And the Codex configuration the hook reads proves that the `marrow` server is the official Marrow MCP server: the README entry (`command = "npx"`, `args = ["-y", "@getmarrow/mcp"]`, or the `--package=@getmarrow/mcp@<version> marrow-mcp` form), the installed `marrow-mcp` bin or the installer's verified-runtime launch, in `$CODEX_HOME/config.toml` or a project `.codex/config.toml`; or the official Marrow Codex plugin, enabled in `$CODEX_HOME/config.toml`, with every pinned file unchanged and installed alone. The labels `functions.mcp__marrow__<name>`, `MCP:marrow:<name>` and `MCP:<name>` and a nested `use_tool` form are never skipped on Codex. Another case, padding, a suffix, an unregistered `marrow_*` name or any other label goes through the hook's normal path, as does a call when the configuration proves nothing.
@@ -298,7 +298,7 @@ Never connect an agent to the email inbox that receives Marrow approval mail. An
 
 ### Hooks the installer writes
 
-These hooks are written with MCP `3.9.99` and later (`MCP_HOST_APPROVAL_HOOKS_SINCE` in `src/pins.js`). v0.1.71 installs MCP `3.9.103`, so `install` and `update` write them; with an older MCP the earlier layout stays. `update` also uses a registry-verified MCP at or above that version.
+These hooks are written with MCP `3.9.99` and later (`MCP_HOST_APPROVAL_HOOKS_SINCE` in `src/pins.js`). v0.1.72 installs MCP `3.9.103`, so `install` and `update` write them; with an older MCP the earlier layout stays. `update` also uses a registry-verified MCP at or above that version.
 
 | Host | Hooks for approvals | How the operator answers |
 | --- | --- | --- |

@@ -2,6 +2,10 @@
 
 Release notes for `@getmarrow/install`, newest first. The README describes only the current version.
 
+## v0.1.72
+
+v0.1.72 is the same code as v0.1.71, which was never published; tests no longer depend on node/npm in /usr/local/bin. Everything listed under v0.1.71 below first ships in v0.1.72.
+
 ## v0.1.71
 
 v0.1.71 installs MCP `3.9.103` (source `868a9c18530a75fcee5052441d0d3d2383511df4`, packed integrity `sha512-STXL6Zaiqv8Jh0wQpQpNut3bvj5ck0wNokwhy21Y7XuqNK55+MMgCkpYhFzIuVCiuGL2FR7NlytA3EmFlHdS6w==`). SDK is `3.7.65`. Update once, restart the owning harness, review hook trust (Codex `/hooks`) and run `doctor --self-test`.
