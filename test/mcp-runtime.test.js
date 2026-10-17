@@ -39,6 +39,9 @@ const { cleanControllerEnv, controllerStatus, ensureCurrentGovernanceController,
 const PIN = PINS.MCP_ADAPTER_VERSION;
 const AHEAD = PIN.replace(/\d+$/, (patch) => String(Number(patch) + 1));
 const fakeIntegrity = (seed) => `sha512-${crypto.createHash('sha512').update(seed).digest('base64')}`;
+// The hook's node search looks in these fixed directories after PATH (src/mcp-runtime.js nodeSearch).
+const HOOK_NODE_DIRS = ['/usr/local/bin', '/opt/homebrew/bin'];
+const isExecutableFile = (file) => { try { fs.accessSync(file, fs.constants.X_OK); return fs.statSync(file).isFile(); } catch { return false; } };
 
 function tempDir(prefix = 'marrow-runtime-') {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -395,11 +398,26 @@ test('without a verified copy every pre-action hook holds with the fixed repair 
     const noNode = runProjectHook(preAction, root, env);
     assert.equal(noNode.status, 0, noNode.stderr);
     assert.equal(noNode.stdout, '{"local":true}');
-    // ...and with no node on PATH either, it holds.
-    const noNodeAtAll = runProjectHook(preAction, root, { ...env, PATH: `${shimDir}:${root}:/usr/bin:/bin`.split(':').filter((dir) => !fs.existsSync(path.join(dir, 'node'))).join(':') });
-    assert.equal(noNodeAtAll.status, 2, noNodeAtAll.stdout);
-    assert.equal(noNodeAtAll.stderr, `${HOLD_TEXT}\n`);
+    // ...and with no node on PATH either, it holds. (Where the hook's own fallback directories,
+    // /usr/local/bin or /opt/homebrew/bin, hold a node, as on a GitHub runner or most Macs, the hook
+    // finds that node and its loader still runs only the verified copy: a changed copy never runs.)
+    const noNodePath = `${shimDir}:${root}:/usr/bin:/bin`.split(':').filter((dir) => !fs.existsSync(path.join(dir, 'node'))).join(':');
+    const noNodeAtAll = runProjectHook(preAction, root, { ...env, PATH: noNodePath });
     assert.doesNotMatch(noNodeAtAll.stdout, /allow|via/);
+    if (HOOK_NODE_DIRS.some((dir) => isExecutableFile(path.join(dir, 'node')))) {
+      assert.equal(noNodeAtAll.status, 0, noNodeAtAll.stderr);
+      assert.equal(noNodeAtAll.stdout, '{"local":true}');
+      fs.appendFileSync(path.join(runtimeDir(home, PIN), 'node_modules', '@getmarrow', 'mcp', 'dist', 'cli.js'), '\n// changed\n');
+      const changedFallback = runProjectHook(preAction, root, { ...env, PATH: noNodePath });
+      assert.equal(changedFallback.status, 1, changedFallback.stderr);
+      assert.equal(changedFallback.stdout, '');
+      assert.equal(changedFallback.stderr, `${WARN_TEXT}\n`);
+      for (const deadline = Date.now() + 60_000; Date.now() < deadline && fs.readdirSync(path.join(home, '.marrow', 'runtime', 'mcp')).some((name) => name.endsWith('.lock'));) await new Promise((resolve) => setTimeout(resolve, 100));
+    } else {
+      assert.equal(noNodeAtAll.status, 2, noNodeAtAll.stdout);
+      assert.equal(noNodeAtAll.stderr, `${HOLD_TEXT}\n`);
+    }
+    assertNothingPlantedRan(home);
 
     // The copy is gone (offline self-heal): every kind of pre-action command warns as a failed npx did.
     fs.rmSync(path.join(home, '.marrow', 'runtime'), { recursive: true, force: true });

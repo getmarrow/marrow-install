@@ -31,12 +31,29 @@ const STUB = path.join(__dirname, 'support', 'registry-stub.js');
 // System-npm awareness. npmInvocation tries fixed root-owned places before it searches PATH, so on a
 // host that has a system npm the PATH-filter tests cannot reach the PATH search unless that npm is
 // hidden. fixedSystemNpm() names the one npmInvocation will pick (null where there is none);
-// withoutSystemNpm() hides only those two absolute files from fs.statSync (the fixed lookup), so the
-// PATH search is still tested everywhere; hostile-input assertions are never skipped.
+// withoutSystemNpm() hides those two absolute files from fs.statSync (the fixed lookup) and the npm in
+// the PATH search's own fallback directories (/usr/local/bin, /opt/homebrew/bin: a GitHub runner and
+// most macOS installs have one there) from fs.realpathSync, so the PATH search is still tested
+// everywhere; hostile-input assertions are never skipped. pathFallbackNpm() names the npm-cli.js (or
+// wrapper) the PATH search falls back to where no fixed one exists (null where there is none).
 const SYSTEM_NPM_CLIS = ['/usr/share/nodejs/npm/bin/npm-cli.js', '/usr/lib/node_modules/npm/bin/npm-cli.js'];
 const PATH_FALLBACK_NPMS = ['/usr/local/bin/npm', '/opt/homebrew/bin/npm'];
 const isFile = (file) => { try { return fs.statSync(file).isFile(); } catch { return false; } };
 const fixedSystemNpm = () => SYSTEM_NPM_CLIS.find(isFile) || null;
+const pathFallbackNpm = () => {
+  for (const file of PATH_FALLBACK_NPMS) {
+    try {
+      const real = fs.realpathSync(file);
+      const stat = fs.statSync(real);
+      if (stat.isFile() && (stat.mode & 0o111) !== 0) return real;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+};
+// What npmInvocation returns for a PATH-fallback npm: npm-cli.js on the trusted node, or the wrapper itself.
+const fallbackPick = (execPath, real) => (/\.js$/.test(real) ? { file: execPath, args: [real] } : { file: real, args: [] });
 const anySystemNpm = () => Boolean(fixedSystemNpm()) || PATH_FALLBACK_NPMS.some((file) => fs.existsSync(file));
 // Directories the hook's node search looks in besides the project: its PATH fallbacks plus whatever
 // the test puts on PATH.
@@ -44,14 +61,20 @@ const HOOK_NODE_DIRS = ['/usr/local/bin', '/opt/homebrew/bin'];
 const nodeIn = (dirs) => dirs.some((dir) => { try { fs.accessSync(path.join(dir, 'node'), fs.constants.X_OK); return fs.statSync(path.join(dir, 'node')).isFile(); } catch { return false; } });
 function withoutSystemNpm(fn) {
   const real = fs.statSync;
+  const realpath = fs.realpathSync;
   fs.statSync = function statSync(file, ...rest) {
     if (SYSTEM_NPM_CLIS.includes(String(file))) throw Object.assign(new Error('ENOENT (hidden by test)'), { code: 'ENOENT' });
     return real.call(this, file, ...rest);
+  };
+  fs.realpathSync = function realpathSync(file, ...rest) {
+    if (PATH_FALLBACK_NPMS.includes(String(file))) throw Object.assign(new Error('ENOENT (hidden by test)'), { code: 'ENOENT' });
+    return realpath.call(this, file, ...rest);
   };
   try {
     return fn();
   } finally {
     fs.statSync = real;
+    fs.realpathSync = realpath;
   }
 }
 
@@ -575,12 +598,19 @@ test('outage rule: a registry that answers 500, a heal that cannot finish within
     assert.equal(withoutSystemNpm(() => runtimeCore.npmInvocation(hostile)), null);
     // ... and where a root-owned system npm exists it is the one picked, run on the trusted node.
     const systemNpm = fixedSystemNpm();
+    // ... or, with none, the npm in the PATH search's fallback directories (a runner's /usr/local/bin):
+    // never the project's, and its child PATH keeps no relative entry and nothing inside the project.
+    const pathNpm = systemNpm ? null : pathFallbackNpm();
     if (systemNpm) {
       assert.deepEqual(runtimeCore.npmInvocation(hostile), { file: path.join(bare, 'node'), args: [systemNpm] });
+    } else if (pathNpm) {
+      const picked = runtimeCore.npmInvocation(hostile);
+      assert.deepEqual({ file: picked.file, args: picked.args }, fallbackPick(path.join(bare, 'node'), pathNpm));
+      assert.equal(picked.path.split(':').some((dir) => !path.isAbsolute(dir) || dir === root || dir.startsWith(`${root}/`) || dir === path.join(linkToProject, 'bin')), false, picked.path);
     } else if (!anySystemNpm()) {
       assert.equal(runtimeCore.npmInvocation(hostile), null);
     }
-    if (systemNpm) {
+    if (systemNpm || pathNpm) {
       // The system npm is used, against the dead registry: warn (exit 1), remembered as an install failure.
       const noNpmRun = runHook(hook(genuine.integrity), root, env);
       await waitForHeal(noNpm);
@@ -621,10 +651,15 @@ test('change 2: the POSIX npm fallback uses the filtered PATH search (no relativ
     // trusted node, never to the project's shim or a link into the project; with it hidden the PATH
     // search must find nothing.
     const systemNpm = fixedSystemNpm();
+    const pathNpm = systemNpm ? null : pathFallbackNpm();
     for (const PATH of ['.', 'bin', project, `${project}/bin`, `${project}/`, link, path.join(link, 'projbin'), `.:${project}:${link}`]) {
       assert.equal(withoutSystemNpm(() => lookup(PATH)), null, PATH);
       if (systemNpm) assert.deepEqual(lookup(PATH), { file: execPath, args: [systemNpm] }, PATH);
-      else if (!anySystemNpm()) assert.equal(lookup(PATH), null, PATH);
+      else if (pathNpm) {
+        const picked = lookup(PATH);
+        assert.deepEqual({ file: picked.file, args: picked.args }, fallbackPick(execPath, pathNpm), PATH);
+        assert.equal(picked.path.split(':').some((dir) => !path.isAbsolute(dir) || dir.startsWith(project) || dir === path.join(link, 'projbin')), false, picked.path);
+      } else if (!anySystemNpm()) assert.equal(lookup(PATH), null, PATH);
     }
     const lookupOnPath = (PATH) => withoutSystemNpm(() => lookup(PATH));
     // A genuine npm (a link to npm-cli.js) after the project's: runs as <trusted node> <npm-cli.js>.
