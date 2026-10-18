@@ -14,7 +14,8 @@ const {
   verifyActionPermit,
 } = require('./enforcement-client');
 const { startGovernanceSidecar } = require('./governance-sidecar');
-const { readOwnerApiKey } = require('./owner-env');
+const { readOwnerKeyDetail } = require('./owner-env');
+const { assertSafeBaseUrl, emitNoticeOnce, ownerKeyBaseUrl } = require('./base-url-policy');
 const {
   controllerStatus,
   ensureCurrentGovernanceController,
@@ -1070,10 +1071,12 @@ function isRisky(text, type) {
 }
 
 function parseBaseOptions(argv, startIndex = 0) {
+  // The key from this terminal, or the owner-only ~/.marrow/env the installer stores, so a run
+  // started from an agent opened outside the install terminal still finds it.
+  const environmentKey = process.env.MARROW_API_KEY || process.env.MARROW_KEY;
+  const ownerKey = environmentKey ? null : ownerEnvKey();
   const options = {
-    // The key from this terminal, or the owner-only ~/.marrow/env the installer stores, so a run
-    // started from an agent opened outside the install terminal still finds it.
-    apiKey: process.env.MARROW_API_KEY || process.env.MARROW_KEY || ownerEnvApiKey(),
+    apiKey: environmentKey || (ownerKey && ownerKey.apiKey) || '',
     baseUrl: process.env.MARROW_BASE_URL || DEFAULT_BASE_URL,
     // A local username is never a registered agent. With no configured id, the server
     // resolves the key-bound agent or the plan seat instead.
@@ -1103,6 +1106,7 @@ function parseBaseOptions(argv, startIndex = 0) {
     invocationNonce: crypto.randomBytes(16).toString('hex'),
   };
   let i = startIndex;
+  let baseUrlSource = process.env.MARROW_BASE_URL ? 'MARROW_BASE_URL from the process environment' : null;
   for (; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--') break;
@@ -1136,8 +1140,13 @@ function parseBaseOptions(argv, startIndex = 0) {
       options.client = sourceClient(argv[++i] || options.client);
       options.clientExplicit = true;
     }
-    else if (arg === '--base-url') options.baseUrl = argv[++i] || options.baseUrl;
-    else if (arg === '--key') {
+    else if (arg === '--base-url') {
+      const value = argv[++i];
+      if (value) {
+        options.baseUrl = value;
+        baseUrlSource = 'the --base-url option';
+      }
+    } else if (arg === '--key') {
       options.apiKey = argv[++i] || options.apiKey;
       options.keyFromArg = true;
     } else if (arg === '--json') options.json = true;
@@ -1150,6 +1159,15 @@ function parseBaseOptions(argv, startIndex = 0) {
   if (!['enforce', 'warn', 'audit'].includes(options.policy)) {
     throw new Error('--policy must be enforce, warn, or audit');
   }
+  // Where the key may go. A key read from the owner file reaches only the default endpoint or one
+  // that same file names or lists; an environment or option URL cannot move it. Then every URL must
+  // be https (loopback may be http). A refused URL stops here, before any network call.
+  if (ownerKey && ownerKey.apiKey && !options.keyFromArg && baseUrlSource) {
+    const decision = ownerKeyBaseUrl({ candidate: options.baseUrl, ownerValues: ownerKey.endpoint, fileName: ownerKey.fileName, source: baseUrlSource });
+    options.baseUrl = decision.baseUrl;
+    emitNoticeOnce(decision.notice);
+  }
+  options.baseUrl = assertSafeBaseUrl(options.baseUrl, baseUrlSource === 'the --base-url option' ? '--base-url' : 'MARROW_BASE_URL');
   if (!options.sessionId) {
     options.sessionId = defaultRunnerSession(options);
     options.sessionDefaulted = true;
@@ -1273,8 +1291,10 @@ function dataOf(json) {
 
 async function rawRequest(options, method, route, body, extraHeaders = {}, { timeoutMs, signal } = {}) {
   if (!options.apiKey) throw new Error(NO_KEY_TEXT);
+  // The last check before the key leaves this process, whoever built the options.
+  const baseUrl = assertSafeBaseUrl(options.baseUrl);
   const requestSignal = requestAbortSignal(timeoutMs, signal);
-  const response = await fetch(new URL(route, options.baseUrl.replace(/\/$/, '/')), {
+  const response = await fetch(new URL(route, baseUrl.replace(/\/$/, '/')), {
     method,
     headers: { ...headers(options), ...extraHeaders },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -1759,11 +1779,12 @@ function errorCode(json) {
 // Where a run that has no key points the person: one command, in a terminal on this machine.
 const NO_KEY_TEXT = 'Marrow can\'t find your key: run `npx @getmarrow/install` once in this machine\'s terminal.';
 
-function ownerEnvApiKey() {
+function ownerEnvKey() {
   try {
-    return readOwnerApiKey(process.env.HOME || process.env.USERPROFILE || os.homedir()).apiKey || '';
+    const stored = readOwnerKeyDetail(process.env.HOME || process.env.USERPROFILE || os.homedir());
+    return stored.apiKey ? stored : null;
   } catch {
-    return '';
+    return null;
   }
 }
 

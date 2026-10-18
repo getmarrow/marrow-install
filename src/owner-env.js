@@ -6,6 +6,8 @@ const path = require('node:path');
 // installer already read. Values are parsed in memory and never printed or logged.
 const OWNER_ENV_FILES = ['env.local', 'env'];
 const KEY_NAMES = ['MARROW_API_KEY', 'MARROW_KEY'];
+// Read from the same trusted file, to decide where its key may be sent (base-url-policy.js).
+const ENDPOINT_NAMES = ['MARROW_BASE_URL', 'MARROW_ALLOWED_BASE_URLS'];
 
 function currentUid() {
   return typeof process.getuid === 'function' ? process.getuid() : null;
@@ -45,7 +47,7 @@ function parseKeyLines(raw) {
   const values = {};
   for (const line of String(raw || '').split(/\r?\n/)) {
     const match = line.match(/^\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)\s*=\s*(.*?)\s*$/);
-    if (!match || !KEY_NAMES.includes(match[1])) continue;
+    if (!match || !(KEY_NAMES.includes(match[1]) || ENDPOINT_NAMES.includes(match[1]))) continue;
     let value = match[2] || '';
     const hashIndex = value.search(/\s+#/);
     if (hashIndex >= 0) value = value.slice(0, hashIndex);
@@ -63,7 +65,7 @@ function fingerprintMatches(left, right) {
 // Returns the stored key only from a private, owner-owned file, as the MCP trusted reader does:
 // env.local first, then env. `conflict` is true when both hold a key and they differ; the keys
 // are compared in memory only and never returned for display.
-function readOwnerApiKey(home) {
+function readOwnerKeyDetail(home) {
   const directory = path.join(home, '.marrow');
   const found = [];
   for (const name of OWNER_ENV_FILES) {
@@ -73,14 +75,20 @@ function readOwnerApiKey(home) {
       const values = parseKeyLines(fs.readFileSync(filePath, 'utf8'));
       // Blank (quoted whitespace) values are absent: they never shadow a valid key in another file.
       const apiKey = String(values.MARROW_API_KEY || '').trim() || String(values.MARROW_KEY || '').trim();
-      if (apiKey) found.push({ apiKey, source: filePath });
+      if (apiKey) found.push({ apiKey, source: filePath, name, values: { MARROW_BASE_URL: values.MARROW_BASE_URL || '', MARROW_ALLOWED_BASE_URLS: values.MARROW_ALLOWED_BASE_URLS || '' } });
     } catch {
       // An unreadable owner file is treated as absent.
     }
   }
-  if (found.length === 0) return { apiKey: '', source: null, conflict: false };
+  if (found.length === 0) return { apiKey: '', source: null, conflict: false, fileName: null, endpoint: {} };
   const conflict = found.length > 1 && !fingerprintMatches(found[0].apiKey, found[1].apiKey);
-  return { apiKey: found[0].apiKey, source: found[0].source, conflict };
+  // `endpoint` holds the endpoint values of the file that supplied the key, and only that file.
+  return { apiKey: found[0].apiKey, source: found[0].source, conflict, fileName: found[0].name, endpoint: found[0].values };
+}
+
+function readOwnerApiKey(home) {
+  const { apiKey, source, conflict } = readOwnerKeyDetail(home);
+  return { apiKey, source, conflict };
 }
 
 // Stores the key only when no owner key file exists yet. An existing different key is left
@@ -132,4 +140,5 @@ module.exports = {
   ensureOwnerApiKey,
   isPrivateOwnerFile,
   readOwnerApiKey,
+  readOwnerKeyDetail,
 };
