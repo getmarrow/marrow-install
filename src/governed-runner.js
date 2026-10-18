@@ -1169,10 +1169,11 @@ function parseBaseOptions(argv, startIndex = 0) {
     throw new Error('--policy must be enforce, warn, or audit');
   }
   // Where the key may go. A key read from the owner file reaches only the default endpoint or one
-  // that same file names or lists; an environment or option URL cannot move it. Then every URL must
-  // be https (loopback may be http). A refused URL stops here, before any network call.
-  if (ownerKey && ownerKey.apiKey && !options.keyFromArg && baseUrlSource) {
-    const decision = ownerKeyBaseUrl({ candidate: options.baseUrl, ownerValues: ownerKey.endpoint, fileName: ownerKey.fileName, source: baseUrlSource });
+  // that same file names or lists; an environment or option URL cannot move it, and with neither the
+  // file's own URL is used. Then every URL must be https (loopback may be http). A refused URL stops
+  // here, before any network call.
+  if (ownerKey && ownerKey.apiKey && !options.keyFromArg) {
+    const decision = ownerKeyBaseUrl({ candidate: baseUrlSource ? options.baseUrl : '', ownerValues: ownerKey.endpoint, fileName: ownerKey.fileName, source: baseUrlSource || undefined });
     options.baseUrl = decision.baseUrl;
     emitNoticeOnce(decision.notice);
   }

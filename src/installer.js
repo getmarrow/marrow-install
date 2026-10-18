@@ -5437,11 +5437,11 @@ function writeInstallLog(home, text) {
 // self-test), by where the key that is sent came from: `ownerKey` is given only when that key is the
 // owner-file key. A key read from the owner file reaches only the default endpoint or one that same file
 // names or lists: a URL that only the environment or --base-url names cannot move it, whatever --key
-// said. Whatever the source, a URL that is not https (loopback may be http) stops the run before any
-// network call.
+// said, and with neither the file's own URL is used. Whatever the source, a URL that is not https
+// (loopback may be http) stops the run before any network call.
 function enforceKeyEndpoint(options, ownerKey) {
-  if (ownerKey && ownerKey.apiKey && options.baseUrlSource) {
-    const decision = ownerKeyBaseUrl({ candidate: options.baseUrl, ownerValues: ownerKey.endpoint, fileName: ownerKey.fileName, source: options.baseUrlSource });
+  if (ownerKey && ownerKey.apiKey) {
+    const decision = ownerKeyBaseUrl({ candidate: options.baseUrlSource ? options.baseUrl : '', ownerValues: ownerKey.endpoint, fileName: ownerKey.fileName, source: options.baseUrlSource || undefined });
     options.baseUrl = decision.baseUrl;
     emitNoticeOnce(decision.notice);
   }

@@ -5,10 +5,11 @@
 // shared test table.
 //
 // A key read from an owner file (~/.marrow/env, ~/.marrow/env.local) goes only to the default
-// endpoint, the endpoint that same file names (MARROW_BASE_URL), or an exact origin that same
-// file lists in MARROW_ALLOWED_BASE_URLS. A base URL that only the process environment or a
-// command-line option names (a project .mcp.json or .claude/settings.json env block, direnv, a
-// devcontainer) never moves it. A key from the process environment or --key keeps its URL.
+// endpoint, the endpoint that same file names (MARROW_BASE_URL, also used when nothing else names
+// one), or an exact origin that same file lists in MARROW_ALLOWED_BASE_URLS. A base URL that only
+// the process environment or a command-line option names (a project .mcp.json or
+// .claude/settings.json env block, direnv, a devcontainer) never moves it. A key from the process
+// environment or --key keeps its URL.
 // Every URL, whatever its source, must be https, or http on a loopback host.
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
@@ -54,17 +55,33 @@ function assertSafeBaseUrl(value, label = 'MARROW_BASE_URL') {
   return text;
 }
 
+function keyTargetUrl(url) {
+  return `${url.origin}${url.pathname.replace(/\/+$/, '')}`;
+}
+
 // The URL for a key that came from an owner file. `candidate` is what the process environment or an
-// option asked for; `ownerValues` are the values of the file that supplied the key; `fileName` is
-// 'env' or 'env.local'; `source` names where the candidate came from, for the notice.
+// option asked for (empty when neither did); `ownerValues` are the values of the file that supplied
+// the key; `fileName` is 'env' or 'env.local'; `source` names where the candidate came from, for the
+// notice. With no candidate, the endpoint that same file names is used when a key may be sent to it
+// (as @getmarrow/mcp and @getmarrow/sdk do); a named URL that may not get a key is ignored, with a
+// notice, and the default is used.
 function ownerKeyBaseUrl({ candidate, ownerValues = {}, fileName = 'env', source = 'MARROW_BASE_URL from the process environment' }) {
   const wanted = String(candidate == null ? '' : candidate).trim();
-  if (!wanted) return { baseUrl: DEFAULT_BASE_URL };
+  const named = parseKeyTarget(ownerValues.MARROW_BASE_URL);
+  if (!wanted) {
+    if (named) return { baseUrl: keyTargetUrl(named) };
+    if (String(ownerValues.MARROW_BASE_URL || '').trim()) {
+      return {
+        baseUrl: DEFAULT_BASE_URL,
+        notice: `ignored MARROW_BASE_URL in ~/.marrow/${fileName}: it must be an https URL (http is allowed only for localhost, 127.0.0.1 and [::1]) with no user name, password, query or fragment`,
+      };
+    }
+    return { baseUrl: DEFAULT_BASE_URL };
+  }
   const target = parseKeyTarget(wanted);
   if (target && target.origin === new URL(DEFAULT_BASE_URL).origin && isRootPath(target)) return { baseUrl: DEFAULT_BASE_URL };
-  const named = parseKeyTarget(ownerValues.MARROW_BASE_URL);
   if (target && ((named && named.origin === target.origin) || allowedOrigins(ownerValues.MARROW_ALLOWED_BASE_URLS).has(target.origin))) {
-    return { baseUrl: `${target.origin}${target.pathname.replace(/\/+$/, '')}` };
+    return { baseUrl: keyTargetUrl(target) };
   }
   return {
     baseUrl: DEFAULT_BASE_URL,

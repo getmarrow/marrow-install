@@ -147,7 +147,8 @@ test('runner: owner key + owner-file URL for the same origin is kept; another or
   ownerFile(fx, dummyKey('owner'), ['MARROW_BASE_URL=https://staging.example']);
   assert.equal(runnerOptions(fx, { MARROW_BASE_URL: 'https://staging.example' }).baseUrl, 'https://staging.example');
   assert.equal(runnerOptions(fx, { MARROW_BASE_URL: 'https://attacker.example' }).baseUrl, DEFAULT_URL);
-  assert.equal(runnerOptions(fx, {}).baseUrl, DEFAULT_URL, 'no environment URL: unchanged from master (the default)');
+  // R1-11: with no environment URL the file's own URL is used, as MCP and the SDK do (master used the default).
+  assert.equal(runnerOptions(fx, {}).baseUrl, 'https://staging.example', 'no environment URL: the owner file\'s own URL');
 });
 
 test('runner: --base-url follows the same rule as the environment URL for an owner key', () => {
@@ -731,7 +732,7 @@ function noticeLines(stderr) {
 // default endpoint; and (unless the run stops first) at least one does, so the check is not vacuous.
 function assertOwnerKeyStaysHome(label, records, { keyed = true } = {}) {
   const fetches = records.filter((record) => record.kind === 'fetch');
-  assert.equal(fetches.some((record) => new URL(record.url).origin === ATTACKER_ORIGIN), false, `${label}: a request went to the attacker`);
+  assert.equal(fetches.some((record) => /attacker/.test(new URL(record.url).hostname)), false, `${label}: a request went to the attacker`);
   assert.equal(records.some((record) => record.kind === 'connect' && /attacker/.test(record.target)), false, `${label}: a connect to the attacker`);
   assert.ok(fetches.filter((record) => record.carries_key).every((record) => new URL(record.url).origin === DEFAULT_URL), `${label}: the owner key went elsewhere`);
   if (keyed) assert.ok(fetches.some((record) => record.carries_key), `${label}: the owner key reached the default endpoint`);
@@ -826,4 +827,251 @@ test('R1-2 CLI: installer --key= is refused before any network call', async () =
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /Unknown argument: --key/);
   assert.deepEqual(captured(capture).filter((record) => record.kind === 'fetch' || record.kind === 'connect'), []);
+});
+
+// ---- R1-11: with no URL from the environment or an option, the owner file's own URL is used ----
+// The file that supplied the key may name its endpoint (MCP and the SDK already use it). Only a URL a
+// key may be sent to is used; anything else is ignored with a source-only notice (the default is used,
+// as before). Nothing else changes: an environment or option URL, another key, a loose or symlinked
+// file and project files keep their answers.
+
+const http = require('node:http');
+
+const STAGING = 'https://staging.example';
+const NOTICE_FILE_URL = 'ignored MARROW_BASE_URL in ~/.marrow/env: it must be an https URL (http is allowed only for localhost, 127.0.0.1 and [::1]) with no user name, password, query or fragment';
+
+test('R1-11 policy: no candidate: the owner file\'s own valid URL; an invalid one is ignored with a source-only notice', () => {
+  const kept = [
+    ['https://staging.example', 'https://staging.example'],
+    ['https://staging.example/', 'https://staging.example'],
+    ['https://staging.example/gateway/', 'https://staging.example/gateway'],
+    ['HTTPS://STAGING.EXAMPLE:8443/v2', 'https://staging.example:8443/v2'],
+    ['http://localhost:8787', 'http://localhost:8787'],
+    ['http://127.0.0.1:9', 'http://127.0.0.1:9'],
+    ['http://[::1]:8787/', 'http://[::1]:8787'],
+    [' https://staging.example ', 'https://staging.example'],
+  ];
+  for (const candidate of ['', null, undefined, '   ']) {
+    for (const [value, expected] of kept) {
+      const decision = policy.ownerKeyBaseUrl({ candidate, ownerValues: { MARROW_BASE_URL: value } });
+      assert.deepEqual(decision, { baseUrl: expected }, `${value} (candidate ${JSON.stringify(candidate)})`);
+    }
+    assert.deepEqual(policy.ownerKeyBaseUrl({ candidate, ownerValues: {} }), { baseUrl: DEFAULT_URL });
+    assert.deepEqual(policy.ownerKeyBaseUrl({ candidate, ownerValues: { MARROW_BASE_URL: '' } }), { baseUrl: DEFAULT_URL });
+  }
+  for (const value of UNSAFE) {
+    const decision = policy.ownerKeyBaseUrl({ candidate: '', ownerValues: { MARROW_BASE_URL: value } });
+    assert.equal(decision.baseUrl, DEFAULT_URL, value);
+    assert.equal(decision.notice, NOTICE_FILE_URL, value);
+    assert.equal(/hunter2|attacker|nip\.io|not a url|stag ing|etc\/passwd|0\.0\.0\.0/.test(decision.notice), false);
+  }
+  assert.match(policy.ownerKeyBaseUrl({ candidate: '', ownerValues: { MARROW_BASE_URL: 'http://attacker.example' }, fileName: 'env.local' }).notice, /in ~\/\.marrow\/env\.local:/);
+  // A candidate keeps today's answers: the file's URL never replaces it, another origin is refused.
+  const ownerValues = { MARROW_BASE_URL: STAGING };
+  assert.equal(policy.ownerKeyBaseUrl({ candidate: ATTACKER, ownerValues }).baseUrl, DEFAULT_URL);
+  assert.ok(policy.ownerKeyBaseUrl({ candidate: ATTACKER, ownerValues }).notice);
+  assert.deepEqual(policy.ownerKeyBaseUrl({ candidate: DEFAULT_URL, ownerValues }), { baseUrl: DEFAULT_URL });
+  assert.deepEqual(policy.ownerKeyBaseUrl({ candidate: `${STAGING}/gateway`, ownerValues }), { baseUrl: `${STAGING}/gateway` });
+});
+
+test('R1-11 runner: the owner file\'s own URL is used with no environment or option URL; every other answer is unchanged', { skip: process.platform === 'win32' }, () => {
+  const fx = fixture('r111-runner');
+  const key = dummyKey('owner');
+  ownerFile(fx, key, [`MARROW_BASE_URL=${STAGING}/gateway/`]);
+  let options = runnerOptions(fx, {});
+  assert.equal(options.apiKey === key, true);
+  assert.equal(options.baseUrl, `${STAGING}/gateway`, 'the file names its endpoint');
+  assert.equal(runnerOptions(fx, { MARROW_BASE_URL: '' }).baseUrl, `${STAGING}/gateway`, 'an empty environment URL is no URL');
+  assert.equal(runnerParse(fx, {}, ['status', '--key', '']).options.baseUrl, `${STAGING}/gateway`, 'a blank --key is no key: still the owner key and its file URL');
+  assert.equal(runnerOptions(fx, { MARROW_BASE_URL: ATTACKER }).baseUrl, DEFAULT_URL, 'an environment URL of another origin: default, as before');
+  assert.equal(runnerOptions(fx, {}, ['--base-url', ATTACKER]).baseUrl, DEFAULT_URL, '--base-url of another origin: default, as before');
+  assert.equal(runnerOptions(fx, { MARROW_BASE_URL: DEFAULT_URL }).baseUrl, DEFAULT_URL, 'an environment URL naming the default keeps the default');
+  // The file's URL is for the file's key only.
+  const argKey = dummyKey('arg');
+  options = runnerOptions(fx, {}, ['--key', argKey]);
+  assert.equal(options.apiKey === argKey, true);
+  assert.equal(options.baseUrl, DEFAULT_URL, 'an explicit key with no URL: default, as before');
+  const envKey = dummyKey('env');
+  options = runnerOptions(fx, { MARROW_API_KEY: envKey });
+  assert.equal(options.apiKey === envKey, true);
+  assert.equal(options.baseUrl, DEFAULT_URL, 'an environment key with no URL: default, as before');
+  // A file URL a key may not be sent to is ignored: the default, as before.
+  for (const value of ['http://attacker.example', 'http://0.0.0.0:8787', 'https://user:hunter2@staging.example', 'https://staging.example?x=1', 'not a url']) {
+    ownerFile(fx, key, [`MARROW_BASE_URL=${value}`]);
+    assert.equal(runnerOptions(fx, {}).baseUrl, DEFAULT_URL, value);
+  }
+});
+
+test('R1-11 runner: the URL comes only from the file that supplied the key; loose and symlinked files supply neither', { skip: process.platform === 'win32' }, () => {
+  const fx = fixture('r111-sources');
+  const localKey = dummyKey('local');
+  write(fx.localFile, [`MARROW_API_KEY=${localKey}`]);
+  write(fx.envFile, [`MARROW_API_KEY=${dummyKey('env')}`, `MARROW_BASE_URL=${STAGING}`]);
+  let options = runnerOptions(fx, {});
+  assert.equal(options.apiKey === localKey, true);
+  assert.equal(options.baseUrl, DEFAULT_URL, 'env.local supplied the key and names no URL; env\'s URL is not used');
+  write(fx.localFile, [`MARROW_API_KEY=${localKey}`, 'MARROW_BASE_URL=https://local.example']);
+  assert.equal(runnerOptions(fx, {}).baseUrl, 'https://local.example');
+  fs.rmSync(fx.localFile);
+  fs.rmSync(fx.envFile);
+  write(fx.envFile, [`MARROW_API_KEY=${localKey}`, `MARROW_BASE_URL=${STAGING}`], 0o644);
+  options = runnerOptions(fx, {});
+  assert.equal(options.apiKey, '', 'a loose file supplies no key');
+  assert.equal(options.baseUrl, DEFAULT_URL, 'and no URL, as before');
+  fs.rmSync(fx.envFile);
+  const real = path.join(fx.root, 'real-env');
+  write(real, [`MARROW_API_KEY=${localKey}`, `MARROW_BASE_URL=${STAGING}`]);
+  fs.symlinkSync(real, fx.envFile);
+  options = runnerOptions(fx, {});
+  assert.equal(options.apiKey, '');
+  assert.equal(options.baseUrl, DEFAULT_URL, 'a symlinked file: no key, no URL, as before');
+});
+
+test('R1-11 runner: session and hold keys follow the endpoint; no key in either', { skip: process.platform === 'win32' }, () => {
+  const fx = fixture('r111-hold');
+  const key = dummyKey('owner');
+  const salt = crypto.randomBytes(32);
+  const material = { argv: ['node', '-e', '0'], action: 'deploy to production', target: '', type: 'deploy' };
+  const optionsNow = () => withProcessEnv(fx, { MARROW_SESSION_ID: '' }, () => parseArgs(['run', '--', 'node', '-e', '0']).options);
+  ownerFile(fx, key);
+  const plain = optionsNow();
+  ownerFile(fx, key, [`MARROW_BASE_URL=${STAGING}`]);
+  const staged = optionsNow();
+  const stagedAgain = optionsNow();
+  assert.equal(plain.baseUrl, DEFAULT_URL);
+  assert.equal(staged.baseUrl, STAGING);
+  assert.notEqual(runnerModule.runnerHoldKey(plain, material, salt), runnerModule.runnerHoldKey(staged, material, salt), 'another endpoint: another hold key');
+  assert.notEqual(runnerModule.defaultRunnerSession(plain), runnerModule.defaultRunnerSession(staged));
+  assert.equal(runnerModule.runnerHoldKey(staged, material, salt), runnerModule.runnerHoldKey(stagedAgain, material, salt), 'same inputs: same hold key');
+  for (const value of [runnerModule.runnerHoldKey(staged, material, salt), runnerModule.defaultRunnerSession(staged)]) {
+    assert.equal(value.includes(key), false);
+  }
+});
+
+test('R1-11 installer self-test: the owner file\'s own URL with no environment or option URL; every other answer is unchanged', async () => {
+  const fx = fixture('r111-inst');
+  const key = dummyKey('owner');
+  ownerFile(fx, key, [`MARROW_BASE_URL=${STAGING}/`]);
+  let requests = await selfTestRequests(fx, key, {});
+  assert.ok(requests.length > 0 && requests.every((request) => request.url.startsWith(`${STAGING}/v1/`)), requests.map((r) => new URL(r.url).origin).join());
+  assert.ok(requests.some((request) => request.auth === `Bearer ${key}`));
+  requests = await selfTestRequests(fx, key, { MARROW_BASE_URL: ATTACKER });
+  assert.ok(requests.length > 0 && requests.every((request) => request.url.startsWith(`${DEFAULT_URL}/`)), 'an environment URL of another origin: default, as before');
+  requests = await selfTestRequests(fx, key, {}, ['--base-url', ATTACKER]);
+  assert.ok(requests.length > 0 && requests.every((request) => request.url.startsWith(`${DEFAULT_URL}/`)), '--base-url of another origin: default, as before');
+  const argKey = dummyKey('arg');
+  requests = await selfTestRequests(fx, argKey, {}, ['--key', argKey]);
+  assert.ok(requests.length > 0 && requests.every((request) => request.url.startsWith(`${DEFAULT_URL}/`)), 'an explicit key with no URL: default, as before');
+  const envKey = dummyKey('env');
+  requests = await selfTestRequests(fx, envKey, { MARROW_API_KEY: envKey });
+  assert.ok(requests.length > 0 && requests.every((request) => request.url.startsWith(`${DEFAULT_URL}/`)), 'an environment key with no URL: default, as before');
+  ownerFile(fx, key, ['MARROW_BASE_URL=http://attacker.example']);
+  requests = await selfTestRequests(fx, key, {});
+  assert.ok(requests.length > 0 && requests.every((request) => request.url.startsWith(`${DEFAULT_URL}/`)), 'a non-loopback http file URL is never used');
+});
+
+async function recordedRun(fx, key, args, extra = {}, { stubNpm = false } = {}) {
+  const { env, capture } = guardedChildEnv(fx, key, extra, { stubNpm });
+  const result = await run(args, { env, cwd: fx.project });
+  const records = captured(capture);
+  return { result, records, fetches: records.filter((record) => record.kind === 'fetch') };
+}
+
+test('R1-11 CLI: status, gate, doctor and install use the owner file\'s own URL with an empty environment', async () => {
+  const forms = [
+    ['runner status', ['status'], false],
+    ['runner gate', ['gate', '--type', 'deploy', '--action', 'deploy to production', '--no-interactive'], false],
+    ['installer doctor --self-test', ['doctor', '--self-test', '--json'], true],
+    ['installer --yes (install)', ['--yes', '--no-controller'], true],
+  ];
+  for (const [label, args, isInstaller] of forms) {
+    const fx = fixture('r111-cli');
+    const key = dummyKey('owner');
+    ownerFile(fx, key, [`MARROW_BASE_URL=${STAGING}`]);
+    const { result, fetches } = await recordedRun(fx, key, isInstaller ? ['--cwd', fx.project, ...args] : args, {}, { stubNpm: isInstaller });
+    const keyed = fetches.filter((record) => record.carries_key);
+    assert.ok(keyed.length > 0, `${label}: the owner key was sent`);
+    assert.ok(keyed.every((record) => new URL(record.url).origin === STAGING), `${label}: only to the file's URL`);
+    assert.deepEqual(noticeLines(result.stderr), [], `${label}: no notice`);
+    assert.equal(`${result.stdout}\n${result.stderr}`.includes(key), false);
+    if (label.startsWith('installer --yes')) {
+      // Configs outside ~/.marrow (harness and MCP settings, the project's files) name the file's URL.
+      const written = [...walkFiles(fx.home), ...walkFiles(fx.project)].filter((file) => !file.startsWith(`${path.join(fx.home, '.marrow')}${path.sep}`));
+      assert.ok(written.some((file) => fs.readFileSync(file, 'utf8').includes(STAGING)), 'the install targets the file\'s URL');
+      assert.equal(written.some((file) => fs.readFileSync(file, 'utf8').includes(DEFAULT_URL)), false, 'and not the default');
+    }
+  }
+});
+
+test('R1-11 CLI: an env-only URL, a loose file, a project file and a non-loopback http file URL keep today\'s answers', { skip: process.platform === 'win32' }, async () => {
+  // Owner key + environment-only URL: default plus one notice (unchanged).
+  let fx = fixture('r111-cli-env');
+  let key = dummyKey('owner');
+  ownerFile(fx, key);
+  let out = await recordedRun(fx, key, ['status'], { MARROW_BASE_URL: STAGING });
+  assert.ok(out.fetches.some((record) => record.carries_key));
+  assert.ok(out.fetches.every((record) => new URL(record.url).origin === DEFAULT_URL));
+  assert.deepEqual(noticeLines(out.result.stderr), [`[marrow] ${NOTICE_ENV}`]);
+
+  // A project .env and .marrow/env naming a URL (and a key): never read; the owner key goes to the default.
+  fx = fixture('r111-cli-project');
+  key = dummyKey('owner');
+  ownerFile(fx, key);
+  fs.writeFileSync(path.join(fx.project, '.env'), `MARROW_API_KEY=${dummyKey('project')}\nMARROW_BASE_URL=${ATTACKER}\n`);
+  fs.mkdirSync(path.join(fx.project, '.marrow'));
+  fs.writeFileSync(path.join(fx.project, '.marrow', 'env'), `MARROW_BASE_URL=${ATTACKER}\n`, { mode: 0o600 });
+  for (const [args, stubNpm] of [[['status'], false], [['--cwd', fx.project, 'doctor', '--self-test', '--json'], true]]) {
+    out = await recordedRun(fx, key, args, {}, { stubNpm });
+    assertOwnerKeyStaysHome(`project files: ${args[0]}`, out.records);
+    assert.deepEqual(noticeLines(out.result.stderr), []);
+  }
+
+  // A loose owner file with a key and a URL: no key, so nothing keyed; its URL is not used.
+  fx = fixture('r111-cli-loose');
+  key = dummyKey('loose');
+  write(fx.envFile, [`MARROW_API_KEY=${key}`, `MARROW_BASE_URL=${ATTACKER}`], 0o644);
+  out = await recordedRun(fx, key, ['status']);
+  assert.equal(out.fetches.some((record) => record.carries_key || /attacker/.test(new URL(record.url).hostname)), false);
+
+  // Non-loopback http in the owner file: refused before any connect; the default gets the key, one notice, no URL text.
+  for (const value of ['http://attacker.example', 'http://attacker.example:8080/v1']) {
+    for (const [label, args, stubNpm] of [['status', ['status'], false], ['doctor', null, true]]) {
+      fx = fixture('r111-cli-http');
+      key = dummyKey('owner');
+      ownerFile(fx, key, [`MARROW_BASE_URL=${value}`]);
+      out = await recordedRun(fx, key, args || ['--cwd', fx.project, 'doctor', '--self-test', '--json'], {}, { stubNpm });
+      assertOwnerKeyStaysHome(`${label} with ${value}`, out.records);
+      assert.deepEqual(noticeLines(out.result.stderr), [`[marrow] ${NOTICE_FILE_URL}`], label);
+      assert.equal(/attacker/.test(`${out.result.stdout}\n${out.result.stderr}`) || `${out.result.stdout}\n${out.result.stderr}`.includes(key), false);
+    }
+  }
+});
+
+test('R1-11 live: an allowlisted loopback URL in the owner file gets the runner\'s requests, with the key', async () => {
+  const seen = [];
+  let key = '';
+  const server = http.createServer((request, response) => {
+    seen.push({ path: request.url.split('?')[0], keyed: request.headers.authorization === `Bearer ${key}` });
+    response.writeHead(401, { 'content-type': 'application/json' });
+    response.end('{"error":"unauthorized"}');
+  });
+  await new Promise((resolveListen) => server.listen(0, '127.0.0.1', resolveListen));
+  try {
+    const url = `http://127.0.0.1:${server.address().port}`;
+    for (const args of [['status'], ['gate', '--type', 'deploy', '--action', 'deploy to production', '--no-interactive']]) {
+      const fx = fixture('r111-live');
+      key = dummyKey('owner');
+      ownerFile(fx, key, [`MARROW_BASE_URL=${url}`]);
+      const before = seen.length;
+      const { env } = guardedChildEnv(fx, key, {}, { record: false });
+      const result = await run(args, { env, cwd: fx.project });
+      const mine = seen.slice(before);
+      assert.ok(mine.length > 0, `${args[0]}: the owner file's loopback URL got the requests`);
+      assert.ok(mine.some((entry) => entry.keyed), `${args[0]}: with the owner key`);
+      assert.deepEqual(noticeLines(result.stderr), []);
+      assert.equal(`${result.stdout}\n${result.stderr}`.includes(key), false);
+    }
+  } finally {
+    await new Promise((resolveClose) => server.close(resolveClose));
+  }
 });
