@@ -480,3 +480,350 @@ test('a non-https URL exits non-zero before any network call; the listener sees 
     wrong.server.close();
   }
 });
+
+// ---- R1-2: an empty, blank or missing --key value is no key ----
+// The key that is then sent is the owner-file key, so the owner rule applies: an environment or
+// --base-url URL never gets it. A real (non-blank) --key value keeps its URL, as before.
+
+const runnerModule = require('../src/governed-runner');
+
+const ATTACKER = 'https://attacker.example';
+const ATTACKER_ORIGIN = new URL(ATTACKER).origin;
+// Empty, ASCII and Unicode white space: String.prototype.trim removes every one of them.
+const BLANK_VALUES = ['', ' ', '   ', '\t', '\n', '\r\n', ' ', ' ', '　', '﻿', '   '];
+const NOTICE_FLAG = 'ignored the --base-url option: the key comes from ~/.marrow/env; list the URL in MARROW_ALLOWED_BASE_URLS in that file to allow it';
+const NOTICE_ENV = 'ignored MARROW_BASE_URL from the process environment: the key comes from ~/.marrow/env; list the URL in MARROW_ALLOWED_BASE_URLS in that file to allow it';
+
+function runnerParse(fx, env, argv) {
+  return withProcessEnv(fx, env, () => parseArgs(argv));
+}
+
+// Every runner form where --key names no key: [label, process env, argv].
+function runnerNoKeyForms() {
+  const forms = [];
+  for (const blank of BLANK_VALUES) {
+    const label = JSON.stringify(blank);
+    forms.push([`status --key ${label} (env URL)`, { MARROW_BASE_URL: ATTACKER }, ['status', '--key', blank]]);
+    forms.push([`status --key ${label} --base-url X`, {}, ['status', '--key', blank, '--base-url', ATTACKER]]);
+    forms.push([`status --base-url X --key ${label}`, {}, ['status', '--base-url', ATTACKER, '--key', blank]]);
+  }
+  forms.push(['status --base-url X --key (last)', {}, ['status', '--base-url', ATTACKER, '--key']]);
+  forms.push(['status --key (last, env URL)', { MARROW_BASE_URL: ATTACKER }, ['status', '--key']]);
+  forms.push(['status --key --base-url X', {}, ['status', '--key', '--base-url', ATTACKER]]);
+  forms.push(['status --key --json --base-url X', {}, ['status', '--key', '--json', '--base-url', ATTACKER]]);
+  forms.push(['status --key --base-url X (env URL too)', { MARROW_BASE_URL: 'https://other.example' }, ['status', '--key', '--base-url', ATTACKER]]);
+  forms.push(['status -k "" --base-url X (no -k alias: parsing stops there; env URL)', { MARROW_BASE_URL: ATTACKER }, ['status', '-k', '', '--base-url', ATTACKER]]);
+  forms.push(['gate --key --type deploy <action> (env URL)', { MARROW_BASE_URL: ATTACKER }, ['gate', '--key', '--type', 'deploy', 'deploy to production']]);
+  forms.push(['run --key -- node -e 0 (env URL)', { MARROW_BASE_URL: ATTACKER }, ['run', '--key', '--', 'node', '-e', '0']]);
+  forms.push(['run --key "" --base-url X -- node -e 0', {}, ['run', '--key', '', '--base-url', ATTACKER, '--', 'node', '-e', '0']]);
+  forms.push(['permit --key --base-url X --action deploy', {}, ['permit', '--key', '--base-url', ATTACKER, '--action', 'deploy']]);
+  forms.push(['proof --key --base-url X --decision-id d', {}, ['proof', '--key', '--base-url', ATTACKER, '--decision-id', 'dec_1']]);
+  forms.push(['controller status --key --base-url X', {}, ['controller', 'status', '--key', '--base-url', ATTACKER]]);
+  return forms;
+}
+
+test('R1-2 runner: --key with an empty, blank or missing value is no key; the owner key keeps the owner rule', () => {
+  const fx = fixture('r12-runner');
+  const key = dummyKey('owner');
+  ownerFile(fx, key);
+  for (const [label, env, argv] of runnerNoKeyForms()) {
+    const parsed = runnerParse(fx, env, argv);
+    assert.equal(parsed.options.apiKey === key, true, `${label}: the owner key is the key`);
+    assert.equal(parsed.options.baseUrl, DEFAULT_URL, `${label}: the default endpoint`);
+    assert.equal(Boolean(parsed.options.keyFromArg), false, `${label}: no key from the command line`);
+  }
+  // `--key` never takes the `--` separator: the child command is unchanged.
+  assert.deepEqual(runnerParse(fx, {}, ['run', '--key', '--', 'node', '-e', '0']).childCommand, ['node', '-e', '0']);
+  assert.equal(runnerParse(fx, {}, ['gate', '--key', '--type', 'deploy', 'deploy to production']).options.action, 'deploy to production');
+});
+
+test('R1-2 runner: a real --key value keeps its URL as before, whatever comes before or after it', () => {
+  const fx = fixture('r12-runner-arg');
+  const key = dummyKey('owner');
+  const argKey = dummyKey('arg');
+  ownerFile(fx, key);
+  const forms = [
+    ['status --key K --base-url X', {}, ['status', '--key', argKey, '--base-url', ATTACKER]],
+    ['status --base-url X --key K', {}, ['status', '--base-url', ATTACKER, '--key', argKey]],
+    ['status --key K (env URL)', { MARROW_BASE_URL: ATTACKER }, ['status', '--key', argKey]],
+    ['status --key K --key "" --base-url X (a blank later --key drops nothing)', {}, ['status', '--key', argKey, '--key', '', '--base-url', ATTACKER]],
+    ['status --key "" --key K --base-url X', {}, ['status', '--key', '', '--key', argKey, '--base-url', ATTACKER]],
+    ['status --key K --base-url X --key (last)', {}, ['status', '--key', argKey, '--base-url', ATTACKER, '--key']],
+    ['status --key " K " --base-url X (value kept as typed)', {}, ['status', '--key', ` ${argKey} `, '--base-url', ATTACKER]],
+  ];
+  for (const [label, env, argv] of forms) {
+    const { options } = runnerParse(fx, env, argv);
+    assert.equal(options.apiKey.trim() === argKey, true, `${label}: the --key value is the key`);
+    assert.equal(options.keyFromArg, true, label);
+    assert.equal(options.baseUrl, ATTACKER, `${label}: an explicit key keeps its URL (unchanged)`);
+  }
+  // A value no trim removes (zero-width space) or a word after --key is a key the caller typed, as
+  // before; it is never the owner key, so the URL it goes to never gets the owner key.
+  for (const value of ['​', 'deploy']) {
+    const { options } = runnerParse(fx, {}, ['status', '--key', value, '--base-url', ATTACKER]);
+    assert.equal(options.apiKey, value);
+    assert.equal(options.apiKey === key, false);
+  }
+  // The control the others stand on: with no --key at all, the owner rule moves the URL.
+  assert.equal(runnerParse(fx, {}, ['status', '--base-url', ATTACKER]).options.baseUrl, DEFAULT_URL);
+});
+
+test('R1-2 runner: the `=` forms are refused before any network call and never echo the value', () => {
+  const fx = fixture('r12-runner-eq');
+  const key = dummyKey('owner');
+  const argKey = dummyKey('arg');
+  ownerFile(fx, key);
+  for (const argv of [['status', '--key='], ['status', '--key=--base-url', ATTACKER], ['status', `--key=${argKey}`, '--base-url', ATTACKER], ['status', '--key', '', `--base-url=${ATTACKER}`]]) {
+    assert.throws(() => runnerParse(fx, {}, argv), (error) => {
+      assert.match(error.message, /^Unknown option: --(key|base-url)$/);
+      assert.equal(error.message.includes(argKey) || /attacker/.test(error.message), false);
+      return true;
+    }, argv.join(' '));
+  }
+});
+
+test('R1-2 runner: whenever the owner key is the key, the URL is the default (invariant over every form)', () => {
+  const fx = fixture('r12-runner-inv');
+  const key = dummyKey('owner');
+  const argKey = dummyKey('arg');
+  ownerFile(fx, key);
+  const values = ['', ' ', ' ', '--base-url', '--', '-k', argKey, undefined];
+  let checked = 0;
+  for (const first of values) {
+    for (const second of values) {
+      for (const env of [{}, { MARROW_BASE_URL: ATTACKER }]) {
+        const argv = ['status', '--key', ...(first === undefined ? [] : [first]), '--base-url', ATTACKER, '--key', ...(second === undefined ? [] : [second])];
+        let options;
+        try {
+          options = runnerParse(fx, env, argv).options;
+        } catch {
+          continue;
+        }
+        checked += 1;
+        if (options.apiKey === key) assert.equal(options.baseUrl, DEFAULT_URL, argv.map((part) => JSON.stringify(part === argKey ? 'K' : part)).join(' '));
+      }
+    }
+  }
+  assert.ok(checked > 50, `checked ${checked} forms`);
+});
+
+test('R1-2 runner: session and hold keys: a blank --key changes nothing, a different key or endpoint changes the key', () => {
+  const fx = fixture('r12-hold');
+  const key = dummyKey('owner');
+  const argKey = dummyKey('arg');
+  ownerFile(fx, key);
+  const salt = crypto.randomBytes(32);
+  const material = { argv: ['node', '-e', '0'], action: 'deploy to production', target: '', type: 'deploy' };
+  const env = { MARROW_BASE_URL: ATTACKER, MARROW_SESSION_ID: '' };
+  const optionsFor = (argv) => runnerParse(fx, env, ['run', ...argv, '--', 'node', '-e', '0']).options;
+  const hold = (options) => runnerModule.runnerHoldKey(options, material, salt);
+  const session = (options) => runnerModule.defaultRunnerSession(options);
+  const none = optionsFor([]);
+  const blank = optionsFor(['--key', '']);
+  const trailing = optionsFor(['--base-url', ATTACKER, '--key']);
+  const explicit = optionsFor(['--key', argKey]);
+  assert.equal(hold(blank), hold(none), 'a blank --key is the same as no --key');
+  assert.equal(hold(trailing), hold(none));
+  assert.equal(session(blank), session(none));
+  assert.notEqual(hold(explicit), hold(none), 'another key, another endpoint: another hold key');
+  assert.notEqual(session(explicit), session(none), 'another endpoint: another session');
+  const sameUrlOtherKey = runnerParse(fx, {}, ['run', '--key', argKey, '--', 'node', '-e', '0']).options;
+  assert.equal(sameUrlOtherKey.baseUrl, none.baseUrl);
+  assert.notEqual(hold(sameUrlOtherKey), hold(none), 'same endpoint, different key: different hold key');
+  for (const value of [hold(none), hold(explicit), session(none), session(explicit)]) {
+    assert.equal(value.includes(key) || value.includes(argKey), false, 'no key in a hold key or session');
+  }
+});
+
+test('R1-2 installer: --key with an empty, blank or missing value is no key and sets no command-line key', () => {
+  const fx = fixture('r12-inst-parse');
+  const envKey = dummyKey('env');
+  const forms = [
+    ...BLANK_VALUES.map((blank) => ['--key', blank]),
+    ['--key'],
+    ['--key', '--base-url', ATTACKER],
+    ['--key', '', '--yes'],
+    ['doctor', '--key', '', '--base-url', ATTACKER],
+    ['--key', 'doctor'],
+  ];
+  for (const argv of forms) {
+    const none = installer.parseArgs(argv, { HOME: fx.home, PATH: process.env.PATH });
+    assert.equal(none.apiKey, '', argv.join(' '));
+    assert.equal(Boolean(none.keyFromArg), false, argv.join(' '));
+    const withEnv = installer.parseArgs(argv, { HOME: fx.home, PATH: process.env.PATH, MARROW_API_KEY: envKey });
+    assert.equal(withEnv.apiKey === envKey, true, `${argv.join(' ')}: the environment key stays the key`);
+    assert.equal(Boolean(withEnv.keyFromArg), false);
+  }
+  const argKey = dummyKey('arg');
+  for (const argv of [['--key', argKey, '--base-url', ATTACKER], ['--key', argKey, '--key', '', '--base-url', ATTACKER], ['--key', '', '--key', argKey, '--base-url', ATTACKER]]) {
+    const options = installer.parseArgs(argv, { HOME: fx.home, PATH: process.env.PATH });
+    assert.equal(options.apiKey === argKey, true);
+    assert.equal(options.keyFromArg, true);
+    assert.equal(options.baseUrl, ATTACKER);
+  }
+  for (const argv of [['--key='], [`--key=${argKey}`], ['--key=--base-url', ATTACKER]]) {
+    assert.throws(() => installer.parseArgs(argv, { HOME: fx.home }), (error) => {
+      assert.match(error.message, /^Unknown argument: --key$/);
+      assert.equal(error.message.includes(argKey) || /attacker/.test(error.message), false);
+      return true;
+    });
+  }
+});
+
+test('R1-2 installer: enforceKeyEndpoint follows the key that is sent, not --key', () => {
+  const fx = fixture('r12-inst-enforce');
+  const key = dummyKey('owner');
+  ownerFile(fx, key);
+  const stored = readOwnerKeyDetail(fx.home);
+  // Options as a caller that set keyFromArg would build them: the owner key still keeps the owner rule.
+  const options = installer.enforceKeyEndpoint({ apiKey: key, keyFromArg: true, baseUrl: ATTACKER, baseUrlSource: 'the --base-url option' }, stored);
+  assert.equal(options.baseUrl, DEFAULT_URL);
+  // A key that is not the owner-file key (no ownerKey given) keeps its URL, as before.
+  assert.equal(installer.enforceKeyEndpoint({ apiKey: dummyKey('arg'), keyFromArg: true, baseUrl: ATTACKER, baseUrlSource: 'the --base-url option' }, null).baseUrl, ATTACKER);
+});
+
+for (const [label, env, extraArgs] of [
+  ['--key "" + env URL', { MARROW_BASE_URL: ATTACKER }, ['--key', '']],
+  ['--key --base-url X', {}, ['--key', '--base-url', ATTACKER]],
+  ['--key "   " --base-url X', {}, ['--key', '   ', '--base-url', ATTACKER]],
+  ['--key "\\u3000" --base-url X', {}, ['--key', '　', '--base-url', ATTACKER]],
+  ['--base-url X --key', {}, ['--base-url', ATTACKER, '--key']],
+  ['--key (before doctor) + env URL', { MARROW_BASE_URL: ATTACKER }, ['--key']],
+]) {
+  test(`R1-2 installer self-test: ${label}: the owner key posts only to the default endpoint`, async () => {
+    const fx = fixture('r12-inst-self');
+    const key = dummyKey('owner');
+    ownerFile(fx, key);
+    const requests = await selfTestRequests(fx, key, env, extraArgs);
+    assert.ok(requests.length > 0, 'the self-test reached the network layer');
+    assert.ok(requests.every((request) => request.url.startsWith(`${DEFAULT_URL}/`)), requests.map((r) => new URL(r.url).origin).join());
+    assert.ok(requests.some((request) => request.auth === `Bearer ${key}`));
+  });
+}
+
+// ---- R1-2 end to end: the real CLI, a recorder for every fetch and connect, this run's net guard ----
+
+function guardedChildEnv(fx, key, extra = {}, { record = true, stubNpm = false } = {}) {
+  const capture = path.join(fx.root, `capture-${crypto.randomBytes(4).toString('hex')}.jsonl`);
+  fs.writeFileSync(capture, '');
+  const nodeOptions = [process.env.NODE_OPTIONS, record ? `--require=${RECORDER}` : ''].filter(Boolean).join(' ');
+  return {
+    capture,
+    env: {
+      PATH: process.env.PATH,
+      HOME: fx.home,
+      TMPDIR: process.env.TMPDIR,
+      CAPTURE_FILE: capture,
+      M2_EXPECT_KEY: key,
+      ...(process.env.GUARD_LOG ? { GUARD_LOG: process.env.GUARD_LOG } : {}),
+      ...(nodeOptions ? { NODE_OPTIONS: nodeOptions } : {}),
+      ...(stubNpm ? { M2_STUB_NPM: '1' } : {}),
+      ...extra,
+    },
+  };
+}
+
+function noticeLines(stderr) {
+  return stderr.split('\n').filter((line) => line.startsWith('[marrow] ignored '));
+}
+
+// No request or connect to the attacker; every request that carries the owner key goes to the
+// default endpoint; and (unless the run stops first) at least one does, so the check is not vacuous.
+function assertOwnerKeyStaysHome(label, records, { keyed = true } = {}) {
+  const fetches = records.filter((record) => record.kind === 'fetch');
+  assert.equal(fetches.some((record) => new URL(record.url).origin === ATTACKER_ORIGIN), false, `${label}: a request went to the attacker`);
+  assert.equal(records.some((record) => record.kind === 'connect' && /attacker/.test(record.target)), false, `${label}: a connect to the attacker`);
+  assert.ok(fetches.filter((record) => record.carries_key).every((record) => new URL(record.url).origin === DEFAULT_URL), `${label}: the owner key went elsewhere`);
+  if (keyed) assert.ok(fetches.some((record) => record.carries_key), `${label}: the owner key reached the default endpoint`);
+}
+
+function walkFiles(root, out = []) {
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    const full = path.join(root, entry.name);
+    if (entry.isDirectory() && !entry.isSymbolicLink()) walkFiles(full, out);
+    else if (entry.isFile()) out.push(full);
+  }
+  return out;
+}
+
+const RUNNER_NO_KEY_CLI = [
+  ['runner status --key "" (env URL)', { MARROW_BASE_URL: ATTACKER }, ['status', '--key', ''], NOTICE_ENV],
+  ['runner status --base-url X --key', {}, ['status', '--base-url', ATTACKER, '--key'], NOTICE_FLAG],
+  ['runner status --key --base-url X', {}, ['status', '--key', '--base-url', ATTACKER], NOTICE_FLAG],
+  ['runner status --key "   " --base-url X', {}, ['status', '--key', '   ', '--base-url', ATTACKER], NOTICE_FLAG],
+  ['runner gate --key "" --base-url X', {}, ['gate', '--key', '', '--base-url', ATTACKER, '--type', 'deploy', '--action', 'deploy to production', '--no-interactive'], NOTICE_FLAG],
+];
+
+test('R1-2 CLI: runner forms with no --key value send the owner key only to the default, with one source-only notice', async () => {
+  for (const [label, extra, args, notice] of RUNNER_NO_KEY_CLI) {
+    const fx = fixture('r12-cli-runner');
+    const key = dummyKey('owner');
+    ownerFile(fx, key);
+    const { env, capture } = guardedChildEnv(fx, key, extra);
+    const result = await run(args, { env, cwd: fx.project });
+    assertOwnerKeyStaysHome(label, captured(capture));
+    assert.deepEqual(noticeLines(result.stderr), [`[marrow] ${notice}`], `${label}: one notice`);
+    const output = `${result.stdout}\n${result.stderr}`;
+    assert.equal(output.includes(key) || /attacker/.test(output), false, `${label}: no key and no URL in the output`);
+  }
+});
+
+test('R1-2 CLI: the controls: a real --key value goes to its URL; env key + env URL is unchanged', async () => {
+  const fx = fixture('r12-cli-control');
+  ownerFile(fx, dummyKey('owner'));
+  const argKey = dummyKey('arg');
+  let child = guardedChildEnv(fx, argKey);
+  let result = await run(['status', '--key', argKey, '--base-url', ATTACKER], { env: child.env, cwd: fx.project });
+  let fetches = captured(child.capture).filter((record) => record.kind === 'fetch');
+  assert.ok(fetches.some((record) => new URL(record.url).origin === ATTACKER_ORIGIN && record.carries_key), 'the explicit key went to its URL: the recorder sees the attacker origin');
+  assert.deepEqual(noticeLines(result.stderr), []);
+  const installerChild = guardedChildEnv(fx, argKey, {}, { stubNpm: true });
+  result = await run(['doctor', '--cwd', fx.project, '--key', argKey, '--base-url', ATTACKER, '--json'], { env: installerChild.env, cwd: fx.project });
+  fetches = captured(installerChild.capture).filter((record) => record.kind === 'fetch');
+  assert.ok(fetches.some((record) => new URL(record.url).origin === ATTACKER_ORIGIN && record.carries_key), 'installer: the explicit key went to its URL');
+  assert.deepEqual(noticeLines(result.stderr), []);
+  const envKey = dummyKey('env');
+  child = guardedChildEnv(fx, envKey, { MARROW_API_KEY: envKey, MARROW_BASE_URL: ATTACKER });
+  result = await run(['status'], { env: child.env, cwd: fx.project });
+  fetches = captured(child.capture).filter((record) => record.kind === 'fetch');
+  assert.ok(fetches.some((record) => new URL(record.url).origin === ATTACKER_ORIGIN && record.carries_key), 'env key + env URL: unchanged');
+  assert.deepEqual(noticeLines(result.stderr), []);
+});
+
+const INSTALLER_NO_KEY_CLI = [
+  ['installer --key --base-url X (install and activate)', {}, ['--key', '--base-url', ATTACKER, '--no-controller'], NOTICE_FLAG, true],
+  ['installer --key "" --yes (env URL)', { MARROW_BASE_URL: ATTACKER }, ['--key', '', '--yes', '--no-controller'], NOTICE_ENV, true],
+  ['installer doctor --key "" --base-url X', {}, ['doctor', '--key', '', '--base-url', ATTACKER, '--json'], NOTICE_FLAG, false],
+  ['installer doctor --key "   " --base-url X', {}, ['doctor', '--key', '   ', '--base-url', ATTACKER, '--json'], NOTICE_FLAG, false],
+];
+
+test('R1-2 CLI: installer forms with no --key value send the owner key only to the default and write no attacker URL', async () => {
+  for (const [label, extra, args, notice, writeRun] of INSTALLER_NO_KEY_CLI) {
+    const fx = fixture('r12-cli-inst');
+    const key = dummyKey('owner');
+    ownerFile(fx, key);
+    const { env, capture } = guardedChildEnv(fx, key, extra, { stubNpm: true });
+    const result = await run(['--cwd', fx.project, ...args], { env, cwd: fx.project });
+    assertOwnerKeyStaysHome(label, captured(capture));
+    assert.deepEqual(noticeLines(result.stderr), [`[marrow] ${notice}`], `${label}: one notice`);
+    const output = `${result.stdout}\n${result.stderr}`;
+    assert.equal(output.includes(key) || /attacker/.test(output), false, `${label}: no key and no URL in the output`);
+    if (writeRun) {
+      // Consumers: the configs and hooks this run wrote never name the attacker URL.
+      const written = [...walkFiles(fx.home), ...walkFiles(fx.project)].filter((file) => !file.startsWith(path.join(fx.home, '.marrow', 'env')));
+      assert.ok(written.length > 2, `${label}: the run wrote its files`);
+      for (const file of written) assert.equal(/attacker/.test(fs.readFileSync(file, 'utf8')), false, `${label}: ${path.relative(fx.root, file)} names the attacker`);
+    }
+  }
+});
+
+test('R1-2 CLI: installer --key= is refused before any network call', async () => {
+  const fx = fixture('r12-cli-eq');
+  const key = dummyKey('owner');
+  ownerFile(fx, key);
+  const { env, capture } = guardedChildEnv(fx, key, {}, { stubNpm: true });
+  const result = await run(['doctor', '--cwd', fx.project, '--key=', '--base-url', ATTACKER], { env, cwd: fx.project });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Unknown argument: --key/);
+  assert.deepEqual(captured(capture).filter((record) => record.kind === 'fetch' || record.kind === 'connect'), []);
+});

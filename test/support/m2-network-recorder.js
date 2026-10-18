@@ -27,6 +27,30 @@ globalThis.fetch = async (url, init = {}) => {
   throw new TypeError('fetch failed');
 };
 
+// Opt-in (M2_STUB_NPM=1): npm and npx never run, so a run stays offline and reaches its server
+// self-test at once. The installer's `npx ... marrow-mcp loop-guard-self-test` gets the passing proof
+// (as the stand-in npx of installer-0166.test.js gives it); every other npm or npx call fails, as it
+// would with no network.
+if (process.env.M2_STUB_NPM === '1') {
+  const childProcess = require('node:child_process');
+  const isNpm = (file, args) => /(^|[\\/])np[mx](\.cmd)?$/.test(String(file))
+    || (Array.isArray(args) && args.some((arg) => /np[mx]-cli\.js$/.test(String(arg))));
+  const proof = JSON.stringify({ pass: true, isolated: true, live_hook_observed: false, repeat_denied: true, mutation_reset: true, owner_disabled_bypass: true });
+  const spawnSync = childProcess.spawnSync;
+  childProcess.spawnSync = function stubbedSpawnSync(file, args, options, ...rest) {
+    if (!isNpm(file, args)) return spawnSync.call(this, file, args, options, ...rest);
+    const text = options && options.encoding && options.encoding !== 'buffer';
+    const out = (value) => (text ? value : Buffer.from(value));
+    if (Array.isArray(args) && args.includes('loop-guard-self-test')) {
+      record({ kind: 'npx', answered: 'loop-guard-self-test' });
+      return { pid: 0, status: 0, signal: null, output: [null, out(proof), out('')], stdout: out(proof), stderr: out('') };
+    }
+    record({ kind: 'npm' });
+    const stderr = out('npm is stubbed by the test recorder');
+    return { pid: 0, status: 1, signal: null, output: [null, out(''), stderr], stdout: out(''), stderr };
+  };
+}
+
 const connect = net.Socket.prototype.connect;
 net.Socket.prototype.connect = function guarded(...args) {
   const first = args[0];

@@ -1147,8 +1147,17 @@ function parseBaseOptions(argv, startIndex = 0) {
         baseUrlSource = 'the --base-url option';
       }
     } else if (arg === '--key') {
-      options.apiKey = argv[++i] || options.apiKey;
-      options.keyFromArg = true;
+      // Only a non-blank value is a key. A missing value (end of argv, or another option next) is
+      // not taken, and a blank one is dropped: the key, and where it may be sent, stay as if --key
+      // were absent.
+      const value = argv[i + 1];
+      if (value !== undefined && !String(value).startsWith('--')) {
+        i += 1;
+        if (String(value).trim()) {
+          options.apiKey = value;
+          options.keyFromArg = true;
+        }
+      }
     } else if (arg === '--json') options.json = true;
     else if (arg === '--interactive') options.interactive = true;
     else if (arg === '--no-interactive') options.interactive = false;

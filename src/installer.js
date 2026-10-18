@@ -951,9 +951,13 @@ function parseArgs(argv, env = process.env) {
       options.mode = optionValue() || options.mode;
     }
     else if (arg === '--key') {
-      // A missing value (end of argv, or another option next) is a missing key, never a key.
-      options.apiKey = optionValue(true) || options.apiKey;
-      options.keyFromArg = true;
+      // A missing value (end of argv, or another option next) or a blank one is a missing key, never
+      // a key: the key, and where it may be sent, stay as if --key were absent.
+      const value = optionValue(true);
+      if (String(value).trim()) {
+        options.apiKey = value;
+        options.keyFromArg = true;
+      }
     }
     else if (arg === '--base-url') {
       const value = optionValue();
@@ -5430,11 +5434,13 @@ function writeInstallLog(home, text) {
 }
 
 // Where the key may go, decided once for every installer flow (install, activate, update, doctor and the
-// self-test). A key read from the owner file reaches only the default endpoint or one that same file
-// names or lists: a URL that only the environment or --base-url names cannot move it. Whatever the
-// source, a URL that is not https (loopback may be http) stops the run before any network call.
+// self-test), by where the key that is sent came from: `ownerKey` is given only when that key is the
+// owner-file key. A key read from the owner file reaches only the default endpoint or one that same file
+// names or lists: a URL that only the environment or --base-url names cannot move it, whatever --key
+// said. Whatever the source, a URL that is not https (loopback may be http) stops the run before any
+// network call.
 function enforceKeyEndpoint(options, ownerKey) {
-  if (ownerKey && ownerKey.apiKey && !options.keyFromArg && options.baseUrlSource) {
+  if (ownerKey && ownerKey.apiKey && options.baseUrlSource) {
     const decision = ownerKeyBaseUrl({ candidate: options.baseUrl, ownerValues: ownerKey.endpoint, fileName: ownerKey.fileName, source: options.baseUrlSource });
     options.baseUrl = decision.baseUrl;
     emitNoticeOnce(decision.notice);
