@@ -8,7 +8,7 @@ const test = require('node:test');
 const PINS = require('../src/pins');
 const installer = require('../src/installer');
 
-// The MCP pin is @getmarrow/mcp 3.9.104, packed from marrow-mcp 6307ef19 (src/pins.js says how its
+// The MCP pin is @getmarrow/mcp 3.9.104, packed from marrow-mcp 24f17b60 (src/pins.js says how its
 // integrity was computed, and that the release chain must re-verify it against the published
 // tarball before this installer is published). The vendored dist/ the tests decide with is that
 // build's, and every command and MCP entry the installer writes names that version.
@@ -16,18 +16,18 @@ const installer = require('../src/installer');
 const MCP_FIXTURES = path.join(__dirname, 'fixtures', 'mcp-3.9.104');
 const EXPECTED = {
   version: '3.9.104',
-  sourceSha: '6307ef1946ab84b86c6075407475dc96413ac386',
-  integrity: 'sha512-8JstteEZQP+6ymgbFiirm8/wvFNO3CcrgmU7njnEGp3lfzSueToxPscSZcrP78aKSWQbMAgF2I/AHidhj7uvTQ==',
+  sourceSha: '24f17b603b9821c58c25caae9611405dee20f4c1',
+  integrity: 'sha512-5A4I318Zxz57VfwCzh5GLwsTn8vL2K3wJQT1p8aGPwtLnON8L9WWclG/0CkHquz0B0wNlyPATyCG7Rzc2RCtww==',
 };
 // The SDK the pinned MCP depends on exactly (its packed tarball). Written out here as well as in src/pins.js, like the MCP
 // values above, so that editing one of the two is caught: every other test reads this value back from the pins.
 const EXPECTED_SDK = {
   version: '3.7.67',
-  integrity: 'sha512-M6Yzt5plpIVPiX+SZjgIGBC9/s4WuCr105uRf8EhRbF0+i/HpRDZSlbDevXymdu7arAIoZWBcfHTeQy/TlhwTQ==',
+  integrity: 'sha512-0Lwg4XLxm9eXxMgQtFAH1y4mXi9CXg3poQlGbeK0AW+EHP+yfUWQUH4d1XYO03QNzwHLAYKfARDmnl5GpBnKUw==',
 };
 const PUBLISHED_0170_INTEGRITY = 'sha512-hTs4jTJmySLk8hHgsGIZksMo9+eO5kjQmU1EJyDX8Qqm9Z+V+yDkauop19roasVvOAFsK3dJjqLoIh7gRhoXJQ==';
 
-test('src/pins.js pins @getmarrow/mcp 3.9.104 from marrow-mcp 6307ef19, not the 3.9.102 of the published 0.1.70', () => {
+test('src/pins.js pins @getmarrow/mcp 3.9.104 from marrow-mcp 24f17b60, not the 3.9.102 of the published 0.1.70', () => {
   assert.equal(PINS.MCP_ADAPTER_VERSION, EXPECTED.version);
   assert.equal(PINS.MCP_ADAPTER_SOURCE_SHA, EXPECTED.sourceSha);
   assert.equal(PINS.MCP_ADAPTER_INTEGRITY, EXPECTED.integrity);
