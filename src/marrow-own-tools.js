@@ -82,17 +82,23 @@ function checkedNames(names) {
 }
 checkedNames(MARROW_OWN_TOOL_NAMES);
 
+// Read-only Claude Code tools that no released matcher sent to the hook (they list names, never
+// content), so they stay unhooked by exact label. A tool any released matcher hooked is never here.
+const CLAUDE_UNHOOKED_READ_ONLY_TOOLS = Object.freeze(['LS', 'ListMcpResourcesTool']);
+
 // One helper builds every host's matcher. Claude Code, Cursor and Gemini test them as JavaScript
 // regexes, unanchored and without the m flag, so `^` and `$` are the start and end of the label.
 // Every consuming part is `[\s\S]*`, so a label padded with a line terminator, NUL or space
 // anywhere still matches, under a search and a full match.
 function buildOwnToolMatchers(names = MARROW_OWN_TOOL_NAMES) {
   const own = `(?:${checkedNames(names).join('|')})`;
-  // Shared with @getmarrow/mcp NATIVE_HOOK_MATCHER (byte-identical). Claude Code names an MCP tool
-  // `mcp__<server>__<tool>` and maps every other character to `_` without trimming, so the exact
-  // label `mcp__marrow__<own>` comes only from server `marrow`: that whole label is skipped, and any
-  // other label holding `mcp__` or `functions.` anywhere reaches the hook.
-  const mcpTail = `^(?!mcp__${MARROW_OWN_SERVER}__${own}$)[\\s\\S]*(?:functions\\.|mcp__)[\\s\\S]*`;
+  // Shared with @getmarrow/mcp NATIVE_HOOK_MATCHER (byte-identical). Every Claude Code label reaches
+  // the hook except exactly `mcp__marrow__<own>` and the read-only labels above, so a built-in
+  // outside any fixed list (Monitor and PowerShell run shell commands; WebFetch, Agent, Skill) and
+  // every future tool are hooked by default. Claude Code names an MCP tool `mcp__<server>__<tool>`
+  // and maps every other character to `_` without trimming, so the exact label `mcp__marrow__<own>`
+  // comes only from server `marrow`.
+  const claude = `^(?!(?:mcp__${MARROW_OWN_SERVER}__${own}|${CLAUDE_UNHOOKED_READ_ONLY_TOOLS.join('|')})$)[\\s\\S]*`;
   // Cursor preToolUse names an MCP tool `MCP:<tool>`, without its server, so no MCP label is
   // skipped here, and the beforeMCPExecution guard allows nothing by name either: Marrow's own
   // tools reach @getmarrow/mcp `cursor-pre-action-hook`, which skips one only when Cursor's own
@@ -100,7 +106,7 @@ function buildOwnToolMatchers(names = MARROW_OWN_TOOL_NAMES) {
   // also only when it is the only server, with at most 8 usable absolute workspace roots).
   const cursorMcp = '[\\s\\S]*MCP:[\\s\\S]*';
   return {
-    claude: `Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|${mcpTail}`,
+    claude,
     // Codex compiles matchers with Rust `regex`, which has no look-around, and drops a hook whose
     // matcher fails to compile (codex-rs/hooks/src/engine/discovery.rs). `*` is Codex's match-all
     // (engine/matcher.rs), so every tool reaches the hook. No own-name exemption may come back in
@@ -113,11 +119,13 @@ function buildOwnToolMatchers(names = MARROW_OWN_TOOL_NAMES) {
     // Gemini names an MCP tool `mcp_<server>_<tool>`, which other server/tool pairs can also
     // produce, so every `mcp_` label reaches the hook (its payload's mcp_context names the server).
     // Gemini tool names start with a letter: a label that does not (a padded one) reaches it too.
-    gemini: '^(?:run_shell_command|write_file|replace|edit_file|delete_file|read_file|read_many_files|glob|grep_search|list_directory|get_file_info|web_search|google_web_search|mcp_[\\s\\S]*)$|^[^A-Za-z_][\\s\\S]*',
+    // web_fetch fetches the URLs its prompt names, so it reaches the hook as web search does.
+    gemini: '^(?:run_shell_command|write_file|replace|edit_file|delete_file|read_file|read_many_files|glob|grep_search|list_directory|get_file_info|web_search|google_web_search|web_fetch|mcp_[\\s\\S]*)$|^[^A-Za-z_][\\s\\S]*',
   };
 }
 
 module.exports = {
+  CLAUDE_UNHOOKED_READ_ONLY_TOOLS,
   MARROW_OWN_TOOL_NAMES,
   MARROW_OWN_SERVER,
   buildOwnToolMatchers,

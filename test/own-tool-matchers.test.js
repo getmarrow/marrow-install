@@ -29,6 +29,8 @@ const OLD = {
 
 const OWN = NAMES.join('|');
 const GEMINI_BUILTINS = 'run_shell_command|write_file|replace|edit_file|delete_file|read_file|read_many_files|glob|grep_search|list_directory|get_file_info|web_search|google_web_search';
+// PKG-H2: web_fetch reaches the Gemini hook too.
+const GEMINI_HOOKED = `${GEMINI_BUILTINS}|web_fetch`;
 
 // The r1 candidate (8371de15) strings, for the "never looser than r1" checks.
 const R1 = (() => {
@@ -48,15 +50,15 @@ const V0170_CODEX = `Bash|apply_patch|Edit|Write|MultiEdit|^(?!mcp__marrow__(?:$
 
 // The exact strings of the rule, assembled here from the JSON (not from the module).
 function expectedStrings() {
-  const tail = `^(?!mcp__marrow__(?:${OWN})$)[\\s\\S]*(?:functions\\.|mcp__)[\\s\\S]*`;
   const cursorMcp = '[\\s\\S]*MCP:[\\s\\S]*';
   return {
-    claude: `Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|${tail}`,
+    // PKG-H2: every label but the exact own labels and the read-only LS / ListMcpResourcesTool.
+    claude: `^(?!(?:mcp__marrow__(?:${OWN})|LS|ListMcpResourcesTool)$)[\\s\\S]*`,
     // Codex: every tool reaches the hook, which skips the exact own names itself.
     codex: '*',
     cursor: `Shell|Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|${cursorMcp}`,
     cursorPreToolUseHostApproval: `Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|${cursorMcp}`,
-    gemini: `^(?:${GEMINI_BUILTINS}|mcp_[\\s\\S]*)$|^[^A-Za-z_][\\s\\S]*`,
+    gemini: `^(?:${GEMINI_HOOKED}|mcp_[\\s\\S]*)$|^[^A-Za-z_][\\s\\S]*`,
   };
 }
 
@@ -352,7 +354,7 @@ test('every matcher is the exact string of the rule, built from the names, and t
   assert.equal(installer.GEMINI_NATIVE_HOOK_MATCHER, expected.gemini);
   // Byte-identical with @getmarrow/mcp NATIVE_HOOK_MATCHER (MCP_SYNC_STRING in the r2 result).
   assert.equal(installer.NATIVE_HOOK_MATCHER,
-    `Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|^(?!mcp__marrow__(?:${OWN})$)[\\s\\S]*(?:functions\\.|mcp__)[\\s\\S]*`);
+    `^(?!(?:mcp__marrow__(?:${OWN})|LS|ListMcpResourcesTool)$)[\\s\\S]*`);
   assert.equal(installer.CODEX_NATIVE_HOOK_MATCHER, '*');
   // Codex (Rust `regex`) has no look-around; its string is its match-all and no regex at all.
   assert.equal(/\(\?<?[=!]/.test(expected.codex), false);
@@ -370,7 +372,8 @@ test('every matcher is the exact string of the rule, built from the names, and t
   }
   // No by-name allow exists any more: the module exports no guard condition (the Cursor
   // beforeMCPExecution guard sends every call, Marrow's own tools included, to the MCP hook).
-  assert.deepEqual(Object.keys(own).sort(), ['MARROW_OWN_SERVER', 'MARROW_OWN_TOOL_NAMES', 'buildOwnToolMatchers']);
+  assert.deepEqual(Object.keys(own).sort(), ['CLAUDE_UNHOOKED_READ_ONLY_TOOLS', 'MARROW_OWN_SERVER', 'MARROW_OWN_TOOL_NAMES', 'buildOwnToolMatchers']);
+  assert.deepEqual(own.CLAUDE_UNHOOKED_READ_ONLY_TOOLS, ['LS', 'ListMcpResourcesTool']);
   assert.equal(own.cursorOwnToolGuardCondition, undefined);
   assert.throws(() => own.buildOwnToolMatchers([]), /invalid Marrow tool name list/);
 });
@@ -557,7 +560,8 @@ test('the named cases for the Claude Code / Codex matcher', () => {
           assert.equal(codexSelects(matcher, tool), true, `codex/${mode}: ${JSON.stringify(tool)} reaches the hook`);
           assert.equal(hookSkips(tool), false, `codex/${mode}: the real hook does not skip ${JSON.stringify(tool)}`);
         }
-        assert.equal(checks(key, matcher, tool, mode), key === 'claude' && tool.startsWith('MCP:') ? false : true, `${key}/${mode}: ${JSON.stringify(tool)}`);
+        // PKG-H2: the Claude Code matcher hooks every label but the exact own ones, so `MCP:` labels (no Claude Code form) reach it too.
+        assert.equal(checks(key, matcher, tool, mode), true, `${key}/${mode}: ${JSON.stringify(tool)}`);
       }
       assert.equal(hookSkips0170('functions.mcp__marrow__marrow_workflow_gate'), true, 'the published 0.1.70 hook skipped it');
       assert.equal(checks(key, matcher, 'mcp__marrow__marrow_commit', mode), false);
