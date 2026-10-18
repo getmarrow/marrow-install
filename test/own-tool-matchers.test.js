@@ -88,7 +88,7 @@ function codexSelects(matcher, tool) {
   return new RegExp(matcher).test(tool);
 }
 // The Codex matcher is `*`, so the hook alone decides what is skipped. That decision is the real
-// @getmarrow/mcp 3.9.103 one (marrow-mcp 868a9c18): test/fixtures/mcp-3.9.103/ holds dist/ of the pinned
+// @getmarrow/mcp 3.9.104 one (marrow-mcp 6307ef19): test/fixtures/mcp-3.9.104/ holds dist/ of the pinned
 // package, byte for byte (the checksum test below pins it), not a copy of its rules written here. A label
 // is skipped only when it is exactly `mcp__marrow__<own>` AND the host's own Codex configuration proves the
 // `marrow` server is the official one. PROVEN is a temporary CODEX_HOME whose config.toml is the README
@@ -218,19 +218,19 @@ function probes(key) {
 }
 
 // sha256 of each vendored file, written here as well as in MANIFEST.json so that editing one of
-// the two is caught. They are dist/ of @getmarrow/mcp 3.9.103 (marrow-mcp 868a9c18; none of these
-// files changes with the 3.9.103 version bump), and the 3.9.102 baseline (3a2bf85e) the published
-// 0.1.70 pinned.
+// the two is caught. They are dist/ of @getmarrow/mcp 3.9.104 (marrow-mcp 6307ef19; only own-tool.js, which
+// carries the Claude Code matcher, and codex-plugin-pins.js differ from the 3.9.103 files), and the 3.9.102
+// baseline (3a2bf85e) the published 0.1.70 pinned.
 const VENDORED_MCP = {
-  sourceSha: '868a9c18530a75fcee5052441d0d3d2383511df4',
+  sourceSha: '6307ef1946ab84b86c6075407475dc96413ac386',
   files: {
-    'own-tool.js': 'abcfcb24d7f4d55fb3f766528aee72a40c4e8a090e8b26271d5aaf234bb69d17',
+    'own-tool.js': '09e7b5b2c3bae1abe1955bf54bf1763f58bbacc4a4abb258633ab4a81d7a6e8b',
     'tool-catalog.js': 'd413c2b7c46c7ed9c7a8b0694481c1f5afe850c3edc67cd28917dc1153b934cb',
     'model-usage.js': 'c7ddbc3482d5a7514453d0be38fa7c51e2f228a50039f3392544319b8defc577',
     'redact.js': '1f7afe22e5bd8b0b8181978d4dc7149e2aec8591459a51a733130d94c5d8da9b',
     'own-server-identity.js': 'c8efc9b000c697c6ce0d91a17348d9b47b1667d0928f657135da8822465176c0',
     'codex-plugins.js': '697e0444c1dc8856ed61ffa169fb39707b76c9a0f4752f6cb4121e315f4b107f',
-    'codex-plugin-pins.js': 'b44c256251c9ce623f3ea7773fb711e5d4cd6a6da11277b2f1af1a6fbbc892fb',
+    'codex-plugin-pins.js': '4d09f1b04ea6c337015b4f05fc5b3545ea625f6bd37d0f48dde218912ea5b99a',
     'host-session.js': '422544dfaf4f75a5e78a607ea8565050f8b11368f9ed275f298f8c1b1b7b350e',
   },
 };
@@ -258,15 +258,15 @@ function checkVendored(directory, vendored, version) {
   return manifest;
 }
 
-test('the vendored MCP 3.9.103 files are byte for byte the pinned @getmarrow/mcp, and the real hook lists the registered names', () => {
-  const manifest = checkVendored(MCP_FIXTURES, VENDORED_MCP, '3.9.103');
+test('the vendored MCP 3.9.104 files are byte for byte the pinned @getmarrow/mcp, and the real hook lists the registered names', () => {
+  const manifest = checkVendored(MCP_FIXTURES, VENDORED_MCP, '3.9.104');
   assert.equal(manifest.source_sha, PINS.MCP_ADAPTER_SOURCE_SHA, 'the vendored files are for the pinned MCP source');
   assert.equal(manifest.version, PINS.MCP_ADAPTER_VERSION);
   assert.equal(manifest.integrity, PINS.MCP_ADAPTER_INTEGRITY);
-  // The pin itself: 3.9.103 from marrow-mcp 868a9c18. A pin left at 3.9.102 (or moved without the
+  // The pin itself: 3.9.104 from marrow-mcp 6307ef19. A pin left at 3.9.102 (or moved without the
   // vendored files) fails here and in the manifest checks above.
-  assert.equal(PINS.MCP_ADAPTER_VERSION, '3.9.103');
-  assert.equal(PINS.MCP_ADAPTER_SOURCE_SHA, '868a9c18530a75fcee5052441d0d3d2383511df4');
+  assert.equal(PINS.MCP_ADAPTER_VERSION, '3.9.104');
+  assert.equal(PINS.MCP_ADAPTER_SOURCE_SHA, '6307ef1946ab84b86c6075407475dc96413ac386');
   assert.match(PINS.MCP_ADAPTER_INTEGRITY, /^sha512-[A-Za-z0-9+/]{86}==$/);
   assert.notEqual(PINS.MCP_ADAPTER_INTEGRITY, 'sha512-hTs4jTJmySLk8hHgsGIZksMo9+eO5kjQmU1EJyDX8Qqm9Z+V+yDkauop19roasVvOAFsK3dJjqLoIh7gRhoXJQ==', 'not the 3.9.102 integrity');
   // The registered names the real module derives from its own catalog are the installer's 58.
