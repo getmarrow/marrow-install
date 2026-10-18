@@ -19,7 +19,8 @@ const {
   marrowEnvKeyNames: hermesMarrowEnvKeyNames,
   planHermesMcpConfig,
 } = require('./hermes-config');
-const { ensureOwnerApiKey, readOwnerApiKey } = require('./owner-env');
+const { ensureOwnerApiKey, readOwnerKeyDetail } = require('./owner-env');
+const { assertSafeBaseUrl, emitNoticeOnce, ownerKeyBaseUrl } = require('./base-url-policy');
 const { buildOwnToolMatchers } = require('./marrow-own-tools');
 const { detectAgentPlugins, describeAgentPlugin } = require('./agent-plugins');
 const {
@@ -870,6 +871,7 @@ function parseArgs(argv, env = process.env) {
     // MARROW_KEY is accepted when MARROW_API_KEY is absent or blank, as the runner and owner files do.
     apiKey: String(env.MARROW_API_KEY || '').trim() || String(env.MARROW_KEY || '').trim(),
     baseUrl: env.MARROW_BASE_URL || DEFAULT_BASE_URL,
+    baseUrlSource: env.MARROW_BASE_URL ? 'MARROW_BASE_URL from the process environment' : null,
     agentId: env.MARROW_FLEET_AGENT_ID || env.MARROW_AGENT_ID || '',
     toolProfile: resolveToolProfile(env.MARROW_TOOL_PROFILE),
     selfTest: true,
@@ -953,7 +955,13 @@ function parseArgs(argv, env = process.env) {
       options.apiKey = optionValue(true) || options.apiKey;
       options.keyFromArg = true;
     }
-    else if (arg === '--base-url') options.baseUrl = optionValue() || options.baseUrl;
+    else if (arg === '--base-url') {
+      const value = optionValue();
+      if (value) {
+        options.baseUrl = value;
+        options.baseUrlSource = 'the --base-url option';
+      }
+    }
     else if (arg === '--agent-id') {
       const value = optionValue();
       if (value) {
@@ -4119,7 +4127,8 @@ async function runSelfTest(options) {
   const configuredAgentId = String(options.agentId || '').trim();
   if (configuredAgentId) headers['x-marrow-agent-id'] = configuredAgentId;
 
-  const baseUrl = options.baseUrl.replace(/\/+$/, '');
+  // The last check before the key leaves this process, whoever built the options.
+  const baseUrl = assertSafeBaseUrl(options.baseUrl).replace(/\/+$/, '');
   const selfTestKey = `install-self-test:${crypto.randomUUID()}`;
   const think = await selfTestWrite(`${baseUrl}/v1/agent/think`, {
     method: 'POST',
@@ -5420,6 +5429,20 @@ function writeInstallLog(home, text) {
   return filePath;
 }
 
+// Where the key may go, decided once for every installer flow (install, activate, update, doctor and the
+// self-test). A key read from the owner file reaches only the default endpoint or one that same file
+// names or lists: a URL that only the environment or --base-url names cannot move it. Whatever the
+// source, a URL that is not https (loopback may be http) stops the run before any network call.
+function enforceKeyEndpoint(options, ownerKey) {
+  if (ownerKey && ownerKey.apiKey && !options.keyFromArg && options.baseUrlSource) {
+    const decision = ownerKeyBaseUrl({ candidate: options.baseUrl, ownerValues: ownerKey.endpoint, fileName: ownerKey.fileName, source: options.baseUrlSource });
+    options.baseUrl = decision.baseUrl;
+    emitNoticeOnce(decision.notice);
+  }
+  options.baseUrl = assertSafeBaseUrl(options.baseUrl, options.baseUrlSource === 'the --base-url option' ? '--base-url' : 'MARROW_BASE_URL');
+  return options;
+}
+
 async function runCli(argv) {
   const options = parseArgs(argv);
   if (options.help) {
@@ -5434,7 +5457,7 @@ async function runCli(argv) {
   }
   // An empty or whitespace-only key from any source (environment, --key, owner file) is missing.
   options.apiKey = String(options.apiKey || '').trim();
-  const stored = readOwnerApiKey(options.home);
+  const stored = readOwnerKeyDetail(options.home);
   stored.apiKey = String(stored.apiKey || '').trim();
   const keyInfo = { source: options.apiKey ? 'environment' : null, path: null, owner_files_disagree: stored.conflict };
   if (!options.apiKey && stored.apiKey) {
@@ -5442,6 +5465,7 @@ async function runCli(argv) {
     keyInfo.source = 'owner_env_file';
     keyInfo.path = stored.source;
   }
+  enforceKeyEndpoint(options, keyInfo.source === 'owner_env_file' ? stored : null);
   const oneCommand = Boolean((options.activate || options.update) && !options.dryRun && !options.doctor);
   // Any write run without a key stops here, before anything is written: hooks installed with no
   // key would deny protected actions on the next harness start. Previews, doctor and uninstall
@@ -5509,6 +5533,7 @@ async function runCli(argv) {
 
 module.exports = {
   argumentLabel,
+  enforceKeyEndpoint,
   maintenanceMcpRuntime,
   parseArgs,
   detectEnvironment,

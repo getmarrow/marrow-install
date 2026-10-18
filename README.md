@@ -402,7 +402,7 @@ See the [Trust Center](https://getmarrow.ai/trust/) for implemented controls, cu
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `MARROW_API_KEY` | Yes for live verification | Account or agent-bound API key. `MARROW_KEY` is accepted by the runner and controller |
-| `MARROW_BASE_URL` | No | API base override |
+| `MARROW_BASE_URL` | No | API base override (`--base-url` too). It must be https; `http` is accepted only for `localhost`, `127.0.0.1` and `[::1]`. When the key comes from `~/.marrow/env`, a URL named only by the process environment or `--base-url` is ignored (one notice) unless that file names it or lists its origin in `MARROW_ALLOWED_BASE_URLS` |
 | `MARROW_FLEET_AGENT_ID`, `MARROW_AGENT_ID` | No | A registered agent id. Unset, Marrow uses the key's bound agent or the plan seat |
 | `MARROW_CLIENT` | No | Harness label; overrides detection |
 | `MARROW_TOOL_PROFILE` | No | `primary` (default when unset), `core` or `full` |
@@ -412,6 +412,7 @@ See the [Trust Center](https://getmarrow.ai/trust/) for implemented controls, cu
 | `MARROW_SESSION_ID`, `MARROW_SIDECAR_PORT` | No | Runner session id (by default one per agent, project, user, service and UTC day) and sidecar port |
 | `HERMES_HOME` | No | Hermes home, when not `~/.hermes` |
 | `MARROW_ALLOWED_BASE_URLS`, `MARROW_ALLOWED_AGENT_IDS` | No | Comma-separated values that install, update and controller maintenance keep in managed MCP configuration instead of resetting them |
+| `MARROW_ALLOWED_BASE_URLS` in `~/.marrow/env` | No | Also read from that owner-only file: comma-separated exact origins that a key stored there may be sent to when the process environment or `--base-url` names them. No wildcards, paths, credentials, queries or fragments |
 
 The installer never sends or writes a generated agent id to Marrow, MCP configuration or the SDK preload; the controller keeps a local identity for its own state only. Only a configured id (`MARROW_FLEET_AGENT_ID`, `MARROW_AGENT_ID` or `--agent-id`) goes into the managed MCP entry and SDK preload. An id already in a managed MCP entry can also stay there: when it is listed in `MARROW_ALLOWED_AGENT_IDS`, or when `update` or `--repair` keep it (the id the installer recorded for that file, or once an id you set yourself in your home MCP configuration; see Trust and Data Boundaries). A kept id is not copied into the SDK preload. With no configured or kept id, Marrow resolves the API key's bound agent or the plan's agent seat, and the self-test reports that server-resolved id. The generated passive runtime reads `MARROW_FLEET_AGENT_ID`, then `MARROW_AGENT_ID`, and uses the installer-captured id only as a fallback. A key bound to no single agent still passes the self-test; activation then reports how to bind one. The installer never copies `MARROW_API_KEY` into MCP configuration or generated runtime source; the owning harness must inherit the key from trusted environment or secret-manager configuration, or from the owner-only `~/.marrow/env`.
 

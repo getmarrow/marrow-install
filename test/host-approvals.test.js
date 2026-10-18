@@ -1603,7 +1603,9 @@ test('runner CLI without MARROW_API_KEY: reads the owner-only ~/.marrow/env, and
       assert.equal(seen.length, 0, 'nothing is sent without a key');
 
       fs.mkdirSync(path.join(dir, '.marrow'), { mode: 0o700 });
-      fs.writeFileSync(path.join(dir, '.marrow', 'env'), `MARROW_API_KEY=${key}\n`, { mode: 0o600 });
+      // A key stored in the owner file goes only to the endpoint that same file allows (PKG-M2); this test's
+      // endpoint is the loopback mock, so the file lists it.
+      fs.writeFileSync(path.join(dir, '.marrow', 'env'), `MARROW_API_KEY=${key}\nMARROW_ALLOWED_BASE_URLS=${baseUrl}\n`, { mode: 0o600 });
       const stored = await runCli(args, { PATH: process.env.PATH, HOME: dir, MARROW_BASE_URL: baseUrl }, dir);
       assert.equal(stored.code, 12, stored.output);
       assert.match(stored.output, /held until a person approves it/);

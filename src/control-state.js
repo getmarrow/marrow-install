@@ -2,6 +2,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { DEFAULT_BASE_URL, assertSafeBaseUrl, emitNoticeOnce } = require('./base-url-policy');
 
 const CONTROL_STATE_VERSION = 1;
 const CONTROL_STATE_DIRECTORY = '.marrow';
@@ -74,7 +75,20 @@ function evidence(options = {}) {
 async function bestEffortLifecycle(event, options = {}) {
   const key = options.apiKey || process.env.MARROW_API_KEY || process.env.MARROW_KEY;
   if (!key || typeof fetch !== 'function') return false;
-  try { const response = await fetch(`${String(options.baseUrl || process.env.MARROW_BASE_URL || 'https://api.getmarrow.ai').replace(/\/$/, '')}/v1/agent/integrations/events`, { method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' }, body: JSON.stringify(event), signal: AbortSignal.timeout(1500) }); return response.ok; } catch { return false; }
+  // A key the caller hands in may have come from the owner file, so the process environment URL is
+  // never paired with it: the caller names the URL it already checked, or the default is used. A
+  // key from the process environment keeps the process environment URL. Whichever applies, a URL
+  // that is not https (loopback may be http) skips delivery before any network call; the local
+  // control change itself is unaffected.
+  const candidate = options.baseUrl || (options.apiKey ? '' : process.env.MARROW_BASE_URL) || DEFAULT_BASE_URL;
+  let baseUrl;
+  try {
+    baseUrl = assertSafeBaseUrl(candidate, options.baseUrl ? 'baseUrl' : 'MARROW_BASE_URL');
+  } catch (error) {
+    emitNoticeOnce(`skipped delivering the control event to Marrow: ${error.message}`);
+    return false;
+  }
+  try { const response = await fetch(`${baseUrl.replace(/\/$/, '')}/v1/agent/integrations/events`, { method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' }, body: JSON.stringify(event), signal: AbortSignal.timeout(1500) }); return response.ok; } catch { return false; }
 }
 function boundedIdentity(value, fallback) { const safe = String(value || '').trim().replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 64); return safe || fallback; }
 function persistBypassReceipt(input, options = {}) {
