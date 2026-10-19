@@ -4684,7 +4684,7 @@ function printReport(report, sink) {
       out(`- backend-projected upgrade-required tools: ${availability.counts.upgrade_required}\n`);
       out(`- backend projection source: ${projection.source}; authorizes calls: no\n`);
     } else {
-      out(`- backend-projected entitlements: unavailable (source: ${projection?.source || 'backend_projection_not_provided'}; non-authorizing)\n`);
+      out(`- backend-projected tools in your plan: unavailable (source: ${projection?.source || 'backend_projection_not_provided'}; non-authorizing)\n`);
     }
   }
   if (report.selfTest.skipped) {

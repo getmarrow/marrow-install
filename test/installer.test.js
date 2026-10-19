@@ -2031,7 +2031,7 @@ test('repair mode writes config and reports self-test remediation state', async 
   assert.match(output, /expected visible tools: 17/);
   assert.match(output, /actual visible tools: unavailable until process reload/);
   assert.match(output, /visible tool names: unavailable until process reload/);
-  assert.match(output, /backend-projected entitlements: unavailable.*non-authorizing/);
+  assert.match(output, /backend-projected tools in your plan: unavailable.*non-authorizing/);
 });
 
 test('doctor reports likely env files when MARROW_API_KEY is not loaded', async () => {

@@ -180,7 +180,8 @@ test('README: the Codex text is in the Codex and Cursor section, exact, and not 
   assert.match(next, /one-time `\/hooks` trust step/i);
   assert.match(next, /Until you do, Codex does not run them and no tool call is checked/);
   assert.match(next, /loop guard can hold a repeated command/);
-  assert.match(next, /this operation already passed with an unchanged result/);
+  assert.match(next, /you already ran this exact <tool> call in this session and nothing has changed since, so it was not run again/);
+  assert.doesNotMatch(next, /this operation already passed with an unchanged result/, 'the old loop-guard text is gone');
   // 8. No claim the code does not support.
   for (const claim of [/cannot call/i, /unsupported call/i, /never (?:held|checked|locked)/i, /every look-alike/i, /fully (?:covered|protected)/i]) {
     assert.doesNotMatch(next, claim, String(claim));
