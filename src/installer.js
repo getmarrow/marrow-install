@@ -23,6 +23,7 @@ const { ensureOwnerApiKey, readOwnerKeyDetail } = require('./owner-env');
 const { assertSafeBaseUrl, emitNoticeOnce, ownerKeyBaseUrl } = require('./base-url-policy');
 const { buildOwnToolMatchers } = require('./marrow-own-tools');
 const { detectAgentPlugins, describeAgentPlugin } = require('./agent-plugins');
+const { runSeatbeltStatus, seatbeltReport, seatbeltLine } = require('./seatbelt-status');
 const {
   delocalizeHookCommand,
   delocalizeHookScriptText,
@@ -876,6 +877,7 @@ function parseArgs(argv, env = process.env) {
     toolProfile: resolveToolProfile(env.MARROW_TOOL_PROFILE),
     selfTest: true,
     loopGuardSelfTest: true,
+    seatbeltStatus: true,
     selfTestExplicitlyDisabled: false,
     json: false,
     activate: false,
@@ -4025,6 +4027,22 @@ function runLoopGuardSelfTest(options = {}) {
   }
 }
 
+// Doctor only: the pinned MCP's read-only `seatbelt-status` command, started like the loop-guard
+// self-test above (npx, the exact pinned package, a private empty folder, an injectable command for
+// tests) but with this process's own environment: the status describes this machine's real HOME,
+// ~/.marrow and key, which the loop-guard's isolated HOME and blank key would hide. The key reaches
+// the child only as an environment variable, never in argv, and nothing the child prints is echoed.
+// Returns { mode, reasons } or null (could not check).
+async function readSeatbeltStatus(options = {}) {
+  if (options.seatbeltStatus !== true) return null;
+  const target = executableMcpTarget(options);
+  const command = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+  const invocation = options.seatbeltStatusCommand
+    || { command, args: ['-y', `--package=@getmarrow/mcp@${target.version}`, 'marrow-mcp', 'seatbelt-status'] };
+  const limits = Number.isFinite(options.seatbeltStatusTimeoutMs) ? { timeoutMs: options.seatbeltStatusTimeoutMs } : {};
+  return runSeatbeltStatus({ ...invocation, env: { ...process.env } }, limits);
+}
+
 function isCanonicalTimestamp(value) {
   if (typeof value !== 'string' || value.length === 0) return false;
   const parsed = Date.parse(value);
@@ -4767,6 +4785,7 @@ function printReport(report, sink) {
         : 'no';
     out('\nDoctor:\n');
     out(`- Marrow active: ${activeLabel}\n`);
+    out(`${seatbeltLine(report.doctor.seatbelt)}\n`);
     out(`- missing env: ${report.doctor.missingEnv.length ? report.doctor.missingEnv.join(', ') : 'none'}\n`);
     if (report.doctor.envHints.length) out(`- possible env files: ${report.doctor.envHints.join(', ')}\n`);
     out(`- missing hooks/config: ${report.doctor.missingHooks.length ? report.doctor.missingHooks.join('; ') : 'none'}\n`);
@@ -5091,6 +5110,8 @@ async function install(options) {
   // Doctor only: Marrow's agent plugins at the host's own install location (src/agent-plugins.js).
   const agentPlugins = options.doctor ? detectAgentPlugins({ home: detection.home, env: process.env, project: detection.root }) : [];
   const pluginHookLabels = new Set(agentPlugins.filter((plugin) => plugin.counted).map((plugin) => plugin.hook_label));
+  // Doctor only: the keyless seatbelt's status from the pinned MCP (null = could not check).
+  const seatbeltStatus = options.doctor ? await readSeatbeltStatus(options) : null;
   // A host whose Marrow plugin supplies the hooks is not missing them.
   const hooksMissingHosts = (plan.absent_hosts || []).filter((entry) => !(plan.absent_hosts || []).some((other) => other.host === entry.host && pluginHookLabels.has(other.label)));
   // Doctor only: a Codex hooks file that still carries the look-ahead matcher Codex rejects.
@@ -5264,6 +5285,7 @@ async function install(options) {
     doctor: {
       ...(hooksMissingHosts.length ? { hooks_missing_hosts: hooksMissingHosts } : {}),
       active: Boolean(!selfTest.skipped && selfTest.active),
+      ...(options.doctor ? { seatbelt: seatbeltReport(seatbeltStatus) } : {}),
       missingEnv: options.apiKey ? [] : ['MARROW_API_KEY'],
       envHints,
       // A host whose Marrow plugin supplies the hooks is not missing them (doctor reports it instead).
