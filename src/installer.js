@@ -3320,6 +3320,24 @@ function updateHostGroups(paths) {
   ];
 }
 
+// Doctor only: true when a host's hook or config file would still be written for a host no counted
+// Marrow plugin supplies (so `--repair` stays the right fix there). The project .mcp.json is not
+// counted: it is planned for any project, whichever host is used.
+function uncoveredHostWrites(changes, paths, plugins) {
+  const covered = new Set(plugins.filter((plugin) => plugin.counted).map((plugin) => plugin.name));
+  const groups = updateHostGroups(paths).filter((group) => group.hooks && !covered.has(group.host));
+  return (changes || []).some((change) => change.changed && change.path !== paths.mcpJson && groups.some((group) => group.files.includes(change.path)));
+}
+
+// Doctor, no key, a counted Marrow plugin: the plugin reads the key from ~/.marrow/env and already
+// supplies the hooks, so the fix is the key path, not --repair or activate.
+function pluginKeyFix(plugins) {
+  const claude = plugins.some((plugin) => plugin.host === 'claude-code');
+  const codex = plugins.some((plugin) => plugin.host === 'codex');
+  const reload = claude && codex ? 'run /reload-plugins in Claude Code and restart Codex' : claude ? 'run /reload-plugins in Claude Code' : 'restart Codex';
+  return `Put MARROW_API_KEY in ~/.marrow/env, run chmod 600 ~/.marrow/env, then ${reload}. The ${plugins.length > 1 ? 'plugins already supply' : 'plugin already supplies'} the hooks; do not run --repair or activate.`;
+}
+
 // The word `update` refreshes what Marrow already configured: no host gets its first Marrow file,
 // and an AGENTS.md without Marrow's block gets none (an explicit --md or --both still may). What
 // it leaves alone is reported; `repair` (and install/activate) still write it, as before.
@@ -4541,6 +4559,17 @@ function buildFirstValueSignal(status, runtime, performance, firstValue = {}, to
   };
 }
 
+// The change labels a counted Marrow plugin supplies for its host: its hooks, and for Claude Code
+// the project .mcp.json server entry the plugin also provides.
+const PLUGIN_SUPPLIED = Object.freeze({
+  'claude-code': { host: 'Claude Code', labels: ['Claude Code MCP passive hooks', 'Project MCP server config'] },
+  codex: { host: 'Codex', labels: ['Codex native hooks'] },
+});
+
+function pluginSuppliedHosts(report) {
+  return (report.doctor?.agent_plugins || []).filter((plugin) => plugin.counted && Object.prototype.hasOwnProperty.call(PLUGIN_SUPPLIED, plugin.host)).map((plugin) => PLUGIN_SUPPLIED[plugin.host]);
+}
+
 function printReport(report, sink) {
   const out = typeof sink === 'function' ? sink : (text) => process.stdout.write(text);
   out(`Marrow passive installer\n`);
@@ -4584,8 +4613,12 @@ function printReport(report, sink) {
     }
   }
 
+  // Doctor only: a host whose counted Marrow plugin supplies its hooks and MCP server has nothing to write.
+  const pluginSupplied = report.writeMode === 'doctor' ? pluginSuppliedHosts(report) : [];
+  const pluginLabels = new Set(pluginSupplied.flatMap((entry) => entry.labels));
   out('\nPlanned changes:\n');
   for (const change of report.changes) {
+    if (!change.applied && change.changed && !change.automatic_repair_suppressed && !change.hook_conflict && pluginLabels.has(change.label)) continue;
     const marker = change.automatic_repair_suppressed
       ? 'preserved unverified-ahead surface; repair suppressed'
       : change.hook_conflict ? 'preserved unmanaged owner file; review required'
@@ -4601,6 +4634,9 @@ function printReport(report, sink) {
     for (const divergence of change.identity_divergence || []) {
       out(`  identity reset: ${divergence.field} ${divergence.replaced} -> ${divergence.applied}. If the previous value was intended, add it to ${divergence.field === 'MARROW_BASE_URL' ? 'MARROW_ALLOWED_BASE_URLS' : 'MARROW_ALLOWED_AGENT_IDS'} and rerun.\n`);
     }
+  }
+  for (const entry of pluginSupplied) {
+    if (report.changes.some((change) => entry.labels.includes(change.label))) out(`- ${entry.host} hooks: supplied by the Marrow plugin (nothing to write)\n`);
   }
   const missing = groupMissingHosts(report.update_skipped);
   for (const [host, entries] of missing.hosts) {
@@ -4784,11 +4820,15 @@ function printReport(report, sink) {
         ? 'server confirmed, restart required'
         : 'no';
     out('\nDoctor:\n');
-    out(`- Marrow active: ${activeLabel}\n`);
+    // A counted Marrow plugin with no key yet runs the seatbelt alone.
+    const seatbeltOnly = activeLabel === 'no' && pluginSupplied.length > 0
+      && report.doctor.missingEnv.includes('MARROW_API_KEY') && report.doctor.seatbelt?.mode === 'seatbelt';
+    out(`- Marrow active: ${seatbeltOnly ? 'seatbelt only (no key yet)' : activeLabel}\n`);
     out(`${seatbeltLine(report.doctor.seatbelt)}\n`);
     out(`- missing env: ${report.doctor.missingEnv.length ? report.doctor.missingEnv.join(', ') : 'none'}\n`);
     if (report.doctor.envHints.length) out(`- possible env files: ${report.doctor.envHints.join(', ')}\n`);
-    out(`- missing hooks/config: ${report.doctor.missingHooks.length ? report.doctor.missingHooks.join('; ') : 'none'}\n`);
+    const missingHooks = report.doctor.missingHooks.filter((label) => !pluginLabels.has(label));
+    out(`- missing hooks/config: ${missingHooks.length ? missingHooks.join('; ') : 'none'}\n`);
     for (const host of groupMissingHosts(report.doctor.hooks_missing_hosts).hosts.keys()) out(`- ${missingHooksLine(host)}\n`);
     const plugins = report.doctor.agent_plugins || [];
     if (!plugins.length) out('- agent plugins: none\n');
@@ -5112,6 +5152,7 @@ async function install(options) {
   const pluginHookLabels = new Set(agentPlugins.filter((plugin) => plugin.counted).map((plugin) => plugin.hook_label));
   // Doctor only: the keyless seatbelt's status from the pinned MCP (null = could not check).
   const seatbeltStatus = options.doctor ? await readSeatbeltStatus(options) : null;
+  const countedPlugins = agentPlugins.filter((plugin) => plugin.counted);
   // A host whose Marrow plugin supplies the hooks is not missing them.
   const hooksMissingHosts = (plan.absent_hosts || []).filter((entry) => !(plan.absent_hosts || []).some((other) => other.host === entry.host && pluginHookLabels.has(other.label)));
   // Doctor only: a Codex hooks file that still carries the look-ahead matcher Codex rejects.
@@ -5308,7 +5349,9 @@ async function install(options) {
       recommendedFix: registryVerificationAction
         || (updateAwaitingRestart ? INSTALLER_RESTART_INSTRUCTION : null)
         || mcpProcesses.exact_fix || mcpConfigurations.exact_fix || (!options.apiKey
-        ? envHints.length
+        ? countedPlugins.length && !uncoveredHostWrites(changes, detection.paths, countedPlugins)
+          ? `${envHints.length ? `MARROW_API_KEY was found in a likely env file at ${envHints[0]}. ` : ''}${pluginKeyFix(countedPlugins)}`
+        : envHints.length
           ? `MARROW_API_KEY was found in a likely env file at ${envHints[0]}. Load that key from trusted secret storage, export only MARROW_API_KEY, then run npx @getmarrow/install --repair.`
           : 'Set MARROW_API_KEY, then run npx @getmarrow/install --repair.'
         : controller.exact_fix || selfTest.recommended_fix || null),
