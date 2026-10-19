@@ -167,6 +167,12 @@ else if (mode === 'hang-with-child') {
   child.unref();
   setInterval(() => {}, 1000);
 }
+else if (mode === 'exit-leave-child') {
+  // The leader prints a valid line and exits 0; a child in its process group keeps stdout open, so 'close' never fires.
+  spawn(process.execPath, ['-e', 'require("node:fs").appendFileSync(process.env.STUB_PID_FILE, process.pid + "\\\\n"); setInterval(() => {}, 1000)'], { stdio: ['ignore', 'inherit', 'ignore'] }).unref();
+  process.stdout.write(payload + '\\n');
+  process.exit(0);
+}
 else if (mode === 'wait-for-stdin') { process.stdin.resume(); process.stdin.on('end', () => { process.stdout.write(payload + '\\n'); process.exit(0); }); setTimeout(() => process.exit(9), 5000); }
 else if (mode === 'env') {
   process.stdout.write(JSON.stringify({ mode: 'seatbelt', reasons: [] }) + '\\n');
@@ -249,6 +255,15 @@ test('stub marrow-mcp: untrusted output is "could not check" (null), within the 
     assert.equal(family.status, null);
     assert.ok(pids(family.pidFile).length >= 1);
     assert.deepEqual(await waitGone(pids(family.pidFile)), [], 'hang-with-child: no process left');
+    // A leader that prints a valid line and exits 0 while a child keeps stdout open is not a valid answer,
+    // and the child dies with the group even though the leader is already gone.
+    const earlier = pids(path.join(stub.dir, 'pids')).length;
+    const left = await viaStub(stub, ['exit-leave-child', valid], { limits: { timeoutMs: 700 } });
+    const leftPids = pids(left.pidFile).slice(earlier);
+    assert.equal(left.status, null, 'exit-leave-child: could not check');
+    assert.ok(left.ms >= 650 && left.ms < 2500, `exit-leave-child took ${left.ms} ms`);
+    assert.equal(leftPids.length, 2, 'exit-leave-child: the leader and its child both ran');
+    assert.deepEqual(await waitGone(leftPids), [], 'exit-leave-child: no process left');
     // A command that does not exist.
     assert.equal(await runSeatbeltStatus({ command: path.join(stub.dir, 'no-such-command'), args: [], env: process.env }, { timeoutMs: 500 }), null);
   } finally {

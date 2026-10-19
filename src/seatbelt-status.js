@@ -72,8 +72,10 @@ function parseSeatbeltStatus(output) {
 
 // stdout of the command as a Buffer, or null on a spawn error, a timeout, more than maxBytes of
 // output, a non-zero exit or a signal. stdin is closed and stderr is dropped. The command runs in
-// its own process group, killed whole on a timeout or an overflow while its leader is still running
-// (so no signal ever goes to a group this call did not create, or to a reused pid).
+// its own process group (POSIX), killed whole on a timeout or an overflow until the call settles,
+// also when the leader has already exited but a member still holds stdout. The only group signalled
+// is the one this call created at spawn (-child.pid); a group id stays reserved while any member
+// lives, and ESRCH (no member left) is ignored.
 function collectOutput({ command, args, cwd, env, timeoutMs = SEATBELT_STATUS_TIMEOUT_MS, maxBytes = SEATBELT_STATUS_MAX_BYTES }) {
   return new Promise((resolve) => {
     const chunks = [];
@@ -82,12 +84,21 @@ function collectOutput({ command, args, cwd, env, timeoutMs = SEATBELT_STATUS_TI
     let timer = null;
     let child = null;
     const stop = () => {
-      if (!child || child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
+      if (!child || child.pid === undefined) return;
+      const leaderRunning = child.exitCode === null && child.signalCode === null;
+      if (process.platform === 'win32') {
+        if (leaderRunning) {
+          try { child.kill('SIGKILL'); } catch { /* already gone */ }
+        }
+        return;
+      }
       try {
-        if (process.platform === 'win32') child.kill('SIGKILL');
-        else process.kill(-child.pid, 'SIGKILL');
-      } catch {
-        try { child.kill('SIGKILL'); } catch { /* already gone */ }
+        process.kill(-child.pid, 'SIGKILL');
+      } catch (error) {
+        // ESRCH: no member of the group is left. Any other failure falls back to the leader, only while it is unreaped.
+        if (error && error.code !== 'ESRCH' && leaderRunning) {
+          try { child.kill('SIGKILL'); } catch { /* already gone */ }
+        }
       }
     };
     const finish = (value) => {
