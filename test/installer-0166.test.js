@@ -832,7 +832,9 @@ function withLoopGuardStub(env) {
 function runBin(args, { cwd, env, input } = {}) {
   return new Promise((resolve) => {
     // These runs stay offline: the local MCP runtime (an npm install) is tested on its own.
-    const child = spawn(process.execPath, [BIN, ...args], { cwd, env: { MARROW_LOCAL_RUNTIME: '0', ...withLoopGuardStub(env) }, stdio: ['pipe', 'pipe', 'pipe'] });
+    // Doctor's status child is a spawn of the real npm by absolute path, which the PATH stand-in cannot reach: the stub preload answers it.
+    const nodeOptions = [env && env.NODE_OPTIONS, `--require=${path.join(__dirname, 'support', 'status-child-stub.js')}`].filter(Boolean).join(' ');
+    const child = spawn(process.execPath, [BIN, ...args], { cwd, env: { MARROW_LOCAL_RUNTIME: '0', ...withLoopGuardStub(env), NODE_OPTIONS: nodeOptions }, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (chunk) => { stdout += chunk; });

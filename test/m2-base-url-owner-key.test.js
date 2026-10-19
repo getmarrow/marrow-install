@@ -23,6 +23,8 @@ const VECTORS = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'm2-
 const DEFAULT_URL = VECTORS.default;
 const BIN = path.join(__dirname, '..', 'bin', 'marrow-install.js');
 const RECORDER = path.join(__dirname, 'support', 'm2-network-recorder.js');
+// Doctor's status child is the real npm started by absolute path; this preload answers that one spawn (see the file).
+const STATUS_STUB = path.join(__dirname, 'support', 'status-child-stub.js');
 
 const dummyKey = (label) => `synthetic-${label}-${crypto.randomBytes(12).toString('hex')}`;
 
@@ -298,7 +300,7 @@ function childEnv(fx, key, extra, { record = true } = {}) {
       TMPDIR: process.env.TMPDIR,
       CAPTURE_FILE: capture,
       M2_EXPECT_KEY: key,
-      ...(record ? { NODE_OPTIONS: `--require=${RECORDER}` } : {}),
+      ...(record ? { NODE_OPTIONS: `--require=${RECORDER} --require=${STATUS_STUB}` } : { NODE_OPTIONS: `--require=${STATUS_STUB}` }),
       ...extra,
     },
   };
@@ -707,7 +709,7 @@ for (const [label, env, extraArgs] of [
 function guardedChildEnv(fx, key, extra = {}, { record = true, stubNpm = false } = {}) {
   const capture = path.join(fx.root, `capture-${crypto.randomBytes(4).toString('hex')}.jsonl`);
   fs.writeFileSync(capture, '');
-  const nodeOptions = [process.env.NODE_OPTIONS, record ? `--require=${RECORDER}` : ''].filter(Boolean).join(' ');
+  const nodeOptions = [process.env.NODE_OPTIONS, record ? `--require=${RECORDER}` : '', `--require=${STATUS_STUB}`].filter(Boolean).join(' ');
   return {
     capture,
     env: {

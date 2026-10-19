@@ -100,3 +100,6 @@ process.env.USERPROFILE = isolatedHome;
 process.once('exit', () => fs.rmSync(isolatedHome, { recursive: true, force: true }));
 
 module.exports = { deadRegistryHome, isolatedHome, testTempRoot };
+
+// Doctor's seatbelt-status child never starts the real npm in a test (see status-child-stub.js).
+require('./status-child-stub');

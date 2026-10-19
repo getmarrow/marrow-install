@@ -23,7 +23,7 @@ const { ensureOwnerApiKey, readOwnerKeyDetail } = require('./owner-env');
 const { assertSafeBaseUrl, emitNoticeOnce, ownerKeyBaseUrl } = require('./base-url-policy');
 const { buildOwnToolMatchers } = require('./marrow-own-tools');
 const { detectAgentPlugins, describeAgentPlugin } = require('./agent-plugins');
-const { runSeatbeltStatus, seatbeltReport, seatbeltLine } = require('./seatbelt-status');
+const { buildStatusEnv, runSeatbeltStatus, seatbeltLine, seatbeltReport, statusInvocation } = require('./seatbelt-status');
 const {
   delocalizeHookCommand,
   delocalizeHookScriptText,
@@ -4045,20 +4045,25 @@ function runLoopGuardSelfTest(options = {}) {
   }
 }
 
-// Doctor only: the pinned MCP's read-only `seatbelt-status` command, started like the loop-guard
-// self-test above (npx, the exact pinned package, a private empty folder, an injectable command for
-// tests) but with this process's own environment: the status describes this machine's real HOME,
-// ~/.marrow and key, which the loop-guard's isolated HOME and blank key would hide. The key reaches
-// the child only as an environment variable, never in argv, and nothing the child prints is echoed.
-// Returns { mode, reasons } or null (could not check).
-async function readSeatbeltStatus(options = {}) {
+// Doctor only: the pinned MCP's read-only `seatbelt-status` command. It is started as
+// `process.execPath <npm's own npx-cli.js next to that node> -y --package=@getmarrow/mcp@<pin> marrow-mcp
+// seatbelt-status`: no shell and no lookup of npx or node on PATH (the loop-guard self-test above still
+// looks npx up on PATH). It runs in a fresh private empty folder, never the project, with an environment
+// built from an allow-list (src/seatbelt-status.js): the key reaches it only as a fixed presence marker,
+// never its value. If npm's npx cannot be found and checked, nothing is started. The status describes
+// this machine's real HOME and ~/.marrow, which the loop-guard's isolated HOME would hide. Nothing the
+// child prints is echoed. Returns { mode, reasons } or null (could not check).
+async function readSeatbeltStatus(options = {}, projectRoot = null) {
   if (options.seatbeltStatus !== true) return null;
   const target = executableMcpTarget(options);
-  const command = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+  const projectDirs = [options.cwd, projectRoot].filter((dir) => typeof dir === 'string' && dir !== '');
+  // options.seatbeltStatusCommand is set only by API callers (tests); no flag or variable sets it.
   const invocation = options.seatbeltStatusCommand
-    || { command, args: ['-y', `--package=@getmarrow/mcp@${target.version}`, 'marrow-mcp', 'seatbelt-status'] };
+    ? { ...options.seatbeltStatusCommand, env: buildStatusEnv(process.env) }
+    : statusInvocation({ version: target.version, projectDirs });
+  if (!invocation) return null;
   const limits = Number.isFinite(options.seatbeltStatusTimeoutMs) ? { timeoutMs: options.seatbeltStatusTimeoutMs } : {};
-  return runSeatbeltStatus({ ...invocation, env: { ...process.env } }, limits);
+  return runSeatbeltStatus(invocation, limits);
 }
 
 function isCanonicalTimestamp(value) {
@@ -5151,7 +5156,7 @@ async function install(options) {
   const agentPlugins = options.doctor ? detectAgentPlugins({ home: detection.home, env: process.env, project: detection.root }) : [];
   const pluginHookLabels = new Set(agentPlugins.filter((plugin) => plugin.counted).map((plugin) => plugin.hook_label));
   // Doctor only: the keyless seatbelt's status from the pinned MCP (null = could not check).
-  const seatbeltStatus = options.doctor ? await readSeatbeltStatus(options) : null;
+  const seatbeltStatus = options.doctor ? await readSeatbeltStatus(options, detection.root) : null;
   const countedPlugins = agentPlugins.filter((plugin) => plugin.counted);
   // A host whose Marrow plugin supplies the hooks is not missing them.
   const hooksMissingHosts = (plan.absent_hosts || []).filter((entry) => !(plan.absent_hosts || []).some((other) => other.host === entry.host && pluginHookLabels.has(other.label)));

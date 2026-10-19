@@ -130,15 +130,188 @@ function collectOutput({ command, args, cwd, env, timeoutMs = SEATBELT_STATUS_TI
   });
 }
 
-// Runs the command in a private empty folder (never the project, whose npm settings or local bins
-// npx would read) and returns { mode, reasons } or null. `invocation` is { command, args, env }.
-async function runSeatbeltStatus(invocation, limits = {}) {
-  const privateCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-install-seatbelt-'));
+// ---- the status child: which program it is, what it receives ----
+//
+// Doctor starts the child as `process.execPath <npm's own npx-cli.js> -y --package=@getmarrow/mcp@<pin>
+// marrow-mcp seatbelt-status`: no shell, no lookup of npx or node on PATH, so nothing the project or
+// the inherited PATH holds can stand in for npm. The child's environment is built from scratch from
+// an allow-list; the key never reaches it.
+
+// Not a secret. The one value the child gets for MARROW_API_KEY when this process has a key: the MCP's
+// status only asks whether a key is set, so the real value never leaves this process.
+const SEATBELT_PRESENCE_KEY = 'marrow-presence-only';
+
+// Non-secret names the MCP's status reads (marrow-mcp src/seatbelt-mode.ts MODE_ENV_NAMES, without its
+// key lookup names MARROW_API_KEY and MARROW_KEY, MARROW_BASE_URL and MARROW_SESSION_ID: none of
+// those decides whether an owner-file key counts), copied only when set.
+const STATUS_ENV_MODE_NAMES = Object.freeze([
+  'HOME', 'USERPROFILE', 'MARROW_SEATBELT_STRICT', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'GEMINI_CLI_SYSTEM_SETTINGS_PATH', 'CLINE_DIR',
+]);
+// What npm needs to run: locale and temporary folders; on Windows also its system folders and extensions.
+const STATUS_ENV_BASIC_NAMES = Object.freeze(['LANG', 'LC_ALL', 'TMPDIR', 'TMP', 'TEMP']);
+const STATUS_ENV_WIN32_NAMES = Object.freeze(['SystemRoot', 'ComSpec', 'PATHEXT', 'APPDATA', 'LOCALAPPDATA']);
+// A user behind a proxy needs these for npm to reach the registry (npm reads them from the environment).
+const STATUS_ENV_PROXY_NAMES = Object.freeze(['HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY', 'https_proxy', 'http_proxy', 'no_proxy']);
+
+const pathModule = (platform) => (platform === 'win32' ? path.win32 : path.posix);
+
+function envValue(env, name, platform) {
+  if (!env || typeof env !== 'object') return undefined;
+  if (platform === 'win32') {
+    const found = Object.keys(env).find((key) => key.toLowerCase() === name.toLowerCase());
+    return found !== undefined && typeof env[found] === 'string' ? env[found] : undefined;
+  }
+  return Object.prototype.hasOwnProperty.call(env, name) && typeof env[name] === 'string' ? env[name] : undefined;
+}
+
+// Whether a path has a node_modules folder directly followed by .bin (either separator, any case).
+function inNodeModulesBin(value, platform) {
+  const parts = pathModule(platform).normalize(String(value)).split(/[\\/]+/).map((part) => part.toLowerCase());
+  return parts.some((part, index) => part === 'node_modules' && parts[index + 1] === '.bin');
+}
+
+function realpathOr(value) {
   try {
-    const output = await collectOutput({ ...invocation, cwd: privateCwd, ...limits });
+    return fs.realpathSync(value);
+  } catch {
+    return value;
+  }
+}
+
+// PATH for the child: the folder of the node running doctor first, then the parent's absolute entries
+// without any node_modules/.bin folder (also behind a link). "." , "" and relative entries are dropped.
+function statusPath(parentPath, execDir, platform) {
+  const P = pathModule(platform);
+  const entries = [execDir];
+  const absolute = platform === 'win32' ? (entry) => /^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/])/.test(entry) : (entry) => P.isAbsolute(entry);
+  for (const entry of typeof parentPath === 'string' ? parentPath.split(P.delimiter) : []) {
+    if (entry === '' || !absolute(entry) || entries.includes(entry)) continue;
+    if (inNodeModulesBin(entry, platform) || inNodeModulesBin(realpathOr(entry), platform)) continue;
+    entries.push(entry);
+  }
+  return entries.join(P.delimiter);
+}
+
+// The child's whole environment, from `parentEnv` (doctor's own): the allow-listed names above, the key
+// presence bit, and the rebuilt PATH. Every other name (NODE_OPTIONS, NODE_PATH, npm_config_*, the key,
+// every other MARROW_*) is left out by construction.
+function buildStatusEnv(parentEnv, { execPath = process.execPath, platform = process.platform } = {}) {
+  const env = {};
+  const seen = new Set();
+  const names = [...STATUS_ENV_MODE_NAMES, ...STATUS_ENV_BASIC_NAMES, ...(platform === 'win32' ? STATUS_ENV_WIN32_NAMES : []), ...STATUS_ENV_PROXY_NAMES];
+  for (const name of names) {
+    const key = platform === 'win32' ? name.toLowerCase() : name;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const value = envValue(parentEnv, name, platform);
+    if (value !== undefined) env[name] = value;
+  }
+  // The MCP's own test for "a key is set" (src/seatbelt-mode.ts): either name, any non-empty value.
+  if (envValue(parentEnv, 'MARROW_API_KEY', platform) || envValue(parentEnv, 'MARROW_KEY', platform)) env.MARROW_API_KEY = SEATBELT_PRESENCE_KEY;
+  env.PATH = statusPath(envValue(parentEnv, 'PATH', platform), pathModule(platform).dirname(execPath), platform);
+  return env;
+}
+
+// Whether `file` is `folder` or below it.
+function isInside(file, folder, platform) {
+  const relative = pathModule(platform).relative(folder, file);
+  return relative === '' || (relative !== '..' && !relative.startsWith(`..${pathModule(platform).sep}`) && !pathModule(platform).isAbsolute(relative));
+}
+
+// The real path of npm's own npx-cli.js next to the node running doctor, or null. The candidate is
+// <node folder>/npx (a link to <prefix>/lib/node_modules/npm/bin/npx-cli.js on nvm, the official
+// tarball and Homebrew; /usr/share/nodejs/npm/bin/npx-cli.js on Debian); on Windows also
+// <node folder>/node_modules/npm/bin/npx-cli.js. Refused (null): a candidate or real path inside the
+// current folder, inside the project folder(s) given, or inside any node_modules/.bin folder; a real
+// path that is not a regular file named npx-cli.js in a folder named bin inside a folder named npm;
+// any error while resolving.
+function resolveTrustedNpx({ execPath = process.execPath, cwd, projectDirs = [], platform = process.platform } = {}) {
+  try {
+    const P = pathModule(platform);
+    if (typeof execPath !== 'string' || !P.isAbsolute(execPath)) return null;
+    const folders = [];
+    for (const dir of [cwd === undefined ? process.cwd() : cwd, ...projectDirs]) {
+      if (typeof dir !== 'string' || dir === '') return null;
+      folders.push(P.resolve(dir), realpathOr(P.resolve(dir)));
+    }
+    const nodeDir = P.dirname(execPath);
+    const candidates = [P.join(nodeDir, 'npx')];
+    if (platform === 'win32') candidates.push(P.join(nodeDir, 'node_modules', 'npm', 'bin', 'npx-cli.js'));
+    const same = (value) => (platform === 'win32' ? String(value).toLowerCase() : String(value));
+    const refused = (file) => inNodeModulesBin(file, platform) || folders.some((folder) => isInside(file, folder, platform));
+    if (refused(execPath) || refused(realpathOr(execPath))) return null;
+    for (const candidate of candidates) {
+      let real;
+      try {
+        real = fs.realpathSync(candidate);
+      } catch {
+        continue;
+      }
+      if (refused(candidate) || refused(real)) continue;
+      const bin = P.dirname(real);
+      if (same(P.basename(real)) !== 'npx-cli.js' || same(P.basename(bin)) !== 'bin' || same(P.basename(P.dirname(bin))) !== 'npm') continue;
+      if (!fs.statSync(real).isFile()) continue;
+      return real;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// { command, args, env } for the real status child, or null (could not check: nothing is started).
+function statusInvocation({ version, parentEnv = process.env, execPath = process.execPath, cwd, projectDirs = [], platform = process.platform } = {}) {
+  if (typeof version !== 'string' || !/^\d+\.\d+\.\d+$/.test(version)) return null;
+  const script = resolveTrustedNpx({ execPath, cwd, projectDirs, platform });
+  if (!script) return null;
+  return {
+    command: execPath,
+    args: [script, '-y', `--package=@getmarrow/mcp@${version}`, 'marrow-mcp', 'seatbelt-status'],
+    env: buildStatusEnv(parentEnv, { execPath, platform }),
+  };
+}
+
+// Whether npm, started with `folder` as its working folder, could find a project above it: npm takes
+// the nearest folder up the tree that holds a package.json or a node_modules as its project (its npm
+// config file and its node_modules), and npm exec puts every ancestor's node_modules/.bin on PATH.
+// Any such entry above the private folder (a TMPDIR below a project, a planted /tmp/node_modules) is
+// refused, and so is anything that cannot be read.
+function noProjectAbove(folder) {
+  for (let dir = path.dirname(folder); ; ) {
+    for (const name of ['node_modules', 'package.json']) {
+      try {
+        fs.lstatSync(path.join(dir, name));
+        return false;
+      } catch (error) {
+        if (!error || (error.code !== 'ENOENT' && error.code !== 'ENOTDIR')) return false;
+      }
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) return true;
+    dir = parent;
+  }
+}
+
+// Runs the command in a fresh empty folder made by mkdtemp under os.tmpdir() (mode 700, removed
+// after in every path), never the project or the doctor's own folder, and returns { mode, reasons }
+// or null. `invocation` is { command, args, env }. If a folder above the private one holds a
+// package.json or a node_modules, nothing is started (null).
+async function runSeatbeltStatus(invocation, limits = {}) {
+  let privateCwd = null;
+  try {
+    privateCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-install-seatbelt-'));
+    fs.chmodSync(privateCwd, 0o700);
+    if (!noProjectAbove(fs.realpathSync(privateCwd))) return null;
+    const output = await collectOutput({ ...invocation, ...limits, cwd: privateCwd });
     return output ? parseSeatbeltStatus(output) : null;
+  } catch {
+    return null;
   } finally {
-    fs.rmSync(privateCwd, { recursive: true, force: true });
+    if (privateCwd) {
+      try {
+        fs.rmSync(privateCwd, { recursive: true, force: true });
+      } catch { /* the folder stays empty and private */ }
+    }
   }
 }
 
@@ -175,6 +348,14 @@ module.exports = {
   REASON_ORDER,
   REASON_TEXT,
   parseSeatbeltStatus,
+  SEATBELT_PRESENCE_KEY,
+  STATUS_ENV_MODE_NAMES,
+  STATUS_ENV_BASIC_NAMES,
+  STATUS_ENV_WIN32_NAMES,
+  STATUS_ENV_PROXY_NAMES,
+  buildStatusEnv,
+  resolveTrustedNpx,
+  statusInvocation,
   collectOutput,
   runSeatbeltStatus,
   pickSeatbeltReason,
