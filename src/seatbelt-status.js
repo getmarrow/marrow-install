@@ -1,7 +1,9 @@
 'use strict';
 
 // Doctor's read-only view of the keyless seatbelt: it runs the pinned MCP's `seatbelt-status`
-// command and prints one plain line. Nothing here writes anything or changes any doctor verdict.
+// command and prints one plain line. It changes no doctor verdict and writes no user file; its only
+// writes are the private working base under the passwd home and one empty private folder in it,
+// removed after each run (see "Where it runs" below).
 //
 // The command prints exactly one line of JSON, {"mode":...,"reasons":[...]}, and exits 0. An older
 // MCP has no such command (an unknown subcommand may start the MCP server on stdio and wait), so
@@ -141,12 +143,26 @@ function collectOutput({ command, args, cwd, env, timeoutMs = SEATBELT_STATUS_TI
   });
 }
 
-// ---- the status child: which program it is, what it receives ----
+// ---- the status child: which program it is, what it receives, where it runs ----
 //
 // Doctor starts the child as `process.execPath <npm's own npx-cli.js> -y --package=@getmarrow/mcp@<pin>
-// marrow-mcp seatbelt-status`: no shell, no lookup of npx or node on PATH, so nothing the project or
-// the inherited PATH holds can stand in for npm. The child's environment is built from scratch from
-// an allow-list; the key never reaches it.
+// marrow-mcp seatbelt-status`: no shell, no lookup of npx or node on PATH, never a fallback to bare npx. The
+// script is accepted only at the one place npm puts it beside this node, with no link in its path and no
+// folder from it up to / that another user could write (resolveTrustedNpx); otherwise nothing is started.
+// The child's environment is built from scratch from an allow-list; the key never reaches it.
+//
+// Where it runs (POSIX): in a fresh empty folder (mode 700, removed after) made inside
+// <passwd home>/.cache/marrow/doctor-tmp, never in a shared temp folder. That base is created one level at a
+// time (mode 700, no link followed) and must be the user's own 700 folder, and its real path and every folder
+// above it up to / must belong to root or the user and not be writable by group or others (chainClosed);
+// otherwise nothing is started. Only then is the private folder made, and then noProjectAbove checks that no
+// folder above it holds a package.json or a node_modules, which npm would take as its project (its npm
+// config file, its node_modules, and every ancestor's node_modules/.bin put on the child's command PATH).
+// Because no other user can write anywhere in that chain, nobody can plant such an entry after the check:
+// the check is not a race. The PATH we pass (the real node's folder first) does NOT beat those ancestor
+// node_modules/.bin folders (npm puts them in front of the PATH we pass); what keeps them out is the
+// noProjectAbove check plus the closed chain. Windows: the per-user temp folder (os.tmpdir()) and
+// noProjectAbove only; file owners and modes mean nothing there.
 
 // Not a secret. The one value the child gets for MARROW_API_KEY when this process has a key: the MCP's
 // status only asks whether a key is set, so the real value never leaves this process.
@@ -189,8 +205,10 @@ function realpathOr(value) {
   }
 }
 
-// PATH for the child: the folder of the node running doctor first, then the parent's absolute entries
-// without any node_modules/.bin folder (also behind a link). "." , "" and relative entries are dropped.
+// PATH for the child: the folder holding the real node binary first, so the MCP bin's `#!/usr/bin/env node`
+// finds the same node when nothing else is in front, then the parent's absolute entries without any
+// node_modules/.bin folder (also behind a link). "." , "" and relative entries are dropped. This order does not
+// stop npm from putting its own ancestor node_modules/.bin folders in front of this PATH: see the header above.
 function statusPath(parentPath, execDir, platform) {
   const P = pathModule(platform);
   const entries = [execDir];
@@ -219,7 +237,8 @@ function buildStatusEnv(parentEnv, { execPath = process.execPath, platform = pro
   }
   // The MCP's own test for "a key is set" (src/seatbelt-mode.ts): either name, any non-empty value.
   if (envValue(parentEnv, 'MARROW_API_KEY', platform) || envValue(parentEnv, 'MARROW_KEY', platform)) env.MARROW_API_KEY = SEATBELT_PRESENCE_KEY;
-  env.PATH = statusPath(envValue(parentEnv, 'PATH', platform), pathModule(platform).dirname(execPath), platform);
+  const execDir = platform === 'win32' ? pathModule(platform).dirname(execPath) : path.posix.dirname(realpathOr(execPath));
+  env.PATH = statusPath(envValue(parentEnv, 'PATH', platform), execDir, platform);
   return env;
 }
 
@@ -302,11 +321,12 @@ function statusInvocation({ version, parentEnv = process.env, execPath = process
   };
 }
 
-// Whether npm, started with `folder` as its working folder, could find a project above it: npm takes
-// the nearest folder up the tree that holds a package.json or a node_modules as its project (its npm
-// config file and its node_modules), and npm exec puts every ancestor's node_modules/.bin on PATH.
-// Any such entry above the private folder (a TMPDIR below a project, a planted /tmp/node_modules) is
-// refused, and so is anything that cannot be read.
+// Whether npm, started with `folder` as its working folder, could find a project above it: npm takes the
+// nearest folder up the tree that holds a package.json or a node_modules as its project (its npm config
+// file and its node_modules), and npm exec puts every ancestor's node_modules/.bin on PATH. Any such entry
+// above the private folder (a package.json or node_modules in the base, in the passwd home or anywhere up to /)
+// is refused, and so is anything that cannot be read. On POSIX this runs after the closed-chain walk, so no
+// other user can add an entry later.
 function noProjectAbove(folder) {
   for (let dir = path.dirname(folder); ; ) {
     for (const name of ['node_modules', 'package.json']) {
@@ -323,14 +343,84 @@ function noProjectAbove(folder) {
   }
 }
 
-// Runs the command in a fresh empty folder made by mkdtemp under os.tmpdir() (mode 700, removed
-// after in every path), never the project or the doctor's own folder, and returns { mode, reasons }
-// or null. `invocation` is { command, args, env }. If a folder above the private one holds a
-// package.json or a node_modules, nothing is started (null).
+// POSIX: the login home folder from the passwd database (os.userInfo().homedir), never $HOME: no environment
+// name, flag or file moves it. null when the lookup fails or the home is empty or relative.
+function passwdHome() {
+  try {
+    const home = os.userInfo().homedir;
+    return typeof home === 'string' && home !== '' && path.isAbsolute(home) ? path.resolve(home) : null;
+  } catch {
+    return null;
+  }
+}
+
+const BASE_PARTS = Object.freeze(['.cache', 'marrow', 'doctor-tmp']);
+
+// POSIX: <passwd home>/.cache/marrow/doctor-tmp as a real path, or null. The passwd home's own chain is checked
+// before anything is created. Missing parts are made one level at a time with mode 700; an existing part must be
+// a real folder (lstat: a link is refused). The base itself must be a folder owned by this user with mode 700
+// (an existing one with another mode is chmod'ed through an open handle, never through a path, then re-read).
+// Finally the base's real path and every folder above it, up to /, must pass chainClosed. Any failure or error: null.
+function privateBase() {
+  try {
+    const sys = systemIo();
+    const home = passwdHome();
+    if (home === null) return null;
+    let dir = fs.realpathSync(home);
+    if (!chainClosed(dir, sys)) return null;
+    for (const part of BASE_PARTS) {
+      dir = path.join(dir, part);
+      let stat = null;
+      try {
+        stat = fs.lstatSync(dir);
+      } catch (error) {
+        if (!error || error.code !== 'ENOENT') return null;
+      }
+      if (!stat) {
+        try {
+          fs.mkdirSync(dir, { mode: 0o700 });
+        } catch (error) {
+          if (!error || error.code !== 'EEXIST') return null;
+        }
+        stat = fs.lstatSync(dir);
+      }
+      if (!stat.isDirectory()) return null;
+    }
+    const fd = fs.openSync(dir, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+    try {
+      const stat = fs.fstatSync(fd);
+      if (!stat.isDirectory() || stat.uid !== sys.getuid()) return null;
+      if ((stat.mode & 0o777) !== 0o700) {
+        fs.fchmodSync(fd, 0o700);
+        if ((fs.fstatSync(fd).mode & 0o777) !== 0o700) return null;
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+    const real = fs.realpathSync(dir);
+    return real === dir && chainClosed(real, sys) ? real : null;
+  } catch {
+    return null;
+  }
+}
+
+// The folder the private working folder is made in: on POSIX the checked base above (or null: nothing is
+// started), on Windows the per-user temp folder (nothing is checked there).
+function statusParentFolder(platform = process.platform) {
+  return platform === 'win32' ? os.tmpdir() : privateBase();
+}
+
+// Runs the command in a fresh empty folder made by mkdtemp inside statusParentFolder() (mode 700, removed
+// after in every path), never the project or the doctor's own folder, and returns { mode, reasons } or
+// null. `invocation` is { command, args, env }. Order: the base is created and checked, then the private
+// folder is made, then noProjectAbove: if a folder above the private one holds a package.json or a
+// node_modules, nothing is started (null).
 async function runSeatbeltStatus(invocation, limits = {}) {
   let privateCwd = null;
   try {
-    privateCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-install-seatbelt-'));
+    const parent = statusParentFolder();
+    if (parent === null) return null;
+    privateCwd = fs.mkdtempSync(path.join(parent, 'marrow-install-seatbelt-'));
     fs.chmodSync(privateCwd, 0o700);
     if (!noProjectAbove(fs.realpathSync(privateCwd))) return null;
     const output = await collectOutput({ ...invocation, ...limits, cwd: privateCwd });
@@ -388,6 +478,7 @@ module.exports = {
   resolveTrustedNpx,
   statusInvocation,
   collectOutput,
+  statusParentFolder,
   runSeatbeltStatus,
   pickSeatbeltReason,
   seatbeltReport,
