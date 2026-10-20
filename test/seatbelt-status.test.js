@@ -368,25 +368,36 @@ test('doctor: a status that prints terminal escapes, a fake mode or 10 KB is nev
   }
 });
 
-test('doctor starts npm\'s own npx-cli.js by absolute path with the exact pinned argv, and the key is only a presence marker', async () => {
-  const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-seatbelt-cwd-'));
+test('doctor starts npm\'s own npx-cli.js by absolute path with the exact pinned argv, and the key is only a presence marker', (t) => {
+  const prefix = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-seatbelt-prefix-')));
   const dummy = crypto.randomBytes(24).toString('hex');
   try {
+    // <prefix>/bin/node with npm's script at its pinned place (the walk to / passes below the test temp root).
+    const script = path.join(prefix, 'lib', 'node_modules', 'npm', 'bin', 'npx-cli.js');
+    fs.mkdirSync(path.join(prefix, 'bin'), { recursive: true });
+    fs.mkdirSync(path.dirname(script), { recursive: true });
+    fs.writeFileSync(script, '// npx\n');
+    fs.writeFileSync(path.join(prefix, 'bin', 'node'), '');
     const args = parseArgs(['doctor']);
     assert.equal(args.seatbeltStatus, true);
+    const execPath = path.join(prefix, 'bin', 'node');
     const invocation = statusInvocation({
-      version: PINS.MCP_ADAPTER_VERSION, parentEnv: { PATH: process.env.PATH, HOME: os.homedir(), MARROW_API_KEY: dummy }, cwd: empty, projectDirs: [empty],
+      version: PINS.MCP_ADAPTER_VERSION, parentEnv: { PATH: process.env.PATH, HOME: os.homedir(), MARROW_API_KEY: dummy }, execPath,
     });
-    assert.ok(invocation, 'the node running the tests has npm\'s npx next to it');
-    assert.equal(invocation.command, process.execPath);
-    assert.equal(path.basename(invocation.args[0]), 'npx-cli.js');
+    assert.ok(invocation, 'a node with npm\'s script at its pinned place');
+    assert.equal(invocation.command, execPath);
+    assert.equal(invocation.args[0], script);
     assert.equal(invocation.args[0], fs.realpathSync(invocation.args[0]), 'the script is a real path');
     assert.deepEqual(invocation.args.slice(1), ['-y', `--package=@getmarrow/mcp@${PINS.MCP_ADAPTER_VERSION}`, 'marrow-mcp', 'seatbelt-status']);
     assert.equal(invocation.env.MARROW_API_KEY, SEATBELT_PRESENCE_KEY);
     assert.equal(JSON.stringify(invocation).includes(dummy), false, 'the key is never in the invocation');
-    assert.equal(statusInvocation({ version: '3.9.104; rm', parentEnv: {}, cwd: empty }), null, 'only an exact x.y.z version');
-    assert.equal(statusInvocation({ version: 'latest', parentEnv: {}, cwd: empty }), null, 'never a tag');
+    assert.equal(statusInvocation({ version: '3.9.104; rm', parentEnv: {}, execPath }), null, 'only an exact x.y.z version');
+    assert.equal(statusInvocation({ version: 'latest', parentEnv: {}, execPath }), null, 'never a tag');
+    // The node running these tests may or may not have a walk to / that passes (a group-writable Homebrew prefix does not).
+    const real = statusInvocation({ version: PINS.MCP_ADAPTER_VERSION, parentEnv: {} });
+    t.diagnostic(`the node running the tests resolves npm's script: ${real ? 'yes' : 'no'}`);
+    if (real) assert.equal(real.command, process.execPath);
   } finally {
-    fs.rmSync(empty, { recursive: true, force: true });
+    fs.rmSync(prefix, { recursive: true, force: true });
   }
 });

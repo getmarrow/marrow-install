@@ -4045,22 +4045,22 @@ function runLoopGuardSelfTest(options = {}) {
   }
 }
 
-// Doctor only: the pinned MCP's read-only `seatbelt-status` command. It is started as
-// `process.execPath <npm's own npx-cli.js next to that node> -y --package=@getmarrow/mcp@<pin> marrow-mcp
-// seatbelt-status`: no shell and no lookup of npx or node on PATH (the loop-guard self-test above still
-// looks npx up on PATH). It runs in a fresh private empty folder, never the project, with an environment
-// built from an allow-list (src/seatbelt-status.js): the key reaches it only as a fixed presence marker,
-// never its value. If npm's npx cannot be found and checked, nothing is started. The status describes
-// this machine's real HOME and ~/.marrow, which the loop-guard's isolated HOME would hide. Nothing the
-// child prints is echoed. Returns { mode, reasons } or null (could not check).
-async function readSeatbeltStatus(options = {}, projectRoot = null) {
+// Doctor only: the pinned MCP's read-only `seatbelt-status` command. It is started as `process.execPath
+// <npm's own npx-cli.js> -y --package=@getmarrow/mcp@<pin> marrow-mcp seatbelt-status`: no shell and no lookup
+// of npx or node on PATH (the loop-guard self-test above still looks npx up on PATH). The script is accepted
+// only at the one place npm puts it beside the node running doctor, with no link in its path and no folder
+// from it up to / that another user could write (src/seatbelt-status.js resolveTrustedNpx); otherwise nothing is
+// started. It runs in a fresh private empty folder, never the project, with an environment built from an
+// allow-list: the key reaches it only as a fixed presence marker, never its value. The status describes this
+// machine's real HOME and ~/.marrow, which the loop-guard's isolated HOME would hide. Nothing the child prints
+// is echoed. Returns { mode, reasons } or null (could not check).
+async function readSeatbeltStatus(options = {}) {
   if (options.seatbeltStatus !== true) return null;
   const target = executableMcpTarget(options);
-  const projectDirs = [options.cwd, projectRoot].filter((dir) => typeof dir === 'string' && dir !== '');
   // options.seatbeltStatusCommand is set only by API callers (tests); no flag or variable sets it.
   const invocation = options.seatbeltStatusCommand
     ? { ...options.seatbeltStatusCommand, env: buildStatusEnv(process.env) }
-    : statusInvocation({ version: target.version, projectDirs });
+    : statusInvocation({ version: target.version });
   if (!invocation) return null;
   const limits = Number.isFinite(options.seatbeltStatusTimeoutMs) ? { timeoutMs: options.seatbeltStatusTimeoutMs } : {};
   return runSeatbeltStatus(invocation, limits);
@@ -5156,7 +5156,7 @@ async function install(options) {
   const agentPlugins = options.doctor ? detectAgentPlugins({ home: detection.home, env: process.env, project: detection.root }) : [];
   const pluginHookLabels = new Set(agentPlugins.filter((plugin) => plugin.counted).map((plugin) => plugin.hook_label));
   // Doctor only: the keyless seatbelt's status from the pinned MCP (null = could not check).
-  const seatbeltStatus = options.doctor ? await readSeatbeltStatus(options, detection.root) : null;
+  const seatbeltStatus = options.doctor ? await readSeatbeltStatus(options) : null;
   const countedPlugins = agentPlugins.filter((plugin) => plugin.counted);
   // A host whose Marrow plugin supplies the hooks is not missing them.
   const hooksMissingHosts = (plan.absent_hosts || []).filter((entry) => !(plan.absent_hosts || []).some((other) => other.host === entry.host && pluginHookLabels.has(other.label)));

@@ -6,6 +6,9 @@
 // the CLI runners that run doctor pass it through NODE_OPTIONS.
 const childProcess = require('node:child_process');
 
+// The location checks the real spawn would pass (see status-host-fakes.js).
+require('./status-host-fakes');
+
 const realSpawn = childProcess.spawn;
 childProcess.spawn = function spawn(file, args, ...rest) {
   if (Array.isArray(args) && args.includes('seatbelt-status') && args.some((arg) => /(^|[\\/])npx-cli\.js$/.test(String(arg)))) {

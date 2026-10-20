@@ -26,20 +26,39 @@ const RECORDER = path.join(__dirname, 'support', 'm2-network-recorder.js');
 const rnd = (n) => crypto.randomBytes(n).toString('hex');
 const PIN_ARGV = ['-y', `--package=@getmarrow/mcp@${PINS.MCP_ADAPTER_VERSION}`, 'marrow-mcp', 'seatbelt-status'];
 
-let installed = null;
-function fakeNode() {
-  if (installed) return installed;
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-fakenode-')));
+const HOST_FAKES = path.join(__dirname, 'support', 'status-host-fakes.js');
+
+// A node install laid out like nvm, the official tarball and Homebrew: <root>/bin/node, <root>/bin/npx -> the script.
+// The node binary is a hard link to `source` when the file system allows it (a COPY otherwise), so process.execPath of a
+// doctor started through it is this path.
+function buildInstall(root, source) {
   const bin = path.join(root, 'bin');
   const npmBin = path.join(root, 'lib', 'node_modules', 'npm', 'bin');
   fs.mkdirSync(bin, { recursive: true });
   fs.mkdirSync(npmBin, { recursive: true });
-  fs.copyFileSync(process.execPath, path.join(bin, 'node'), fs.constants.COPYFILE_FICLONE);
-  fs.chmodSync(path.join(bin, 'node'), 0o755);
+  const node = path.join(bin, 'node');
+  try {
+    fs.linkSync(source, node);
+  } catch {
+    fs.copyFileSync(source, node, fs.constants.COPYFILE_FICLONE);
+  }
+  fs.chmodSync(node, 0o755);
   fs.symlinkSync('../lib/node_modules/npm/bin/npx-cli.js', path.join(bin, 'npx'));
-  installed = { root, bin, node: path.join(bin, 'node'), link: path.join(bin, 'npx'), cli: path.join(npmBin, 'npx-cli.js'), npmBin };
+  return { root, bin, node, link: path.join(bin, 'npx'), cli: path.join(npmBin, 'npx-cli.js'), npmBin };
+}
+
+let installed = null;
+function fakeNode() {
+  if (installed) return installed;
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-fakenode-')));
+  installed = buildInstall(root, process.execPath);
   process.once('exit', () => fs.rmSync(root, { recursive: true, force: true }));
   return installed;
+}
+
+// Another install below `parent`, sharing the first one's node binary (a hard link, no second copy).
+function extraInstall(parent) {
+  return buildInstall(parent, fakeNode().node);
 }
 
 // The stub npx-cli.js: records what it was started with and answers like the MCP's status command.
@@ -73,6 +92,7 @@ function stubMain(config) {
 
 function writeStub(fake, record) {
   fs.writeFileSync(fake.cli, `#!/usr/bin/env node\n(${stubMain.toString()})(${JSON.stringify({ record })});\n`, { mode: 0o755 });
+  fs.chmodSync(fake.cli, 0o755);
 }
 
 function workspace() {
@@ -96,14 +116,14 @@ const plantedRuns = (ws) => (fs.existsSync(ws.planted) ? fs.readFileSync(ws.plan
 const statusRecords = (ws) => (fs.existsSync(ws.record) ? fs.readFileSync(ws.record, 'utf8').split('\n').filter(Boolean).map((row) => JSON.parse(row)) : []).filter((row) => row.kind === 'status');
 
 // The doctor, started by the fake node, in `cwd`. `env` is the whole environment of the doctor process.
-function doctor(ws, env, { cwd = ws.project, args = [], selfTest = false } = {}) {
-  const fake = fakeNode();
-  writeStub(fake, ws.record);
+function doctor(ws, env, { cwd = ws.project, args = [], selfTest = false, install = fakeNode(), stub = true } = {}) {
+  const fake = install;
+  if (stub) writeStub(fake, ws.record);
   const capture = path.join(ws.base, 'capture.jsonl');
   fs.writeFileSync(capture, '');
   const result = spawnSync(fake.node, [BIN, 'doctor', ...(selfTest ? [] : ['--no-self-test']), '--cwd', ws.project, ...args], {
     cwd,
-    env: { CAPTURE_FILE: capture, ...env, NODE_OPTIONS: [`--require=${RECORDER}`, env.NODE_OPTIONS].filter(Boolean).join(' ') },
+    env: { CAPTURE_FILE: capture, ...env, NODE_OPTIONS: [`--require=${RECORDER}`, `--require=${HOST_FAKES}`, env.NODE_OPTIONS].filter(Boolean).join(' ') },
     encoding: 'utf8',
     timeout: 120000,
     maxBuffer: 16 * 1024 * 1024,
@@ -276,73 +296,110 @@ test('R5 R7 the key reaches the child only as the presence marker; two machines 
   assert.equal(a.envNames.includes('MARROW_KEY'), false);
 });
 
-test('R6 trusted-npx refusals: nothing is started and the line is "could not check"', () => {
-  const fake = fakeNode();
-  const original = fs.readlinkSync(fake.link);
+test('R6 N2 N3 N4 trusted-npx refusals: nothing is started and the line is "could not check"', () => {
   const ws = workspace();
+  const inst = extraInstall(path.join(ws.base, 'inst'));
+  writeStub(inst, ws.record);
   // The loop-guard self-test (not changed) looks npx up on PATH, so a neutral one is on PATH here.
   const neutral = path.join(ws.base, 'neutral-bin');
   const proof = '{"pass":true,"isolated":true,"live_hook_observed":false,"repeat_denied":true,"mutation_reset":true,"owner_disabled_bypass":true}';
   fs.mkdirSync(neutral);
-  fs.writeFileSync(path.join(neutral, 'npx'), `#!/bin/sh\nprintf '%s\\n' '${proof}'\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(neutral, 'npx'), `#!/bin/sh\nprintf '%s\n' '${proof}'\n`, { mode: 0o755 });
   const envFor = () => ({ ...baseEnv(ws), PATH: `${neutral}${path.delimiter}/usr/bin${path.delimiter}/bin` });
-  const refuse = (label, expectRuns = []) => {
+  const run = (options = {}) => {
     fs.rmSync(ws.record, { force: true });
-    const run = doctor(ws, envFor());
-    assert.equal(run.result.status, 0, `${label}: ${run.text}`);
-    assert.equal(run.line, '- Seatbelt: could not check', label);
+    return doctor(ws, envFor(), { install: inst, stub: false, ...options });
+  };
+  const refuse = (label, options) => {
+    const result = run(options);
+    assert.equal(result.result.status, 0, `${label}: ${result.text}`);
+    assert.equal(result.line, '- Seatbelt: could not check', label);
     assert.deepEqual(statusRecords(ws), [], `${label}: no status child`);
-    assert.deepEqual(plantedRuns(ws), expectRuns, `${label}: nothing planted ran`);
-    assert.match(run.text, /\n- Marrow active: /, `${label}: the rest of doctor still prints`);
+    assert.deepEqual(plantedRuns(ws), [], `${label}: nothing planted ran`);
+    assert.match(result.text, /\n- Marrow active: /, `${label}: the rest of doctor still prints`);
+  };
+  const npmFolder = path.join(inst.root, 'lib', 'node_modules', 'npm');
+  const mode = (file, bits) => {
+    const before = fs.lstatSync(file).mode & 0o7777;
+    fs.chmodSync(file, bits);
+    return () => fs.chmodSync(file, before);
   };
   try {
-    const control = doctor(ws, envFor());
+    const control = run();
     assert.equal(control.line, '- Seatbelt: on (no account)', 'control: the untouched install works');
-    // Candidate missing.
-    fs.rmSync(fake.link);
-    refuse('candidate missing');
-    // A link to a file inside the doctor's folder.
-    plant(path.join(ws.project, 'npx-cli.js'), ws, 'in-cwd');
-    fs.symlinkSync(path.join(ws.project, 'npx-cli.js'), fake.link);
-    refuse('link to a file inside the cwd');
-    fs.rmSync(fake.link);
-    // A link to a file inside node_modules/.bin (named npx-cli.js in a bin folder, in an npm folder).
-    const hidden = path.join(ws.base, 'elsewhere', 'node_modules', '.bin');
-    fs.mkdirSync(hidden, { recursive: true });
-    plant(path.join(hidden, 'npx-cli.js'), ws, 'in-bin');
-    fs.symlinkSync(path.join(hidden, 'npx-cli.js'), fake.link);
-    refuse('link to a node_modules/.bin file');
-    fs.rmSync(fake.link);
-    // A link to a file that is not npm's npx-cli.js, and to npx-cli.js outside an npm/bin folder.
-    plant(path.join(ws.base, 'other', 'npm', 'bin', 'something.js'), ws, 'other-name');
-    fs.symlinkSync(path.join(ws.base, 'other', 'npm', 'bin', 'something.js'), fake.link);
-    refuse('link to a file not named npx-cli.js');
-    fs.rmSync(fake.link);
-    plant(path.join(ws.base, 'other2', 'tools', 'bin', 'npx-cli.js'), ws, 'other-folder');
-    fs.symlinkSync(path.join(ws.base, 'other2', 'tools', 'bin', 'npx-cli.js'), fake.link);
-    refuse('npx-cli.js not inside an npm folder');
-    fs.rmSync(fake.link);
-    // A link to a folder named like the script.
-    fs.mkdirSync(path.join(ws.base, 'other3', 'npm', 'bin', 'npx-cli.js'), { recursive: true });
-    fs.symlinkSync(path.join(ws.base, 'other3', 'npm', 'bin', 'npx-cli.js'), fake.link);
+    assert.equal(statusRecords(ws).length, 1, 'control: one status child');
+    // N2: npx-cli.js is only trusted at <node folder>/../lib/node_modules/npm/bin/npx-cli.js, with no link anywhere in that path.
+    fs.renameSync(npmFolder, `${npmFolder}-moved`);
+    refuse('pinned folder gone (bin/npx now dangles)');
+    fs.renameSync(`${npmFolder}-moved`, npmFolder);
+    const other = path.join(ws.base, 'other', 'npm');
+    fs.mkdirSync(path.join(other, 'bin'), { recursive: true });
+    plant(path.join(other, 'bin', 'npx-cli.js'), ws, 'other-npm');
+    fs.renameSync(npmFolder, `${npmFolder}-moved`);
+    fs.symlinkSync(other, npmFolder);
+    refuse('lib/node_modules/npm is a link to another npm folder');
+    fs.rmSync(npmFolder);
+    fs.renameSync(`${npmFolder}-moved`, npmFolder);
+    const script = inst.cli;
+    const saved = fs.readFileSync(script);
+    fs.rmSync(script);
+    fs.symlinkSync(path.join(other, 'bin', 'npx-cli.js'), script);
+    refuse('npx-cli.js is a link');
+    fs.rmSync(script);
+    fs.writeFileSync(script, saved, { mode: 0o755 });
+    // bin/npx is not consulted: with the pinned file missing, a bin/npx that points at a good file elsewhere is not used.
+    fs.renameSync(script, `${script}.moved`);
+    fs.rmSync(inst.link);
+    fs.symlinkSync(path.join(other, 'bin', 'npx-cli.js'), inst.link);
+    refuse('bin/npx points elsewhere and the pinned file is missing');
+    fs.rmSync(inst.link);
+    fs.symlinkSync('../lib/node_modules/npm/bin/npx-cli.js', inst.link);
+    // A folder named like the script, and a dangling link in its place.
+    fs.mkdirSync(script);
     refuse('a folder, not a regular file');
-    fs.rmSync(fake.link);
-    // A dangling link.
-    fs.symlinkSync(path.join(ws.base, 'does-not-exist'), fake.link);
+    fs.rmdirSync(script);
+    fs.symlinkSync(path.join(ws.base, 'does-not-exist'), script);
     refuse('dangling link');
-    fs.rmSync(fake.link);
-    // The install itself inside the doctor's project folder (--cwd names the folder that holds node).
-    fs.symlinkSync(original, fake.link);
+    fs.rmSync(script);
+    fs.renameSync(`${script}.moved`, script);
+    assert.equal(run().line, '- Seatbelt: on (no account)', 'control after restoring N2');
+    // N3: the script or any folder above it that group or others can write.
+    for (const [label, target, bits] of [
+      ['script group-writable', script, 0o775],
+      ['script other-writable', script, 0o757],
+      ['npm/bin group-writable', inst.npmBin, 0o775],
+      ['lib/node_modules other-writable', path.join(inst.root, 'lib', 'node_modules'), 0o757],
+      ['the install root group-writable', inst.root, 0o770],
+      ['the install root sticky world-writable', inst.root, 0o1777],
+    ]) {
+      const restore = mode(target, bits);
+      try {
+        refuse(label);
+      } finally {
+        restore();
+      }
+    }
+    assert.equal(run().line, '- Seatbelt: on (no account)', 'control after restoring N3');
+    // N4: a node (or its script) under any node_modules/.bin folder, in any case.
+    for (const hidden of ['node_modules/.bin', 'A/Node_Modules/.BIN']) {
+      const nodeHere = path.join(ws.base, 'hid', hidden, 'node');
+      const scriptHere = path.join(path.dirname(nodeHere), '..', 'lib', 'node_modules', 'npm', 'bin', 'npx-cli.js');
+      fs.mkdirSync(path.dirname(nodeHere), { recursive: true });
+      fs.mkdirSync(path.dirname(scriptHere), { recursive: true });
+      fs.linkSync(fakeNode().node, nodeHere);
+      fs.copyFileSync(inst.cli, scriptHere);
+      fs.rmSync(ws.record, { force: true });
+      const result = doctor(ws, envFor(), { install: { node: nodeHere, bin: path.dirname(nodeHere), cli: scriptHere }, stub: false });
+      assert.equal(result.line, '- Seatbelt: could not check', hidden);
+      assert.deepEqual(statusRecords(ws), [], hidden);
+    }
+    // Changed by Cliff's ruling on X5: a node installed inside --cwd (the project folder) is no longer refused. The
+    // location pin and the owner walk are what vouch for npm now, and both pass here.
     fs.rmSync(ws.record, { force: true });
-    const inside = spawnSync(fake.node, [BIN, 'doctor', '--no-self-test', '--cwd', fake.root], { cwd: ws.base, env: { ...envFor(), CAPTURE_FILE: path.join(ws.base, 'cap'), NODE_OPTIONS: `--require=${RECORDER}` }, encoding: 'utf8', timeout: 120000 });
-    assert.match(inside.stdout, /\n- Seatbelt: could not check\n/, 'node installed inside --cwd');
-    assert.deepEqual(statusRecords(ws), []);
-    // Restored: works again.
-    const again = doctor(ws, envFor());
-    assert.equal(again.line, '- Seatbelt: on (no account)', 'control after restoring');
+    const inside = spawnSync(inst.node, [BIN, 'doctor', '--no-self-test', '--cwd', inst.root], { cwd: ws.base, env: { ...envFor(), CAPTURE_FILE: path.join(ws.base, 'cap'), NODE_OPTIONS: `--require=${RECORDER} --require=${HOST_FAKES}` }, encoding: 'utf8', timeout: 120000 });
+    assert.match(inside.stdout, /\n- Seatbelt: on \(no account\)\n/, 'node installed inside --cwd now gives a real line');
+    assert.equal(statusRecords(ws).length, 1);
   } finally {
-    fs.rmSync(fake.link, { force: true });
-    fs.symlinkSync(original, fake.link);
     ws.cleanup();
   }
 });
@@ -411,46 +468,137 @@ test('R10 proxy names reach the child unchanged; nothing else from the other lis
   }
 });
 
-test('trusted npx: the layouts of nvm, the official tarball, Homebrew and Debian resolve; every error gives null', () => {
+// A stand-in for the file system calls the resolver makes: `real` maps a path to its real path (default: itself), `stat` gives
+// {kind, uid, mode} for the paths that exist.
+function fakeIo({ real = {}, stat, uid = 1000 }) {
+  const missing = () => Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+  return {
+    realpathSync: (value) => {
+      if (value in real) return real[value];
+      if (value in stat) return value;
+      throw missing();
+    },
+    lstatSync: (value) => {
+      if (!(value in stat)) throw missing();
+      const { kind, uid: owner = 0, mode = kind === 'file' ? 0o755 : 0o755 } = stat[value];
+      return { isFile: () => kind === 'file', isDirectory: () => kind === 'dir', isSymbolicLink: () => kind === 'link', uid: owner, mode };
+    },
+    getuid: () => uid,
+  };
+}
+// stat entries for `file` and every folder above it (POSIX).
+function chainOf(file, overrides = {}, owner = 0) {
+  const entries = {};
+  for (let current = file; ; current = path.posix.dirname(current)) {
+    entries[current] = { kind: current === file ? 'file' : 'dir', uid: owner, mode: 0o755, ...(overrides[current] || {}) };
+    if (current === '/') return entries;
+  }
+}
+
+test('trusted npx: the pinned layouts of nvm, the official tarball, Homebrew and Debian resolve; every error gives null', () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-layouts-')));
-  const cwd = path.join(root, 'work');
-  fs.mkdirSync(cwd);
   try {
-    // <prefix>/bin/{node,npx -> ../lib/node_modules/npm/bin/npx-cli.js}: nvm, the tarball, Homebrew.
+    // <prefix>/bin/node with <prefix>/lib/node_modules/npm/bin/npx-cli.js: nvm, the tarball, Homebrew (real folders, on disk).
     const prefix = path.join(root, 'prefix');
+    const script = path.join(prefix, 'lib', 'node_modules', 'npm', 'bin', 'npx-cli.js');
     fs.mkdirSync(path.join(prefix, 'bin'), { recursive: true });
-    fs.mkdirSync(path.join(prefix, 'lib', 'node_modules', 'npm', 'bin'), { recursive: true });
-    fs.writeFileSync(path.join(prefix, 'lib', 'node_modules', 'npm', 'bin', 'npx-cli.js'), '// npx\n');
-    fs.symlinkSync('../lib/node_modules/npm/bin/npx-cli.js', path.join(prefix, 'bin', 'npx'));
-    assert.equal(resolveTrustedNpx({ execPath: path.join(prefix, 'bin', 'node'), cwd }), path.join(prefix, 'lib', 'node_modules', 'npm', 'bin', 'npx-cli.js'));
-    // Debian: /usr/bin/{node,npx -> ../share/nodejs/npm/bin/npx-cli.js}.
-    const usr = path.join(root, 'usr');
-    fs.mkdirSync(path.join(usr, 'bin'), { recursive: true });
-    fs.mkdirSync(path.join(usr, 'share', 'nodejs', 'npm', 'bin'), { recursive: true });
-    fs.writeFileSync(path.join(usr, 'share', 'nodejs', 'npm', 'bin', 'npx-cli.js'), '// npx\n');
-    fs.symlinkSync('../share/nodejs/npm/bin/npx-cli.js', path.join(usr, 'bin', 'npx'));
-    assert.equal(resolveTrustedNpx({ execPath: path.join(usr, 'bin', 'node'), cwd }), path.join(usr, 'share', 'nodejs', 'npm', 'bin', 'npx-cli.js'));
-    // Errors give null: relative execPath, no execPath folder, a cwd that holds the install, a project dir that holds it.
-    assert.equal(resolveTrustedNpx({ execPath: 'node', cwd }), null);
-    assert.equal(resolveTrustedNpx({ execPath: path.join(root, 'missing', 'node'), cwd }), null);
-    assert.equal(resolveTrustedNpx({ execPath: path.join(prefix, 'bin', 'node'), cwd: prefix }), null);
-    assert.equal(resolveTrustedNpx({ execPath: path.join(prefix, 'bin', 'node'), cwd, projectDirs: [path.join(prefix, 'lib')] }), null);
-    assert.equal(resolveTrustedNpx({ execPath: path.join(prefix, 'bin', 'node'), cwd, projectDirs: [''] }), null);
-    // A node install below a node_modules/.bin folder is refused (any depth, any case).
-    for (const hidden of ['node_modules/.bin', 'a/Node_Modules/.BIN/b']) {
-      const sub = path.join(root, 'hid', hidden);
-      fs.mkdirSync(path.join(sub, '..', 'lib', 'node_modules', 'npm', 'bin'), { recursive: true });
-      fs.mkdirSync(sub, { recursive: true });
-      fs.writeFileSync(path.join(sub, '..', 'lib', 'node_modules', 'npm', 'bin', 'npx-cli.js'), '// npx\n');
-      fs.symlinkSync('../lib/node_modules/npm/bin/npx-cli.js', path.join(sub, 'npx'));
-      assert.equal(resolveTrustedNpx({ execPath: path.join(sub, 'node'), cwd }), null, hidden);
+    fs.mkdirSync(path.dirname(script), { recursive: true });
+    fs.writeFileSync(script, '// npx\n');
+    fs.writeFileSync(path.join(prefix, 'bin', 'node'), '');
+    assert.equal(resolveTrustedNpx({ execPath: path.join(prefix, 'bin', 'node') }), script, 'no bin/npx needed');
+    // The current folder and the project folder are not consulted any more (Cliff's ruling on X5): the install may be anywhere
+    // the pin and the owner walk accept, also below the folder doctor was started in.
+    const original = process.cwd();
+    try {
+      process.chdir(prefix);
+      assert.equal(resolveTrustedNpx({ execPath: path.join(prefix, 'bin', 'node') }), script, 'node installed inside the current folder');
+    } finally {
+      process.chdir(original);
     }
-    // The option is not reachable from the CLI or the environment: it is read from process.execPath only.
-    const { statusInvocation: viaDefaults } = require('../src/seatbelt-status');
-    assert.equal(viaDefaults({ version: '3.9.104', cwd, projectDirs: [cwd] })?.command, process.execPath);
+    // Errors give null: relative execPath, no node folder, a node folder without the pinned script.
+    assert.equal(resolveTrustedNpx({ execPath: 'node' }), null);
+    assert.equal(resolveTrustedNpx({ execPath: path.join(root, 'missing', 'node') }), null);
+    fs.mkdirSync(path.join(root, 'bare', 'bin'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'bare', 'bin', 'node'), '');
+    assert.equal(resolveTrustedNpx({ execPath: path.join(root, 'bare', 'bin', 'node') }), null, 'no pinned script');
+    // A link in the pinned path is refused, and so is a node or script below a node_modules/.bin folder (any depth, any case).
+    fs.mkdirSync(path.join(root, 'linked', 'bin'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'linked', 'lib', 'node_modules'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'linked', 'bin', 'node'), '');
+    fs.symlinkSync(path.join(prefix, 'lib', 'node_modules', 'npm'), path.join(root, 'linked', 'lib', 'node_modules', 'npm'));
+    assert.equal(resolveTrustedNpx({ execPath: path.join(root, 'linked', 'bin', 'node') }), null, 'npm folder is a link');
+    for (const hidden of ['node_modules/.bin', 'a/Node_Modules/.BIN/b']) {
+      const bin = path.join(root, 'hid', hidden);
+      fs.mkdirSync(path.join(bin, '..', 'lib', 'node_modules', 'npm', 'bin'), { recursive: true });
+      fs.writeFileSync(path.join(bin, '..', 'lib', 'node_modules', 'npm', 'bin', 'npx-cli.js'), '// npx\n');
+      fs.mkdirSync(bin, { recursive: true });
+      fs.writeFileSync(path.join(bin, 'node'), '');
+      assert.equal(resolveTrustedNpx({ execPath: path.join(bin, 'node') }), null, hidden);
+    }
+    // A node that is itself a link into a node_modules/.bin folder is refused by its real path.
+    const hiddenBin = path.join(root, 'proj', 'node_modules', '.bin');
+    fs.mkdirSync(hiddenBin, { recursive: true });
+    fs.writeFileSync(path.join(hiddenBin, 'node'), '');
+    fs.rmSync(path.join(prefix, 'bin', 'node'));
+    fs.symlinkSync(path.join(hiddenBin, 'node'), path.join(prefix, 'bin', 'node'));
+    assert.equal(resolveTrustedNpx({ execPath: path.join(prefix, 'bin', 'node') }), null, 'node links into node_modules/.bin');
+    // The seam of the resolver is not reachable from the CLI or the environment: statusInvocation passes none, and the defaults read process.execPath.
+    assert.equal(statusInvocation({ version: '3.9.104', execPath: path.join(prefix, 'bin', 'node') }) === null, true, 'the link refusal holds through statusInvocation');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('N5 trusted npx, Debian: /usr/bin/node accepts /usr/share/nodejs/npm/bin/npx-cli.js and the pin; nothing else', () => {
+  const debian = '/usr/share/nodejs/npm/bin/npx-cli.js';
+  const pin = '/usr/lib/node_modules/npm/bin/npx-cli.js';
+  const base = { ...chainOf(debian), '/usr/bin': { kind: 'dir', uid: 0, mode: 0o755 }, '/usr/bin/node': { kind: 'file', uid: 0, mode: 0o755 } };
+  const resolve = (execPath, stat, real = {}, uid = 1000) => resolveTrustedNpx({ execPath, platform: 'linux', io: fakeIo({ stat, real, uid }) });
+  assert.equal(resolve('/usr/bin/node', base), debian, 'Debian layout');
+  assert.equal(resolve('/usr/local/bin/node', { ...base, '/usr/local/bin': { kind: 'dir' }, '/usr/local/bin/node': { kind: 'file' } }), null, 'the Debian script is only for /usr/bin/node');
+  assert.equal(resolve('/opt/node/bin/node', { ...base, '/opt/node/bin': { kind: 'dir' }, '/opt/node/bin/node': { kind: 'file' } }), null, 'another node: not the Debian script');
+  assert.equal(resolve('/usr/bin/node', { ...base, '/usr/share/nodejs/npm': { kind: 'link', uid: 0 } }), null, 'a link in the Debian path');
+  assert.equal(resolve('/usr/bin/node', { ...base }, { [debian]: '/srv/npm/bin/npx-cli.js' }), null, 'the script resolves elsewhere');
+  assert.equal(resolve('/usr/bin/node', { ...base, [debian]: { kind: 'link', uid: 0 } }), null, 'the script is a link');
+  assert.equal(resolve('/usr/bin/node', { ...base, [debian]: { kind: 'dir', uid: 0 } }), null, 'a folder, not a file');
+  // The pin is tried first and, when it fails, the Debian script is still checked on its own.
+  assert.equal(resolve('/usr/bin/node', { ...base, ...chainOf(pin) }), pin, 'the pin wins when both exist');
+  assert.equal(resolve('/usr/bin/node', { ...base, ...chainOf(pin, { '/usr/lib': { mode: 0o775 } }) }), debian, 'a failing pin does not hide a good Debian script');
+  // Owner walk: every folder up to / and the script.
+  const walk = (overrides, uid = 1000) => resolve('/usr/bin/node', { ...base, ...chainOf(debian, overrides) }, {}, uid);
+  assert.equal(walk({}), debian, 'root-owned, not writable by others');
+  assert.equal(walk({ '/usr/share': { mode: 0o775 } }), null, 'a group-writable folder above');
+  assert.equal(walk({ '/usr': { mode: 0o757 } }), null, 'an other-writable folder above');
+  assert.equal(walk({ '/': { mode: 0o777 } }), null, 'root folder writable');
+  assert.equal(walk({ '/usr/share/nodejs': { mode: 0o1777 } }), null, 'sticky and world-writable never qualifies');
+  assert.equal(walk({ [debian]: { mode: 0o775 } }), null, 'script group-writable');
+  assert.equal(walk({ [debian]: { mode: 0o757 } }), null, 'script other-writable');
+  assert.equal(walk({ '/usr/share/nodejs/npm': { uid: 4242 } }), null, 'a folder owned by another user');
+  assert.equal(walk({ [debian]: { uid: 4242 } }), null, 'the script owned by another user');
+  assert.equal(walk({ '/usr/share': { uid: 1000 } }), debian, 'a folder owned by the running user passes');
+  assert.equal(walk({ '/usr/share': { uid: 1000 } }, 0), null, 'run as root: a folder owned by a user is refused');
+  assert.equal(walk({ '/usr/share': { uid: 1000 } }, 2000), null, 'owned by a third user');
+  assert.equal(walk({ '/usr/share': { kind: 'link' } }), null, 'a link above the script');
+  assert.equal(resolve('/usr/bin/node', { ...base, [debian]: undefined }), null, 'missing script');
+  assert.equal(resolveTrustedNpx({ execPath: '/usr/bin/node', platform: 'linux', io: { ...fakeIo({ stat: base }), lstatSync: () => { throw new Error('EACCES'); } } }), null, 'any lstat error');
+  assert.equal(resolveTrustedNpx({ execPath: '/usr/bin/node', platform: 'linux', io: { ...fakeIo({ stat: base }), getuid: () => undefined } }), null, 'no uid');
+});
+
+test('N6 trusted npx, Windows: <node folder>\\node_modules\\npm\\bin\\npx-cli.js, case-insensitive, regular file, no owner walk', () => {
+  const node = 'C:\\Program Files\\nodejs\\node.exe';
+  const script = 'C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npx-cli.js';
+  const stat = { 'C:\\Program Files\\nodejs': { kind: 'dir' }, [node]: { kind: 'file' }, [script]: { kind: 'file', uid: 99999, mode: 0o777 } };
+  const resolve = (execPath, io) => resolveTrustedNpx({ execPath, platform: 'win32', io: { getuid: () => { throw new Error('no owner walk on Windows'); }, ...io } });
+  assert.equal(resolve(node, fakeIo({ stat })), script, 'resolves; the owner and mode of the files are not read');
+  const upper = 'C:\\PROGRAM FILES\\nodejs\\NODE_MODULES\\npm\\bin\\NPX-CLI.JS';
+  assert.equal(resolve(node, fakeIo({ stat: { ...stat, [upper]: { kind: 'file' } }, real: { [script]: upper } })), upper, 'real path in another case: the same place');
+  assert.equal(resolve(node, fakeIo({ stat, real: { [script]: 'D:\\other\\npm\\bin\\npx-cli.js' } })), null, 'the script resolves elsewhere (a link)');
+  assert.equal(resolve(node, fakeIo({ stat: { ...stat, [script]: { kind: 'dir' } } })), null, 'a folder');
+  assert.equal(resolve(node, fakeIo({ stat: { ...stat, [script]: { kind: 'link' } } })), null, 'a link');
+  assert.equal(resolve(node, fakeIo({ stat: { ...stat, [script]: undefined } })), null, 'missing');
+  assert.equal(resolve('C:\\proj\\Node_Modules\\.BIN\\node.exe', fakeIo({ stat: { 'C:\\proj\\Node_Modules\\.BIN': { kind: 'dir' }, 'C:\\proj\\Node_Modules\\.BIN\\node.exe': { kind: 'file' }, 'C:\\proj\\Node_Modules\\node_modules\\npm\\bin\\npx-cli.js': { kind: 'file' } } })), null, 'node under node_modules\\.bin');
+  assert.equal(resolve('node.exe', fakeIo({ stat })), null, 'relative execPath');
+  assert.equal(resolve(node, { realpathSync: () => { throw new Error('EPERM'); } }), null, 'any error');
 });
 
 test('the child environment is built from scratch: allow-list, key marker, rebuilt PATH (POSIX and Windows rules)', () => {

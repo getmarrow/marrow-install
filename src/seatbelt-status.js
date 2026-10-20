@@ -223,45 +223,65 @@ function buildStatusEnv(parentEnv, { execPath = process.execPath, platform = pro
   return env;
 }
 
-// Whether `file` is `folder` or below it.
-function isInside(file, folder, platform) {
-  const relative = pathModule(platform).relative(folder, file);
-  return relative === '' || (relative !== '..' && !relative.startsWith(`..${pathModule(platform).sep}`) && !pathModule(platform).isAbsolute(relative));
+// The file-system calls the location checks make. A unit test passes its own to resolveTrustedNpx; doctor's
+// call sites pass none, and no flag, environment name or file doctor reads reaches this parameter.
+function systemIo(io) {
+  return {
+    realpathSync: (value) => fs.realpathSync(value),
+    lstatSync: (value) => fs.lstatSync(value),
+    getuid: () => process.getuid(),
+    ...io,
+  };
 }
 
-// The real path of npm's own npx-cli.js next to the node running doctor, or null. The candidate is
-// <node folder>/npx (a link to <prefix>/lib/node_modules/npm/bin/npx-cli.js on nvm, the official
-// tarball and Homebrew; /usr/share/nodejs/npm/bin/npx-cli.js on Debian); on Windows also
-// <node folder>/node_modules/npm/bin/npx-cli.js. Refused (null): a candidate or real path inside the
-// current folder, inside the project folder(s) given, or inside any node_modules/.bin folder; a real
-// path that is not a regular file named npx-cli.js in a folder named bin inside a folder named npm;
-// any error while resolving.
-function resolveTrustedNpx({ execPath = process.execPath, cwd, projectDirs = [], platform = process.platform } = {}) {
+// POSIX: whether `start` (a real path) and every folder above it, up to /, belongs to root or to this user and cannot be
+// written by its group or by others. Then no other user can add, rename or replace anything on the way down to `start`.
+// A sticky world-writable /tmp never qualifies. `start` is a folder unless `startIsFile`. Throws on any error: callers
+// treat that as a refusal.
+function chainClosed(start, io, { startIsFile = false } = {}) {
+  const uid = io.getuid();
+  if (!Number.isInteger(uid)) return false;
+  for (let current = start; ; ) {
+    const stat = io.lstatSync(current);
+    if (stat.isSymbolicLink() || (current === start && startIsFile ? !stat.isFile() : !stat.isDirectory())) return false;
+    if ((stat.uid !== 0 && stat.uid !== uid) || (stat.mode & 0o022) !== 0) return false;
+    const parent = path.posix.dirname(current);
+    if (parent === current) return true;
+    current = parent;
+  }
+}
+
+// npm's own npx-cli.js next to the node running doctor, or null. The only script accepted is the one place npm puts
+// it, beside this node: <real node folder>/../lib/node_modules/npm/bin/npx-cli.js (nvm, the official tarball,
+// Homebrew), or /usr/share/nodejs/npm/bin/npx-cli.js when the node is /usr/bin/node (Debian); on Windows
+// <real node folder>\node_modules\npm\bin\npx-cli.js. Nothing is followed: its real path must equal that path (no
+// link anywhere in it) and it must be a regular file. bin/npx, the PATH and the current or project folders are not
+// consulted. Refused (null): a node or script under any node_modules/.bin folder (any depth, both separators,
+// any case); on POSIX also a script or any folder above it that belongs to someone other than root or this user
+// or that group or others can write (nothing to check on Windows: its file owners and modes mean nothing there);
+// any error while resolving. `io` is the unit-test seam of systemIo().
+function resolveTrustedNpx({ execPath = process.execPath, platform = process.platform, io } = {}) {
   try {
+    const sys = systemIo(io);
     const P = pathModule(platform);
     if (typeof execPath !== 'string' || !P.isAbsolute(execPath)) return null;
-    const folders = [];
-    for (const dir of [cwd === undefined ? process.cwd() : cwd, ...projectDirs]) {
-      if (typeof dir !== 'string' || dir === '') return null;
-      folders.push(P.resolve(dir), realpathOr(P.resolve(dir)));
-    }
-    const nodeDir = P.dirname(execPath);
-    const candidates = [P.join(nodeDir, 'npx')];
-    if (platform === 'win32') candidates.push(P.join(nodeDir, 'node_modules', 'npm', 'bin', 'npx-cli.js'));
-    const same = (value) => (platform === 'win32' ? String(value).toLowerCase() : String(value));
-    const refused = (file) => inNodeModulesBin(file, platform) || folders.some((folder) => isInside(file, folder, platform));
-    if (refused(execPath) || refused(realpathOr(execPath))) return null;
+    if (inNodeModulesBin(execPath, platform) || inNodeModulesBin(sys.realpathSync(execPath), platform)) return null;
+    const nodeDir = sys.realpathSync(P.dirname(execPath));
+    const candidates = platform === 'win32'
+      ? [P.join(nodeDir, 'node_modules', 'npm', 'bin', 'npx-cli.js')]
+      : [P.join(nodeDir, '..', 'lib', 'node_modules', 'npm', 'bin', 'npx-cli.js')];
+    if (platform !== 'win32' && execPath === '/usr/bin/node') candidates.push('/usr/share/nodejs/npm/bin/npx-cli.js');
+    const same = (a, b) => (platform === 'win32' ? String(a).toLowerCase() === String(b).toLowerCase() : a === b);
     for (const candidate of candidates) {
       let real;
       try {
-        real = fs.realpathSync(candidate);
+        real = sys.realpathSync(candidate);
       } catch {
         continue;
       }
-      if (refused(candidate) || refused(real)) continue;
-      const bin = P.dirname(real);
-      if (same(P.basename(real)) !== 'npx-cli.js' || same(P.basename(bin)) !== 'bin' || same(P.basename(P.dirname(bin))) !== 'npm') continue;
-      if (!fs.statSync(real).isFile()) continue;
+      if (!same(real, P.normalize(candidate)) || inNodeModulesBin(real, platform)) continue;
+      if (platform !== 'win32' && !chainClosed(real, sys, { startIsFile: true })) continue;
+      if (platform === 'win32' && !sys.lstatSync(real).isFile()) continue;
       return real;
     }
     return null;
@@ -271,9 +291,9 @@ function resolveTrustedNpx({ execPath = process.execPath, cwd, projectDirs = [],
 }
 
 // { command, args, env } for the real status child, or null (could not check: nothing is started).
-function statusInvocation({ version, parentEnv = process.env, execPath = process.execPath, cwd, projectDirs = [], platform = process.platform } = {}) {
+function statusInvocation({ version, parentEnv = process.env, execPath = process.execPath, platform = process.platform } = {}) {
   if (typeof version !== 'string' || !/^\d+\.\d+\.\d+$/.test(version)) return null;
-  const script = resolveTrustedNpx({ execPath, cwd, projectDirs, platform });
+  const script = resolveTrustedNpx({ execPath, platform });
   if (!script) return null;
   return {
     command: execPath,
