@@ -12,8 +12,8 @@ const { mcpServerLaunch, runtimeDir } = require('../src/mcp-runtime');
 const { fakeRuntime } = require('./support/fake-runtime');
 const host = require('./support/mcp-host');
 
-// Installer 0.1.73 against the pinned MCP 3.9.104 (marrow-mcp 7a521329): what the installer writes
-// for Codex and Cursor, and what the real MCP decision (test/fixtures/mcp-3.9.104, byte for byte)
+// Installer 0.1.73 against the pinned MCP 3.9.105 (marrow-mcp 8ffda003): what the installer writes
+// for Codex and Cursor, and what the real MCP decision (test/fixtures/mcp-3.9.105, byte for byte)
 // does with it. Every host here is a temporary HOME/CODEX_HOME and project; npm_config_* is unset
 // unless a case sets it (test/support/mcp-host.js).
 
@@ -144,7 +144,7 @@ test('Cursor guard with the MCP decision in the loop: official installer config 
   withFixture('marrow-cursor-loop-', {}, (fixture) => {
     installInto(fixture);
     const guard = readJson(path.join(fixture.root, '.cursor', 'hooks.json')).hooks.beforeMCPExecution.find((entry) => isMarrowCommand(entry.command)).command;
-    // The stand-in runtime runs the vendored 3.9.104 decision (test/support/cursor-hook-decision.js).
+    // The stand-in runtime runs the vendored 3.9.105 decision (test/support/cursor-hook-decision.js).
     const driver = path.join(__dirname, 'support', 'cursor-hook-decision.js');
     fakeRuntime(fixture.home, PINS.MCP_ADAPTER_VERSION, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(driver)}\n`);
     const run = (event) => {
