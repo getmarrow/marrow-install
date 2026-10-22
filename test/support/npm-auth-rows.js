@@ -64,8 +64,9 @@ function setup() {
   return { work, mcp, sdk, tls: certificates(work), packages: { '@getmarrow/mcp': { [PIN]: mcp }, '@getmarrow/sdk': { [SDK]: sdk } }, token: 'gf' + crypto.randomBytes(18).toString('hex') };
 }
 
+let captureSerial = 0;
 async function startCapture(ctx, label, extra = {}) {
-  const config = path.join(ctx.work, `capture-${label}-${crypto.randomBytes(3).toString('hex')}.json`);
+  const config = path.join(ctx.work, `capture-${label}-${process.pid}-${captureSerial += 1}.json`);
   const counts = `${config}.counts`;
   fs.writeFileSync(config, JSON.stringify({ packages: ctx.packages, ...(ctx.tls ? { key: ctx.tls.key, cert: ctx.tls.cert } : {}), ...extra }));
   const child = spawn(process.execPath, [CAPTURE, config, counts], { stdio: ['ignore', 'pipe', 'inherit'], env: { PATH: process.env.PATH, MARROW_CAPTURE_TOKEN: ctx.token } });
@@ -151,6 +152,21 @@ async function waitForHeal(home) {
   }
 }
 
+// The hook runs as an async child, not spawnSync: spawnSync blocks the event loop, so rows could
+// never overlap. Same shell, argv, cwd, env, stdin, 90 s timeout, latin1 text and exit status.
+function runShell(shell, command, options) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(shell, ['-c', command], { cwd: options.cwd, env: options.env, stdio: ['pipe', 'pipe', 'pipe'], timeout: options.timeout });
+    const chunks = { stdout: [], stderr: [] };
+    child.stdout.on('data', (chunk) => chunks.stdout.push(chunk));
+    child.stderr.on('data', (chunk) => chunks.stderr.push(chunk));
+    child.stdin.on('error', () => {});
+    child.stdin.end(options.input);
+    child.on('error', reject);
+    child.on('close', (status) => resolve({ status, stdout: Buffer.concat(chunks.stdout).toString('latin1'), stderr: Buffer.concat(chunks.stderr).toString('latin1') }));
+  });
+}
+
 // Runs one row with `command` (default: head's localized hook) and returns counts only.
 async function runRow(ctx, row, command) {
   const home = tempDir('marrow-fu1-home-');
@@ -167,7 +183,7 @@ async function runRow(ctx, row, command) {
     const env = { HOME: home, PATH: `${path.dirname(process.execPath)}:/usr/bin:/bin`, ...(row.local && !command ? { HTTPS_PROXY: 'http://127.0.0.1:9' } : {}), ...(row.env ? row.env(c) : {}) };
     // dash drops env names that are not shell identifiers (npm_config_@scope:registry, NPM_CONFIG_HTTPS-PROXY, NPM_CONFIG_//host/:_authToken); bash passes them on, as the user's shell or a host can.
     const shell = Object.keys(env).every((name) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) ? '/bin/sh' : '/bin/bash';
-    const result = spawnSync(shell, ['-c', command || hookFor(ctx)], { cwd: root, env, input: EVENT, encoding: 'latin1', timeout: 90_000 });
+    const result = await runShell(shell, command || hookFor(ctx), { cwd: root, env, input: EVENT, timeout: 90_000 });
     await waitForHeal(home);
     const leaked = [result.stdout, result.stderr].filter((text) => String(text || '').includes(ctx.token)).length;
     return {
@@ -187,4 +203,35 @@ async function runRow(ctx, row, command) {
   }
 }
 
-module.exports = { MASTER_HOOK, PIN, ROWS, hookFor, runRow, setup, tempDir };
+// Rows share nothing writable (each has its own HOME, project folder, capture servers on port 0,
+// lock and npm cache; ctx is read only), and most of a row is waiting on npm, so a bounded pool runs
+// them side by side. Results come back in `rows` order and every row still runs: a row that could
+// not run is reported after the others finish, so none is left running into the caller's cleanup.
+// A hint for the start order only: these rows end in a refused install that runs to the runtime's
+// own 30 s npm limit (measured), so they start first and the pool does not need a second wave for
+// them. A stale entry changes the time a run takes, never what it checks.
+const SLOW_ROWS = new Set(['A3b', 'A12', 'A12b', 'A16', 'A16p', 'A16q', 'A16s', 'N1', 'N2', 'N5', 'V1', 'NP2', 'O3', 'O4']);
+const CPUS = typeof os.availableParallelism === 'function' ? os.availableParallelism() : os.cpus().length;
+const ROW_CONCURRENCY = Math.max(4, Math.min(16, CPUS * 4));
+async function runRows(ctx, rows, concurrency = ROW_CONCURRENCY) {
+  const results = new Array(rows.length);
+  const failures = [];
+  const order = rows.map((row, index) => index).sort((a, b) => Number(SLOW_ROWS.has(rows[b].id)) - Number(SLOW_ROWS.has(rows[a].id)) || a - b);
+  let next = 0;
+  const worker = async () => {
+    while (next < order.length) {
+      const index = order[next];
+      next += 1;
+      try {
+        results[index] = await runRow(ctx, rows[index]);
+      } catch (error) {
+        failures.push(`${rows[index].id}: ${error && error.message}`);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, rows.length) }, worker));
+  if (failures.length) throw new Error(`rows that could not run: ${failures.join('; ')}`);
+  return results;
+}
+
+module.exports = { MASTER_HOOK, PIN, ROWS, hookFor, runRow, runRows, setup, tempDir };
