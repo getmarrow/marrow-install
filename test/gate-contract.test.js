@@ -546,8 +546,11 @@ test('a hung Marrow write times out and a protected command fails closed within 
   assert.equal(attempts, 3);
   assert.equal(fs.existsSync(marker), false);
   // Three attempts of 40 ms each and no wait between them: it fails closed at once, 1.88 s before
-  // its 2 s deadline, instead of waiting the deadline out.
+  // its 2 s deadline, instead of waiting the deadline out. The events also show a call that blocks
+  // the process (Atomics.wait, a synchronous child); the real-time bound, the old 2 s, is the hang
+  // guard for any other block.
   assert.deepEqual(clock.events, [{ kind: 'timeout', ms: 40 }, { kind: 'timeout', ms: 40 }, { kind: 'timeout', ms: 40 }]);
   assert.equal(clock.now, 120);
+  assert.ok(clock.realMs < 2_000, `${Math.round(clock.realMs)} ms of real time`);
   fs.rmSync(directory, { recursive: true, force: true });
 });

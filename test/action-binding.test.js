@@ -742,30 +742,32 @@ test('security re-review N2: a secret inside a nested quoted command keeps that 
   assert.equal(runner.redactedCommand(['docker', 'run', '-e', `DB_PASSWORD=${S1} ${S2}`, 'app']), "docker run -e 'DB_PASSWORD=[REDACTED_AMBIGUOUS]' app");
 });
 
-// Growth guard, not wall-clock speed (the method of the URL/JWT linearity test above): the large input
-// is compared with the same shape at 1/32 of its size, both in CPU time (process.cpuUsage), so a
-// loaded machine does not move it. Linear work costs about 32x more (measured 7x to 35x here),
-// quadratic work about 1024x, so a ratio above 256 is super-linear growth. The large input gets up to
-// 3 tries and the best counts, since noise only ever slows a run. The old wall-clock ceiling stays as
-// a backstop, now on CPU time.
-function assertLinearCost(label, work, build, count, backstopMs) {
+// Growth guard (the method of the URL/JWT linearity test above): the large input is compared with
+// the same shape at 1/32 of its size, both in CPU time (process.cpuUsage), so a loaded machine does
+// not move the ratio. Linear work costs about 32x more (measured 7x to 35x here), quadratic work
+// about 1024x, so a ratio above 256 is super-linear growth. The large input gets up to 3 tries for
+// the ratio and the best counts, since noise only ever slows a run. Beside it stays the old absolute
+// ceiling, unchanged: the wall-clock time of one run of the large input, one try, no retry.
+function assertLinearCost(label, work, build, count, ceilingMs) {
   const SMALLER_BY = 32;
   const MAX_RATIO = 256;
-  const cpuMs = (input) => {
-    const before = process.cpuUsage();
+  const measure = (input) => {
+    const wallStart = process.hrtime.bigint();
+    const cpuStart = process.cpuUsage();
     work(input);
-    const used = process.cpuUsage(before);
-    return (used.user + used.system) / 1000;
+    const used = process.cpuUsage(cpuStart);
+    return { cpu: (used.user + used.system) / 1000, wall: Number(process.hrtime.bigint() - wallStart) / 1e6 };
   };
   const large = build(count);
   const small = build(count / SMALLER_BY);
-  cpuMs(small);
+  measure(small);
   // Best of 5 on the small side, floored at 1 ms so timer granularity cannot inflate the ratio.
-  const baseline = Math.max(1, Math.min(...Array.from({ length: 5 }, () => cpuMs(small))));
-  let best = Infinity;
-  for (let attempt = 0; attempt < 3 && (best / baseline > MAX_RATIO || best >= backstopMs); attempt += 1) best = Math.min(best, cpuMs(large));
+  const baseline = Math.max(1, Math.min(...Array.from({ length: 5 }, () => measure(small).cpu)));
+  const first = measure(large);
+  assert.ok(first.wall < ceilingMs, `${label} took ${Math.round(first.wall)} ms`);
+  let best = first.cpu;
+  for (let attempt = 1; attempt < 3 && best / baseline > MAX_RATIO; attempt += 1) best = Math.min(best, measure(large).cpu);
   assert.ok(best / baseline <= MAX_RATIO, `${label} cost ${(best / baseline).toFixed(1)}x its ${SMALLER_BY}x smaller baseline (${best.toFixed(1)} ms vs ${baseline.toFixed(1)} ms of CPU); more than ${MAX_RATIO}x is super-linear growth`);
-  assert.ok(best < backstopMs, `${label} took ${Math.round(best)} ms of CPU`);
 }
 
 test('security re-review N3/N4: many argv words and control sequences stay fast', () => {

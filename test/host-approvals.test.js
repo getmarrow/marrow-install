@@ -11,7 +11,7 @@ const test = require('node:test');
 const PINS = require('../src/pins');
 const installer = require('../src/installer');
 const runner = require('../src/governed-runner');
-const { clockLog, readWaits, withHookClock } = require('./support/hook-clock');
+const { assertNoBlock, clockLog, readWaits, withHookClock } = require('./support/hook-clock');
 
 const BIN = path.join(__dirname, '..', 'bin', 'marrow-install.js');
 const FIXTURES = path.join(__dirname, 'fixtures', 'installer-0167');
@@ -508,8 +508,10 @@ test('Gemini: the BeforeTool guard passes the typed-reply denial, keeps the fixe
     const slow = run(before.command, 'slow', '{}', withHookClock({}, guardWaits, { timers: 'instant' }));
     assert.equal(slow.status, 2);
     assert.equal(slow.stderr, LAUNCH_FAILURE);
-    const guardTimers = readWaits(guardWaits).timers;
+    const guardSeen = readWaits(guardWaits);
+    const guardTimers = guardSeen.timers;
     assert.deepEqual(guardTimers, [4500], 'the guard asks for exactly one wait');
+    assertNoBlock(guardSeen, 'the guard waits only through that timer');
     assert.ok(guardTimers[0] < before.timeout, 'the guard gives up before the host timeout');
 
     // BeforeAgent never blocks the prompt: valid output passes, anything else becomes {}.

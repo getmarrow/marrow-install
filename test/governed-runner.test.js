@@ -1429,8 +1429,9 @@ test('requestJson aborts a hung request only when a timeout is given', async () 
       clock.run(requestJson(options, 'POST', '/v1/agent/enforcement', { operation: 'heartbeat' }, {}, { timeoutMs: 50 })),
       (error) => error.name === 'TimeoutError',
     );
-    assert.deepEqual(clock.events, [{ kind: 'timeout', ms: 50 }]);
+    assert.deepEqual(clock.events, [{ kind: 'timeout', ms: 50 }], 'the only wait is the timeout asked for: no call blocked the process');
     assert.equal(clock.now, 50);
+    assert.ok(clock.realMs < 2000, `${Math.round(clock.realMs)} ms of real time`);
     assert.equal(signals[0], undefined);
     assert.ok(signals[1] instanceof AbortSignal);
   } finally {

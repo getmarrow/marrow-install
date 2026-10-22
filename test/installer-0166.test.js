@@ -797,9 +797,12 @@ test('self-test writes stop at their time limits instead of hanging the install'
   }
   assert.equal(attempts, 3);
   // Three attempts of 40 ms each and no wait between them: it stops 1.88 s before its 2 s deadline
-  // instead of waiting the deadline out.
+  // instead of waiting the deadline out. The events also show a call that blocks the process
+  // (Atomics.wait, a synchronous child); the real-time bound, the old 2 s, is the hang guard for
+  // any other block.
   assert.deepEqual(clock.events, [{ kind: 'timeout', ms: 40 }, { kind: 'timeout', ms: 40 }, { kind: 'timeout', ms: 40 }]);
   assert.equal(clock.now, 120);
+  assert.ok(clock.realMs < 2_000, `${Math.round(clock.realMs)} ms of real time`);
 });
 
 const KEYLESS_MESSAGE_ACTIVATE = 'Marrow needs your API key. Nothing was written. Create a key at https://getmarrow.ai/signup, save it as MARROW_API_KEY=your_key in the owner-only file ~/.marrow/env, then run chmod 700 ~/.marrow && chmod 600 ~/.marrow/env, then run: npx -y @getmarrow/install@latest activate  (fallback: MARROW_API_KEY=your_key npx -y @getmarrow/install@latest activate)\n';

@@ -1,5 +1,5 @@
 const { deadRegistryHome } = require('./support/isolated-environment');
-const { clockLog, readWaits, withHookClock } = require('./support/hook-clock');
+const { assertAtOnce, assertBlockingChildObservable, assertNoBlock, clockLog, readWaits, withHookClock } = require('./support/hook-clock');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
@@ -251,12 +251,13 @@ test('offline with no copy: the pre-action hook warns and lets the call run (exi
     assert.equal(held.stdout, '');
     assert.equal(held.stderr, `${WARN_TEXT}\n`);
     assert.ok(readWaits(waits).sleeps.length > 0, 'the first call waited for the heal, so the wait is observable');
+    assertBlockingChildObservable();
     const mark = JSON.parse(fs.readFileSync(healOf(home, root).mark, 'utf8'));
     assert.equal(mark.reason, 'npm_install_failed');
     const again = runHook(hook(genuine.integrity), root, withHookClock(hookEnv(home, root), waits, { atomics: 'virtual' }));
     assert.equal(again.status, 1);
     assert.equal(again.stderr, `${WARN_TEXT}\n`);
-    assert.deepEqual(readWaits(waits).sleeps, [], 'the remembered failure is warned at once: the hook never entered its wait');
+    assertAtOnce(readWaits(waits), 'the remembered failure is warned at once');
     const result = runHook(hook(genuine.integrity, 'claude-hook'), root, hookEnv(home, root));
     assert.equal(result.status, 1);
     assert.equal(result.stderr, `${UNAVAILABLE_TEXT}\n`);
@@ -584,7 +585,9 @@ test('outage rule: a registry that answers 500, a heal that cannot finish within
     const timedOut = runHook(hook(genuine.integrity, 'codex-pre-action-hook'), root, withHookClock(hookEnv(slow, root), slowWaits, { atomics: 'virtual' }));
     assert.equal(timedOut.status, 1, timedOut.stderr);
     assert.equal(timedOut.stderr, `${WARN_TEXT}\n`);
-    assert.deepEqual(readWaits(slowWaits).sleeps, new Array(35).fill(100), 'a 5 s host: 35 waits of 100 ms, then the warning');
+    const slowSeen = readWaits(slowWaits);
+    assert.deepEqual(slowSeen.sleeps, new Array(35).fill(100), 'a 5 s host: 35 waits of 100 ms, then the warning');
+    assertNoBlock(slowSeen, 'the hook waited only through those sleeps');
     nothingPlantedRan(slow, root);
 
     // Change 2: no npm-cli.js next to node, and the only npm on PATH is the project's (first on
@@ -737,7 +740,7 @@ test('failure record: only a private record in private directories counts; a loo
       const held = runHook(hook(genuine.integrity), root, withHookClock(hookEnv(home, root), linkedWaits, { atomics: 'virtual' }));
       assert.equal(held.status, 2, `${linked.join('/')}: ${held.stderr}`);
       assert.equal(held.stderr, `${HOLD_TEXT}\n`);
-      assert.deepEqual(readWaits(linkedWaits).sleeps, [], `${linked.join('/')}: held at once, the hook never entered its wait`);
+      assertAtOnce(readWaits(linkedWaits), `${linked.join('/')}: held at once`);
     }
     // A trusted record of an outage: warn at once, no registry request.
     const outage = forged(() => {});
