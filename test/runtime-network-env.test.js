@@ -11,7 +11,7 @@ const PINS = require('../src/pins');
 const { applyPlan, buildPlan, detectEnvironment } = require('../src/installer');
 const { HOLD_TEXT, WARN_TEXT, delocalizeHookScriptText, ensureMcpRuntime, localizeHookCommand, runtimeCore } = require('../src/mcp-runtime');
 const { fakeRuntime } = require('./support/fake-runtime');
-const { assertAtOnce, assertBlockingChildObservable, clockLog, readWaits, withHookClock } = require('./support/hook-clock');
+const { assertAtOnce, assertBlockingChildObservable, assertHangGuardObservable, clockLog, hangGuarded, readWaits, withHookClock } = require('./support/hook-clock');
 
 // Round 4: npm network settings from npm_config_* env (B1), per-project outage records and the
 // rate-limited heal (B2), and the Cline validator on the searched node (F-1). Real npm against a
@@ -110,8 +110,8 @@ function project() {
 }
 const hookFor = (pk, sub = 'claude-pre-action-hook') => localizeHookCommand(`npx -y --package=@getmarrow/mcp@${PIN} marrow-mcp ${sub}`, PIN, { platform: 'linux', integrity: pk.mcp.integrity, sdk: { version: SDK, integrity: pk.sdk.integrity } });
 const envFor = (home, root, extra = {}) => ({ HOME: home, PATH: `.:${root}:${path.dirname(process.execPath)}:/usr/bin:/bin`, ...extra });
-function runHook(command, root, env) {
-  return spawnSync('/bin/sh', ['-c', command], { cwd: root, env, input: EVENT, encoding: 'utf8', timeout: 90_000 });
+function runHook(command, root, env, spawnOptions = {}) {
+  return spawnSync('/bin/sh', ['-c', command], { cwd: root, env, input: EVENT, encoding: 'utf8', timeout: 90_000, ...spawnOptions });
 }
 async function waitForHeal(home) {
   const root = path.join(home, '.marrow', 'runtime', 'mcp');
@@ -339,6 +339,7 @@ test('B2: per-project records (a symlinked path shares its real path\'s record);
     assert.equal(first.status, 1, first.stderr);
     assert.ok(readWaits(waits).sleeps.length > 0, 'the first call waited for the heal, so the wait is observable');
     assertBlockingChildObservable();
+    assertHangGuardObservable();
     await waitForHeal(home);
     const after = down.requests().length;
     assert.ok(after > 0);
@@ -348,7 +349,7 @@ test('B2: per-project records (a symlinked path shares its real path\'s record);
     for (let i = 0; i < 20; i += 1) {
       // (PATH names the real path: a PATH entry spelled through a link is the known node-search
       // residual, builder r3 FOLLOW-UP 2, not this change.)
-      const call = runHook(hookFor(pk), i % 2 ? link : root, withHookClock(envFor(home, root), waits, { atomics: 'virtual' }));
+      const call = hangGuarded((guard) => runHook(hookFor(pk), i % 2 ? link : root, withHookClock(envFor(home, root), waits, { atomics: 'virtual' }), guard), `B2 storm call ${i}`);
       assert.equal(call.status, 1, call.stderr);
       assert.equal(call.stderr, `${WARN_TEXT}\n`);
       const seen = readWaits(waits);
@@ -367,7 +368,7 @@ test('B2: per-project records (a symlinked path shares its real path\'s record);
     // heal; the next call decides.
     const { tried } = runtimeCore.healPaths(home, PIN, root);
     fs.writeFileSync(tried, JSON.stringify({ at: Date.now() - 31_000, reason: 'heal_started' }), { mode: 0o600 });
-    const kicked = runHook(hookFor(pk), root, withHookClock(envFor(home, root), waits, { atomics: 'virtual' }));
+    const kicked = hangGuarded((guard) => runHook(hookFor(pk), root, withHookClock(envFor(home, root), waits, { atomics: 'virtual' }), guard), 'B2 kicked call');
     assert.equal(kicked.status, 1, kicked.stderr);
     assertAtOnce(readWaits(waits), 'warned at once: the hook started the heal without waiting for it');
     // (The heal is detached: wait until it has asked the registry and released its lock.)

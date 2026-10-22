@@ -11,7 +11,7 @@ const test = require('node:test');
 const PINS = require('../src/pins');
 const installer = require('../src/installer');
 const runner = require('../src/governed-runner');
-const { assertNoBlock, clockLog, readWaits, withHookClock } = require('./support/hook-clock');
+const { assertNoBlock, clockLog, hangGuarded, readWaits, withHookClock } = require('./support/hook-clock');
 
 const BIN = path.join(__dirname, '..', 'bin', 'marrow-install.js');
 const FIXTURES = path.join(__dirname, 'fixtures', 'installer-0167');
@@ -478,7 +478,7 @@ test('Gemini: the BeforeTool guard passes the typed-reply denial, keeps the fixe
     assert.equal(handler('AfterAgent', 'marrow-after-agent').command.includes(`${spec()} marrow-mcp gemini-session-hook`), true);
 
     const bin = fakeNpx(ws.base);
-    const run = (command, mode, input = '{}', extraEnv = {}) => spawnSync(written(command), { shell: true, env: { ...process.env, HOME: ws.base, PATH: `${bin}:${process.env.PATH}`, FAKE_NPX_MODE: mode, ...extraEnv }, input, encoding: 'utf8', timeout: 20_000 });
+    const run = (command, mode, input = '{}', extraEnv = {}, spawnOptions = {}) => spawnSync(written(command), { shell: true, env: { ...process.env, HOME: ws.base, PATH: `${bin}:${process.env.PATH}`, FAKE_NPX_MODE: mode, ...extraEnv }, input, encoding: 'utf8', timeout: 20_000, ...spawnOptions });
     const passed = {
       allow: '{"decision":"allow"}\n',
       fixed: '{"decision":"deny","reason":"Marrow blocked this action because required governance approval or proof is unavailable."}\n',
@@ -505,7 +505,8 @@ test('Gemini: the BeforeTool guard passes the typed-reply denial, keeps the fixe
     // The guard's timer is recorded and runs at once instead of after 4.5 s; the test reads the
     // wait the guard asked for, not how long it took.
     const guardWaits = clockLog();
-    const slow = run(before.command, 'slow', '{}', withHookClock({}, guardWaits, { timers: 'instant' }));
+    // (This runner already caps every call at 20 s, below the hang guard's 30 s: the cap stays.)
+    const slow = hangGuarded((guard) => run(before.command, 'slow', '{}', withHookClock({}, guardWaits, { timers: 'instant' }), guard), 'Gemini guard call', { cap: 20_000 });
     assert.equal(slow.status, 2);
     assert.equal(slow.stderr, LAUNCH_FAILURE);
     const guardSeen = readWaits(guardWaits);

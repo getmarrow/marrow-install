@@ -45,6 +45,39 @@ function readWaits(log) {
 // a busy machine gives a spinning hook only part of a CPU (a 4 s loop measured 2.8 s of CPU).
 const HOOK_CPU_GUARD_MS = 1000;
 
+// Hang guard for a hook call that must return at once. The counters above see Atomics.wait, the
+// blocking child calls and CPU time; they do not see a block that waits on nothing they count, for
+// instance fs.readSync on a pipe or FIFO that never gets data. This is the wall-clock check for
+// that one case, a fixed constant (not an env var, not scaled by load): the slowest normal call
+// of these checks measured 217 ms on a host at load 36 (115 to 217 ms across all six), so ten
+// times that is 2.2 s and the 30 s floor decides. It is far above any ordinary slowness under load
+// and exists only to turn a true hang into a failure that says so, instead of waiting for the
+// caller's own timeout (90 s in the hook runners) and then failing on a null exit status.
+const HOOK_NORMAL_MAX_MS = 220;
+const HOOK_HANG_GUARD_MS = Math.max(10 * HOOK_NORMAL_MAX_MS, 30_000);
+
+// Runs one hook call under the hang guard: `spawn` is called with the spawnSync options that carry
+// the bound and returns the spawnSync result, which comes back only if the hook did not hang. The
+// hook is started as its own process-group leader and killed with SIGKILL, so a hook that traps
+// SIGTERM or sits in a blocking read cannot outlive the guard. spawnSync's own timeout kills only
+// the pid it started, and the hook is sh -> sh -> node, so the blocked process is a descendant:
+// after a timeout the whole group is killed by its exact id (the group id is that pid). `cap`
+// lowers the bound for a call whose runner already has a tighter timeout; it never raises it.
+function hangGuarded(spawn, message, { cap = Infinity } = {}) {
+  const bound = Math.min(cap, HOOK_HANG_GUARD_MS);
+  const run = spawn({ timeout: bound, killSignal: 'SIGKILL', detached: true });
+  const hung = Boolean(run.error) && run.error.code === 'ETIMEDOUT';
+  if (hung && run.pid) {
+    try {
+      process.kill(-run.pid, 'SIGKILL');
+    } catch {
+      // nothing of the group is left
+    }
+  }
+  assert.ok(!hung, `HANG GUARD: ${message}: the hook did not return within ${bound} ms and was killed (process group ${run.pid}); it is blocked on something no counter sees, such as a read on a pipe or FIFO that gets no data, which is not ordinary slowness`);
+  return run;
+}
+
 // A hook call that blocked nothing: it ran no blocking child (no allowlist: the hook's warn paths
 // start the heal detached and never run npm inline) and used little CPU.
 function assertNoBlock(waits, message) {
@@ -73,4 +106,24 @@ function assertBlockingChildObservable() {
   assert.ok(seen.cpuMs !== null && seen.cpuMs < HOOK_CPU_GUARD_MS, 'the CPU time is logged at exit');
 }
 
-module.exports = { assertAtOnce, assertBlockingChildObservable, assertNoBlock, clockLog, readWaits, withHookClock, PRELOAD };
+// Positive control for the hang guard: a process blocked in a read on a FIFO that never gets data
+// (opened read-write, so it has no writer to wait for and nothing to wake it) is killed by the
+// guard and the guard fails with its own message. The bound is lowered to 2 s for this probe only.
+function assertHangGuardObservable() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-hang-guard-'));
+  const fifo = path.join(dir, 'never-gets-data');
+  try {
+    assert.equal(spawnSync('mkfifo', [fifo]).status, 0, 'mkfifo made the FIFO');
+    const probe = `const fs=require('node:fs');fs.readSync(fs.openSync(${JSON.stringify(fifo)},'r+'),Buffer.alloc(1),0,1,null)`;
+    let run = null;
+    assert.throws(
+      () => hangGuarded((guard) => (run = spawnSync(process.execPath, ['-e', probe], { env: { PATH: process.env.PATH }, ...guard })), 'control', { cap: 2000 }),
+      /^AssertionError.*HANG GUARD: control: the hook did not return within 2000 ms and was killed/,
+    );
+    assert.equal(run.signal, 'SIGKILL', 'the guard killed the blocked process, and spawnSync returned only after it exited');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+module.exports = { assertAtOnce, assertBlockingChildObservable, assertHangGuardObservable, assertNoBlock, clockLog, hangGuarded, readWaits, withHookClock, PRELOAD };

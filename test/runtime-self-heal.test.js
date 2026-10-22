@@ -1,5 +1,5 @@
 const { deadRegistryHome } = require('./support/isolated-environment');
-const { assertAtOnce, assertBlockingChildObservable, assertNoBlock, clockLog, readWaits, withHookClock } = require('./support/hook-clock');
+const { assertAtOnce, assertBlockingChildObservable, assertHangGuardObservable, assertNoBlock, clockLog, hangGuarded, readWaits, withHookClock } = require('./support/hook-clock');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
@@ -163,8 +163,8 @@ function hookEnv(home, root, extra = {}) {
   // The project first on PATH, relative and absolute (direnv-style): its node must never run.
   return { HOME: home, PATH: `.:node_modules/.bin:${root}:${root}/node_modules/.bin:${path.dirname(process.execPath)}:/usr/bin:/bin`, npm_config_registry: 'http://127.0.0.1:9/', npm_config_prefix: root, ...extra };
 }
-function runHook(command, root, env) {
-  return spawnSync('/bin/sh', ['-c', command], { cwd: root, env, input: EVENT, encoding: 'utf8', timeout: 90_000 });
+function runHook(command, root, env, spawnOptions = {}) {
+  return spawnSync('/bin/sh', ['-c', command], { cwd: root, env, input: EVENT, encoding: 'utf8', timeout: 90_000, ...spawnOptions });
 }
 const canonical = (sub, version = PIN) => `npx -y --package=@getmarrow/mcp@${version} marrow-mcp ${sub}`;
 // The hook a project file carries, for the stand-in package's integrity (no SDK pin: the stub
@@ -252,9 +252,10 @@ test('offline with no copy: the pre-action hook warns and lets the call run (exi
     assert.equal(held.stderr, `${WARN_TEXT}\n`);
     assert.ok(readWaits(waits).sleeps.length > 0, 'the first call waited for the heal, so the wait is observable');
     assertBlockingChildObservable();
+    assertHangGuardObservable();
     const mark = JSON.parse(fs.readFileSync(healOf(home, root).mark, 'utf8'));
     assert.equal(mark.reason, 'npm_install_failed');
-    const again = runHook(hook(genuine.integrity), root, withHookClock(hookEnv(home, root), waits, { atomics: 'virtual' }));
+    const again = hangGuarded((guard) => runHook(hook(genuine.integrity), root, withHookClock(hookEnv(home, root), waits, { atomics: 'virtual' }), guard), 'remembered-failure repeat call');
     assert.equal(again.status, 1);
     assert.equal(again.stderr, `${WARN_TEXT}\n`);
     assertAtOnce(readWaits(waits), 'the remembered failure is warned at once');
@@ -582,7 +583,7 @@ test('outage rule: a registry that answers 500, a heal that cannot finish within
     // The hook's clock is virtual: it asks to sleep in 100 ms steps, passes them without sleeping,
     // and gives up when they add up to the 3.5 s budget.
     const slowWaits = clockLog();
-    const timedOut = runHook(hook(genuine.integrity, 'codex-pre-action-hook'), root, withHookClock(hookEnv(slow, root), slowWaits, { atomics: 'virtual' }));
+    const timedOut = hangGuarded((guard) => runHook(hook(genuine.integrity, 'codex-pre-action-hook'), root, withHookClock(hookEnv(slow, root), slowWaits, { atomics: 'virtual' }), guard), 'budget-end call');
     assert.equal(timedOut.status, 1, timedOut.stderr);
     assert.equal(timedOut.stderr, `${WARN_TEXT}\n`);
     const slowSeen = readWaits(slowWaits);
@@ -737,7 +738,7 @@ test('failure record: only a private record in private directories counts; a loo
       if (linked.length > 1) fs.mkdirSync(path.join(home, ...linked.slice(0, -1)), { recursive: true, mode: 0o700 });
       fs.symlinkSync(linked.length === 1 ? elsewhere : linked.length === 2 ? path.join(elsewhere, 'runtime') : path.join(elsewhere, 'runtime', 'mcp'), path.join(home, ...linked));
       const linkedWaits = clockLog();
-      const held = runHook(hook(genuine.integrity), root, withHookClock(hookEnv(home, root), linkedWaits, { atomics: 'virtual' }));
+      const held = hangGuarded((guard) => runHook(hook(genuine.integrity), root, withHookClock(hookEnv(home, root), linkedWaits, { atomics: 'virtual' }), guard), `${linked.join('/')}: linked-directory call`);
       assert.equal(held.status, 2, `${linked.join('/')}: ${held.stderr}`);
       assert.equal(held.stderr, `${HOLD_TEXT}\n`);
       assertAtOnce(readWaits(linkedWaits), `${linked.join('/')}: held at once`);
