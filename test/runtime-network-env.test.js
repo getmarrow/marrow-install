@@ -11,7 +11,7 @@ const PINS = require('../src/pins');
 const { applyPlan, buildPlan, detectEnvironment } = require('../src/installer');
 const { HOLD_TEXT, WARN_TEXT, delocalizeHookScriptText, ensureMcpRuntime, localizeHookCommand, runtimeCore } = require('../src/mcp-runtime');
 const { fakeRuntime } = require('./support/fake-runtime');
-const { assertAtOnce, assertBlockingChildObservable, assertHangGuardObservable, clockLog, hangGuarded, readWaits, withHookClock } = require('./support/hook-clock');
+const { assertActiveResourcesObservable, assertAtOnce, assertBlockingChildObservable, assertHangGuardObservable, clockLog, hangGuarded, readWaits, withHookClock } = require('./support/hook-clock');
 
 // Round 4: npm network settings from npm_config_* env (B1), per-project outage records and the
 // rate-limited heal (B2), and the Cline validator on the searched node (F-1). Real npm against a
@@ -339,6 +339,7 @@ test('B2: per-project records (a symlinked path shares its real path\'s record);
     assert.equal(first.status, 1, first.stderr);
     assert.ok(readWaits(waits).sleeps.length > 0, 'the first call waited for the heal, so the wait is observable');
     assertBlockingChildObservable();
+    assertActiveResourcesObservable();
     assertHangGuardObservable();
     await waitForHeal(home);
     const after = down.requests().length;

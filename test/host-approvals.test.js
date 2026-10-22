@@ -512,7 +512,12 @@ test('Gemini: the BeforeTool guard passes the typed-reply denial, keeps the fixe
     const guardSeen = readWaits(guardWaits);
     const guardTimers = guardSeen.timers;
     assert.deepEqual(guardTimers, [4500], 'the guard asks for exactly one wait');
-    assertNoBlock(guardSeen, 'the guard waits only through that timer');
+    // (Unlike the other hook calls this one cannot end with an empty event loop: the guard runs its
+    // entrypoint as a child and holds it until its timer fires. On the first turn it holds exactly
+    // that child, that child's stdout pipe and that one timer (which the clock runs as an
+    // immediate), measured on every run; the check allows those and fails on anything else or more,
+    // such as a socket, a second timer or pending async I/O.)
+    assertNoBlock(guardSeen, 'the guard waits only through that timer', { allow: { Immediate: 1, ProcessWrap: 1, PipeWrap: 1 } });
     assert.ok(guardTimers[0] < before.timeout, 'the guard gives up before the host timeout');
 
     // BeforeAgent never blocks the prompt: valid output passes, anything else becomes {}.

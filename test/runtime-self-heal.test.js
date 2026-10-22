@@ -1,5 +1,5 @@
 const { deadRegistryHome } = require('./support/isolated-environment');
-const { assertAtOnce, assertBlockingChildObservable, assertHangGuardObservable, assertNoBlock, clockLog, hangGuarded, readWaits, withHookClock } = require('./support/hook-clock');
+const { assertActiveResourcesObservable, assertAtOnce, assertBlockingChildObservable, assertHangGuardObservable, assertNoBlock, clockLog, hangGuarded, readWaits, withHookClock } = require('./support/hook-clock');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
@@ -252,6 +252,7 @@ test('offline with no copy: the pre-action hook warns and lets the call run (exi
     assert.equal(held.stderr, `${WARN_TEXT}\n`);
     assert.ok(readWaits(waits).sleeps.length > 0, 'the first call waited for the heal, so the wait is observable');
     assertBlockingChildObservable();
+    assertActiveResourcesObservable();
     assertHangGuardObservable();
     const mark = JSON.parse(fs.readFileSync(healOf(home, root).mark, 'utf8'));
     assert.equal(mark.reason, 'npm_install_failed');
