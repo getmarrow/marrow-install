@@ -86,6 +86,68 @@ function readOwnerKeyDetail(home) {
   return { apiKey: found[0].apiKey, source: found[0].source, conflict, fileName: found[0].name, endpoint: found[0].values };
 }
 
+// Names of key entries in an env file whose value is blank (`MARROW_API_KEY=`, `MARROW_API_KEY="   "`): the
+// same line grammar as parseKeyLines, which drops them, so the reader never sees a blank key.
+function blankKeyNames(raw) {
+  const names = new Set();
+  for (const line of String(raw || '').split(/\r?\n/)) {
+    const match = line.match(/^\s*(?:export\s+)?([A-Z_][A-Z0-9_]*)\s*=\s*(.*?)\s*$/);
+    if (!match || !KEY_NAMES.includes(match[1])) continue;
+    let value = match[2] || '';
+    const hashIndex = value.search(/\s+#/);
+    if (hashIndex >= 0) value = value.slice(0, hashIndex);
+    if (stripQuotes(value).trim() === '') names.add(match[1]);
+  }
+  return [...names];
+}
+
+// Why no key can be used, for doctor, as names and reasons only (never a value). Call it when no key was found:
+// state 'none' is a plain "no key yet"; 'empty' is a key entry that is present but blank (an environment variable
+// set to blank, or a blank line in an owner env file); 'unusable' is an owner env file that exists but cannot be
+// used (not an owner-only file, or unreadable). Only a missing file counts as absent. `homeWritable` says the home
+// folder is group- or other-writable, which makes every file under it unusable as an owner file.
+function ownerKeyStoreState(home, env = {}) {
+  const problems = [];
+  for (const name of KEY_NAMES) {
+    const value = env[name];
+    if (typeof value !== 'string') continue;
+    if (value.trim()) return { state: 'key', problems: [], homeWritable: false };
+    problems.push({ state: 'empty', name, source: 'the environment' });
+  }
+  let keyFound = false;
+  for (const name of OWNER_ENV_FILES) {
+    const filePath = path.join(home, '.marrow', name);
+    const source = `~/.marrow/${name}`;
+    try {
+      fs.lstatSync(filePath);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') problems.push({ state: 'unusable', name, source, reason: 'cannot be inspected' });
+      continue;
+    }
+    if (!isPrivateOwnerFile(filePath, home)) {
+      problems.push({ state: 'unusable', name, source, reason: 'is not an owner-only file' });
+      continue;
+    }
+    let raw;
+    try {
+      raw = fs.readFileSync(filePath, 'utf8');
+    } catch {
+      problems.push({ state: 'unusable', name, source, reason: 'cannot be read' });
+      continue;
+    }
+    const values = parseKeyLines(raw);
+    if (String(values.MARROW_API_KEY || '').trim() || String(values.MARROW_KEY || '').trim()) keyFound = true;
+    else for (const keyName of blankKeyNames(raw)) problems.push({ state: 'empty', name: keyName, source });
+  }
+  if (keyFound) return { state: 'key', problems: [], homeWritable: false };
+  let homeWritable = false;
+  try {
+    homeWritable = (fs.lstatSync(home).mode & 0o022) !== 0;
+  } catch { /* an unreadable home is reported by the file checks above */ }
+  const state = !problems.length ? 'none' : problems.some((problem) => problem.state === 'unusable') ? 'unusable' : 'empty';
+  return { state, problems, homeWritable };
+}
+
 function readOwnerApiKey(home) {
   const { apiKey, source, conflict } = readOwnerKeyDetail(home);
   return { apiKey, source, conflict };
@@ -139,6 +201,7 @@ function ensureOwnerApiKey(home, apiKey) {
 module.exports = {
   ensureOwnerApiKey,
   isPrivateOwnerFile,
+  ownerKeyStoreState,
   readOwnerApiKey,
   readOwnerKeyDetail,
 };

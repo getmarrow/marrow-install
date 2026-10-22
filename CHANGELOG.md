@@ -2,6 +2,16 @@
 
 Release notes for `@getmarrow/install`, newest first. The README describes only the current version.
 
+## Unreleased
+
+v0.1.74 (unreleased). `doctor` wording and one line of guidance only; the counting rules are unchanged, nothing `setup`, `activate`, `update` or `--repair` writes changes, `update` prints what it printed before, and the pins stay MCP `3.9.105` and SDK `3.7.67`.
+
+- **Doctor's Cursor line says what it cannot see.** A Cursor plugin is still never counted: the plugin docs name no verified place where Cursor installs it and no file that says it is enabled. When Cursor's hooks are really missing, the line keeps its `--repair` and adds one sentence: if you installed a Marrow plugin in Cursor, check Cursor's plugin list first, because doctor cannot see it and `--repair` would add a second set. `update` keeps the base line.
+- **Doctor names only hosts that are there.** A `.mcp.json` with no host marker (`.claude`, `CLAUDE.md`, `.cursor`, `.codex`, and the rest) is reported as `MCP config (host unknown)`, no longer as Claude Code. This is doctor only: `update` still names Claude Code for it, as before.
+- **A key that is blank or cannot be used is a failure, never "no key yet".** When no key can be used, doctor now says why: `MARROW_API_KEY is set but empty in <source>` (an environment variable or a line in `~/.marrow/env` or `env.local`), or `~/.marrow/env cannot be read` or `is not an owner-only file`, with the fix. With a counted plugin the label stays `Marrow active: no` (not `seatbelt only (no key yet)`) and the fix never tells you to run `--repair` or `activate`; without one, `--repair` stays the last step. When your home folder is writable by a group or others, the fix names `chmod go-w ~`. A key value is never printed.
+- **A group-writable plugin copy: one line to fix it.** A copy made under `umask 002` is still not counted (a shared group or an ACL grant looks the same, because an ACL's mask is the group bits, and a group member could replace the launcher). Doctor now says so in one line, `chmod -R go-w <copy>` plus `chmod go-w` for the folders above it and each config file it read, instead of one path per run. A copy with any other problem keeps the per-path message.
+- **With a counted plugin, no second set of hooks is suggested.** The skipped self-test's hint no longer ends in `activate` (it is the plugin key fix), and the MCP runtime line does not send you to `--repair` unless an installer hook of its own needs repair.
+
 ## v0.1.73
 
 v0.1.73 installs MCP `3.9.105` (source `8ffda0034d8b2590e8b7996b7be01debf1bd64f0`, packed integrity `sha512-coU1B1ee2AG0MQ6zgzmwj2IllqnpOQYwyihWTtG7rM67hnelMGHF0fY5Z7Rd2acFH4hw96yr73yaDraEkeht3w==`). SDK is `3.7.67` (packed integrity `sha512-0Lwg4XLxm9eXxMgQtFAH1y4mXi9CXg3poQlGbeK0AW+EHP+yfUWQUH4d1XYO03QNzwHLAYKfARDmnl5GpBnKUw==`). Update once and restart the owning harness; Claude Code needs no other step, Codex still needs the one-time `/hooks` review.

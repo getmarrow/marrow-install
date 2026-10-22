@@ -9,14 +9,23 @@
 //   and ~/.claude/settings.json has enabledPlugins["marrow@getmarrow"] === true.
 // - Codex 0.161.0 (`codex plugin add marrow@getmarrow`): <codex home>/plugins/cache/getmarrow/marrow/<version>,
 //   and <codex home>/config.toml has [plugins."marrow@getmarrow"] with enabled = true.
-// Cursor's install layout is not verified, so a Cursor plugin is never counted.
+// Cursor is not counted. The Cursor plugin tree (plugins 5537049f, plugins/marrow-cursor) gives the exact pre-action
+// command (`node "${CURSOR_PLUGIN_ROOT}/scripts/marrow-launch.cjs" cursor-pre-action-hook`, in a flat hooks.json with
+// preToolUse, beforeShellExecution and beforeMCPExecution entries) but no verified install location: its "Install in
+// Cursor" section says to add the repository as a plugin source inside Cursor (no path) or, as a fallback, to copy
+// the folder to ~/.cursor/plugins/local/marrow by hand (live proof pending), and its README says Cursor cannot install
+// Marrow yet. No file recording that the plugin is enabled is documented either. A path is never guessed: a Cursor
+// plugin is counted only after a measured install gives the path and the enabled state (doctor's Cursor line says so).
 //
 // A project can only turn a plugin off: its own settings disabling the plugin make it not counted
 // there; nothing in a project ever makes a plugin count.
 //
 // Only those locations count, and only when every folder from the home folder down and every file
-// read is a real (not symlinked) entry owned by this user that no one else can write. A folder or
-// file merely named "marrow" in a project, or anything outside the user's home, never counts.
+// read is a real (not symlinked) entry owned by this user that no one else can write: group write counts as
+// writable by others (a shared primary group and an ACL grant both show up as group bits, and a group member
+// could replace the launcher). A copy made under umask 002 is not counted; when group write is the only problem,
+// one line with one chmod command fixes every entry doctor reads. A folder or file merely named "marrow" in a
+// project, or anything outside the user's home, never counts.
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -46,21 +55,23 @@ const HOSTS = Object.freeze({
 
 const uid = () => (typeof process.getuid === 'function' ? process.getuid() : null);
 
-// Why an entry is not owner-only, or null when it is.
-function unsafeEntry(entry, kind) {
+// Why an entry is not owner-only, or null when it is. `groupOnly` marks an entry whose only problem is group write.
+function entryProblem(entry, kind) {
   let stat;
   try {
     stat = fs.lstatSync(entry);
   } catch {
-    return 'missing';
+    return { reason: 'missing' };
   }
-  if (stat.isSymbolicLink()) return 'a symbolic link';
-  if (kind === 'dir' ? !stat.isDirectory() : !stat.isFile()) return kind === 'dir' ? 'not a folder' : 'not a file';
+  if (stat.isSymbolicLink()) return { reason: 'a symbolic link' };
+  if (kind === 'dir' ? !stat.isDirectory() : !stat.isFile()) return { reason: kind === 'dir' ? 'not a folder' : 'not a file' };
   const me = uid();
-  if (me !== null && stat.uid !== me) return 'owned by another user';
-  if ((stat.mode & 0o022) !== 0) return 'writable by other users';
+  if (me !== null && stat.uid !== me) return { reason: 'owned by another user' };
+  if ((stat.mode & 0o022) !== 0) return { reason: 'writable by other users', groupOnly: (stat.mode & 0o002) === 0 };
   return null;
 }
+
+const unsafeEntry = (entry, kind) => entryProblem(entry, kind)?.reason || null;
 
 // Checks every folder from home down to target (inclusive when target is a folder).
 function unsafeChain(home, target, kind) {
@@ -129,6 +140,69 @@ function inspectCopy(home, host, copy, version) {
   return { version, path: copy, events };
 }
 
+// The one plugin version folder under a host's cache folder, when exactly one exists (used only to name a fix).
+function cachedCopy(cacheDir) {
+  const problem = entryProblem(cacheDir, 'dir');
+  if (problem && !problem.groupOnly) return null;
+  try {
+    const versions = fs.readdirSync(cacheDir).filter((name) => VERSION.test(name));
+    return versions.length === 1 ? path.join(cacheDir, versions[0]) : null;
+  } catch {
+    return null;
+  }
+}
+
+const shellWord = (value) => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, "'\\''")}'`);
+
+// For a copy that is not counted only because group write is set (an install made under umask 002; a shared
+// primary group and an ACL grant look the same, because an ACL's mask is the group bits): one line that clears
+// it for every entry doctor reads. Null when anything else is wrong with any of them (another owner, a link,
+// world write, a missing file): then only the per-path message applies, and nothing here loosens a check.
+function groupWriteFix(home, host, copy, configFiles) {
+  if (!copy) return null;
+  const spec = HOSTS[host];
+  const files = [path.join(copy, spec.manifest), path.join(copy, 'scripts', 'marrow-launch.cjs'), path.join(copy, 'hooks', 'hooks.json')];
+  const inside = [[copy, 'dir']];
+  for (const file of files) {
+    const parts = path.relative(copy, file).split(path.sep);
+    let current = copy;
+    parts.forEach((part, index) => {
+      current = path.join(current, part);
+      inside.push([current, index === parts.length - 1 ? 'file' : 'dir']);
+    });
+  }
+  const outside = [[home, 'dir']];
+  const down = path.relative(home, path.dirname(copy));
+  if (down.startsWith('..') || path.isAbsolute(down)) return null;
+  let current = home;
+  for (const part of down.split(path.sep).filter(Boolean)) {
+    current = path.join(current, part);
+    outside.push([current, 'dir']);
+  }
+  outside.push(...configFiles.map((file) => [file, 'file']));
+  const single = [];
+  let recursive = false;
+  for (const [entry, kind] of outside) {
+    const problem = entryProblem(entry, kind);
+    if (problem && !problem.groupOnly) return null;
+    if (problem) single.push(entry);
+  }
+  for (const [entry, kind] of inside) {
+    const problem = entryProblem(entry, kind);
+    if (problem && !problem.groupOnly) return null;
+    if (problem) recursive = true;
+  }
+  const commands = [...(recursive ? [`chmod -R go-w ${shellWord(copy)}`] : []), ...(single.length ? [`chmod go-w ${single.map(shellWord).join(' ')}`] : [])];
+  return commands.length && ![copy, ...single].some((entry) => /[\x00-\x1f\x7f-\x9f]/.test(entry)) ? commands.join(' && ') : null;
+}
+
+// Adds the one-line fix to a plugin that is not counted only because of group write.
+function withGroupWriteFix(plugin, home, host, copy, configFiles) {
+  if (plugin.counted || plugin.unsafe?.reason !== 'writable by other users') return plugin;
+  const fix = groupWriteFix(home, host, typeof copy === 'function' ? copy() : copy, configFiles);
+  return fix ? { ...plugin, group_write_fix: fix } : plugin;
+}
+
 // A project file read only to find an explicit "off" (never trusted to turn anything on).
 function projectText(file) {
   try {
@@ -161,7 +235,10 @@ function claudePlugin(home, project) {
     return null;
   }
   const list = readOwnerJson(home, installed);
-  if (list.unsafe) return { host: 'claude-code', counted: false, ...list };
+  const cache = path.join(base, 'plugins', 'cache', MARKETPLACE, 'marrow');
+  const configFiles = [installed, path.join(base, 'settings.json')];
+  const fixable = (plugin, copy) => withGroupWriteFix(plugin, home, 'claude-code', copy, configFiles);
+  if (list.unsafe) return fixable({ host: 'claude-code', counted: false, ...list }, () => cachedCopy(cache));
   const entries = own(own(list.value, 'plugins'), PLUGIN_KEY);
   const entry = Array.isArray(entries) ? entries.find((item) => own(item, 'scope') === 'user') : null;
   if (!entry) return null;
@@ -170,12 +247,12 @@ function claudePlugin(home, project) {
   const expected = path.join(base, 'plugins', 'cache', MARKETPLACE, 'marrow', version);
   if (own(entry, 'installPath') !== expected) return { host: 'claude-code', counted: false, invalid: `it is not installed at ${expected}` };
   const settings = readOwnerJson(home, path.join(base, 'settings.json'));
-  if (settings.unsafe) return { host: 'claude-code', counted: false, ...settings };
+  if (settings.unsafe) return fixable({ host: 'claude-code', counted: false, ...settings }, expected);
   if (own(own(settings.value, 'enabledPlugins'), PLUGIN_KEY) !== true) return { host: 'claude-code', counted: false, version, disabled: true };
   const off = claudeProjectDisables(project);
   if (off) return { host: 'claude-code', counted: false, version, disabled: true, disabled_by: off };
   const copy = inspectCopy(home, 'claude-code', expected, version);
-  return { host: 'claude-code', counted: Boolean(copy.events), ...copy };
+  return fixable({ host: 'claude-code', counted: Boolean(copy.events), ...copy }, expected);
 }
 
 // `[plugins."marrow@getmarrow"]` followed (before the next table) by `enabled = true`. Any other
@@ -207,16 +284,18 @@ function codexPlugin(home, env, project) {
   const cache = path.join(configured, 'plugins', 'cache', MARKETPLACE, 'marrow');
   if (!fs.existsSync(config) || !fs.existsSync(cache)) return null;
   const read = readOwnerFile(home, config);
-  if (read.unsafe) return { host: 'codex', counted: false, ...read };
+  const fixable = (plugin, copy) => withGroupWriteFix(plugin, home, 'codex', copy, [config]);
+  if (read.unsafe) return fixable({ host: 'codex', counted: false, ...read }, () => cachedCopy(cache));
   if (!codexPluginEnabled(read.text)) return { host: 'codex', counted: false, disabled: true };
   const projectConfig = project ? path.join(project, '.codex', 'config.toml') : null;
   if (projectConfig && codexPluginState(projectText(projectConfig)) === false) return { host: 'codex', counted: false, disabled: true, disabled_by: projectConfig };
   const unsafe = unsafeChain(home, cache, 'dir');
-  if (unsafe) return { host: 'codex', counted: false, unsafe };
+  if (unsafe) return fixable({ host: 'codex', counted: false, unsafe }, () => cachedCopy(cache));
   const versions = fs.readdirSync(cache).filter((name) => VERSION.test(name));
   if (versions.length !== 1) return { host: 'codex', counted: false, invalid: versions.length ? `it has ${versions.length} cached versions (${versions.join(', ')})` : 'it has no cached copy' };
-  const copy = inspectCopy(home, 'codex', path.join(cache, versions[0]), versions[0]);
-  return { host: 'codex', counted: Boolean(copy.events), ...copy };
+  const copyPath = path.join(cache, versions[0]);
+  const copy = inspectCopy(home, 'codex', copyPath, versions[0]);
+  return fixable({ host: 'codex', counted: Boolean(copy.events), ...copy }, copyPath);
 }
 
 function detectAgentPlugins({ home, env = {}, project = null }) {
@@ -234,6 +313,7 @@ function detectAgentPlugins({ home, env = {}, project = null }) {
 function describeAgentPlugin(plugin) {
   if (plugin.counted) return `${plugin.name}: Marrow plugin ${plugin.version} (${plugin.path}); its hooks: ${plugin.events.join(', ')}`;
   if (plugin.disabled) return `${plugin.name}: Marrow plugin installed but ${plugin.disabled_by ? `turned off for this project in ${plugin.disabled_by}` : 'not enabled'}; not counted`;
+  if (plugin.group_write_fix) return `${plugin.name}: Marrow plugin not counted: ${plugin.unsafe.path} is writable by other users (by a group only, as after an install under umask 002; a shared group or an ACL looks the same). Fix, one line: ${plugin.group_write_fix}, then run doctor again`;
   if (plugin.unsafe) return `${plugin.name}: Marrow plugin not counted: ${plugin.unsafe.path} is ${plugin.unsafe.reason}. Fix: chmod go-w ${plugin.unsafe.path} (it must be yours, not a link), then run doctor again`;
   return `${plugin.name}: Marrow plugin not counted: ${plugin.invalid}. Fix: reinstall it with ${plugin.remove_plugin} and then the host's plugin install for marrow@getmarrow`;
 }
