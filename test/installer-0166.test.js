@@ -35,6 +35,7 @@ const MATCHER = require('../src/marrow-own-tools').buildOwnToolMatchers().claude
 const command = (entrypoint) => `npx -y --package=${MCP_PIN} marrow-mcp ${entrypoint}`;
 
 const { canonicalHooks } = require('./support/fake-runtime');
+const { installVirtualClock } = require('./support/virtual-clock');
 const { hookTextUsesNpx } = require('../src/mcp-runtime');
 function tempDir(prefix = 'marrow-0166-') {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -774,11 +775,13 @@ test('self-test writes stop at their time limits instead of hanging the install'
     attempts += 1;
     request.signal?.addEventListener('abort', () => reject(Object.assign(new Error('timed out'), { name: 'TimeoutError' })));
   });
-  const started = Date.now();
   // The request timers are unref'd, as a real socket would keep the process alive instead.
   const keepAlive = setInterval(() => {}, 1_000);
+  // Virtual time: the attempt timeouts fire without a real wait, and the test reads the waits the
+  // product asked for instead of measuring how long it took.
+  const clock = installVirtualClock();
   try {
-    await assert.rejects(runSelfTest({
+    await assert.rejects(clock.run(runSelfTest({
       selfTest: true,
       apiKey: 'mrw_fixture_timeout',
       baseUrl: 'https://api.example.test',
@@ -786,13 +789,17 @@ test('self-test writes stop at their time limits instead of hanging the install'
       selfTestRetryDelayMs: 0,
       selfTestAttemptTimeoutMs: 40,
       selfTestDeadlineMs: 2_000,
-    }), /self-test did not return decision_id after 3 attempts \(last: timed out\)/);
+    })), /self-test did not return decision_id after 3 attempts \(last: timed out\)/);
   } finally {
+    clock.restore();
     clearInterval(keepAlive);
     global.fetch = originalFetch;
   }
   assert.equal(attempts, 3);
-  assert.ok(Date.now() - started < 2_000);
+  // Three attempts of 40 ms each and no wait between them: it stops 1.88 s before its 2 s deadline
+  // instead of waiting the deadline out.
+  assert.deepEqual(clock.events, [{ kind: 'timeout', ms: 40 }, { kind: 'timeout', ms: 40 }, { kind: 'timeout', ms: 40 }]);
+  assert.equal(clock.now, 120);
 });
 
 const KEYLESS_MESSAGE_ACTIVATE = 'Marrow needs your API key. Nothing was written. Create a key at https://getmarrow.ai/signup, save it as MARROW_API_KEY=your_key in the owner-only file ~/.marrow/env, then run chmod 700 ~/.marrow && chmod 600 ~/.marrow/env, then run: npx -y @getmarrow/install@latest activate  (fallback: MARROW_API_KEY=your_key npx -y @getmarrow/install@latest activate)\n';

@@ -6,6 +6,7 @@ const path = require('node:path');
 const { PassThrough, Writable } = require('node:stream');
 const test = require('node:test');
 const PINS = require('../src/pins');
+const { installVirtualClock } = require('./support/virtual-clock');
 
 const {
   gateDecision,
@@ -1418,17 +1419,22 @@ test('requestJson aborts a hung request only when a timeout is given', async () 
   const options = { apiKey: 'test-key', baseUrl: 'http://127.0.0.1:9', sessionId: 'session-1', client: 'codex' };
   // AbortSignal.timeout uses an unref'd timer; a real socket keeps the loop alive, this stub does not.
   const keepAlive = setInterval(() => {}, 1000);
+  // Virtual time: the 50 ms timeout fires without a real wait, and the test reads the waits the
+  // product asked for instead of measuring how long it took.
+  const clock = installVirtualClock();
   try {
-    assert.deepEqual(await requestJson(options, 'GET', '/v1/agent/status'), { ok: true });
-    const started = Date.now();
+    assert.deepEqual(await clock.run(requestJson(options, 'GET', '/v1/agent/status')), { ok: true });
+    assert.deepEqual(clock.events, [], 'a request given no timeout asks for no wait');
     await assert.rejects(
-      requestJson(options, 'POST', '/v1/agent/enforcement', { operation: 'heartbeat' }, {}, { timeoutMs: 50 }),
+      clock.run(requestJson(options, 'POST', '/v1/agent/enforcement', { operation: 'heartbeat' }, {}, { timeoutMs: 50 })),
       (error) => error.name === 'TimeoutError',
     );
-    assert.ok(Date.now() - started < 2000);
+    assert.deepEqual(clock.events, [{ kind: 'timeout', ms: 50 }]);
+    assert.equal(clock.now, 50);
     assert.equal(signals[0], undefined);
     assert.ok(signals[1] instanceof AbortSignal);
   } finally {
+    clock.restore();
     clearInterval(keepAlive);
     globalThis.fetch = originalFetch;
   }

@@ -11,6 +11,7 @@ const test = require('node:test');
 const PINS = require('../src/pins');
 const installer = require('../src/installer');
 const runner = require('../src/governed-runner');
+const { clockLog, readWaits, withHookClock } = require('./support/hook-clock');
 
 const BIN = path.join(__dirname, '..', 'bin', 'marrow-install.js');
 const FIXTURES = path.join(__dirname, 'fixtures', 'installer-0167');
@@ -477,7 +478,7 @@ test('Gemini: the BeforeTool guard passes the typed-reply denial, keeps the fixe
     assert.equal(handler('AfterAgent', 'marrow-after-agent').command.includes(`${spec()} marrow-mcp gemini-session-hook`), true);
 
     const bin = fakeNpx(ws.base);
-    const run = (command, mode, input = '{}') => spawnSync(written(command), { shell: true, env: { ...process.env, HOME: ws.base, PATH: `${bin}:${process.env.PATH}`, FAKE_NPX_MODE: mode }, input, encoding: 'utf8', timeout: 20_000 });
+    const run = (command, mode, input = '{}', extraEnv = {}) => spawnSync(written(command), { shell: true, env: { ...process.env, HOME: ws.base, PATH: `${bin}:${process.env.PATH}`, FAKE_NPX_MODE: mode, ...extraEnv }, input, encoding: 'utf8', timeout: 20_000 });
     const passed = {
       allow: '{"decision":"allow"}\n',
       fixed: '{"decision":"deny","reason":"Marrow blocked this action because required governance approval or proof is unavailable."}\n',
@@ -501,11 +502,15 @@ test('Gemini: the BeforeTool guard passes the typed-reply denial, keeps the fixe
     assert.equal(echoed.status, 0, echoed.stderr);
     assert.equal(JSON.parse(echoed.stdout).reason, `bytes ${Buffer.byteLength(big)}`);
     // A hung entrypoint is blocked before Gemini's own 5 s timeout could let the call through.
-    const started = Date.now();
-    const slow = run(before.command, 'slow');
+    // The guard's timer is recorded and runs at once instead of after 4.5 s; the test reads the
+    // wait the guard asked for, not how long it took.
+    const guardWaits = clockLog();
+    const slow = run(before.command, 'slow', '{}', withHookClock({}, guardWaits, { timers: 'instant' }));
     assert.equal(slow.status, 2);
     assert.equal(slow.stderr, LAUNCH_FAILURE);
-    assert.ok(Date.now() - started < 5000, 'the guard gives up before the host timeout');
+    const guardTimers = readWaits(guardWaits).timers;
+    assert.deepEqual(guardTimers, [4500], 'the guard asks for exactly one wait');
+    assert.ok(guardTimers[0] < before.timeout, 'the guard gives up before the host timeout');
 
     // BeforeAgent never blocks the prompt: valid output passes, anything else becomes {}.
     for (const [mode, stdout] of [['ctx', null], ['ctxempty', '{}\n']]) {

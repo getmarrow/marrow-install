@@ -11,6 +11,7 @@ const PINS = require('../src/pins');
 const { applyPlan, buildPlan, detectEnvironment } = require('../src/installer');
 const { HOLD_TEXT, WARN_TEXT, delocalizeHookScriptText, ensureMcpRuntime, localizeHookCommand, runtimeCore } = require('../src/mcp-runtime');
 const { fakeRuntime } = require('./support/fake-runtime');
+const { clockLog, readWaits, withHookClock } = require('./support/hook-clock');
 
 // Round 4: npm network settings from npm_config_* env (B1), per-project outage records and the
 // rate-limited heal (B2), and the Cline validator on the searched node (F-1). Real npm against a
@@ -110,9 +111,7 @@ function project() {
 const hookFor = (pk, sub = 'claude-pre-action-hook') => localizeHookCommand(`npx -y --package=@getmarrow/mcp@${PIN} marrow-mcp ${sub}`, PIN, { platform: 'linux', integrity: pk.mcp.integrity, sdk: { version: SDK, integrity: pk.sdk.integrity } });
 const envFor = (home, root, extra = {}) => ({ HOME: home, PATH: `.:${root}:${path.dirname(process.execPath)}:/usr/bin:/bin`, ...extra });
 function runHook(command, root, env) {
-  const started = Date.now();
-  const result = spawnSync('/bin/sh', ['-c', command], { cwd: root, env, input: EVENT, encoding: 'utf8', timeout: 90_000 });
-  return { ...result, ms: Date.now() - started };
+  return spawnSync('/bin/sh', ['-c', command], { cwd: root, env, input: EVENT, encoding: 'utf8', timeout: 90_000 });
 }
 async function waitForHeal(home) {
   const root = path.join(home, '.marrow', 'runtime', 'mcp');
@@ -331,23 +330,27 @@ test('B2: per-project records (a symlinked path shares its real path\'s record);
     assert.deepEqual(runtimeCore.healPaths(home, PIN, link), runtimeCore.healPaths(home, PIN, root));
     assert.notDeepEqual(runtimeCore.healPaths(home, PIN, root).mark, runtimeCore.healPaths(home, PIN, path.join(root, 'sub')).mark);
     assert.match(path.basename(runtimeCore.healPaths(home, PIN, root).mark), new RegExp(`^\\.heal-${PIN.replace(/\./g, '\\.')}-[0-9a-f]{64}\\.failed$`));
-    // R1: offline (registry 500) first call: warns, one heal ran.
-    const first = runHook(hookFor(pk), root, envFor(home, root));
+    // R1: offline (registry 500) first call: warns, one heal ran. This call really waits for the
+    // heal (its waits are counted, not skipped), which shows the log sees the hook's wait; every
+    // later call below must warn without entering that wait (its waits are skipped, so an entry
+    // costs no time and shows in the log).
+    const waits = clockLog();
+    const first = runHook(hookFor(pk), root, withHookClock(envFor(home, root), waits, { atomics: 'count' }));
     assert.equal(first.status, 1, first.stderr);
+    assert.ok(readWaits(waits).sleeps.length > 0, 'the first call waited for the heal, so the wait is observable');
     await waitForHeal(home);
     const after = down.requests().length;
     assert.ok(after > 0);
     // Storm: 20 calls in at most 10 s: each warns at once; no further npm run (one per 30 s), and
     // the symlinked path uses the same record.
-    const started = Date.now();
     for (let i = 0; i < 20; i += 1) {
       // (PATH names the real path: a PATH entry spelled through a link is the known node-search
       // residual, builder r3 FOLLOW-UP 2, not this change.)
-      const call = runHook(hookFor(pk), i % 2 ? link : root, envFor(home, root));
+      const call = runHook(hookFor(pk), i % 2 ? link : root, withHookClock(envFor(home, root), waits, { atomics: 'virtual' }));
       assert.equal(call.status, 1, call.stderr);
       assert.equal(call.stderr, `${WARN_TEXT}\n`);
+      assert.deepEqual(readWaits(waits).sleeps, [], `call ${i}: warned at once, the hook never entered its wait`);
     }
-    assert.ok(Date.now() - started < 10_000, `${Date.now() - started} ms`);
     await waitForHeal(home);
     assert.equal(down.requests().length, after, 'no npm ran during the storm');
     // The registry comes back. Within 30 s of the last attempt: still warn, no heal yet.
@@ -359,9 +362,9 @@ test('B2: per-project records (a symlinked path shares its real path\'s record);
     // heal; the next call decides.
     const { tried } = runtimeCore.healPaths(home, PIN, root);
     fs.writeFileSync(tried, JSON.stringify({ at: Date.now() - 31_000, reason: 'heal_started' }), { mode: 0o600 });
-    const kicked = runHook(hookFor(pk), root, envFor(home, root));
+    const kicked = runHook(hookFor(pk), root, withHookClock(envFor(home, root), waits, { atomics: 'virtual' }));
     assert.equal(kicked.status, 1, kicked.stderr);
-    assert.ok(kicked.ms < 3000, `${kicked.ms} ms: warned at once`);
+    assert.deepEqual(readWaits(waits).sleeps, [], 'warned at once: the hook started the heal without entering its wait');
     // (The heal is detached: wait until it has asked the registry and released its lock.)
     for (const deadline = Date.now() + 30_000; Date.now() < deadline && genuine.requests().length === 0;) await new Promise((resolve) => setTimeout(resolve, 100));
     await waitForHeal(home);

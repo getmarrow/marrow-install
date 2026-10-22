@@ -1,4 +1,5 @@
 const { deadRegistryHome } = require('./support/isolated-environment');
+const { clockLog, readWaits, withHookClock } = require('./support/hook-clock');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
@@ -163,9 +164,7 @@ function hookEnv(home, root, extra = {}) {
   return { HOME: home, PATH: `.:node_modules/.bin:${root}:${root}/node_modules/.bin:${path.dirname(process.execPath)}:/usr/bin:/bin`, npm_config_registry: 'http://127.0.0.1:9/', npm_config_prefix: root, ...extra };
 }
 function runHook(command, root, env) {
-  const started = Date.now();
-  const result = spawnSync('/bin/sh', ['-c', command], { cwd: root, env, input: EVENT, encoding: 'utf8', timeout: 90_000 });
-  return { ...result, ms: Date.now() - started };
+  return spawnSync('/bin/sh', ['-c', command], { cwd: root, env, input: EVENT, encoding: 'utf8', timeout: 90_000 });
 }
 const canonical = (sub, version = PIN) => `npx -y --package=@getmarrow/mcp@${version} marrow-mcp ${sub}`;
 // The hook a project file carries, for the stand-in package's integrity (no SDK pin: the stub
@@ -244,16 +243,20 @@ test('offline with no copy: the pre-action hook warns and lets the call run (exi
   fs.appendFileSync(path.join(home, '.npmrc'), `cache=${path.join(home, '.npm-cache')}\n`);
   const root = plantedProject('http://127.0.0.1:9/');
   try {
-    const held = runHook(hook(genuine.integrity), root, hookEnv(home, root));
+    // The first call really waits for the heal (counted, not skipped); the repeat call must not
+    // enter that wait at all (its waits are skipped, so an entry costs no time and shows in the log).
+    const waits = clockLog();
+    const held = runHook(hook(genuine.integrity), root, withHookClock(hookEnv(home, root), waits, { atomics: 'count' }));
     assert.equal(held.status, 1, held.stdout);
     assert.equal(held.stdout, '');
     assert.equal(held.stderr, `${WARN_TEXT}\n`);
+    assert.ok(readWaits(waits).sleeps.length > 0, 'the first call waited for the heal, so the wait is observable');
     const mark = JSON.parse(fs.readFileSync(healOf(home, root).mark, 'utf8'));
     assert.equal(mark.reason, 'npm_install_failed');
-    const again = runHook(hook(genuine.integrity), root, hookEnv(home, root));
+    const again = runHook(hook(genuine.integrity), root, withHookClock(hookEnv(home, root), waits, { atomics: 'virtual' }));
     assert.equal(again.status, 1);
     assert.equal(again.stderr, `${WARN_TEXT}\n`);
-    assert.ok(again.ms < held.ms || again.ms < 3000, `${again.ms} ms`);
+    assert.deepEqual(readWaits(waits).sleeps, [], 'the remembered failure is warned at once: the hook never entered its wait');
     const result = runHook(hook(genuine.integrity, 'claude-hook'), root, hookEnv(home, root));
     assert.equal(result.status, 1);
     assert.equal(result.stderr, `${UNAVAILABLE_TEXT}\n`);
@@ -575,10 +578,13 @@ test('outage rule: a registry that answers 500, a heal that cannot finish within
     const mcpRoot = path.join(slow, '.marrow', 'runtime', 'mcp');
     fs.mkdirSync(path.join(mcpRoot, `.heal-${PIN}.lock`), { recursive: true, mode: 0o700 });
     for (const dir of [path.join(slow, '.marrow'), path.join(slow, '.marrow', 'runtime'), mcpRoot]) fs.chmodSync(dir, 0o700);
-    const timedOut = runHook(hook(genuine.integrity, 'codex-pre-action-hook'), root, hookEnv(slow, root));
+    // The hook's clock is virtual: it asks to sleep in 100 ms steps, passes them without sleeping,
+    // and gives up when they add up to the 3.5 s budget.
+    const slowWaits = clockLog();
+    const timedOut = runHook(hook(genuine.integrity, 'codex-pre-action-hook'), root, withHookClock(hookEnv(slow, root), slowWaits, { atomics: 'virtual' }));
     assert.equal(timedOut.status, 1, timedOut.stderr);
     assert.equal(timedOut.stderr, `${WARN_TEXT}\n`);
-    assert.ok(timedOut.ms >= 3400 && timedOut.ms < 20_000, `${timedOut.ms} ms`);
+    assert.deepEqual(readWaits(slowWaits).sleeps, new Array(35).fill(100), 'a 5 s host: 35 waits of 100 ms, then the warning');
     nothingPlantedRan(slow, root);
 
     // Change 2: no npm-cli.js next to node, and the only npm on PATH is the project's (first on
@@ -727,10 +733,11 @@ test('failure record: only a private record in private directories counts; a loo
       fs.writeFileSync(path.join(elsewhere, 'runtime', 'mcp', path.basename(healOf(home, root).mark)), JSON.stringify({ at: Date.now(), reason: 'npm_install_failed' }), { mode: 0o600 });
       if (linked.length > 1) fs.mkdirSync(path.join(home, ...linked.slice(0, -1)), { recursive: true, mode: 0o700 });
       fs.symlinkSync(linked.length === 1 ? elsewhere : linked.length === 2 ? path.join(elsewhere, 'runtime') : path.join(elsewhere, 'runtime', 'mcp'), path.join(home, ...linked));
-      const held = runHook(hook(genuine.integrity), root, hookEnv(home, root));
+      const linkedWaits = clockLog();
+      const held = runHook(hook(genuine.integrity), root, withHookClock(hookEnv(home, root), linkedWaits, { atomics: 'virtual' }));
       assert.equal(held.status, 2, `${linked.join('/')}: ${held.stderr}`);
       assert.equal(held.stderr, `${HOLD_TEXT}\n`);
-      assert.ok(held.ms < 5000, `${held.ms} ms`);
+      assert.deepEqual(readWaits(linkedWaits).sleeps, [], `${linked.join('/')}: held at once, the hook never entered its wait`);
     }
     // A trusted record of an outage: warn at once, no registry request.
     const outage = forged(() => {});

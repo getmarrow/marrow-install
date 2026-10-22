@@ -742,18 +742,47 @@ test('security re-review N2: a secret inside a nested quoted command keeps that 
   assert.equal(runner.redactedCommand(['docker', 'run', '-e', `DB_PASSWORD=${S1} ${S2}`, 'app']), "docker run -e 'DB_PASSWORD=[REDACTED_AMBIGUOUS]' app");
 });
 
+// Growth guard, not wall-clock speed (the method of the URL/JWT linearity test above): the large input
+// is compared with the same shape at 1/32 of its size, both in CPU time (process.cpuUsage), so a
+// loaded machine does not move it. Linear work costs about 32x more (measured 7x to 35x here),
+// quadratic work about 1024x, so a ratio above 256 is super-linear growth. The large input gets up to
+// 3 tries and the best counts, since noise only ever slows a run. The old wall-clock ceiling stays as
+// a backstop, now on CPU time.
+function assertLinearCost(label, work, build, count, backstopMs) {
+  const SMALLER_BY = 32;
+  const MAX_RATIO = 256;
+  const cpuMs = (input) => {
+    const before = process.cpuUsage();
+    work(input);
+    const used = process.cpuUsage(before);
+    return (used.user + used.system) / 1000;
+  };
+  const large = build(count);
+  const small = build(count / SMALLER_BY);
+  cpuMs(small);
+  // Best of 5 on the small side, floored at 1 ms so timer granularity cannot inflate the ratio.
+  const baseline = Math.max(1, Math.min(...Array.from({ length: 5 }, () => cpuMs(small))));
+  let best = Infinity;
+  for (let attempt = 0; attempt < 3 && (best / baseline > MAX_RATIO || best >= backstopMs); attempt += 1) best = Math.min(best, cpuMs(large));
+  assert.ok(best / baseline <= MAX_RATIO, `${label} cost ${(best / baseline).toFixed(1)}x its ${SMALLER_BY}x smaller baseline (${best.toFixed(1)} ms vs ${baseline.toFixed(1)} ms of CPU); more than ${MAX_RATIO}x is super-linear growth`);
+  assert.ok(best < backstopMs, `${label} took ${Math.round(best)} ms of CPU`);
+}
+
 test('security re-review N3/N4: many argv words and control sequences stay fast', () => {
-  for (const argv of [Array.from({ length: 40000 }, () => 'a'), Array.from({ length: 4000 }, () => '-c'), ['bash', ...Array.from({ length: 20000 }, () => '-x'), '-c', 'TOKEN=x; ls']]) {
-    const started = process.hrtime.bigint();
-    runner.redactedCommand(argv);
-    const ms = Number(process.hrtime.bigint() - started) / 1e6;
-    assert.ok(ms < 3000, `${argv.length} words took ${Math.round(ms)} ms`);
+  const words = (word, wrap) => (count) => wrap(Array.from({ length: count }, () => word));
+  for (const [label, build, count] of [
+    ['40000 plain words', words('a', (list) => list), 40000],
+    ['4000 -c flags', words('-c', (list) => list), 4000],
+    ['20000 -x flags before bash -c', words('-x', (list) => ['bash', ...list, '-c', 'TOKEN=x; ls']), 20000],
+  ]) {
+    assertLinearCost(label, (argv) => runner.redactedCommand(argv), build, count, 3000);
   }
-  for (const input of ['\u001b]'.repeat(131072), '\u009d'.repeat(262144), '\u001b[1m'.repeat(65536)]) {
-    const started = process.hrtime.bigint();
-    runner.redact(input);
-    const ms = Number(process.hrtime.bigint() - started) / 1e6;
-    assert.ok(ms < 2000, `control input took ${Math.round(ms)} ms`);
+  for (const [label, build, count] of [
+    ['OSC openers', (n) => '\u001b]'.repeat(n), 131072],
+    ['C1 OSC openers', (n) => '\u009d'.repeat(n), 262144],
+    ['SGR sequences', (n) => '\u001b[1m'.repeat(n), 65536],
+  ]) {
+    assertLinearCost(label, (input) => runner.redact(input), build, count, 2000);
   }
 });
 
