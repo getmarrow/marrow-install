@@ -545,7 +545,8 @@ test('P3: a blank key entry is "set but empty": `=`, quoted spaces, bare spaces,
       const result = await keyCase(ws);
       assertFailure(result, `${name} is set but empty in ~/.marrow/${file}`);
       assert.deepEqual(result.report.doctor.key_problems.map((problem) => [problem.state, problem.key_name, problem.source]), [['key_empty', name, `~/.marrow/${file}`]]);
-      assert.match(result.report.doctor.recommendedFix, new RegExp(`^${name} in ~/\\.marrow/${file.replace('.', '\\.')} must be a real key, not blank`));
+      assert.match(result.report.doctor.recommendedFix, new RegExp(`^${name} in ~/\\.marrow/${file.replace('.', '\\.')} must be a real key, not blank \\(fill it in, or remove the line\\)\\. `));
+      assert.doesNotMatch(result.report.doctor.recommendedFix, /unset it/, 'a line in a file is removed, not unset');
     } finally {
       ws.cleanup();
     }
@@ -561,7 +562,10 @@ test('P3: an environment variable set to blank or whitespace is "set but empty i
         delete process.env.MARROW_API_KEY;
         delete process.env.MARROW_KEY;
         process.env[name] = value;
-        assertFailure(await keyCase(ws), `${name} is set but empty in the environment`);
+        const result = await keyCase(ws);
+        assertFailure(result, `${name} is set but empty in the environment`);
+        assert.match(result.report.doctor.recommendedFix, new RegExp(`^${name} in the environment must be a real key, not blank \\(fill it in, or unset it\\)\\. `));
+        assert.doesNotMatch(result.report.doctor.recommendedFix, /remove the line/, 'a variable has no line to remove');
       } finally {
         ws.cleanup();
       }
@@ -578,6 +582,19 @@ test('P3: an environment variable set to blank or whitespace is "set but empty i
       assert.equal(ownerKeyStoreState(ws.home, { MARROW_API_KEY: '', MARROW_KEY: dummy }).state, 'key');
     } finally {
       ws.cleanup();
+    }
+    // A blank variable and a blank file line together: each gets its own wording.
+    const both = pluginMachine();
+    try {
+      keyFile(both, 'MARROW_API_KEY=\n');
+      delete process.env.MARROW_KEY;
+      process.env.MARROW_API_KEY = '';
+      const result = await keyCase(both);
+      assert.ok(result.lines.includes('- key problem: MARROW_API_KEY is set but empty in the environment'));
+      assert.ok(result.lines.includes('- key problem: MARROW_API_KEY is set but empty in ~/.marrow/env'));
+      assert.ok(result.report.doctor.recommendedFix.startsWith('MARROW_API_KEY in the environment must be a real key, not blank (fill it in, or unset it); MARROW_API_KEY in ~/.marrow/env must be a real key, not blank (fill it in, or remove the line). '), result.report.doctor.recommendedFix);
+    } finally {
+      both.cleanup();
     }
   } finally {
     for (const [name, value] of Object.entries(original)) {
@@ -610,10 +627,13 @@ test('P4: a group- or other-writable home makes a private key file unusable, and
       keyFile(ws, `MARROW_API_KEY=${dummy}\n`);
       fs.chmodSync(ws.home, homeMode);
       const result = await keyCase(ws);
-      assertFailure(result, '~/.marrow/env is not an owner-only file, so a key in it is not used', [dummy], { plugin: false });
+      // The key file is fine; the home folder is the cause, so the message names the home, not the file.
+      assertFailure(result, '~/.marrow/env is in a home folder that group or others can write, so a key in it is not used', [dummy], { plugin: false });
+      assert.equal(result.text.includes('not an owner-only file'), false, 'the file itself is fine');
       assert.ok(result.report.doctor.recommendedFix.startsWith('~/.marrow/env must be a plain file you own in a mode-700 ~/.marrow (run chmod go-w ~ && chmod 700 ~/.marrow && chmod 600 ~/.marrow/env). '), result.report.doctor.recommendedFix);
       const state = ownerKeyStoreState(ws.home, {});
       assert.equal(state.homeWritable, true);
+      assert.deepEqual(state.problems.map((problem) => problem.reason), ['is in a home folder that group or others can write']);
       assert.equal(JSON.stringify(state).includes(dummy), false);
       fs.chmodSync(ws.home, 0o700);
       assert.equal(ownerKeyStoreState(ws.home, {}).state, 'key', 'with the home fixed the same file is a usable key');
@@ -631,8 +651,30 @@ test('P4: a group- or other-writable home makes a private key file unusable, and
     assert.equal(only(result.report.doctor.agent_plugins, 'claude-code').counted, false);
     assert.ok(result.lines.some((line) => line.startsWith('- agent plugin: Claude Code: Marrow plugin not counted:') && line.includes(`chmod go-w ${ws.home}`)));
     assert.ok(result.report.doctor.recommendedFix.includes('chmod go-w ~ && chmod 700 ~/.marrow'));
+    assert.ok(result.lines.includes('- key problem: ~/.marrow/env is in a home folder that group or others can write, so a key in it is not used'));
   } finally {
     ws.cleanup();
+  }
+  // A group-writable home AND a key file that is itself wrong (mode 644): both causes are named, the fix covers both.
+  const both = workspace();
+  try {
+    const dummy = dummyKey();
+    keyFile(both, `MARROW_API_KEY=${dummy}\n`, { mode: 0o644 });
+    fs.chmodSync(both.home, 0o770);
+    const result = await keyCase(both);
+    assertFailure(result, '~/.marrow/env is in a home folder that group or others can write, and is not an owner-only file, so a key in it is not used', [dummy], { plugin: false });
+    assert.ok(result.report.doctor.recommendedFix.startsWith('~/.marrow/env must be a plain file you own in a mode-700 ~/.marrow (run chmod go-w ~ && chmod 700 ~/.marrow && chmod 600 ~/.marrow/env). '));
+  } finally {
+    both.cleanup();
+  }
+  // The home is fine: a file that is not owner-only keeps the file wording.
+  const fine = workspace();
+  try {
+    keyFile(fine, `MARROW_API_KEY=${dummyKey()}\n`, { mode: 0o644 });
+    assert.deepEqual(ownerKeyStoreState(fine.home, {}).problems.map((problem) => problem.reason), ['is not an owner-only file']);
+    assert.equal(ownerKeyStoreState(fine.home, {}).homeWritable, false);
+  } finally {
+    fine.cleanup();
   }
 });
 
@@ -645,7 +687,7 @@ test('scope: without a plugin a blank or unusable key is also a failure line, an
       fs.writeFileSync(path.join(ws.project, 'CLAUDE.md'), '# Claude\n');
       const result = await keyCase(ws);
       assertFailure(result, 'MARROW_API_KEY is set but empty in the environment', [], { plugin: false });
-      assert.equal(result.report.doctor.recommendedFix, 'MARROW_API_KEY in the environment must be a real key, not blank (fill it in, or remove the line). Then run npx @getmarrow/install --repair.');
+      assert.equal(result.report.doctor.recommendedFix, 'MARROW_API_KEY in the environment must be a real key, not blank (fill it in, or unset it). Then run npx @getmarrow/install --repair.');
     } finally {
       ws.cleanup();
     }
@@ -720,10 +762,12 @@ test('every string this round adds to doctor is plain ASCII without the banned w
   const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'installer.js'), 'utf8');
   const strings = [CAVEAT, 'MARROW_API_KEY is set but empty in ~/.marrow/env', '~/.marrow/env cannot be read, so a key in it is not used',
     'must be a plain file you own in a mode-700 ~/.marrow', 'must be a real key, not blank (fill it in, or remove the line)',
+    'must be a real key, not blank (fill it in, or unset it)', '~/.marrow/env is in a home folder that group or others can write, so a key in it is not used',
+    '~/.marrow/env is in a home folder that group or others can write, and is not an owner-only file, so a key in it is not used',
     'MCP config (host unknown)', 'key problem:'];
   for (const text of strings) {
     assert.match(text, /^[\x20-\x7e]+$/);
     assert.doesNotMatch(text, /\b(risk|risky|score|classifier)\b/i);
   }
-  for (const text of ['If you installed a Marrow plugin in Cursor, check Cursor\\\'s plugin list first', 'must be a real key, not blank', 'key problem: ', 'MCP config (host unknown)']) assert.ok(source.includes(text), text);
+  for (const text of ['If you installed a Marrow plugin in Cursor, check Cursor\\\'s plugin list first', 'must be a real key, not blank', "'unset it' : 'remove the line'", 'key problem: ', 'MCP config (host unknown)']) assert.ok(source.includes(text), text);
 });

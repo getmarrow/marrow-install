@@ -3367,7 +3367,8 @@ function keyProblemFix(problems, homeWritable, plugins) {
   const empty = problems.filter((problem) => problem.state === 'empty');
   const parts = [];
   if (files.length) parts.push(`${files.join(' and ')} must be a plain file you own in a mode-700 ~/.marrow (run ${homeWritable ? 'chmod go-w ~ && ' : ''}chmod 700 ~/.marrow && chmod 600 ${files.join(' ')})`);
-  if (empty.length) parts.push(`${empty.map((problem) => `${problem.name} in ${problem.source}`).join(' and ')} must be a real key, not blank (fill it in, or remove the line)`);
+  // A blank environment variable is unset; a blank line in a file is removed.
+  for (const problem of empty) parts.push(`${problem.name} in ${problem.source} must be a real key, not blank (fill it in, or ${problem.source === 'the environment' ? 'unset it' : 'remove the line'})`);
   // With plugins supplying every host's hooks the plugin sentence ends it; otherwise --repair stays the last step.
   return plugins
     ? `${parts.join('; ')}. Then run npx -y @getmarrow/install@latest doctor. ${pluginSuppliesSentence(plugins)}`

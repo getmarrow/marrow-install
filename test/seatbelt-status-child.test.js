@@ -109,6 +109,14 @@ function workspace() {
 // The private base of the status child under a (fake) passwd home.
 const baseOf = (home) => path.join(home, '.cache', 'marrow', 'doctor-tmp');
 
+// The three base parts as an earlier build left them (a run no longer leaves them): each a mode-700 folder of the user's own.
+function makeBase(home) {
+  for (const part of [path.join(home, '.cache'), path.join(home, '.cache', 'marrow'), baseOf(home)]) {
+    fs.mkdirSync(part, { mode: 0o700 });
+    fs.chmodSync(part, 0o700);
+  }
+}
+
 // A script that records its own name and the fourth word of its argv (the subcommand) when it runs.
 function plant(file, ws, label) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -451,7 +459,7 @@ test('R9 4b a package.json or a node_modules above the private folder (project, 
       const run = doctor(ws, baseEnv(ws, { STATUS_TEST_PASSWD_HOME: dir }));
       assert.equal(run.line, '- Seatbelt: could not check', label);
       assert.deepEqual(statusRecords(ws), [], label);
-      assert.deepEqual(fs.readdirSync(baseOf(dir)), [], `${label}: the private folder was removed`);
+      assert.deepEqual(fs.readdirSync(dir), [], `${label}: the private folder and every base part made for it were removed`);
     }
   } finally {
     ws.cleanup();
@@ -661,7 +669,7 @@ const couldNotCheck = (ws, label, env = baseEnv(ws), options = {}) => {
   return run;
 };
 
-test('B0 the happy path: the child runs in <passwd home>/.cache/marrow/doctor-tmp/marrow-install-seatbelt-*, mode 700, empty, removed after', () => {
+test('B0 the happy path: the child runs in <passwd home>/.cache/marrow/doctor-tmp/marrow-install-seatbelt-*, mode 700, empty; it and every base part the run made are removed after', () => {
   const ws = workspace();
   try {
     const run = doctor(ws, baseEnv(ws));
@@ -670,16 +678,18 @@ test('B0 the happy path: the child runs in <passwd home>/.cache/marrow/doctor-tm
     const [record, ...more] = statusRecords(ws);
     assert.equal(more.length, 0);
     assertRecord(record, { node: fakeNode().node, script: fakeNode().cli, home: ws.home, names: ['HOME', 'PATH'] });
-    // The only new state under the passwd home: .cache, .cache/marrow and the base, each mode 700, the base empty.
-    assert.deepEqual(fs.readdirSync(ws.home), ['.cache']);
+    // Doctor is read-only: the run made .cache, .cache/marrow and the base for its child and removed them again.
+    assert.deepEqual(fs.readdirSync(ws.home), []);
+    // With the base already there the run reuses it and leaves every part as it found it (it removes only what it made).
+    makeBase(ws.home);
+    fs.rmSync(ws.record);
+    assert.equal(doctor(ws, baseEnv(ws)).line, '- Seatbelt: on (no account)');
     for (const part of [path.join(ws.home, '.cache'), path.join(ws.home, '.cache', 'marrow'), baseOf(ws.home)]) assert.equal(mode7(part), 0o700, part);
+    assert.deepEqual(fs.readdirSync(ws.home), ['.cache']);
     assert.deepEqual(fs.readdirSync(path.join(ws.home, '.cache')), ['marrow']);
     assert.deepEqual(fs.readdirSync(path.join(ws.home, '.cache', 'marrow')), ['doctor-tmp']);
     assert.deepEqual(fs.readdirSync(baseOf(ws.home)), []);
     assert.equal(fs.lstatSync(baseOf(ws.home)).uid, process.getuid());
-    // A second run reuses the base.
-    fs.rmSync(ws.record);
-    assert.equal(doctor(ws, baseEnv(ws)).line, '- Seatbelt: on (no account)');
   } finally {
     ws.cleanup();
   }
@@ -720,7 +730,8 @@ test('B1 TMPDIR is not used on POSIX: a world-writable TMPDIR holding a project,
 test('B3 a group- or other-writable ancestor of the base, a link as the base or as .cache, and a pre-existing base with another mode', () => {
   const ws = workspace();
   try {
-    assert.equal(doctor(ws, baseEnv(ws)).line, '- Seatbelt: on (no account)', 'control: creates the base');
+    makeBase(ws.home);
+    assert.equal(doctor(ws, baseEnv(ws)).line, '- Seatbelt: on (no account)', 'control: uses the base');
     const cache = path.join(ws.home, '.cache');
     const marrow = path.join(cache, 'marrow');
     const base = baseOf(ws.home);
@@ -792,7 +803,7 @@ test('B4 HOME pointing elsewhere does not move the base: it stays under the pass
     const [record] = statusRecords(ws);
     assertRecord(record, { node: fakeNode().node, script: fakeNode().cli, home: ws.home, names: ['HOME', 'PATH'] });
     assert.deepEqual(fs.readdirSync(elsewhere), [], 'nothing created under HOME');
-    assert.deepEqual(fs.readdirSync(ws.home), ['.cache']);
+    assert.deepEqual(fs.readdirSync(ws.home), [], 'the base was made under the passwd home and removed again');
   } finally {
     ws.cleanup();
   }
@@ -841,7 +852,8 @@ test('B7 B8 a node_modules/.bin/node, a package.json (plain, workspaces) or a no
 test('B9 a package.json or a node_modules in the base itself (the direct parent) or in .cache (two levels up): could not check, the private folder removed', () => {
   const ws = workspace();
   try {
-    assert.equal(doctor(ws, baseEnv(ws)).line, '- Seatbelt: on (no account)', 'control: creates the base');
+    makeBase(ws.home);
+    assert.equal(doctor(ws, baseEnv(ws)).line, '- Seatbelt: on (no account)', 'control: uses the base');
     const base = baseOf(ws.home);
     const cache = path.join(ws.home, '.cache');
     for (const [where, label] of [[base, 'the base'], [cache, '.cache']]) {
@@ -906,15 +918,28 @@ test('the Windows branch keeps the per-user temp folder and touches nothing; the
     for (const name of names) fs[name] = saved[name];
   }
   assert.deepEqual(touched, [], 'no file system call on the win32 branch');
-  assert.equal(statusParentFolder('linux'), baseOf(os.userInfo().homedir), 'the POSIX base is below the passwd home');
+  // statusParentFolder makes the base and leaves it (runSeatbeltStatus is what removes what it made): use a throwaway passwd home.
+  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-seatbelt-parent-')));
+  const original = process.env.HOME;
+  try {
+    fs.chmodSync(home, 0o700);
+    hostFakes.setPasswdHome(home);
+    assert.equal(statusParentFolder('linux'), baseOf(home), 'the POSIX base is below the passwd home');
+  } finally {
+    hostFakes.setPasswdHome(original);
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test('the passwd home is os.userInfo().homedir, never $HOME: a lookup failure, an empty or a relative home gives null', () => {
   const home = process.env.HOME;
   const original = hostFakes.realPasswdHome();
+  const passwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-seatbelt-passwd-')));
   try {
+    fs.chmodSync(passwd, 0o700);
+    hostFakes.setPasswdHome(passwd);
     process.env.HOME = path.join(os.tmpdir(), 'not-the-passwd-home');
-    assert.equal(statusParentFolder('linux'), baseOf(os.userInfo().homedir), 'HOME changed: the base did not move');
+    assert.equal(statusParentFolder('linux'), baseOf(passwd), 'HOME changed: the base did not move');
     for (const bad of ['!throw', '', 'relative/home']) {
       hostFakes.setPasswdHome(bad);
       assert.equal(statusParentFolder('linux'), null, JSON.stringify(bad));
@@ -922,6 +947,7 @@ test('the passwd home is os.userInfo().homedir, never $HOME: a lookup failure, a
   } finally {
     process.env.HOME = home;
     hostFakes.setPasswdHome(home);
+    fs.rmSync(passwd, { recursive: true, force: true });
   }
   assert.ok(original === null || typeof original === 'string');
 });

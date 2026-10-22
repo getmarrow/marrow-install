@@ -163,6 +163,12 @@ function collectOutput({ command, args, cwd, env, timeoutMs = SEATBELT_STATUS_TI
 // node_modules/.bin folders (npm puts them in front of the PATH we pass); what keeps them out is the
 // noProjectAbove check plus the closed chain. Windows: the per-user temp folder (os.tmpdir()) and
 // noProjectAbove only; file owners and modes mean nothing there.
+//
+// Doctor is read-only, so a run leaves nothing behind: its private folder is removed, and so is every part of the
+// base (.cache, .cache/marrow, doctor-tmp) that THIS run made, on every path (success, a failing or timed-out
+// child, a refusal, a thrown error). A part that was already there is never removed, and nothing is removed with
+// more than rmdir (an empty folder only), so nothing of anyone else's is touched. Runs at the same time share the
+// base, so the run that leaves last does the removal (releaseBase).
 
 // Not a secret. The one value the child gets for MARROW_API_KEY when this process has a key: the MCP's
 // status only asks whether a key is set, so the real value never leaves this process.
@@ -355,20 +361,40 @@ function passwdHome() {
 }
 
 const BASE_PARTS = Object.freeze(['.cache', 'marrow', 'doctor-tmp']);
+const PRIVATE_PREFIX = 'marrow-install-seatbelt-';
+// An empty folder named made-from-<n> in the base is the note of a run that made the base parts from index n
+// (0 .cache, 1 marrow, 2 doctor-tmp) and is still running with peers: whoever leaves last takes the note (rmdir) and
+// then owes that removal.
+const NOTE_PREFIX = 'made-from-';
+const NOTE_RE = /^made-from-([012])$/;
+const VANISHED = Symbol('vanished');
 
 // POSIX: <passwd home>/.cache/marrow/doctor-tmp as a real path, or null. The passwd home's own chain is checked
 // before anything is created. Missing parts are made one level at a time with mode 700; an existing part must be
 // a real folder (lstat: a link is refused). The base itself must be a folder owned by this user with mode 700
 // (an existing one with another mode is chmod'ed through an open handle, never through a path, then re-read).
 // Finally the base's real path and every folder above it, up to /, must pass chainClosed. Any failure or error: null.
-function privateBase() {
+// `held` is the caller's record of what this call made: held.parts (the three paths) and held.from (the index of the
+// first part it made, or null when all were there); it is filled in as each part is made, so a failure half way
+// still tells the caller what to remove. A part that vanishes under us (a peer that was leaving removed it) is made
+// again, a few times.
+function privateBase(held = { parts: [], from: null }) {
+  for (let pass = 0; pass < 3; pass += 1) {
+    const base = basePass(held);
+    if (base !== VANISHED) return base;
+  }
+  return null;
+}
+
+function basePass(held) {
   try {
     const sys = systemIo();
     const home = passwdHome();
     if (home === null) return null;
     let dir = fs.realpathSync(home);
     if (!chainClosed(dir, sys)) return null;
-    for (const part of BASE_PARTS) {
+    held.parts = BASE_PARTS.map((part, index) => path.join(dir, ...BASE_PARTS.slice(0, index + 1)));
+    for (const [index, part] of BASE_PARTS.entries()) {
       dir = path.join(dir, part);
       let stat = null;
       try {
@@ -379,10 +405,16 @@ function privateBase() {
       if (!stat) {
         try {
           fs.mkdirSync(dir, { mode: 0o700 });
+          if (held.from === null || index < held.from) held.from = index;
         } catch (error) {
+          if (error && error.code === 'ENOENT') return VANISHED;
           if (!error || error.code !== 'EEXIST') return null;
         }
-        stat = fs.lstatSync(dir);
+        try {
+          stat = fs.lstatSync(dir);
+        } catch (error) {
+          return error && error.code === 'ENOENT' ? VANISHED : null;
+        }
       }
       if (!stat.isDirectory()) return null;
     }
@@ -399,40 +431,146 @@ function privateBase() {
     }
     const real = fs.realpathSync(dir);
     return real === dir && chainClosed(real, sys) ? real : null;
-  } catch {
-    return null;
+  } catch (error) {
+    return error && error.code === 'ENOENT' ? VANISHED : null;
   }
 }
 
 // The folder the private working folder is made in: on POSIX the checked base above (or null: nothing is
-// started), on Windows the per-user temp folder (nothing is checked there).
+// started), on Windows the per-user temp folder (nothing is checked there). On POSIX this MAKES the base when
+// it is missing and leaves it: only runSeatbeltStatus, which releases what it made, runs the status child.
 function statusParentFolder(platform = process.platform) {
   return platform === 'win32' ? os.tmpdir() : privateBase();
 }
 
-// Runs the command in a fresh empty folder made by mkdtemp inside statusParentFolder() (mode 700, removed
-// after in every path), never the project or the doctor's own folder, and returns { mode, reasons } or
-// null. `invocation` is { command, args, env }. Order: the base is created and checked, then the private
-// folder is made, then noProjectAbove: if a folder above the private one holds a package.json or a
-// node_modules, nothing is started (null).
-async function runSeatbeltStatus(invocation, limits = {}) {
-  let privateCwd = null;
+// Makes the private folder (mkdtemp inside statusParentFolder(), mode 700) and records it in `held`: { cwd, parts,
+// from, noted }. When this run made any part of the base it writes its note (see NOTE_PREFIX) while its own
+// folder is already there, so the base cannot be removed under it. True, or false when nothing may be started.
+function acquirePrivateFolder(held, platform = process.platform) {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const parent = platform === 'win32' ? os.tmpdir() : privateBase(held);
+    if (parent === null) return false;
+    try {
+      held.cwd = fs.mkdtempSync(path.join(parent, PRIVATE_PREFIX));
+    } catch (error) {
+      if (error && error.code === 'ENOENT' && platform !== 'win32') continue;
+      return false;
+    }
+    fs.chmodSync(held.cwd, 0o700);
+    if (held.from !== null) held.noted = putNote(held.parts[2], held.from);
+    return true;
+  }
+  return false;
+}
+
+function putNote(leaf, from) {
   try {
-    const parent = statusParentFolder();
-    if (parent === null) return null;
-    privateCwd = fs.mkdtempSync(path.join(parent, 'marrow-install-seatbelt-'));
-    fs.chmodSync(privateCwd, 0o700);
-    if (!noProjectAbove(fs.realpathSync(privateCwd))) return null;
-    const output = await collectOutput({ ...invocation, ...limits, cwd: privateCwd });
+    fs.mkdirSync(path.join(leaf, `${NOTE_PREFIX}${from}`), { mode: 0o700 });
+    return true;
+  } catch (error) {
+    return Boolean(error) && error.code === 'EEXIST';
+  }
+}
+
+function hasLivePeer(leaf) {
+  try {
+    return fs.readdirSync(leaf).some((name) => name.startsWith(PRIVATE_PREFIX));
+  } catch {
+    return false;
+  }
+}
+
+// Removes the private folder, then (POSIX) the base parts this run made, bottom up, with rmdir only. `held` is what
+// acquirePrivateFolder and privateBase recorded. Never throws. The last run to leave removes the parts any run made:
+//   - a live peer folder (marrow-install-seatbelt-*) in the base: that peer will remove them. The duty is put in a
+//     note first, and the base is listed once more after it, so a peer that left meanwhile cannot miss it.
+//   - no live peer: take every note (rmdir; the run that wins a note owns it, a run that loses stops), rmdir the
+//     base, then .cache/marrow and .cache as far as the notes say they were made. A run that found the base
+//     already there and sees no note owes nothing and leaves it alone.
+//   - rmdir says not empty (a peer arrived, or the folder holds someone's files): a peer is told by a note, the
+//     files are left; rmdir fails for another reason (a parent made read-only): the note is put back so a later run can finish.
+// Bounded: eight rounds of plain system calls.
+function releaseStatusFolder(held) {
+  if (held.cwd) {
+    try {
+      fs.rmSync(held.cwd, { recursive: true, force: true });
+    } catch { /* the folder stays empty and private; the base stays with it */ }
+  }
+  if (held.cwd === null && held.from === null) return;
+  try {
+    releaseBase(held);
+  } catch { /* nothing more can be done */ }
+}
+
+function releaseBase(held) {
+  if (held.parts.length !== BASE_PARTS.length) return;
+  const leaf = held.parts[2];
+  let owed = held.noted ? null : held.from;
+  for (let round = 0; round < 8; round += 1) {
+    let names = null;
+    try {
+      names = fs.readdirSync(leaf);
+    } catch { /* no base */ }
+    if (names !== null) {
+      if (names.some((name) => name.startsWith(PRIVATE_PREFIX))) {
+        if (owed === null || (putNote(leaf, owed) && hasLivePeer(leaf))) return;
+        continue;
+      }
+      for (const name of names) {
+        const match = NOTE_RE.exec(name);
+        if (!match) continue;
+        try {
+          fs.rmdirSync(path.join(leaf, name));
+          owed = owed === null ? Number(match[1]) : Math.min(owed, Number(match[1]));
+        } catch { /* another run took it, or it is not an empty folder */ }
+      }
+      if (owed === null || names.some((name) => !NOTE_RE.test(name))) return;
+      try {
+        fs.rmdirSync(leaf);
+      } catch (error) {
+        const code = error && error.code;
+        if (code === 'ENOTEMPTY' || code === 'EEXIST') continue;
+        if (code !== 'ENOENT') {
+          putNote(leaf, owed);
+          return;
+        }
+      }
+    }
+    if (owed === null) return;
+    let blocked = false;
+    for (let index = BASE_PARTS.length - 2; index >= owed; index -= 1) {
+      try {
+        fs.rmdirSync(held.parts[index]);
+      } catch (error) {
+        const code = error && error.code;
+        if (code === 'ENOENT') continue;
+        if (code !== 'ENOTEMPTY' && code !== 'EEXIST') return;
+        blocked = true;
+        break;
+      }
+    }
+    if (!blocked) return;
+    if (!putNote(leaf, owed)) return;
+    if (hasLivePeer(leaf)) return;
+  }
+}
+
+// Runs the command in a fresh empty folder made by mkdtemp inside the base (mode 700), never the project or the
+// doctor's own folder, and returns { mode, reasons } or null. The folder, and the base parts this run made, are
+// removed after in every path (releaseStatusFolder). `invocation` is { command, args, env }. Order: the base is
+// created and checked, then the private folder is made, then noProjectAbove: if a folder above the private one
+// holds a package.json or a node_modules, nothing is started (null).
+async function runSeatbeltStatus(invocation, limits = {}) {
+  const held = { cwd: null, parts: [], from: null, noted: false };
+  try {
+    if (!acquirePrivateFolder(held)) return null;
+    if (!noProjectAbove(fs.realpathSync(held.cwd))) return null;
+    const output = await collectOutput({ ...invocation, ...limits, cwd: held.cwd });
     return output ? parseSeatbeltStatus(output) : null;
   } catch {
     return null;
   } finally {
-    if (privateCwd) {
-      try {
-        fs.rmSync(privateCwd, { recursive: true, force: true });
-      } catch { /* the folder stays empty and private */ }
-    }
+    releaseStatusFolder(held);
   }
 }
 
@@ -479,6 +617,8 @@ module.exports = {
   statusInvocation,
   collectOutput,
   statusParentFolder,
+  acquirePrivateFolder,
+  releaseStatusFolder,
   runSeatbeltStatus,
   pickSeatbeltReason,
   seatbeltReport,

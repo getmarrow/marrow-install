@@ -13,7 +13,9 @@ function currentUid() {
   return typeof process.getuid === 'function' ? process.getuid() : null;
 }
 
-function isPrivateOwnerFile(filePath, home) {
+// `ignoreHomeWrite` skips only the "home folder is not group- or other-writable" rule, to tell whether the home folder is
+// the one thing wrong (doctor names the cause).
+function isPrivateOwnerFile(filePath, home, { ignoreHomeWrite = false } = {}) {
   try {
     const resolvedHome = path.resolve(home);
     const resolvedFile = path.resolve(filePath);
@@ -29,7 +31,7 @@ function isPrivateOwnerFile(filePath, home) {
       && (uid === null || (fileStat.uid === uid && parentStat.uid === uid && homeStat.uid === uid))
       && (fileStat.mode & 0o077) === 0
       && (parentStat.mode & 0o022) === 0
-      && (homeStat.mode & 0o022) === 0;
+      && (ignoreHomeWrite || (homeStat.mode & 0o022) === 0);
   } catch {
     return false;
   }
@@ -105,8 +107,10 @@ function blankKeyNames(raw) {
 // state 'none' is a plain "no key yet"; 'empty' is a key entry that is present but blank (an environment variable
 // set to blank, or a blank line in an owner env file); 'unusable' is an owner env file that exists but cannot be
 // used (not an owner-only file, or unreadable). Only a missing file counts as absent. `homeWritable` says the home
-// folder is group- or other-writable, which makes every file under it unusable as an owner file.
+// folder is group- or other-writable, which makes every file under it unusable as an owner file; when that is so the
+// reason names the home folder (and the file too only when the file itself is also wrong).
 function ownerKeyStoreState(home, env = {}) {
+  const homeOpen = homeIsWritableByOthers(home);
   const problems = [];
   for (const name of KEY_NAMES) {
     const value = env[name];
@@ -125,7 +129,11 @@ function ownerKeyStoreState(home, env = {}) {
       continue;
     }
     if (!isPrivateOwnerFile(filePath, home)) {
-      problems.push({ state: 'unusable', name, source, reason: 'is not an owner-only file' });
+      const fileWrong = !isPrivateOwnerFile(filePath, home, { ignoreHomeWrite: true });
+      const reason = !homeOpen ? 'is not an owner-only file'
+        : fileWrong ? 'is in a home folder that group or others can write, and is not an owner-only file'
+          : 'is in a home folder that group or others can write';
+      problems.push({ state: 'unusable', name, source, reason });
       continue;
     }
     let raw;
@@ -140,12 +148,17 @@ function ownerKeyStoreState(home, env = {}) {
     else for (const keyName of blankKeyNames(raw)) problems.push({ state: 'empty', name: keyName, source });
   }
   if (keyFound) return { state: 'key', problems: [], homeWritable: false };
-  let homeWritable = false;
-  try {
-    homeWritable = (fs.lstatSync(home).mode & 0o022) !== 0;
-  } catch { /* an unreadable home is reported by the file checks above */ }
   const state = !problems.length ? 'none' : problems.some((problem) => problem.state === 'unusable') ? 'unusable' : 'empty';
-  return { state, problems, homeWritable };
+  return { state, problems, homeWritable: homeOpen };
+}
+
+// Whether the home folder can be written by its group or by others. An unreadable home is reported by the file checks.
+function homeIsWritableByOthers(home) {
+  try {
+    return (fs.lstatSync(home).mode & 0o022) !== 0;
+  } catch {
+    return false;
+  }
 }
 
 function readOwnerApiKey(home) {
