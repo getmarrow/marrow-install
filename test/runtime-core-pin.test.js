@@ -6,7 +6,7 @@ const path = require('node:path');
 const test = require('node:test');
 const zlib = require('node:zlib');
 const PINS = require('../src/pins');
-const { mcpServerLaunch } = require('../src/mcp-runtime');
+const { launcherSource, mcpServerLaunch, runtimeConfig } = require('../src/mcp-runtime');
 const host = require('./support/mcp-host');
 
 // src/runtime-core.js is the code every written hook and MCP server entry runs first (the loader embeds
@@ -67,26 +67,29 @@ test('the embedded core hash is on the pinned MCP list (INSTALLER_RUNTIME_CORE_S
   assert.equal(listed.includes(sha256(decodeLoader(launch.args[2]).core)), true, 'the core a loader embeds today is on the list');
 });
 
-test('the real MCP proves the installer launch for the pin and for 3.9.102, and rejects a loader whose core differs by one byte', () => {
-  for (const version of [PINS.MCP_ADAPTER_VERSION, '3.9.102']) {
-    const launch = mcpServerLaunch(version, { platform: 'linux' });
-    assert.equal(host.identity.isOfficialMarrowServerLaunch(launch.command, launch.args), true, version);
-  }
+test('the real MCP proves the pinned installer launch when its own loader started the hook (never a 3.9.102 launch, which carries no integrity), and rejects a loader whose core differs by one byte', () => {
+  // Since MCP 3.9.106 a launch is proven only against the loader that started the hook, and only with a pack integrity: the
+  // pin's loader proves the pin's launch; a 3.9.102 launch (no integrity pinned for it) is proven under no loader.
+  const pinned = mcpServerLaunch(PINS.MCP_ADAPTER_VERSION, { platform: 'linux' });
+  assert.equal(host.identity.isOfficialMarrowServerLaunch(pinned.command, pinned.args, launcherSource(runtimeConfig(PINS.MCP_ADAPTER_VERSION))), true, PINS.MCP_ADAPTER_VERSION);
+  const old = mcpServerLaunch('3.9.102', { platform: 'linux' });
+  assert.equal(host.identity.isOfficialMarrowServerLaunch(old.command, old.args, launcherSource(runtimeConfig('3.9.102'))), false, '3.9.102 under its own loader');
+  assert.equal(host.identity.isOfficialMarrowServerLaunch(old.command, old.args, host.PINNED_LAUNCHER), false, '3.9.102 under the pinned loader');
   const launch = mcpServerLaunch(PINS.MCP_ADAPTER_VERSION, { platform: 'linux' });
   const decoded = decodeLoader(launch.args[2]);
   // The same code, recompressed: proven (the MCP compares content, not compressed bytes).
   const same = [...launch.args];
   same[2] = encodeLoader(decoded.source);
-  assert.equal(host.identity.isOfficialMarrowServerLaunch(launch.command, same), true, 'recompressed');
+  assert.equal(host.identity.isOfficialMarrowServerLaunch(launch.command, same, host.PINNED_LAUNCHER), true, 'recompressed');
   // One byte more in the core (or one changed): not on the list, so the entry is not proven.
   for (const core of [`${decoded.core} `, decoded.core.replace("require('node:fs')", "require('fs')"), `${decoded.core}\n`]) {
     assert.notEqual(core, decoded.core);
     const tampered = [...launch.args];
     tampered[2] = encodeLoader(`${decoded.head}(${core}${LOADER_TAIL}`);
-    assert.equal(host.identity.isOfficialMarrowServerLaunch(launch.command, tampered), false, JSON.stringify(core.slice(-12)));
+    assert.equal(host.identity.isOfficialMarrowServerLaunch(launch.command, tampered, host.PINNED_LAUNCHER), false, JSON.stringify(core.slice(-12)));
   }
   // The shipped core is not simply any text: a different version in the config is not proven either.
   const wrongVersion = [...launch.args];
   wrongVersion[3] = '--package=@getmarrow/mcp@3.9.101';
-  assert.equal(host.identity.isOfficialMarrowServerLaunch(launch.command, wrongVersion), false);
+  assert.equal(host.identity.isOfficialMarrowServerLaunch(launch.command, wrongVersion, host.PINNED_LAUNCHER), false);
 });

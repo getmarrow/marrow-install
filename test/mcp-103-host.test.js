@@ -12,8 +12,8 @@ const { mcpServerLaunch, runtimeDir } = require('../src/mcp-runtime');
 const { fakeRuntime } = require('./support/fake-runtime');
 const host = require('./support/mcp-host');
 
-// Installer 0.1.73 against the pinned MCP 3.9.105 (marrow-mcp 8ffda003): what the installer writes
-// for Codex and Cursor, and what the real MCP decision (test/fixtures/mcp-3.9.105, byte for byte)
+// Installer 0.1.73 against the pinned MCP 3.9.106 (marrow-mcp b8973d3a): what the installer writes
+// for Codex and Cursor, and what the real MCP decision (test/fixtures/mcp-3.9.106, byte for byte)
 // does with it. Every host here is a temporary HOME/CODEX_HOME and project; npm_config_* is unset
 // unless a case sets it (test/support/mcp-host.js).
 
@@ -63,7 +63,7 @@ test('Cursor: the installer-written .cursor/mcp.json is proven official by the M
     // The entry is the installer's verified-runtime launch (a loader whose core the MCP pins), not npx.
     assert.equal(config.mcpServers.marrow.command, process.platform === 'win32' ? 'node' : '/bin/sh');
     assert.match(JSON.stringify(config.mcpServers.marrow.args), new RegExp(`--package=@getmarrow/mcp@${PINS.MCP_ADAPTER_VERSION.replace(/\./g, '\\.')}`));
-    assert.equal(host.identity.isOfficialMarrowServerLaunch(config.mcpServers.marrow.command, config.mcpServers.marrow.args), true);
+    assert.equal(host.identity.isOfficialMarrowServerLaunch(config.mcpServers.marrow.command, config.mcpServers.marrow.args, host.PINNED_LAUNCHER), true);
     assert.deepEqual(host.cursorVerdict(fixture), { official: true, reason: 'official' });
     assert.equal(count(host.cursorSkips(fixture, CURSOR_LABELS)), 58);
     assert.equal(count(host.cursorSkips(fixture, CURSOR_PRE_LABELS)), 58, 'preToolUse: the official server is the only one');
@@ -144,7 +144,7 @@ test('Cursor guard with the MCP decision in the loop: official installer config 
   withFixture('marrow-cursor-loop-', {}, (fixture) => {
     installInto(fixture);
     const guard = readJson(path.join(fixture.root, '.cursor', 'hooks.json')).hooks.beforeMCPExecution.find((entry) => isMarrowCommand(entry.command)).command;
-    // The stand-in runtime runs the vendored 3.9.105 decision (test/support/cursor-hook-decision.js).
+    // The stand-in runtime runs the vendored 3.9.106 decision (test/support/cursor-hook-decision.js).
     const driver = path.join(__dirname, 'support', 'cursor-hook-decision.js');
     fakeRuntime(fixture.home, PINS.MCP_ADAPTER_VERSION, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(driver)}\n`);
     const run = (event) => {
@@ -244,13 +244,13 @@ test('an install written by the published 0.1.70: the old Cursor guard (allows s
   });
 });
 
-test('the .cursor/mcp.json the published 0.1.70 wrote is proven by the 3.9.103 MCP too (same pinned runtime core), so the repair never locks own tools out', () => {
+test('the .cursor/mcp.json the published 0.1.70 wrote is not proven by the 3.9.106 MCP (only the exact launch of the loader that started the hook is), so its own tools are checked, not skipped, until the repair rewrites the entry', () => {
   withFixture('marrow-upgrade-0170-mcp-', {}, (fixture) => {
     load0170(fixture);
     const config = readJson(path.join(fixture.root, '.cursor', 'mcp.json'));
     assert.match(JSON.stringify(config.mcpServers.marrow.args), /--package=@getmarrow\/mcp@3\.9\.102/);
-    assert.deepEqual(host.cursorVerdict(fixture), { official: true, reason: 'official' });
-    assert.equal(count(host.cursorSkips(fixture, CURSOR_LABELS)), 58);
+    assert.deepEqual(host.cursorVerdict(fixture), { official: false, reason: 'the marrow server is not the official Marrow MCP launch' });
+    assert.equal(count(host.cursorSkips(fixture, CURSOR_LABELS)), 0);
   });
 });
 
