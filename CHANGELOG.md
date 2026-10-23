@@ -2,9 +2,9 @@
 
 Release notes for `@getmarrow/install`, newest first. The README describes only the current version.
 
-## Unreleased
+## v0.1.74
 
-v0.1.74 (unreleased). `doctor` wording and one line of guidance, and the MCP pin: v0.1.74 installs MCP `3.9.106` (source `b8973d3a6aa1e2a85a7aa4ac09801d6842f98661`, packed integrity `sha512-B7j4eCpzzU1qEv4SewO4Dj4MMPQmLgjgJa9z1LpciS20g7+IhVVQFqYUjVbklJAnJBpUl0+7FLbjOC9nYdjcGQ==`); the SDK pin stays `3.7.67`. The counting rules are unchanged and `update` prints what it printed before.
+v0.1.74. `doctor` wording and one line of guidance, and the MCP pin: v0.1.74 installs MCP `3.9.106` (source `b8973d3a6aa1e2a85a7aa4ac09801d6842f98661`, packed integrity `sha512-B7j4eCpzzU1qEv4SewO4Dj4MMPQmLgjgJa9z1LpciS20g7+IhVVQFqYUjVbklJAnJBpUl0+7FLbjOC9nYdjcGQ==`); the SDK pin stays `3.7.67`. The counting rules are unchanged and `update` prints what it printed before.
 
 - **Doctor's Cursor line says what it cannot see.** A Cursor plugin is still never counted: the plugin docs name no verified place where Cursor installs it and no file that says it is enabled. When Cursor's hooks are really missing, the line keeps its `--repair` and adds one sentence: if you installed a Marrow plugin in Cursor, check Cursor's plugin list first, because doctor cannot see it and `--repair` would add a second set. `update` keeps the base line.
 - **Doctor names only hosts that are there.** A `.mcp.json` with no host marker (`.claude`, `CLAUDE.md`, `.cursor`, `.codex`, and the rest) is reported as `MCP config (host unknown)`, no longer as Claude Code. This is doctor only: `update` still names Claude Code for it, as before.
