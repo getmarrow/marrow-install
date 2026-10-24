@@ -962,3 +962,298 @@ test('the test guard: a write under the real passwd home throws and is counted; 
   assert.equal(hostFakes.guardSelfTestTrips(), before + 3);
   assert.equal(hostFakes.guardTrips(), 0, 'no real trip in this process');
 });
+
+// ---- WHY: when the home or cache folder chain is unsafe, doctor says which folder and why (and the one command) ----
+//
+// The refusal itself is the one of PATCH2-BASE above and does not change: same refusals, no status child, nothing created,
+// exit 0, the same first line and the same JSON. Only one more printed line appears, from what the refusing walk saw.
+
+const WHY = '  Doctor skipped this check: ';
+const MISSING_ENV = /^- missing env: /;
+
+function seatbeltBlock(run) {
+  const lines = (run.result.stdout || '').split('\n');
+  const at = lines.findIndex((entry) => entry.startsWith('- Seatbelt:'));
+  assert.ok(at > 0, `a Seatbelt line: ${run.text}`);
+  return { lines, at, first: lines[at], next: lines[at + 1] };
+}
+
+// What is on disk below `top`: type, mode, owner and link target of every entry (no inode, no content).
+function listTree(top) {
+  const rows = [];
+  const walk = (dir) => {
+    for (const name of fs.readdirSync(dir).sort()) {
+      const full = path.join(dir, name);
+      const stat = fs.lstatSync(full);
+      const rel = path.relative(top, full);
+      if (stat.isSymbolicLink()) rows.push(`${rel} link -> ${fs.readlinkSync(full)}`);
+      else if (stat.isDirectory()) {
+        rows.push(`${rel} dir ${(stat.mode & 0o7777).toString(8)} ${stat.uid}`);
+        walk(full);
+      } else rows.push(`${rel} file ${(stat.mode & 0o7777).toString(8)} ${stat.uid} ${stat.size}`);
+    }
+  };
+  walk(top);
+  return rows;
+}
+
+// A refused run as couldNotCheck checks it (exit 0, first line, no status child, nothing planted ran), the home and the
+// project left exactly as they were, and the line after the Seatbelt line equal to `expected` (null: no extra line).
+function refusedWith(ws, label, expected, env = baseEnv(ws), options = {}) {
+  const homeBefore = listTree(ws.base).filter((row) => !/^(record\.jsonl|capture\.jsonl|planted\.log)/.test(row));
+  const run = couldNotCheck(ws, label, env, options);
+  const { next, lines } = seatbeltBlock(run);
+  if (expected === null) assert.match(next, MISSING_ENV, `${label}: no extra line, the next line is "- missing env"`);
+  else assert.equal(next, expected, label);
+  assert.equal(lines.filter((entry) => entry.startsWith(WHY)).length, expected === null ? 0 : 1, `${label}: at most one extra line`);
+  assert.equal(listTree(ws.base).filter((row) => !/^(record\.jsonl|capture\.jsonl|planted\.log)/.test(row)).join('\n'), homeBefore.join('\n'), `${label}: nothing created, removed or changed`);
+  assert.equal(/\bchown\b|\bsudo\b/.test(run.text), false, `${label}: never chown or sudo`);
+  return run;
+}
+
+test('M1 why: .cache, .cache/marrow or the home writable by group or others: the folder, "writable by other users" and `chmod go-w <path>`; the printed command fixes it', () => {
+  const ws = workspace();
+  try {
+    const targets = [
+      ['.cache', path.join(ws.home, '.cache')],
+      ['.cache/marrow', path.join(ws.home, '.cache', 'marrow')],
+      ['the home', ws.home],
+    ];
+    for (const withBase of [true, false]) {
+      for (const [label, target] of targets) {
+        if (!withBase && label === '.cache/marrow') continue;
+        for (const bits of [0o770, 0o702, 0o707, 0o777, 0o1777]) {
+          if (withBase) makeBase(ws.home);
+          else if (label === '.cache') fs.mkdirSync(path.join(ws.home, '.cache'), { mode: 0o700 });
+          const before = mode7(target);
+          fs.chmodSync(target, bits);
+          try {
+            refusedWith(ws, `${label} ${bits.toString(8)} (base ${withBase ? 'present' : 'absent'})`, `${WHY}${target} is writable by other users. Fix: chmod go-w ${target}`);
+          } finally {
+            fs.chmodSync(target, before);
+          }
+          fs.rmSync(path.join(ws.home, '.cache'), { recursive: true, force: true });
+        }
+      }
+    }
+    // The command, pasted as printed, fixes it: the next doctor runs the check.
+    for (const [label, target] of targets) {
+      makeBase(ws.home);
+      fs.chmodSync(target, 0o777);
+      const run = refusedWith(ws, `${label}: fix`, `${WHY}${target} is writable by other users. Fix: chmod go-w ${target}`);
+      const command = seatbeltBlock(run).next.split(' Fix: ')[1];
+      assert.equal(command, `chmod go-w ${target}`);
+      const pasted = spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8' });
+      assert.equal(pasted.status, 0, `${label}: ${pasted.stderr}`);
+      assert.equal(mode7(target) & 0o022, 0, `${label}: group and others cannot write now`);
+      fs.rmSync(ws.record, { force: true });
+      assert.equal(doctor(ws, baseEnv(ws)).line, '- Seatbelt: on (no account)', `${label}: after the fix the check runs`);
+      fs.chmodSync(target, 0o700);
+      fs.rmSync(path.join(ws.home, '.cache'), { recursive: true, force: true });
+    }
+    // The only difference from a normal doctor is that one line.
+    makeBase(ws.home);
+    const normal = doctor(ws, baseEnv(ws));
+    fs.chmodSync(path.join(ws.home, '.cache'), 0o777);
+    const refused = couldNotCheck(ws, 'diff');
+    const strip = (run) => (run.result.stdout || '').split('\n').filter((entry) => !entry.startsWith('- Seatbelt:') && !entry.startsWith(WHY));
+    assert.deepEqual(strip(refused), strip(normal), 'every other line of doctor is the same');
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('M2 why: a link says "is a link" (no command); a file in the way and every other refusal print no extra line', () => {
+  const ws = workspace();
+  try {
+    const cache = path.join(ws.home, '.cache');
+    const marrow = path.join(cache, 'marrow');
+    const base = baseOf(ws.home);
+    makeBase(ws.home);
+    const real = path.join(ws.base, 'real-base');
+    fs.mkdirSync(real, { mode: 0o700 });
+    fs.rmdirSync(base);
+    fs.symlinkSync(real, base);
+    refusedWith(ws, 'the base is a link', `${WHY}${base} is a link.`);
+    fs.rmSync(base);
+    // .cache is a link to a world-writable folder: named as a link, not as writable.
+    const shared = path.join(ws.base, 'shared-tmp');
+    fs.mkdirSync(shared);
+    fs.chmodSync(shared, 0o1777);
+    fs.mkdirSync(path.join(shared, 'marrow', 'doctor-tmp'), { recursive: true });
+    fs.renameSync(cache, `${cache}-moved`);
+    fs.symlinkSync(shared, cache);
+    refusedWith(ws, '.cache is a link to a 1777 folder', `${WHY}${cache} is a link.`);
+    fs.rmSync(cache);
+    fs.symlinkSync(path.join(ws.base, 'nowhere'), cache);
+    refusedWith(ws, '.cache is a dangling link', `${WHY}${cache} is a link.`);
+    fs.rmSync(cache);
+    fs.renameSync(`${cache}-moved`, cache);
+    // .cache/marrow is a link.
+    fs.renameSync(marrow, `${marrow}-moved`);
+    fs.symlinkSync(`${marrow}-moved`, marrow);
+    refusedWith(ws, '.cache/marrow is a link', `${WHY}${marrow} is a link.`);
+    fs.rmSync(marrow);
+    fs.renameSync(`${marrow}-moved`, marrow);
+    // A file in place of the base or of .cache: no reason of the three, so the first line stands alone.
+    fs.writeFileSync(base, '');
+    refusedWith(ws, 'a file in place of the base', null);
+    fs.rmSync(base);
+    fs.rmSync(cache, { recursive: true });
+    fs.writeFileSync(cache, '');
+    refusedWith(ws, 'a file in place of .cache', null);
+    fs.rmSync(cache);
+    // Refusals that are not about the base walk: a package.json in the home, a passwd lookup that throws, an npm folder others can write.
+    fs.writeFileSync(path.join(ws.home, 'package.json'), '{"name":"x","private":true}\n');
+    refusedWith(ws, 'a package.json in the home', null);
+    fs.rmSync(path.join(ws.home, 'package.json'));
+    refusedWith(ws, 'passwd lookup throws', null, baseEnv(ws, { STATUS_TEST_PASSWD_HOME: '!throw' }));
+    const npmFolder = path.dirname(fakeNode().cli);
+    fs.chmodSync(npmFolder, 0o770);
+    try {
+      refusedWith(ws, 'npm folder group-writable', null);
+    } finally {
+      fs.chmodSync(npmFolder, 0o755);
+    }
+    // Control: a normal run has its line and no extra one.
+    fs.rmSync(ws.record, { force: true });
+    const run = doctor(ws, baseEnv(ws));
+    assert.equal(run.line, '- Seatbelt: on (no account)');
+    assert.match(seatbeltBlock(run).next, MISSING_ENV);
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('M3 why: a folder owned by another user says so (no command, no chown, no sudo), also when it is writable too', () => {
+  const ws = workspace();
+  try {
+    makeBase(ws.home);
+    const cache = path.join(ws.home, '.cache');
+    const marrow = path.join(cache, 'marrow');
+    const base = baseOf(ws.home);
+    for (const [label, target] of [['.cache', cache], ['.cache/marrow', marrow], ['the base', base], ['the home', ws.home], ['the folder above the home', ws.base]]) {
+      refusedWith(ws, `${label} owned by another uid`, `${WHY}${target} is owned by another user.`, baseEnv(ws, { STATUS_TEST_FAKE_OWNER: target }));
+    }
+    fs.chmodSync(cache, 0o777);
+    try {
+      refusedWith(ws, '.cache owned by another uid and writable', `${WHY}${cache} is owned by another user.`, baseEnv(ws, { STATUS_TEST_FAKE_OWNER: cache }));
+    } finally {
+      fs.chmodSync(cache, 0o700);
+    }
+    // The fake owner changes nothing for a path it does not name: control.
+    fs.rmSync(ws.record, { force: true });
+    assert.equal(doctor(ws, baseEnv(ws, { STATUS_TEST_FAKE_OWNER: path.join(ws.base, 'not-a-folder-here') })).line, '- Seatbelt: on (no account)');
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('M4 why: a path with a space, quote, $(...), backtick, newline, ;&|, non-ASCII, ESC, a leading dash or a tilde: no command, only plain characters shown, refusal unchanged', () => {
+  const ws = workspace();
+  try {
+    const shown = (name) => name.replace(/[^A-Za-z0-9._/-]/g, '?');
+    const names = ['my home', "it's", 'say"hi"', '$(touch pwned)', '`touch pwned`', 'line1\nline2', 'hömé-ひ', '-rf', '\u001b[31mred', 'a;b&c|d', '~', '--help'];
+    for (const name of names) {
+      const home = path.join(ws.base, name);
+      fs.mkdirSync(home, { mode: 0o700 });
+      const cache = path.join(home, '.cache');
+      fs.mkdirSync(cache, { mode: 0o700 });
+      fs.chmodSync(cache, 0o770);
+      const env = { ...baseEnv(ws, { HOME: home, STATUS_TEST_PASSWD_HOME: home }) };
+      const run = refusedWith(ws, `home named ${JSON.stringify(name)}`, `${WHY}${shown(cache)} is writable by other users.`, env);
+      assert.equal(/[\x00-\x09\x0b-\x1f\x7f]|[^\x00-\x7f]/.test(run.result.stdout.replace(/\n$/, '').split('\n').filter((entry) => entry.startsWith(WHY)).join('')), false, 'plain ASCII on the line');
+      assert.equal(/Fix:|chmod/.test(run.text), false, `no command: ${JSON.stringify(name)}`);
+      for (const planted of [path.join(ws.base, 'pwned'), path.join(ws.project, 'pwned'), path.join(home, 'pwned'), path.join(cache, 'pwned')]) assert.equal(fs.existsSync(planted), false, `nothing ran: ${planted}`);
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+    // A home that is itself unsafe, with a link and an owner as the reason.
+    const odd = path.join(ws.base, 'my home');
+    fs.mkdirSync(odd, { mode: 0o700 });
+    fs.chmodSync(odd, 0o770);
+    refusedWith(ws, 'home with a space, 770', `${WHY}${shown(odd)} is writable by other users.`, baseEnv(ws, { HOME: odd, STATUS_TEST_PASSWD_HOME: odd }));
+    fs.chmodSync(odd, 0o700);
+    fs.symlinkSync(ws.project, path.join(odd, '.cache'));
+    refusedWith(ws, 'link with a space', `${WHY}${shown(path.join(odd, '.cache'))} is a link.`, baseEnv(ws, { HOME: odd, STATUS_TEST_PASSWD_HOME: odd }));
+    fs.rmSync(path.join(odd, '.cache'));
+    fs.mkdirSync(path.join(odd, '.cache'), { mode: 0o700 });
+    refusedWith(ws, 'owner with a space', `${WHY}${shown(path.join(odd, '.cache'))} is owned by another user.`, baseEnv(ws, { HOME: odd, STATUS_TEST_PASSWD_HOME: odd, STATUS_TEST_FAKE_OWNER: path.join(odd, '.cache') }));
+    fs.rmSync(odd, { recursive: true, force: true });
+    // Controls: a path of plain characters, dots and dashes in the middle, gets its command.
+    for (const name of ['a.b-c_d', '..hidden', 'x-y']) {
+      const home = path.join(ws.base, name);
+      fs.mkdirSync(home, { mode: 0o700 });
+      fs.mkdirSync(path.join(home, '.cache'), { mode: 0o700 });
+      fs.chmodSync(path.join(home, '.cache'), 0o770);
+      const cache = path.join(home, '.cache');
+      refusedWith(ws, `plain home ${name}`, `${WHY}${cache} is writable by other users. Fix: chmod go-w ${cache}`, baseEnv(ws, { HOME: home, STATUS_TEST_PASSWD_HOME: home }));
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('M5 why: the folder named is the passwd home\'s, never $HOME\'s; an unsafe $HOME with a safe passwd home is not a refusal', () => {
+  const ws = workspace();
+  try {
+    const elsewhere = path.join(ws.base, 'elsewhere-home');
+    fs.mkdirSync(elsewhere, { mode: 0o700 });
+    const cache = path.join(ws.home, '.cache');
+    fs.mkdirSync(cache, { mode: 0o700 });
+    fs.chmodSync(cache, 0o777);
+    const run = refusedWith(ws, 'HOME elsewhere, passwd home unsafe', `${WHY}${cache} is writable by other users. Fix: chmod go-w ${cache}`, baseEnv(ws, { HOME: elsewhere, STATUS_TEST_PASSWD_HOME: ws.home }));
+    assert.equal(run.text.includes('elsewhere-home/.cache'), false, 'the HOME variable is not what is named');
+    fs.chmodSync(cache, 0o700);
+    fs.rmSync(cache, { recursive: true });
+    fs.chmodSync(elsewhere, 0o770);
+    fs.rmSync(ws.record, { force: true });
+    const ok = doctor(ws, baseEnv(ws, { HOME: elsewhere, STATUS_TEST_PASSWD_HOME: ws.home }));
+    assert.equal(ok.line, '- Seatbelt: on (no account)');
+    assert.match(seatbeltBlock(ok).next, MISSING_ENV);
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('M6 why: doctor --json carries the same fields and values (no new field, no extra line); exit code 0', () => {
+  const ws = workspace();
+  try {
+    const json = (label, env = baseEnv(ws)) => {
+      fs.rmSync(ws.record, { force: true });
+      const run = doctor(ws, env, { args: ['--json'] });
+      assert.equal(run.result.status, 0, `${label}: ${run.text}`);
+      assert.equal((run.result.stdout || '').includes('Doctor skipped'), false, `${label}: the extra line is not in the JSON`);
+      return { report: JSON.parse(run.result.stdout), stdout: run.result.stdout, spawns: statusRecords(ws).length };
+    };
+    const normal = json('normal');
+    assert.deepEqual(normal.report.doctor.seatbelt, { mode: 'seatbelt', reason: null });
+    const cache = path.join(ws.home, '.cache');
+    const marrow = path.join(cache, 'marrow');
+    const refusals = [];
+    makeBase(ws.home);
+    fs.chmodSync(cache, 0o777);
+    refusals.push(['.cache 777', json('.cache 777')]);
+    fs.chmodSync(cache, 0o700);
+    fs.chmodSync(marrow, 0o707);
+    refusals.push(['.cache/marrow 707', json('.cache/marrow 707')]);
+    fs.chmodSync(marrow, 0o700);
+    refusals.push(['owner', json('owner', baseEnv(ws, { STATUS_TEST_FAKE_OWNER: cache }))]);
+    fs.chmodSync(ws.home, 0o707);
+    refusals.push(['home 707', json('home 707')]);
+    fs.chmodSync(ws.home, 0o700);
+    const real = path.join(ws.base, 'real-cache');
+    fs.renameSync(cache, real);
+    fs.symlinkSync(real, cache);
+    refusals.push(['link', json('link')]);
+    for (const [label, got] of refusals) {
+      assert.deepEqual(got.report.doctor.seatbelt, { mode: 'could_not_check', reason: null }, label);
+      assert.deepEqual(Object.keys(got.report.doctor.seatbelt), ['mode', 'reason'], label);
+      assert.equal(got.spawns, 0, `${label}: no status child`);
+      assert.deepEqual(Object.keys(got.report.doctor), Object.keys(normal.report.doctor), `${label}: the same doctor fields in the same order`);
+      assert.deepEqual(Object.keys(got.report), Object.keys(normal.report), `${label}: the same top-level fields`);
+    }
+  } finally {
+    ws.cleanup();
+  }
+});

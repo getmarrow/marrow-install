@@ -16,10 +16,13 @@ const {
   SEATBELT_STATUS_MAX_BYTES,
   SEATBELT_STATUS_TIMEOUT_MS,
   SEATBELT_PRESENCE_KEY,
+  chainClosed,
   parseSeatbeltStatus,
   runSeatbeltStatus,
+  safeFixPath,
   seatbeltLine,
   seatbeltReport,
+  seatbeltWhyLine,
   statusInvocation,
 } = require('../src/seatbelt-status');
 
@@ -399,5 +402,186 @@ test('doctor starts npm\'s own npx-cli.js by absolute path with the exact pinned
     if (real) assert.equal(real.command, process.execPath);
   } finally {
     fs.rmSync(prefix, { recursive: true, force: true });
+  }
+});
+
+// ---- why doctor could not check: the extra line under "- Seatbelt: could not check" ----
+
+// A fake file system for chainClosed: `chain` lists folders from the top (/) down to the start, each { uid, mode, kind }.
+function fakeChain(rows, uid = 1000) {
+  const table = new Map(rows.map(([name, uid2, mode, kind = 'dir']) => [name, { uid: uid2, mode, kind }]));
+  return {
+    getuid: () => uid,
+    lstatSync: (name) => {
+      const row = table.get(name);
+      if (!row) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      return { uid: row.uid, mode: row.mode, isSymbolicLink: () => row.kind === 'link', isDirectory: () => row.kind === 'dir', isFile: () => row.kind === 'file' };
+    },
+  };
+}
+const SAFE_ROWS = [['/', 0, 0o755], ['/home', 0, 0o755], ['/home/u', 1000, 0o700], ['/home/u/.cache', 1000, 0o700], ['/home/u/.cache/marrow', 1000, 0o700]];
+const withRow = (name, patch) => SAFE_ROWS.map((row) => (row[0] === name ? [row[0], ...patch] : row));
+
+// The decision exactly as it was before the reason was recorded (080a82dc), kept here to prove nothing about it moved.
+function chainClosedBefore(start, io, { startIsFile = false } = {}) {
+  const uid = io.getuid();
+  if (!Number.isInteger(uid)) return false;
+  for (let current = start; ; ) {
+    const stat = io.lstatSync(current);
+    if (stat.isSymbolicLink() || (current === start && startIsFile ? !stat.isFile() : !stat.isDirectory())) return false;
+    if ((stat.uid !== 0 && stat.uid !== uid) || (stat.mode & 0o022) !== 0) return false;
+    const parent = path.posix.dirname(current);
+    if (parent === current) return true;
+    current = parent;
+  }
+}
+
+test('chainClosed names the first unsafe folder walking up and why, and decides exactly as before', () => {
+  const start = '/home/u/.cache/marrow';
+  const why = () => ({});
+  const check = (rows, expected, options = {}) => {
+    const io = fakeChain(rows);
+    const note = why();
+    assert.equal(chainClosed(start, io, { ...options, why: note }), expected.ok);
+    assert.equal(chainClosed(start, io, options), expected.ok, 'same answer without the out-parameter');
+    assert.equal(chainClosedBefore(start, io, options), expected.ok, 'same answer as 080a82dc');
+    if (expected.ok) assert.deepEqual(note, {}, 'nothing is noted when the chain is closed');
+    else assert.deepEqual(note, { path: expected.path, reason: expected.reason });
+  };
+  check(SAFE_ROWS, { ok: true });
+  check(SAFE_ROWS.map((row) => (row[0] === '/home' ? ['/home', 0, 0o775] : row)), { ok: false, path: '/home', reason: 'writable' });
+  for (const [bits, label] of [[0o770, '770'], [0o702, '702'], [0o707, '707'], [0o777, '777'], [0o1777, '1777'], [0o720, '720 (group write only)']]) {
+    check(withRow('/home/u/.cache', [1000, bits]), { ok: false, path: '/home/u/.cache', reason: 'writable' });
+    check(withRow('/home/u/.cache/marrow', [1000, bits]), { ok: false, path: start, reason: 'writable' });
+    check(withRow('/home/u', [1000, bits]), { ok: false, path: '/home/u', reason: 'writable' });
+    assert.ok(label);
+  }
+  for (const bits of [0o755, 0o750, 0o700, 0o500, 0o755 | 0o4000, 0o1755]) check(withRow('/home/u/.cache', [1000, bits]), { ok: true });
+  // The first unsafe folder is the one nearest the start; the ones above it are not named.
+  check(withRow('/home/u/.cache', [1000, 0o777]).map((row) => (row[0] === '/home' ? ['/home', 0, 0o777] : row)), { ok: false, path: '/home/u/.cache', reason: 'writable' });
+  check(withRow('/home/u/.cache/marrow', [1000, 0o770]).map((row) => (row[0] === '/home/u/.cache' ? ['/home/u/.cache', 1000, 0o777] : row)), { ok: false, path: start, reason: 'writable' });
+  // Owners: another user is "other_owner", also when the folder is writable too (the owner is told first); root is fine, and root-owned and writable is "writable".
+  check(withRow('/home/u/.cache', [1001, 0o700]), { ok: false, path: '/home/u/.cache', reason: 'other_owner' });
+  check(withRow('/home/u/.cache', [1001, 0o777]), { ok: false, path: '/home/u/.cache', reason: 'other_owner' });
+  check(withRow('/home/u/.cache', [0, 0o755]), { ok: true });
+  check(withRow('/home/u/.cache', [0, 0o777]), { ok: false, path: '/home/u/.cache', reason: 'writable' });
+  check(withRow('/home/u', [4242, 0o700]), { ok: false, path: '/home/u', reason: 'other_owner' });
+  // A link is a link whatever its mode and owner; a file is "other".
+  check(withRow('/home/u/.cache', [1000, 0o700, 'link']), { ok: false, path: '/home/u/.cache', reason: 'link' });
+  check(withRow('/home/u/.cache', [1001, 0o777, 'link']), { ok: false, path: '/home/u/.cache', reason: 'link' });
+  check(withRow('/home/u/.cache', [1000, 0o700, 'file']), { ok: false, path: '/home/u/.cache', reason: 'other' });
+  check(withRow('/home/u/.cache/marrow', [1000, 0o700, 'file']), { ok: true }, { startIsFile: true });
+  check(SAFE_ROWS, { ok: false, path: start, reason: 'other' }, { startIsFile: true });
+  // An error from the file system is thrown as before and notes nothing; so is a uid that is not an integer.
+  const note = {};
+  assert.throws(() => chainClosed('/home/u/missing', fakeChain(SAFE_ROWS), { why: note }), /ENOENT/);
+  assert.throws(() => chainClosedBefore('/home/u/missing', fakeChain(SAFE_ROWS)), /ENOENT/);
+  assert.deepEqual(note, {});
+  assert.equal(chainClosed(start, { ...fakeChain(SAFE_ROWS), getuid: () => 'x' }, { why: note }), false);
+  assert.deepEqual(note, {});
+});
+
+test('chainClosed gives the same answer as 080a82dc on 3000 random chains (owner, mode, kind, start kind)', () => {
+  let seed = 20261024;
+  const next = (n) => {
+    seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff;
+    return seed % n;
+  };
+  const owners = [0, 1000, 1000, 1001, 4242];
+  const modes = [0o700, 0o755, 0o750, 0o775, 0o770, 0o702, 0o707, 0o777, 0o1777, 0o1755, 0o500, 0o020, 0o002];
+  const kinds = ['dir', 'dir', 'dir', 'dir', 'link', 'file'];
+  const names = ['/', '/a', '/a/b', '/a/b/c', '/a/b/c/d'];
+  let closed = 0;
+  for (let round = 0; round < 3000; round += 1) {
+    const rows = names.map((name) => [name, owners[next(owners.length)], modes[next(modes.length)], kinds[next(kinds.length)]]);
+    if (next(3) > 0) for (const row of rows) { row[2] = [0o700, 0o755][next(2)]; row[3] = 'dir'; if (next(4) === 0) row[1] = 1000; }
+    if (next(5) === 0) rows.pop();
+    const io = fakeChain(rows);
+    const startIsFile = next(4) === 0;
+    const run = (fn) => { try { return fn(); } catch (error) { return `threw ${error.code}`; } };
+    const before = run(() => chainClosedBefore('/a/b/c/d', io, { startIsFile }));
+    const note = {};
+    const after = run(() => chainClosed('/a/b/c/d', io, { startIsFile, why: note }));
+    assert.equal(after, before, JSON.stringify(rows));
+    assert.equal(run(() => chainClosed('/a/b/c/d', io, { startIsFile })), before);
+    if (before === true) closed += 1;
+    if (before === false) assert.ok(note.path && ['link', 'other', 'other_owner', 'writable'].includes(note.reason), JSON.stringify([rows, note]));
+    else assert.deepEqual(note, {});
+  }
+  assert.ok(closed > 100 && closed < 2900, `the random chains cover both answers (${closed} closed)`);
+});
+
+const refusalOf = (folder, reason, home = '/home/u') => ({ refusal: { home, path: folder, reason } });
+const whyOf = (folder, reason, home) => seatbeltWhyLine(seatbeltReport(null, refusalOf(folder, reason, home)));
+
+test('the extra line: three reasons, the fix command only for a writable folder with a safe path under the home', () => {
+  const prefix = '  Doctor skipped this check: ';
+  assert.equal(whyOf('/home/u/.cache', 'writable'), `${prefix}/home/u/.cache is writable by other users. Fix: chmod go-w /home/u/.cache`);
+  assert.equal(whyOf('/home/u/.cache/marrow', 'writable'), `${prefix}/home/u/.cache/marrow is writable by other users. Fix: chmod go-w /home/u/.cache/marrow`);
+  assert.equal(whyOf('/home/u', 'writable'), `${prefix}/home/u is writable by other users. Fix: chmod go-w /home/u`);
+  assert.equal(whyOf('/home/u/.cache', 'link'), `${prefix}/home/u/.cache is a link.`);
+  assert.equal(whyOf('/home/u/.cache', 'other_owner'), `${prefix}/home/u/.cache is owned by another user.`);
+  // Not under the home, or the home is /: the reason without a command.
+  assert.equal(whyOf('/home', 'writable'), `${prefix}/home is writable by other users.`);
+  assert.equal(whyOf('/tmp/x', 'writable'), `${prefix}/tmp/x is writable by other users.`);
+  assert.equal(whyOf('/home/u2/.cache', 'writable'), `${prefix}/home/u2/.cache is writable by other users.`, 'a longer name with the home as a prefix is not under the home');
+  assert.equal(whyOf('/etc', 'writable', '/'), `${prefix}/etc is writable by other users.`);
+  assert.equal(whyOf('/', 'writable', '/'), `${prefix}/ is writable by other users.`);
+  // Every other reason, and every malformed refusal: no extra line (the first line stands alone, as before).
+  for (const reason of ['other', 'unknown', '', null, undefined, 'writable ', 'WRITABLE', '__proto__', 'constructor']) assert.equal(whyOf('/home/u/.cache', reason), null, String(reason));
+  for (const bad of [null, undefined, {}, { refusal: null }, { refusal: {} }, { refusal: { reason: 'writable' } }, { refusal: { path: 7, reason: 'writable' } }, { refusal: { path: null, reason: 'link' } }, 'text', 5]) {
+    assert.equal(seatbeltWhyLine(seatbeltReport(null, bad)), null, JSON.stringify(bad));
+  }
+  // Only a refusal of the walk gets the line: a status, a copy of the report, a JSON round trip, a report built by hand, odd inputs.
+  const report = seatbeltReport(null, refusalOf('/home/u/.cache', 'writable'));
+  assert.ok(seatbeltWhyLine(report));
+  assert.equal(seatbeltWhyLine({ ...report }), null);
+  assert.equal(seatbeltWhyLine(JSON.parse(JSON.stringify(report))), null);
+  assert.equal(seatbeltWhyLine({ mode: 'could_not_check', reason: null }), null);
+  assert.equal(seatbeltWhyLine(seatbeltReport({ mode: 'seatbelt', reasons: [] }, refusalOf('/home/u/.cache', 'writable'))), null, 'a status that came back has no refusal line');
+  assert.equal(seatbeltWhyLine(seatbeltReport({ mode: 'claimed_no_key', reasons: [] }, refusalOf('/home/u/.cache', 'link'))), null);
+  for (const odd of [null, undefined, 'could_not_check', 3, [], () => {}]) assert.equal(seatbeltWhyLine(odd), null);
+  // The report, its JSON and its first line are exactly what they were.
+  assert.deepEqual(report, { mode: 'could_not_check', reason: null });
+  assert.equal(JSON.stringify(report), '{"mode":"could_not_check","reason":null}');
+  assert.deepEqual(Object.keys(report), ['mode', 'reason']);
+  assert.deepEqual(Object.getOwnPropertySymbols(report), []);
+  assert.equal(seatbeltLine(report), '- Seatbelt: could not check');
+  assert.equal(JSON.stringify(seatbeltReport(null)), JSON.stringify(report));
+});
+
+test('the extra line: abuse table for the path (space, quotes, $(...), backtick, newline, non-ASCII, leading dash, ESC, long)', () => {
+  const home = '/home/u';
+  const unsafe = [
+    '/home/u/my dir', "/home/u/it's", '/home/u/say"hi"', '/home/u/$(touch pwned)', '/home/u/`id`', '/home/u/a\nb', '/home/u/a\rb', '/home/u/h\u00f6m\u00e9',
+    '/home/u/\u3072', '/home/u/-rf', '/home/u/.cache/-x', '/home/u/\u001b[31mred', '/home/u/a;b', '/home/u/a&b', '/home/u/a|b', '/home/u/a>b', '/home/u/~', '/home/u/a*b',
+    '/home/u/a\\b', '/home/u/a\tb', '/home/u/a\u0000b', '/home/u/../etc', '/home/u/./x', '/home/u/..', `/home/u/${'x'.repeat(1100)}`, '/home/u//x', 'home/u/x', '', '-rf',
+    '/home/user/x', '/home/ux', '/home', '/', '/home/u/a%20b', '/home/u/a{b}', '/home/u/a b/c', '/home/u/a:b', '/home/u/#x', '/home/u/a=b', '/home/u/a,b', '/home/u/a@b', '/home/u/a!b',
+  ];
+  for (const folder of unsafe) {
+    assert.equal(safeFixPath(folder, home), false, JSON.stringify(folder));
+    const line = whyOf(folder, 'writable', home);
+    assert.equal(line === null || !/Fix:|chmod/.test(line), true, `no command: ${JSON.stringify(folder)}`);
+    if (line !== null) {
+      assert.match(line, /^[\x20-\x7e]+$/, `plain ASCII, one line: ${JSON.stringify(folder)}`);
+      assert.doesNotMatch(line, /[$`'"\\;&|<>*(){}!#%=@]/, `no shell character shown: ${JSON.stringify(folder)}`);
+    }
+  }
+  for (const folder of ['/home/u', '/home/u/.cache', '/home/u/.cache/marrow', '/home/u/a.b-c_d', '/home/u/..hidden', '/home/u/.x/y-z/0']) {
+    assert.equal(safeFixPath(folder, home), true, folder);
+  }
+  for (const badHome of [undefined, null, '', '/', 5]) assert.equal(safeFixPath('/home/u/.cache', badHome), false, String(badHome));
+  assert.equal(safeFixPath(undefined, home), false);
+  // A long plain path is shown in full and gets its command (up to 1024 characters); beyond that, no command.
+  const long = `/home/u/${'y'.repeat(900)}`;
+  assert.equal(whyOf(long, 'writable', home), `  Doctor skipped this check: ${long} is writable by other users. Fix: chmod go-w ${long}`);
+  assert.doesNotMatch(whyOf(`/home/u/${'y'.repeat(1100)}`, 'writable', home), /Fix:/);
+  // Every extra line is plain ASCII on one line and avoids the banned words (like every other doctor seatbelt string).
+  for (const reason of ['writable', 'link', 'other_owner']) {
+    const line = whyOf('/home/u/.cache', reason, home);
+    assert.match(line, /^[\x20-\x7e]+$/);
+    assert.doesNotMatch(line, /\b(risk|risky|score|classifier)\b/i);
+    assert.doesNotMatch(line, /run\b[^.]*\bdoctor/i);
+    assert.doesNotMatch(line, /chown|sudo|protect|on\b.*\boff\b/i);
   }
 });

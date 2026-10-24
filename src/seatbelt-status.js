@@ -1,9 +1,10 @@
 'use strict';
 
 // Doctor's read-only view of the keyless seatbelt: it runs the pinned MCP's `seatbelt-status`
-// command and prints one plain line. It changes no doctor verdict and writes no user file; its only
-// writes are the private working base under the passwd home and one empty private folder in it,
-// removed after each run (see "Where it runs" below).
+// command and prints one plain line (and, when the home or cache folder chain was unsafe and the check was
+// refused, one more line saying which folder and why: see "why doctor could not check" below). It changes no
+// doctor verdict and writes no user file; its only writes are the private working base under the passwd home
+// and one empty private folder in it, removed after each run (see "Where it runs" below).
 //
 // The command prints exactly one line of JSON, {"mode":...,"reasons":[...]}, and exits 0. An older
 // MCP has no such command (an unknown subcommand may start the MCP server on stdio and wait), so
@@ -262,18 +263,31 @@ function systemIo(io) {
 // POSIX: whether `start` (a real path) and every folder above it, up to /, belongs to root or to this user and cannot be
 // written by its group or by others. Then no other user can add, rename or replace anything on the way down to `start`.
 // A sticky world-writable /tmp never qualifies. `start` is a folder unless `startIsFile`. Throws on any error: callers
-// treat that as a refusal.
-function chainClosed(start, io, { startIsFile = false } = {}) {
+// treat that as a refusal. `why`, when given, is only written to: the first folder (walking up from `start`) that made it
+// refuse and the reason, as { path, reason } (see refuse). It changes no decision.
+function chainClosed(start, io, { startIsFile = false, why = null } = {}) {
   const uid = io.getuid();
   if (!Number.isInteger(uid)) return false;
   for (let current = start; ; ) {
     const stat = io.lstatSync(current);
-    if (stat.isSymbolicLink() || (current === start && startIsFile ? !stat.isFile() : !stat.isDirectory())) return false;
-    if ((stat.uid !== 0 && stat.uid !== uid) || (stat.mode & 0o022) !== 0) return false;
+    if (stat.isSymbolicLink()) return refuse(why, current, 'link');
+    if (current === start && startIsFile ? !stat.isFile() : !stat.isDirectory()) return refuse(why, current, 'other');
+    if (stat.uid !== 0 && stat.uid !== uid) return refuse(why, current, 'other_owner');
+    if ((stat.mode & 0o022) !== 0) return refuse(why, current, 'writable');
     const parent = path.posix.dirname(current);
     if (parent === current) return true;
     current = parent;
   }
+}
+
+// Notes into `why` (when there is one) which folder a walk refused at and why, and returns false: the refusal itself.
+// Reasons: 'link', 'other_owner' (not root and not this user), 'writable' (group or others can write), 'other'.
+function refuse(why, folder, reason) {
+  if (why) {
+    why.path = folder;
+    why.reason = reason;
+  }
+  return false;
 }
 
 // npm's own npx-cli.js next to the node running doctor, or null. The only script accepted is the one place npm puts
@@ -387,12 +401,15 @@ function privateBase(held = { parts: [], from: null }) {
 }
 
 function basePass(held) {
+  held.refusal = null;
   try {
     const sys = systemIo();
     const home = passwdHome();
     if (home === null) return null;
     let dir = fs.realpathSync(home);
-    if (!chainClosed(dir, sys)) return null;
+    // `why` is what the walk that refuses itself saw (never a second look at the file system); see seatbeltWhyLine.
+    const why = { home: dir, path: null, reason: null };
+    if (!chainClosed(dir, sys, { why })) return refused(held, why);
     held.parts = BASE_PARTS.map((part, index) => path.join(dir, ...BASE_PARTS.slice(0, index + 1)));
     for (const [index, part] of BASE_PARTS.entries()) {
       dir = path.join(dir, part);
@@ -416,12 +433,23 @@ function basePass(held) {
           return error && error.code === 'ENOENT' ? VANISHED : null;
         }
       }
-      if (!stat.isDirectory()) return null;
+      if (!stat.isDirectory()) {
+        refuse(why, dir, stat.isSymbolicLink() ? 'link' : 'other');
+        return refused(held, why);
+      }
     }
-    const fd = fs.openSync(dir, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+    let fd;
+    try {
+      fd = fs.openSync(dir, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+    } catch (error) {
+      // ELOOP: the last name is a link (swapped in since the lstat above); any other error says nothing about why.
+      if (error && error.code === 'ELOOP') held.refusal = { ...why, path: dir, reason: 'link' };
+      throw error;
+    }
     try {
       const stat = fs.fstatSync(fd);
-      if (!stat.isDirectory() || stat.uid !== sys.getuid()) return null;
+      if (!stat.isDirectory()) return refused(held, { ...why, path: dir, reason: 'other' });
+      if (stat.uid !== sys.getuid()) return refused(held, { ...why, path: dir, reason: 'other_owner' });
       if ((stat.mode & 0o777) !== 0o700) {
         fs.fchmodSync(fd, 0o700);
         if ((fs.fstatSync(fd).mode & 0o777) !== 0o700) return null;
@@ -430,10 +458,17 @@ function basePass(held) {
       fs.closeSync(fd);
     }
     const real = fs.realpathSync(dir);
-    return real === dir && chainClosed(real, sys) ? real : null;
+    if (real !== dir) return null;
+    return chainClosed(real, sys, { why }) ? real : refused(held, why);
   } catch (error) {
     return error && error.code === 'ENOENT' ? VANISHED : null;
   }
+}
+
+// Keeps what the refusing walk saw in held.refusal (the caller's record) and gives the refusal: null.
+function refused(held, why) {
+  held.refusal = why;
+  return null;
 }
 
 // The folder the private working folder is made in: on POSIX the checked base above (or null: nothing is
@@ -559,9 +594,11 @@ function releaseBase(held) {
 // doctor's own folder, and returns { mode, reasons } or null. The folder, and the base parts this run made, are
 // removed after in every path (releaseStatusFolder). `invocation` is { command, args, env }. Order: the base is
 // created and checked, then the private folder is made, then noProjectAbove: if a folder above the private one
-// holds a package.json or a node_modules, nothing is started (null).
-async function runSeatbeltStatus(invocation, limits = {}) {
-  const held = { cwd: null, parts: [], from: null, noted: false };
+// holds a package.json or a node_modules, nothing is started (null). `refusal`, when given, receives only the
+// first unsafe folder of the base walk that refused ({ home, path, reason } or null; see seatbeltWhyLine); it
+// changes nothing else.
+async function runSeatbeltStatus(invocation, limits = {}, refusal = null) {
+  const held = { cwd: null, parts: [], from: null, noted: false, refusal: null };
   try {
     if (!acquirePrivateFolder(held)) return null;
     if (!noProjectAbove(fs.realpathSync(held.cwd))) return null;
@@ -570,6 +607,7 @@ async function runSeatbeltStatus(invocation, limits = {}) {
   } catch {
     return null;
   } finally {
+    if (refusal) refusal.refusal = held.refusal;
     releaseStatusFolder(held);
   }
 }
@@ -581,9 +619,16 @@ function pickSeatbeltReason(reasons) {
   return reasons.includes('account_evidence') ? 'account_evidence' : null;
 }
 
-// The report field (codes only): { mode, reason }. A status of null is "could_not_check".
-function seatbeltReport(status) {
-  if (!status) return { mode: 'could_not_check', reason: null };
+// The report field (codes only): { mode, reason }. A status of null is "could_not_check". `refusal` is the
+// object runSeatbeltStatus filled: when it names why the base walk refused, the extra doctor line is kept for
+// seatbeltWhyLine against THIS report object (a WeakMap, so the report, its JSON and its fields stay as they were).
+function seatbeltReport(status, refusal = null) {
+  if (!status) {
+    const report = { mode: 'could_not_check', reason: null };
+    const note = refusalNote(refusal && refusal.refusal);
+    if (note) WHY_LINES.set(report, note);
+    return report;
+  }
   return { mode: status.mode, reason: status.mode === 'claimed_no_key' ? pickSeatbeltReason(status.reasons) : null };
 }
 
@@ -597,6 +642,52 @@ function seatbeltLine(report) {
   const code = Object.prototype.hasOwnProperty.call(REASON_TEXT, report.reason) ? report.reason : 'other';
   const [reason, fix] = REASON_TEXT[code];
   return `- Seatbelt: strict here (holds more actions): ${reason} -> ${fix}`;
+}
+
+// ---- why doctor could not check: the one extra line under "- Seatbelt: could not check" ----
+//
+// When the base walk (privateBase) refuses, doctor says which folder made it refuse and why, from what that same
+// walk saw. Only three reasons get a line; every other refusal, and every other way of "could not check" (a
+// timeout, an old MCP, an untrusted npm, a package.json above the private folder), prints no extra line, exactly as before.
+//   writable    "is writable by other users", and, when it is safe to paste, `chmod go-w <path>`
+//   link        "is a link" (no command)
+//   other_owner "is owned by another user" (no command: never chown or sudo)
+// The only variable text is the path, and the command is printed only for a path of [A-Za-z0-9._/-] that is the
+// passwd home or below it (see safeFixPath). Any other path is shown with every other character as "?".
+const WHY_LINES = new WeakMap();
+const WHY_PREFIX = '  Doctor skipped this check: ';
+const WHY_REASON_TEXT = Object.freeze({ writable: 'is writable by other users', link: 'is a link', other_owner: 'is owned by another user' });
+const PATH_LIMIT = 1024;
+
+// Whether `folder` may be named in a pasted command: a plain absolute path (only [A-Za-z0-9._/-], no "." or ".." name and
+// no name that starts with a dash) that is `home` or below it, with a `home` that is a plain absolute path and not /.
+function safeFixPath(folder, home) {
+  if (typeof folder !== 'string' || typeof home !== 'string' || folder.length > PATH_LIMIT || !/^\/[A-Za-z0-9._/-]+$/.test(home)) return false;
+  if (!/^\/[A-Za-z0-9._/-]*$/.test(folder) || folder.includes('//')) return false;
+  if (!folder.split('/').slice(1).every((name) => name !== '.' && name !== '..' && !name.startsWith('-'))) return false;
+  return folder === home || folder.startsWith(`${home}/`);
+}
+
+// The path as shown: itself when it is plain, else with every character outside the safe set shown as "?" (never
+// a control byte or a quote to the terminal). Cut at PATH_LIMIT characters.
+function shownPath(folder) {
+  const text = Array.from(String(folder)).map((char) => (/^[A-Za-z0-9._/-]$/.test(char) ? char : '?')).join('');
+  return text.length > PATH_LIMIT ? `${text.slice(0, PATH_LIMIT)}...` : text;
+}
+
+// The extra line for a refusal { home, path, reason } from the base walk, or null for none.
+function refusalNote(refusal) {
+  if (!refusal || typeof refusal !== 'object' || typeof refusal.path !== 'string' || !Object.prototype.hasOwnProperty.call(WHY_REASON_TEXT, refusal.reason)) return null;
+  const folder = refusal.path;
+  const text = `${WHY_PREFIX}${shownPath(folder)} ${WHY_REASON_TEXT[refusal.reason]}.`;
+  return refusal.reason === 'writable' && safeFixPath(folder, refusal.home) ? `${text} Fix: chmod go-w ${folder}` : text;
+}
+
+// The extra doctor line (without the newline) for a seatbeltReport() value that was a refusal, or null. It is
+// only ever returned for the report object seatbeltReport made it for, so a copy, a JSON round trip or a report
+// built by hand has none and doctor prints the first line alone.
+function seatbeltWhyLine(report) {
+  return report && typeof report === 'object' && report.mode === 'could_not_check' && WHY_LINES.has(report) ? WHY_LINES.get(report) : null;
 }
 
 module.exports = {
@@ -623,4 +714,7 @@ module.exports = {
   pickSeatbeltReason,
   seatbeltReport,
   seatbeltLine,
+  seatbeltWhyLine,
+  safeFixPath,
+  chainClosed,
 };
