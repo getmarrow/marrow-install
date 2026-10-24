@@ -79,10 +79,41 @@ const ALWAYS_NETWORK = new Set(['lfs', 'svn', 'send-email', 'imap-send', 'p4', '
 const GIT_FLAGS = new Set(['-p', '-P', '--paginate', '--no-pager', '--no-replace-objects', '--bare', '--literal-pathspecs', '--glob-pathspecs',
   '--noglob-pathspecs', '--icase-pathspecs', '--no-optional-locks', '--no-advice', '--version', '-v', '--help', '-h', '--html-path', '--man-path',
   '--info-path', '--exec-path']);
-// Options of the network subcommands that take the next word as their value (so it is not mistaken for the repository).
-const VALUE_OPTIONS = new Set(['-o', '--push-option', '--depth', '--deepen', '--shallow-since', '--shallow-exclude', '--jobs', '-j', '--upload-pack',
-  '--receive-pack', '--exec', '--repo', '--branch', '-b', '--origin', '--template', '--reference', '--reference-if-able', '--separate-git-dir', '--filter',
-  '--server-option', '--negotiation-tip', '--refmap', '--bundle-uri', '--ref-format', '-u', '--config', '-c', '--remote']);
+// Arity of each option, per subcommand, from git's own option tables (`git <subcommand> -h`): `value` takes the next word (or one
+// glued on: -ofoo, --depth=1), `flag` takes none. An option in neither list has an unknown arity: it is judged both ways (its next
+// word as a value, and as a positional). The same letter differs by subcommand (-u is a flag for push and fetch, a value for clone).
+const arity = (value, flag) => ({ value: new Set(value.split(' ').filter(Boolean)), flag: new Set(flag.split(' ').filter(Boolean)) });
+const OPTION_ARITY = {
+  push: arity('--repo --receive-pack --exec -o --push-option',
+    '-v --verbose -q --quiet --all --branches --mirror -d --delete --tags -n --dry-run --porcelain -f --force --force-with-lease --force-if-includes --thin --progress --prune --no-verify --verify --follow-tags --signed --atomic -4 --ipv4 -6 --ipv6 -u --set-upstream'),
+  fetch: arity('--upload-pack -j --jobs --depth --shallow-since --shallow-exclude --deepen --refmap -o --server-option --negotiation-tip --filter',
+    '-v --verbose -q --quiet --all --set-upstream -a --append --atomic -f --force -m --multiple -t --tags -n --prefetch -p --prune -P --prune-tags --dry-run --porcelain --write-fetch-head -k --keep -u --update-head-ok --progress --unshallow --refetch --update-shallow -4 --ipv4 -6 --ipv6 --negotiate-only --auto-maintenance --auto-gc --show-forced-updates --write-commit-graph --stdin'),
+  pull: arity('--upload-pack --depth --shallow-since --shallow-exclude --deepen --refmap -o --server-option --negotiation-tip -s --strategy -X --strategy-option --cleanup',
+    '-v --verbose -q --quiet --progress -r --rebase -n --stat --log --signoff --squash --commit --edit --ff --ff-only --verify --verify-signatures --autostash -S --gpg-sign --allow-unrelated-histories --all -a --append -f --force -t --tags -p --prune -j --jobs --dry-run -k --keep --unshallow --update-shallow --show-forced-updates --set-upstream -4 --ipv4 -6 --ipv6'),
+  clone: arity('-j --jobs --template --reference --reference-if-able -o --origin -b --branch -u --upload-pack --depth --shallow-since --shallow-exclude --separate-git-dir -c --config --server-option --filter --bundle-uri --ref-format',
+    '-v --verbose -q --quiet --progress --reject-shallow -n --no-checkout --checkout --bare --mirror -l --local --no-hardlinks --hardlinks -s --shared --dissociate --single-branch --no-tags --tags --shallow-submodules --also-filter-submodules --remote-submodules --sparse -4 --ipv4 -6 --ipv6'),
+  'ls-remote': arity('--upload-pack --exec -o --server-option --sort',
+    '-q --quiet -t --tags -h --heads --refs --exit-code --get-url --symref'),
+  // remote, remote add, submodule, archive: no table, so every option is judged both ways.
+  other: arity('', ''),
+};
+// How an option word reads: 'flag', 'value' (the next word is its value), 'attached' (the value is in the word) or 'unknown'.
+function optionKind(label, word) {
+  const table = OPTION_ARITY[label] || OPTION_ARITY.other;
+  if (word.startsWith('--')) {
+    if (word.includes('=')) return 'attached';
+    if (table.value.has(word)) return 'value';
+    if (table.flag.has(word)) return 'flag';
+    const negated = word.replace(/^--no-/, '--');
+    return negated !== word && (table.value.has(negated) || table.flag.has(negated)) ? 'flag' : 'unknown';
+  }
+  for (let at = 1; at < word.length; at++) {
+    const letter = `-${word[at]}`;
+    if (table.value.has(letter)) return at + 1 < word.length ? 'attached' : 'value';
+    if (!table.flag.has(letter)) return 'unknown';
+  }
+  return 'flag';
+}
 // Config keys (-c, --config-env) that can point a command at another address, run a program for it or load more config.
 const REDIRECT_KEY = /^(url\.|remote\.|remotes\.|credential\.|http\.|https\.|protocol\.|include\.|includeif\.|alias\.|submodule\.|core\.(sshcommand|gitproxy|askpass)$|branch\..*\.(remote|pushremote)$)/i;
 const FORBIDDEN_GIT_NAMES = ['GIT_ASKPASS', 'SSH_ASKPASS', 'GIT_SSH', 'GIT_SSH_COMMAND', 'GIT_PROXY_COMMAND', 'GIT_EXEC_PATH', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_PARAMETERS'];
@@ -195,6 +226,34 @@ function textReasons(text, ctx, depth = 0) {
   return out;
 }
 
+// A node child started through a shell, env, exec or another wrapper cannot be given the isolation preload (the text or the wrapper's
+// own options cannot be rewritten safely, and NODE_OPTIONS is never used), so its passwd home would stay the real one. Refused
+// unless the command line already carries `--require <this file>`; a node child started directly is handled by the seam.
+const WRAPPERS = new Set(['env', 'exec', 'command', 'builtin', 'nice', 'nohup', 'time', 'timeout', 'xargs', 'sudo', 'doas', 'setsid', 'stdbuf', 'ionice']);
+// Options of a wrapper that take the next word as their value (so it is not mistaken for the command).
+const WRAPPER_VALUES = { env: ['-u', '-C', '-S', '--unset', '--chdir', '--split-string'], nice: ['-n', '--adjustment'], timeout: ['-s', '-k', '--signal', '--kill-after'], sudo: ['-u', '-g', '-h', '-p', '-C', '-D', '-r', '-t', '-U'],
+  doas: ['-u', '-C'], stdbuf: ['-i', '-o', '-e'], ionice: ['-c', '-n', '-p', '-t'], xargs: ['-n', '-I', '-L', '-P', '-s', '-d', '-E', '-a', '--max-args', '--max-procs', '--delimiter', '--arg-file'] };
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+function isNodeWord(word) {
+  const base = path.basename(String(word));
+  return base === 'node' || base === 'nodejs' || base === 'node.exe' || String(word) === process.execPath;
+}
+// Index of the word that names the command, after leading assignments and wrappers with their options (-1: none, or `command -v`).
+function commandPosition(words) {
+  let at = 0;
+  for (;;) {
+    while (at < words.length && ASSIGNMENT.test(words[at])) at++;
+    if (at >= words.length) return -1;
+    const wrapper = path.basename(words[at]);
+    if (!WRAPPERS.has(wrapper)) return at;
+    at++;
+    while (at < words.length && (words[at].startsWith('-') || ASSIGNMENT.test(words[at]) || /^\d+(\.\d+)?[smhd]?$/.test(words[at]))) {
+      if (wrapper === 'command' && /^-[a-zA-Z]*[vV]/.test(words[at])) return -1;
+      at += (WRAPPER_VALUES[wrapper] || []).includes(words[at]) ? 2 : 1;
+    }
+  }
+}
+
 function wordsReasons(all, ctx, depth) {
   const words = [];
   for (let i = 0; i < all.length; i++) {
@@ -202,6 +261,10 @@ function wordsReasons(all, ctx, depth) {
     else if (!/^\d*[<>]/.test(all[i])) words.push(all[i]);
   }
   const out = [];
+  const at = commandPosition(words);
+  if (at >= 0 && !ctx.shellNode && isNodeWord(words[at]) && !(ctx.direct && depth === 0 && at === 0) && !hasPreload(words.slice(at + 1))) {
+    out.push('a node child started through a shell, env or exec has no isolation preload (start node directly, or put --require <the helper> on its command line)');
+  }
   for (let i = 0; i < words.length; i++) {
     const base = path.basename(String(words[i]));
     if (SHELLS.has(base)) {
@@ -313,46 +376,97 @@ function rewritten(url, config) {
   return out;
 }
 
+// One reading per way the option words can be read: an option of unknown arity forks the reading (its next word is its value, or it
+// is a positional). A reading holds the positional words (the first names the remote), the --repo / --remote values and `--all`.
+const MAX_READINGS = 64;
+const REPO_OPTIONS = ['--repo', '--remote'];
+function readNetworkArgs(label, rest, allRemotes) {
+  const done = [];
+  const open = [{ at: 0, positionals: [], repos: [], all: allRemotes, ended: false }];
+  let capped = false;
+  while (open.length) {
+    const reading = open.pop();
+    while (reading.at < rest.length) {
+      const word = rest[reading.at];
+      reading.at += 1;
+      if (reading.ended || !word.startsWith('-')) {
+        reading.positionals.push(word);
+        continue;
+      }
+      if (word === '--') reading.ended = true;
+      else if (word === '--all' || word === '-a' || word === '--multiple') reading.all = true;
+      else if (word === '-c' || word === '--config') reading.at += 1;
+      else {
+        const kind = optionKind(label, word);
+        const name = word.split('=')[0];
+        if (kind === 'attached' && REPO_OPTIONS.includes(name)) reading.repos.push(word.slice(name.length + 1));
+        if (kind === 'value' && reading.at < rest.length) {
+          if (REPO_OPTIONS.includes(word)) reading.repos.push(rest[reading.at]);
+          reading.at += 1;
+        } else if (kind === 'unknown' && reading.at < rest.length) {
+          if (open.length + done.length < MAX_READINGS) {
+            // One reading takes the next word as the option's value; this one carries on with the option read as a flag.
+            const asValue = { ...reading, positionals: reading.positionals.slice(), repos: reading.repos.slice() };
+            if (REPO_OPTIONS.includes(word)) asValue.repos.push(rest[reading.at]);
+            asValue.at += 1;
+            open.push(asValue);
+          } else {
+            capped = true;
+          }
+        }
+      }
+    }
+    done.push(reading);
+  }
+  return { readings: done, capped };
+}
+
 // A push, fetch, pull, clone, ls-remote, remote update, submodule update (and the like) must name only local addresses, and
 // so must every remote it could use: the named one, or all of them when none is named. The configuration is read through git
-// itself with an empty global and system config, so insteadOf and pushurl are applied as git would apply them.
+// itself with an empty global and system config, so insteadOf and pushurl are applied as git would apply them. Every option word
+// is judged: a value after an option is checked like any other word, and an option of unknown arity is read both ways.
 function networkReasons(label, rest, where, ctx, allRemotes) {
   const out = [];
-  const positionals = [];
-  let all = allRemotes;
   let ended = false;
   for (let i = 0; i < rest.length; i++) {
     const word = rest[i];
+    const bundle = !ended && /^--bundle-uri(=|$)/.test(word) ? (word.includes('=') ? word.slice(word.indexOf('=') + 1) : rest[i + 1]) : null;
     if (/[$`]/.test(word)) out.push(`git ${label}: an unexpanded variable or command in a network command`);
-    if (isStrongRemote(word)) out.push(`git ${label}: a non-local address`);
+    if (isStrongRemote(bundle === null || !word.includes('=') ? word : bundle)) out.push(`git ${label}: a non-local address`);
+    if (bundle !== null && (bundle === undefined || !isLocalTarget(bundle))) out.push(`git ${label}: a --bundle-uri that is not a local path or file: URL`);
     if (!ended && word === '--') ended = true;
-    else if (!ended && (word === '--all' || word === '-a' || word === '--multiple')) all = true;
     else if (!ended && /^--recurse-submodules(=|$)/.test(word) && word !== '--recurse-submodules=no') out.push(`git ${label}: submodule recursion`);
-    else if (!ended && /^--repo=/.test(word)) positionals.unshift(word.slice(7));
     else if (!ended && (word === '-c' || word === '--config')) {
       if (REDIRECT_KEY.test(String(rest[++i] ?? '').split('=')[0])) out.push(`git ${label}: a config key that can redirect a remote`);
-    } else if (!ended && VALUE_OPTIONS.has(word)) {
-      const value = rest[++i];
-      if (word === '--remote' && value !== undefined) positionals.unshift(value);
-    } else if (ended || !word.startsWith('-')) positionals.push(word);
+    }
   }
-  const named = all ? null : positionals[0];
-  const urlWord = label === 'remote add' ? positionals[1] : named;
-  if (urlWord !== null && urlWord !== undefined && !isLocalTarget(urlWord)) out.push(`git ${label}: a non-local address`);
-  if (out.length === 0 && label !== 'remote add' && !(label === 'archive' && named === undefined)) {
+  const { readings, capped } = readNetworkArgs(label, rest, allRemotes);
+  if (capped) out.push(`git ${label}: too many options of unknown arity to judge`);
+  const namesOf = (reading) => (allRemotes ? [] : [...reading.repos, ...(label === 'archive' ? [] : reading.positionals.slice(0, 1))].filter((name) => name !== undefined));
+  for (const reading of readings) {
+    const urlWord = label === 'remote add' ? reading.positionals[1] : null;
+    if (urlWord !== null && urlWord !== undefined && !isLocalTarget(urlWord)) out.push(`git ${label}: a non-local address`);
+    if (label !== 'remote add' && namesOf(reading).some((name) => !isLocalTarget(name))) out.push(`git ${label}: a non-local address`);
+  }
+  if (out.length === 0 && label !== 'remote add') {
     const config = loadConfig(where, ctx);
     if (!config) {
       out.push(`git ${label}: the remote configuration cannot be read`);
     } else {
       if (config.rewrites.some((rule) => !isLocalTarget(rule.base))) out.push(`git ${label}: a url rewrite to a non-local base is configured`);
       const candidates = [];
-      if (named !== null && named !== undefined) {
-        if (config.remotes.has(named)) candidates.push(...config.remotes.get(named).flatMap((url) => rewritten(url, config)));
-        else candidates.push(...rewritten(named, config));
-      } else {
-        for (const urls of config.remotes.values()) candidates.push(...urls.flatMap((url) => rewritten(url, config)));
-        for (const value of config.loose) if (!config.remotes.has(value)) candidates.push(...rewritten(value, config));
-        if (label === 'submodule') for (const url of config.submodules) candidates.push(...rewritten(url, config));
+      for (const reading of readings) {
+        const names = namesOf(reading);
+        if (label === 'archive' && names.length === 0) continue;
+        for (const name of names) {
+          if (config.remotes.has(name)) candidates.push(...config.remotes.get(name).flatMap((url) => rewritten(url, config)));
+          else candidates.push(...rewritten(name, config));
+        }
+        if (reading.all || names.length === 0) {
+          for (const urls of config.remotes.values()) candidates.push(...urls.flatMap((url) => rewritten(url, config)));
+          for (const value of config.loose) if (!config.remotes.has(value)) candidates.push(...rewritten(value, config));
+          if (label === 'submodule') for (const url of config.submodules) candidates.push(...rewritten(url, config));
+        }
       }
       if (candidates.some((url) => !isLocalTarget(url))) out.push(`git ${label}: a remote resolves to a non-local address`);
     }
@@ -373,11 +487,23 @@ function emptyConfigFile(name) {
   if (!fs.existsSync(file)) fs.writeFileSync(file, '', { mode: 0o600 });
   return file;
 }
+// The real path of a path that may not exist yet: the real path of its nearest existing parent plus the rest, so a symlink anywhere
+// on the way (a HOME under the temp dir that points outside it) is followed.
+function realish(target) {
+  try {
+    return fs.realpathSync(target);
+  } catch {
+    const parent = path.dirname(target);
+    return parent === target ? target : path.join(realish(parent), path.basename(target));
+  }
+}
+// Absolute only, and judged by where the path really lands (symlinks followed), not by how it is spelled.
 function isUnderTemp(candidate) {
   const text = String(candidate);
   if (!path.isAbsolute(text)) return false;
-  const resolved = path.resolve(text);
-  return [state.tempRoot, safeReal(state.tempRoot)].some((root) => resolved === root || resolved.startsWith(root + path.sep));
+  const resolved = realish(path.resolve(text));
+  const root = safeReal(state.tempRoot);
+  return resolved === root || resolved.startsWith(root + path.sep);
 }
 function safeReal(target) {
   try {
@@ -477,6 +603,10 @@ function prepare(name, argv) {
   // option (isolationKeepsArgv: true on the spawn) or a call site listed at install (argvChecked) for shipped code.
   const marked = options.isolationKeepsArgv === true;
   delete options.isolationKeepsArgv;
+  // A test that exists to run an installed hook through /bin/sh (a hostile PATH, the real hook text) names that: the node inside the
+  // shell still gets the private HOME, but not the passwd preload. Every other shell, env or exec form that starts node is refused.
+  const shellNode = options.isolationShellNode === true;
+  delete options.isolationShellNode;
   const keepArgv = node && name !== 'fork' && (marked || (state.argvChecked.length > 0 && state.argvChecked.some((rel) => callFrame().file.endsWith(path.sep + rel))));
   if (node && !keepArgv) {
     if (name === 'fork') {
@@ -501,7 +631,7 @@ function prepare(name, argv) {
   }
 
   const words = [call.file, ...call.args].map(String);
-  const ctx = { cwd: path.resolve(String(options.cwd || process.cwd())), vars, gitCount: 0 };
+  const ctx = { cwd: path.resolve(String(options.cwd || process.cwd())), vars, gitCount: 0, direct: !shell && isNode(call.file), shellNode };
   reasons.push(...(shell ? textReasons(words.join(' '), ctx) : wordsReasons(words, ctx, 0)));
   reasons.push(...finalReasons(vars, name === 'fork' ? options.execArgv : call.args, node, keepArgv));
   state.checked += 1;
@@ -523,7 +653,7 @@ function netReasons(options) {
   }
   const argv = (options.args || []).map(String);
   const node = isNode(options.file);
-  const ctx = { cwd: path.resolve(String(options.cwd || process.cwd())), vars, gitCount: 0 };
+  const ctx = { cwd: path.resolve(String(options.cwd || process.cwd())), vars, gitCount: 0, direct: node };
   const out = [...wordsReasons([String(options.file), ...argv.slice(1)], ctx, 0), ...finalReasons(vars, argv, node)];
   state.checked += 1;
   state.git += ctx.gitCount > 0 ? 1 : 0;

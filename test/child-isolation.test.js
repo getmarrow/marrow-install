@@ -385,7 +385,7 @@ test('static: every test file loads the isolation first, nothing shipped names t
     const first = fs.readFileSync(path.join(__dirname, file), 'utf8').split('\n').find((line) => line.trim() && !line.trim().startsWith('//'));
     assert.match(first, /require\('\.\/support\/isolated-environment'\)/, `${file} loads the isolation first`);
   }
-  const names = ['child-isolation', 'SBT_', 'isolationKeepsArgv', 'SPAWN_GUARD', 'ESPAWNGUARD'];
+  const names = ['child-isolation', 'SBT_', 'isolationKeepsArgv', 'isolationShellNode', 'SPAWN_GUARD', 'ESPAWNGUARD'];
   const walk = (directory) => fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => (entry.isDirectory() ? walk(path.join(directory, entry.name)) : [path.join(directory, entry.name)]));
   for (const file of ['bin', 'src', 'scripts'].flatMap((directory) => walk(path.join(REPO_ROOT, directory)))) {
     const text = fs.readFileSync(file, 'utf8');
@@ -396,4 +396,255 @@ test('static: every test file loads the isolation first, nothing shipped names t
   const files = JSON.parse(packed.stdout)[0].files.map((entry) => entry.path);
   assert.ok(files.length > 10);
   for (const file of files) assert.match(file, /^(bin\/|src\/|package\.json$|README\.md$|LICENSE|CHANGELOG\.md$)/, `${file} is a shipped file`);
+});
+
+// ---- patch round 1 (aud-test-iso-2c findings F1 to F5) -------------------------------------------------------------------
+// These rows judge a command with plan() so that nothing is started: a bundle URI or a missed refusal must never reach a network.
+const planOf = (cwd, args) => iso.plan('spawnSync', 'git', args, { cwd, env: { PATH } });
+const planRefusedRows = (cwd, rows, pattern) => {
+  for (const [name, args] of Object.entries(rows)) assert.match(String(planOf(cwd, args).refused), pattern, `${name}: git ${args.join(' ').replace(new RegExp(`\\S*${HOST}\\S*`, 'g'), '<url>')}`);
+};
+const planAllowedRows = (cwd, rows) => {
+  for (const [name, args] of Object.entries(rows)) assert.equal(planOf(cwd, args).refused, null, `${name}: git ${args.join(' ')}`);
+};
+
+test('F1: option arity follows git per subcommand: -u, -o, -j, --repo and refspec-free forms cannot hide a remote (judged with the next word as a value and as a positional)', () => {
+  const U = URLS.https;
+  const S = URLS['scp-style'];
+  const publicOrigin = repoWith(`[remote "origin"]\n\turl = ${U}\n`);
+  const publicPushUrl = repoWith(`[remote "origin"]\n\turl = ${path.join(scratch('iso-bare-'), 'b.git')}\n\tpushurl = ${U}\n`);
+  const rows = {
+    'push -u <url> main': ['push', '-u', U, 'main'],
+    'push -u <scp> main': ['push', '-u', S, 'main'],
+    'push -u <url> (no refspec)': ['push', '-u', U],
+    'push -u <scp> (no refspec)': ['push', '-u', S],
+    'push --set-upstream <scp>': ['push', '--set-upstream', S],
+    'push -v -u <scp> main': ['push', '-v', '-u', S, 'main'],
+    'push -vu <scp> (a cluster of flags)': ['push', '-vu', S],
+    'fetch -u <url>': ['fetch', '-u', U],
+    'fetch -u <scp>': ['fetch', '-u', S],
+    'pull -u <scp> main (pull has no -u: unknown arity, both readings)': ['pull', '-u', S, 'main'],
+    'push -o x <url>': ['push', '-o', 'x', U],
+    'push -o x <scp>': ['push', '-o', 'x', S],
+    'push -ox <scp> (value glued on)': ['push', '-ox', S],
+    'push --push-option x <scp>': ['push', '--push-option', 'x', S],
+    'push --repo <url>': ['push', '--repo', U],
+    'push --repo <scp>': ['push', '--repo', S],
+    'push --repo <scp> main': ['push', '--repo', S, 'main'],
+    'push --repo=<scp>': ['push', `--repo=${S}`],
+    'push --repo <scp> ./local (the first positional wins in git, both are judged)': ['push', '--repo', S, './local.git'],
+    'push -j <scp> (push has no -j: unknown arity)': ['push', '-j', S],
+    'push --frobnicate <scp> (unknown long option)': ['push', '--frobnicate', S],
+    'push -x <scp> (unknown short option)': ['push', '-x', S],
+    'push --rep <scp> (an abbreviated --repo)': ['push', '--rep', S],
+    'push --all <scp>': ['push', '--all', S],
+    'push --mirror <scp>': ['push', '--mirror', S],
+    'push -o <url> origin (a url as an option value is judged too)': ['push', '-o', U, './local.git'],
+    'fetch --depth <url> ./local': ['fetch', '--depth', U, './local.git'],
+    'fetch -j 4 <scp>': ['fetch', '-j', '4', S],
+    'fetch --upload-pack x <scp>': ['fetch', '--upload-pack', 'x', S],
+    'clone -u x <scp> dest (-u takes a value for clone)': ['clone', '-u', 'x', S, 'dest'],
+    'clone -b main <scp> dest': ['clone', '-b', 'main', S, 'dest'],
+    'clone --depth 1 <scp> dest': ['clone', '--depth', '1', S, 'dest'],
+    'clone -j 4 <url> dest': ['clone', '-j', '4', U, 'dest'],
+    'clone --template t --reference r <scp> dest': ['clone', '--template', 't', '--reference', 'r', S, 'dest'],
+    'ls-remote --heads <scp>': ['ls-remote', '--heads', S],
+    'ls-remote -o x <scp>': ['ls-remote', '-o', 'x', S],
+    'ls-remote --upload-pack x <scp>': ['ls-remote', '--upload-pack', 'x', S],
+    'archive --remote <scp> HEAD': ['archive', '--remote', S, 'HEAD'],
+    'archive --remote=<scp> HEAD': ['archive', `--remote=${S}`, 'HEAD'],
+  };
+  planRefusedRows(publicOrigin, rows, /^ESPAWNGUARD .*non-local/);
+  // The same words with a remote NAME: the name resolves to a public address in the repository config.
+  const named = {
+    'push -u origin main': ['push', '-u', 'origin', 'main'],
+    'push -u origin (no refspec)': ['push', '-u', 'origin'],
+    'push -v -u origin main': ['push', '-v', '-u', 'origin', 'main'],
+    'push --set-upstream origin': ['push', '--set-upstream', 'origin'],
+    'fetch -u origin': ['fetch', '-u', 'origin'],
+    'pull -u origin main': ['pull', '-u', 'origin', 'main'],
+    'push -o x origin': ['push', '-o', 'x', 'origin'],
+    'push --repo origin': ['push', '--repo', 'origin'],
+    'push --repo=origin main': ['push', '--repo=origin', 'main'],
+    'push -j origin (unknown arity)': ['push', '-j', 'origin'],
+    'push --frobnicate origin (unknown arity)': ['push', '--frobnicate', 'origin'],
+    'push -x origin': ['push', '-x', 'origin'],
+    'fetch -j 4 origin': ['fetch', '-j', '4', 'origin'],
+    'clone -u x origin': ['clone', '-u', 'x', 'origin', 'dest'],
+    'ls-remote --heads origin': ['ls-remote', '--heads', 'origin'],
+    'archive --remote=origin HEAD': ['archive', '--remote=origin', 'HEAD'],
+    'archive --remote origin HEAD': ['archive', '--remote', 'origin', 'HEAD'],
+    'push -u (no remote named: every remote is judged)': ['push', '-u'],
+  };
+  planRefusedRows(publicOrigin, named, /^ESPAWNGUARD .*(non-local|resolves)/);
+  planRefusedRows(publicPushUrl, { 'push -u origin main (pushurl is public)': ['push', '-u', 'origin', 'main'], 'push -u origin (pushurl is public)': ['push', '-u', 'origin'] }, /resolves to a non-local/);
+  // The key rows again on every child_process function (a missed refusal would stop at GIT_ALLOW_PROTOCOL=file, never at a lookup).
+  gitRefused(['push', '-u', U, 'main'], {}, 'push -u <url> main');
+  gitRefused(['fetch', '-u', U], {}, 'fetch -u <url>');
+  gitRefused(['push', '-o', 'x', U], {}, 'push -o x <url>');
+  gitRefused(['push', '--repo', U], {}, 'push --repo <url>');
+  gitRefused(['push', '-u', 'origin', 'main'], { cwd: publicOrigin }, 'push -u origin main');
+  gitRefused(['push', '-u', 'origin'], { cwd: publicOrigin }, 'push -u origin');
+  // Local forms stay allowed, whatever the option.
+  const bare = path.join(scratch('iso-bare-'), 'bare.git');
+  const localOrigin = repoWith(`[remote "origin"]\n\turl = ${bare}\n`);
+  planAllowedRows(localOrigin, {
+    'push -u ./bare.git main': ['push', '-u', './bare.git', 'main'],
+    'push -u <abs bare> main': ['push', '-u', bare, 'main'],
+    'push -u origin main': ['push', '-u', 'origin', 'main'],
+    'push -u origin': ['push', '-u', 'origin'],
+    'push -vu origin': ['push', '-vu', 'origin'],
+    'fetch -u origin': ['fetch', '-u', 'origin'],
+    'fetch file:///tmp/x': ['fetch', 'file:///tmp/x'],
+    'fetch file://localhost/tmp/x': ['fetch', 'file://localhost/tmp/x'],
+    'fetch -u file:///tmp/x': ['fetch', '-u', 'file:///tmp/x'],
+    'push -o x ./bare.git': ['push', '-o', 'x', './bare.git'],
+    'push --repo ./bare.git': ['push', '--repo', './bare.git'],
+    'push --repo=./bare.git main': ['push', '--repo=./bare.git', 'main'],
+    'push --force-with-lease=main:abc origin main': ['push', '--force-with-lease=main:abc', 'origin', 'main'],
+    'fetch -j 4 origin': ['fetch', '-j', '4', 'origin'],
+    'fetch --depth 1 origin': ['fetch', '--depth', '1', 'origin'],
+    'pull --rebase origin main': ['pull', '--rebase', 'origin', 'main'],
+    'clone -b main ./src dest': ['clone', '-b', 'main', './src', 'dest'],
+    'clone --depth 1 file:///tmp/src dest': ['clone', '--depth', '1', 'file:///tmp/src', 'dest'],
+    'clone -u x ./src dest': ['clone', '-u', 'x', './src', 'dest'],
+    'ls-remote --heads ./bare.git': ['ls-remote', '--heads', './bare.git'],
+    'ls-remote -o x origin': ['ls-remote', '-o', 'x', 'origin'],
+    'push --frobnicate origin (unknown option, every reading is local)': ['push', '--frobnicate', 'origin'],
+    'push -x ./bare.git main (unknown option, every reading is local)': ['push', '-x', './bare.git', 'main'],
+  });
+  // Too many options of unknown arity to judge: refused rather than guessed.
+  const many = (count) => ['push', ...Array.from({ length: count }, (_, at) => [`--unknown${at}`, `w${at}`]).flat(), './bare.git'];
+  assert.equal(planOf(localOrigin, many(4)).refused, null, 'a few unknown options are judged');
+  assert.match(String(planOf(localOrigin, many(9)).refused), /too many options of unknown arity/);
+});
+
+test('F2: --bundle-uri (the = form and the space form) is refused unless its value is a local path or a file: URL', () => {
+  const U = URLS.https;
+  const S = URLS['scp-style'];
+  const root = scratch('iso-bundle-');
+  const refusedRows = {
+    '--bundle-uri=<https>': ['clone', `--bundle-uri=${U}`, './src', 'dest'],
+    '--bundle-uri <https>': ['clone', '--bundle-uri', U, './src', 'dest'],
+    '--bundle-uri=<http>': ['clone', `--bundle-uri=${URLS.http}`, './src', 'dest'],
+    '--bundle-uri <http>': ['clone', '--bundle-uri', URLS.http, './src', 'dest'],
+    '--bundle-uri=<ssh>': ['clone', `--bundle-uri=${URLS.ssh}`, './src', 'dest'],
+    '--bundle-uri <scp>': ['clone', '--bundle-uri', S, './src', 'dest'],
+    '--bundle-uri=<scp>': ['clone', `--bundle-uri=${S}`, './src', 'dest'],
+    '--bundle-uri <file: URL with a host>': ['clone', '--bundle-uri', URLS['file:// with a host'], './src', 'dest'],
+    '--bundle-uri=<ext::>': ['clone', `--bundle-uri=${URLS['ext::']}`, './src', 'dest'],
+    '--bundle-uri with no value': ['clone', './src', 'dest', '--bundle-uri'],
+    '--bundle-uri <https> before a local source': ['clone', '--depth', '1', '--bundle-uri', U, '-b', 'main', './src', 'dest'],
+    '--bundle-uri <https> with a url source': ['clone', '--bundle-uri', U, S, 'dest'],
+    '--bundle-uri=<variable>': ['clone', '--bundle-uri=$U', './src', 'dest'],
+    '--bundle-uri <variable>': ['clone', '--bundle-uri', '$U', './src', 'dest'],
+    '--bundle-uri after a global option': ['-C', '.', '-c', 'user.name=t', 'clone', '--bundle-uri', U, './src', 'dest'],
+  };
+  planRefusedRows(root, refusedRows, /^ESPAWNGUARD .*(--bundle-uri|non-local|unexpanded)/);
+  for (const [name, args] of Object.entries(refusedRows).filter(([, row]) => !row.some((word) => word.includes('$')))) {
+    for (const [fn, call] of Object.entries({ execSync: (text) => iso.plan('execSync', text, { cwd: root, env: { PATH } }), 'sh -c': (text) => iso.plan('execFileSync', 'sh', ['-c', text], { cwd: root, env: { PATH } }) })) {
+      assert.match(String(call(textOf('git', args)).refused), /^ESPAWNGUARD /, `${name} as shell text / ${fn}`);
+    }
+  }
+  const bundle = path.join(root, 'b.bundle');
+  planAllowedRows(root, {
+    '--bundle-uri=<absolute path>': ['clone', `--bundle-uri=${bundle}`, './src', 'dest'],
+    '--bundle-uri <absolute path>': ['clone', '--bundle-uri', bundle, './src', 'dest'],
+    '--bundle-uri=<relative path>': ['clone', '--bundle-uri=b.bundle', './src', 'dest'],
+    '--bundle-uri=<file: URL>': ['clone', `--bundle-uri=file://${bundle}`, './src', 'dest'],
+    '--bundle-uri <file: URL>': ['clone', '--bundle-uri', `file://${bundle}`, './src', 'dest'],
+    '--bundle-uri <file://localhost URL>': ['clone', '--bundle-uri', `file://localhost${bundle}`, './src', 'dest'],
+    '--bundle-uri <file: URL> with file:// source': ['clone', '--bundle-uri', `file://${bundle}`, `file://${root}/src`, 'dest'],
+  });
+});
+
+test('F3: a node child started through sh -c, env, exec or another wrapper cannot get the preload, so it is refused; a direct node child and an explicit --require are not', () => {
+  const root = scratch('iso-node-');
+  const probe = `node ${quote(PROBE)} ${quote(testTempRoot)} ${quote(passwdHome)}`;
+  const text = {
+    'sh -c node': `sh -c ${quote(probe)}`,
+    'bash -lc node': `bash -lc ${quote(probe)}`,
+    'nested sh -c': `sh -c ${quote(`sh -c ${quote(probe)}`)}`,
+    'node after &&': `true && ${probe}`,
+    'node after a pipe': `printf x | ${probe}`,
+    'node with an assignment': `FOO=1 ${probe}`,
+    'NODE_OPTIONS= node (the empty-NODE_OPTIONS form installed hooks use)': `printf x | NODE_OPTIONS= ${probe}`,
+    'exec node': `exec ${probe}`,
+    'env node': `env ${probe}`,
+    'env -i FOO=1 node': `env -i FOO=1 ${probe}`,
+    'env -u X node': `env -u X ${probe}`,
+    'nice node': `nice -n 5 ${probe}`,
+    'timeout node': `timeout 5 ${probe}`,
+    'xargs node': `xargs ${probe}`,
+    'nohup node': `nohup ${probe}`,
+    'time node': `time ${probe}`,
+    'absolute node path': `${quote(process.execPath)} -e 1`,
+    'nodejs': 'nodejs -e 1',
+    'in a command substitution': `echo $(${probe})`,
+    'in backticks': `echo \`${probe}\``,
+    'eval node': `eval ${quote(probe)}`,
+  };
+  for (const [name, command] of Object.entries(text)) {
+    for (const [fn, call] of Object.entries({ execSync: (value) => iso.plan('execSync', value, { cwd: root, env: { PATH } }), 'spawnSync with a shell': (value) => iso.plan('spawnSync', value, [], { cwd: root, env: { PATH }, shell: true }), 'execFileSync sh -c': (value) => iso.plan('execFileSync', 'sh', ['-c', value], { cwd: root, env: { PATH } }) })) {
+      assert.match(String(call(command).refused), /a node child started through a shell, env or exec has no isolation preload/, `${name} / ${fn}`);
+    }
+  }
+  for (const [file, args] of [['env', ['node', PROBE]], ['env', ['-i', 'FOO=1', 'node', PROBE]], ['nice', ['node', PROBE]], ['timeout', ['5', 'node', PROBE]], ['xargs', ['node', PROBE]], ['sh', ['-c', probe]], ['bash', ['-lc', probe]]]) {
+    assert.match(String(iso.plan('spawnSync', file, args, { cwd: root, env: { PATH } }).refused), /no isolation preload/, `${file} ${args[0]}`);
+  }
+  // Not a node command: the word only appears as an argument or in a lookup.
+  for (const command of ['echo node', 'command -v node', 'which node', 'git commit -m node', 'grep node file.txt', 'printf "%s\n" node', 'true # node', 'ls ./node', 'echo $(command -v node)']) {
+    assert.equal(iso.plan('execSync', command, { cwd: root, env: { PATH } }).refused, null, command);
+  }
+  // A node child started directly, and one whose command line already carries the preload, are not refused.
+  assert.equal(iso.plan('spawnSync', NODE, [PROBE], { cwd: root, env: { PATH } }).refused, null);
+  assert.equal(iso.plan('spawnSync', 'node', [PROBE], { cwd: root, env: { PATH } }).refused, null);
+  const preloaded = `node --require ${quote(iso.SELF)} ${quote(PROBE)} ${quote(testTempRoot)} ${quote(passwdHome)}`;
+  assert.equal(iso.plan('execSync', `sh -c ${quote(preloaded)}`, { cwd: root, env: { PATH } }).refused, null);
+  assert.equal(iso.plan('spawnSync', 'env', ['node', '--require', iso.SELF, PROBE], { cwd: root, env: { PATH } }).refused, null);
+  // The explicit waiver (a test that runs an installed hook through /bin/sh) is per call and does not touch the HOME rules.
+  assert.equal(iso.plan('execFileSync', 'sh', ['-c', probe], { cwd: root, env: { PATH }, isolationShellNode: true }).refused, null);
+  const waived = iso.plan('execFileSync', 'sh', ['-c', probe], { cwd: root, env: { PATH, HOME: '/nonexistent-home' }, isolationShellNode: true });
+  assert.match(String(waived.refused), /HOME is outside the test temp dir/);
+  // Probe: the one allowed way through a shell still sees the private HOME and the scratch passwd home, never the real one.
+  const seen = JSON.parse(cp.execSync(`exec ${preloaded}`, { env: { PATH }, encoding: 'utf8' }));
+  assert.equal(seen.homeUnderTemp, true, 'the node child under sh sees the private HOME');
+  assert.equal(seen.passwdHomeIsScratch, true, 'the passwd-home reader sees the scratch folder, not the real home');
+  assert.equal(seen.preloaded, true);
+});
+
+test('F4: a HOME under the temp dir that is a symlink to somewhere outside is refused; one that stays inside is not (every child_process function)', () => {
+  const outside = fs.mkdtempSync('/tmp/iso-outside-');
+  try {
+    const holder = scratch('iso-link-');
+    const toOutside = path.join(holder, 'to-outside');
+    const toInside = path.join(holder, 'to-inside');
+    const toReal = path.join(holder, 'to-real-home');
+    const inside = scratch('iso-inside-');
+    fs.symlinkSync(outside, toOutside);
+    fs.symlinkSync(inside, toInside);
+    fs.symlinkSync(iso.realPasswdHome(), toReal);
+    fs.mkdirSync(path.join(inside, 'sub'));
+    fs.symlinkSync(outside, path.join(inside, 'sub', 'back-out'));
+    const asArgs = (name, options) => (name === 'exec' || name === 'execSync' ? [name, 'true', options] : [name, name === 'fork' ? PROBE : NODE, name === 'fork' ? [] : ['-e', ''], options]);
+    for (const name of Object.keys(ARGV_FUNCTIONS).filter((key) => !key.includes('shell') && key !== 'exec' && key !== 'execSync').concat(['exec', 'execSync'])) {
+      for (const [label, home] of [['a link to a folder outside', toOutside], ['a path below a link to outside', path.join(toOutside, 'deeper', 'still')], ['a link to the real passwd home', toReal], ['a link below the temp dir that goes back out', path.join(inside, 'sub', 'back-out')], ['a path below a link that goes back out', path.join(inside, 'sub', 'back-out', 'x')]]) {
+        assert.match(String(iso.plan(...asArgs(name, { env: { PATH, HOME: home } })).refused), /HOME is outside the test temp dir/, `${name} with HOME ${label}`);
+      }
+      for (const [label, home] of [['a link to a folder inside', toInside], ['a path below a link to inside', path.join(toInside, 'new', 'home')], ['a plain folder', inside]]) {
+        assert.equal(iso.plan(...asArgs(name, { env: { PATH, HOME: home } })).refused, null, `${name} with HOME ${label}`);
+      }
+    }
+    // A relative HOME stays refused for every child, even one that resolves from its cwd to a folder under the temp dir.
+    assert.match(String(iso.plan('spawnSync', NODE, ['-e', ''], { cwd: inside, env: { PATH, HOME: 'sub' } }).refused), /HOME is relative/);
+    // The private config files are judged the same way: a link to outside is replaced by the empty private file, never used.
+    const link = path.join(holder, 'gitconfig-link');
+    fs.writeFileSync(path.join(outside, 'gitconfig'), `[url "https://${HOST}/"]\n\tinsteadOf = up\n`);
+    fs.symlinkSync(path.join(outside, 'gitconfig'), link);
+    const planned = iso.plan('spawnSync', 'git', ['status'], { cwd: inside, env: { PATH, GIT_CONFIG_GLOBAL: link } });
+    assert.equal(planned.refused, null);
+    assert.notEqual(planned.argv[2].env.GIT_CONFIG_GLOBAL, link, 'the linked config is not used');
+  } finally {
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
 });
