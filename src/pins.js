@@ -2,17 +2,19 @@
 // This is the only place they are set: a release changes the MCP version, source SHA and
 // integrity here together (and the SDK pair together), and the tests read them from here.
 //
-// The MCP pin is @getmarrow/mcp 3.9.103, the release candidate marrow-mcp 868a9c18. The integrity is the
+// The MCP pin is @getmarrow/mcp 3.9.106, the release candidate marrow-mcp b8973d3a. The integrity is the
 // sha512 of that candidate's packed tarball (npm pack, Node 22.23, npm 10.9), and the source SHA is the
-// candidate commit. The eight files in test/fixtures/mcp-3.9.103 are dist/ of the same tarball, byte for
-// byte, and MANIFEST.json there records them. One scripted re-pin set all of it together.
+// candidate commit. The eight files in test/fixtures/mcp-3.9.106 are dist/ of the same tarball, byte for
+// byte, and MANIFEST.json there records them. The SDK pin is @getmarrow/sdk 3.7.67, whose packed tarball
+// the MCP candidate's lockfile and exact dependency also name. One scripted re-pin set all of it together.
 // THE RELEASE CHAIN MUST RE-VERIFY THIS PIN
-// AGAINST THE PUBLISHED @getmarrow/mcp@3.9.103 TARBALL BEFORE THIS INSTALLER IS PUBLISHED, and
-// change the source SHA and integrity here if the published tarball differs.
+// AGAINST THE PUBLISHED @getmarrow/mcp@3.9.106 TARBALL BEFORE THIS INSTALLER IS PUBLISHED, and
+// change the source SHA and integrity here if the published tarball differs. The same goes for the
+// published @getmarrow/sdk@3.7.67 tarball and SDK_ADAPTER_INTEGRITY.
 module.exports = Object.freeze({
-  MCP_ADAPTER_VERSION: '3.9.103',
-  MCP_ADAPTER_SOURCE_SHA: '868a9c18530a75fcee5052441d0d3d2383511df4',
-  MCP_ADAPTER_INTEGRITY: 'sha512-STXL6Zaiqv8Jh0wQpQpNut3bvj5ck0wNokwhy21Y7XuqNK55+MMgCkpYhFzIuVCiuGL2FR7NlytA3EmFlHdS6w==',
+  MCP_ADAPTER_VERSION: '3.9.106',
+  MCP_ADAPTER_SOURCE_SHA: 'b8973d3a6aa1e2a85a7aa4ac09801d6842f98661',
+  MCP_ADAPTER_INTEGRITY: 'sha512-B7j4eCpzzU1qEv4SewO4Dj4MMPQmLgjgJa9z1LpciS20g7+IhVVQFqYUjVbklJAnJBpUl0+7FLbjOC9nYdjcGQ==',
   // The first MCP version that ships the host-approval hook entrypoints
   // (claude-permission-request-hook, cursor-context-hook, gemini-context-hook) and reads Cursor's
   // shell/MCP execution events and Gemini's BeforeAgent prompt. The installer writes the
@@ -22,6 +24,6 @@ module.exports = Object.freeze({
   // version the host-approvals MCP is published as when the release re-pins the MCP above.
   MCP_HOST_APPROVAL_HOOKS_SINCE: '3.9.99',
   // The SDK pin, at the backend's parity version. Change version and integrity together.
-  SDK_ADAPTER_VERSION: '3.7.65',
-  SDK_ADAPTER_INTEGRITY: 'sha512-U+rxqEBs7uIHaGbx+ADGl09RvXSMeqxQZXTuJHxwx6P8EhOEB6SSLcot0OAhAu3gfGuZ+020ch0Y0WieqjxtYw==',
+  SDK_ADAPTER_VERSION: '3.7.67',
+  SDK_ADAPTER_INTEGRITY: 'sha512-0Lwg4XLxm9eXxMgQtFAH1y4mXi9CXg3poQlGbeK0AW+EHP+yfUWQUH4d1XYO03QNzwHLAYKfARDmnl5GpBnKUw==',
 });

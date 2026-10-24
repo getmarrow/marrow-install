@@ -2031,7 +2031,7 @@ test('repair mode writes config and reports self-test remediation state', async 
   assert.match(output, /expected visible tools: 17/);
   assert.match(output, /actual visible tools: unavailable until process reload/);
   assert.match(output, /visible tool names: unavailable until process reload/);
-  assert.match(output, /backend-projected entitlements: unavailable.*non-authorizing/);
+  assert.match(output, /backend-projected tools in your plan: unavailable.*non-authorizing/);
 });
 
 test('doctor reports likely env files when MARROW_API_KEY is not loaded', async () => {
@@ -2207,8 +2207,8 @@ test('self-test returns first five-minute value signal and proof', async () => {
       agentId: 'installer-test',
     });
     assert.equal(requestHeaders['x-marrow-package'], '@getmarrow/install');
-    assert.equal(requestHeaders['x-marrow-package-version'], '0.1.72');
-    assert.equal(requestHeaders['x-marrow-install-version'], '0.1.72');
+    assert.equal(requestHeaders['x-marrow-package-version'], '0.1.74');
+    assert.equal(requestHeaders['x-marrow-install-version'], '0.1.74');
     assert.equal(requestHeaders['x-marrow-sdk-version'], PINS.SDK_ADAPTER_VERSION);
     assert.equal(requestHeaders['x-marrow-mcp-version'], PINS.MCP_ADAPTER_VERSION);
     assert.equal(result.mcp_tool_profile.configured_profile, 'unset');

@@ -131,9 +131,9 @@ test('README: the Codex text is in the Codex and Cursor section, exact, and not 
   assert.match(next, /v0\.1\.70 wrote uses look-ahead, which Codex rejects/);
   assert.match(next, /npx @getmarrow\/install@latest update/);
   // 2. The pin the text names is the pin in src/pins.js.
-  assert.equal(PINS.MCP_ADAPTER_VERSION, '3.9.103');
-  assert.match(next, /`@getmarrow\/mcp` 3\.9\.103 \(built from marrow-mcp `868a9c18`/);
-  assert.equal(PINS.MCP_ADAPTER_SOURCE_SHA.startsWith('868a9c18'), true);
+  assert.equal(PINS.MCP_ADAPTER_VERSION, '3.9.106');
+  assert.match(next, /`@getmarrow\/mcp` 3\.9\.106 \(built from marrow-mcp `b8973d3a`/);
+  assert.equal(PINS.MCP_ADAPTER_SOURCE_SHA.startsWith('b8973d3a'), true);
   // 3. Own tools are skipped only with proof: exact label, the module's 58 names, the proven forms, the never forms.
   assert.equal(own.MARROW_OWN_TOOL_NAMES.length, 58);
   assert.match(next, /skipped only when the configuration proves the server/);
@@ -180,7 +180,8 @@ test('README: the Codex text is in the Codex and Cursor section, exact, and not 
   assert.match(next, /one-time `\/hooks` trust step/i);
   assert.match(next, /Until you do, Codex does not run them and no tool call is checked/);
   assert.match(next, /loop guard can hold a repeated command/);
-  assert.match(next, /this operation already passed with an unchanged result/);
+  assert.match(next, /you already ran this exact <tool> call in this session and nothing has changed since, so it was not run again/);
+  assert.doesNotMatch(next, /this operation already passed with an unchanged result/, 'the old loop-guard text is gone');
   // 8. No claim the code does not support.
   for (const claim of [/cannot call/i, /unsupported call/i, /never (?:held|checked|locked)/i, /every look-alike/i, /fully (?:covered|protected)/i]) {
     assert.doesNotMatch(next, claim, String(claim));

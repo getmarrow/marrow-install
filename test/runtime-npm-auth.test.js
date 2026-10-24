@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const test = require('node:test');
 
 const { runtimeCore } = require('../src/mcp-runtime');
-const { ROWS, runRow, setup } = require('./support/npm-auth-rows');
+const { ROWS, runRows, setup } = require('./support/npm-auth-rows');
 
 // FU-1: the owner's npm auth reaches the network only when every network setting comes from the
 // owner's own npm config. A network setting from the environment (npm_config_* allowlist, plain
@@ -64,9 +64,12 @@ test('FU-1 r4: DNS, OpenSSL, PREFIX/DESTDIR and NODE_USE_ENV_PROXY variables sta
 test('FU-1 end to end (real npm, capture servers, dummy token): no abuse row sends the owner\'s token to the attacker; the owner\'s mirror, proxy and auth work as before; a project .npmrc is never read', async () => {
   const ctx = setup();
   try {
-    for (const row of ROWS) {
-      if (row.tls && !ctx.tls) continue;
-      const result = await runRow(ctx, row);
+    // The rows are independent, so they run side by side (support/npm-auth-rows.js runRows); the checks
+    // below are the same, per row, in row order.
+    const rows = ROWS.filter((row) => !row.tls || ctx.tls);
+    const results = await runRows(ctx, rows);
+    for (const [index, row] of rows.entries()) {
+      const result = results[index];
       assert.equal(result.attacker.token_hits, 0, `${row.id} ${row.what}: token at the attacker`);
       assert.equal(result.token_in_output, 0, `${row.id}: token in hook output`);
       assert.equal(result.runtime_dirs, 0, `${row.id}: the empty configs are removed`);

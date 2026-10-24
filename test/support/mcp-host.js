@@ -1,7 +1,7 @@
 'use strict';
 
 // Hermetic host fixtures for the pinned @getmarrow/mcp decision. The decision code is the real
-// dist/ of 3.9.103 (test/fixtures/mcp-3.9.103, pinned by sha256 in own-tool-matchers.test.js), not a
+// dist/ of 3.9.106 (test/fixtures/mcp-3.9.106, pinned by sha256 in own-tool-matchers.test.js), not a
 // copy of its rules. Every fixture is a temporary HOME (and CODEX_HOME) plus a temporary project:
 // the decision reads only those, never the operator's home or npm configuration, and runs with
 // every `npm_config_*` name unset and no real process ancestor, so a result never depends on the
@@ -10,10 +10,18 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const MCP_FIXTURES = path.join(__dirname, '..', 'fixtures', 'mcp-3.9.103');
+const MCP_FIXTURES = path.join(__dirname, '..', 'fixtures', 'mcp-3.9.106');
 const PLUGIN_FIXTURE = path.join(__dirname, '..', 'fixtures', 'codex-plugin-b446393', 'marrow');
 const identity = require(path.join(MCP_FIXTURES, 'own-server-identity.js'));
 const ownTool = require(path.join(MCP_FIXTURES, 'own-tool.js'));
+const PINS = require('../../src/pins');
+const mcpRuntime = require('../../src/mcp-runtime');
+
+// A hook the installer starts runs inside its loader, which leaves the decoded launcher in `global.MARROW_L`; since
+// MCP 3.9.106 the host proof accepts an installer launch only when it is exactly the launch of that loader. Every
+// fixture below therefore runs as a hook started by the installer's loader for the pinned MCP (the launcher the
+// installer writes into hooks and server entries); pass `loader: null` for a hook the installer did not start.
+const PINNED_LAUNCHER = mcpRuntime.launcherSource(mcpRuntime.runtimeConfig(PINS.MCP_ADAPTER_VERSION));
 
 // What the README tells a Codex user to add (`codex mcp add marrow -- npx -y @getmarrow/mcp`).
 const README_CODEX_TOML = '[mcp_servers.marrow]\ncommand = "npx"\nargs = ["-y", "@getmarrow/mcp"]\n';
@@ -53,7 +61,10 @@ function hostFixture(prefix = 'marrow-host-', { underHome = false } = {}) {
 // Runs `fn` as the hook would run: HOME (and CODEX_HOME) the fixture's, every npm_config_* name
 // unset (any case), the fixture project as the working directory, and a process table with one
 // `codex` ancestor started an hour ago (or none: `codex: null`). `env` sets or (undefined) unsets names.
-function withHost(host, fn, { env = {}, codex = { args: ['codex'] } } = {}) {
+function withHost(host, fn, { env = {}, codex = { args: ['codex'] }, loader = PINNED_LAUNCHER } = {}) {
+  const savedLoader = Object.getOwnPropertyDescriptor(globalThis, 'MARROW_L');
+  if (loader === null) delete globalThis.MARROW_L;
+  else globalThis.MARROW_L = loader;
   const saved = new Map();
   const set = (name, value) => {
     if (!saved.has(name)) saved.set(name, process.env[name]);
@@ -75,6 +86,8 @@ function withHost(host, fn, { env = {}, codex = { args: ['codex'] } } = {}) {
     return fn();
   } finally {
     process.chdir(cwd);
+    if (savedLoader) Object.defineProperty(globalThis, 'MARROW_L', savedLoader);
+    else delete globalThis.MARROW_L;
     if (table === undefined) delete globalThis[TEST_PROCESS_TABLE];
     else globalThis[TEST_PROCESS_TABLE] = table;
     for (const [name, value] of saved) {
@@ -123,6 +136,7 @@ function installOfficialPlugin(host, { enable = true } = {}) {
 
 module.exports = {
   MCP_FIXTURES,
+  PINNED_LAUNCHER,
   README_CODEX_TOML,
   codexSkips,
   codexVerdict,

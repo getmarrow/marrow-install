@@ -11,6 +11,7 @@ const test = require('node:test');
 const PINS = require('../src/pins');
 const installer = require('../src/installer');
 const runner = require('../src/governed-runner');
+const { assertNoBlock, clockLog, hangGuarded, readWaits, withHookClock } = require('./support/hook-clock');
 
 const BIN = path.join(__dirname, '..', 'bin', 'marrow-install.js');
 const FIXTURES = path.join(__dirname, 'fixtures', 'installer-0167');
@@ -477,7 +478,7 @@ test('Gemini: the BeforeTool guard passes the typed-reply denial, keeps the fixe
     assert.equal(handler('AfterAgent', 'marrow-after-agent').command.includes(`${spec()} marrow-mcp gemini-session-hook`), true);
 
     const bin = fakeNpx(ws.base);
-    const run = (command, mode, input = '{}') => spawnSync(written(command), { shell: true, env: { ...process.env, HOME: ws.base, PATH: `${bin}:${process.env.PATH}`, FAKE_NPX_MODE: mode }, input, encoding: 'utf8', timeout: 20_000 });
+    const run = (command, mode, input = '{}', extraEnv = {}, spawnOptions = {}) => spawnSync(written(command), { shell: true, env: { ...process.env, HOME: ws.base, PATH: `${bin}:${process.env.PATH}`, FAKE_NPX_MODE: mode, ...extraEnv }, input, encoding: 'utf8', timeout: 20_000, ...spawnOptions });
     const passed = {
       allow: '{"decision":"allow"}\n',
       fixed: '{"decision":"deny","reason":"Marrow blocked this action because required governance approval or proof is unavailable."}\n',
@@ -501,11 +502,23 @@ test('Gemini: the BeforeTool guard passes the typed-reply denial, keeps the fixe
     assert.equal(echoed.status, 0, echoed.stderr);
     assert.equal(JSON.parse(echoed.stdout).reason, `bytes ${Buffer.byteLength(big)}`);
     // A hung entrypoint is blocked before Gemini's own 5 s timeout could let the call through.
-    const started = Date.now();
-    const slow = run(before.command, 'slow');
+    // The guard's timer is recorded and runs at once instead of after 4.5 s; the test reads the
+    // wait the guard asked for, not how long it took.
+    const guardWaits = clockLog();
+    // (This runner already caps every call at 20 s, below the hang guard's 30 s: the cap stays.)
+    const slow = hangGuarded((guard) => run(before.command, 'slow', '{}', withHookClock({}, guardWaits, { timers: 'instant' }), guard), 'Gemini guard call', { cap: 20_000 });
     assert.equal(slow.status, 2);
     assert.equal(slow.stderr, LAUNCH_FAILURE);
-    assert.ok(Date.now() - started < 5000, 'the guard gives up before the host timeout');
+    const guardSeen = readWaits(guardWaits);
+    const guardTimers = guardSeen.timers;
+    assert.deepEqual(guardTimers, [4500], 'the guard asks for exactly one wait');
+    // (Unlike the other hook calls this one cannot end with an empty event loop: the guard runs its
+    // entrypoint as a child and holds it until its timer fires. On the first turn it holds exactly
+    // that child, that child's stdout pipe and that one timer (which the clock runs as an
+    // immediate), measured on every run; the check allows those and fails on anything else or more,
+    // such as a socket, a second timer or pending async I/O.)
+    assertNoBlock(guardSeen, 'the guard waits only through that timer', { allow: { Immediate: 1, ProcessWrap: 1, PipeWrap: 1 } });
+    assert.ok(guardTimers[0] < before.timeout, 'the guard gives up before the host timeout');
 
     // BeforeAgent never blocks the prompt: valid output passes, anything else becomes {}.
     for (const [mode, stdout] of [['ctx', null], ['ctxempty', '{}\n']]) {
@@ -1603,7 +1616,9 @@ test('runner CLI without MARROW_API_KEY: reads the owner-only ~/.marrow/env, and
       assert.equal(seen.length, 0, 'nothing is sent without a key');
 
       fs.mkdirSync(path.join(dir, '.marrow'), { mode: 0o700 });
-      fs.writeFileSync(path.join(dir, '.marrow', 'env'), `MARROW_API_KEY=${key}\n`, { mode: 0o600 });
+      // A key stored in the owner file goes only to the endpoint that same file allows (PKG-M2); this test's
+      // endpoint is the loopback mock, so the file lists it.
+      fs.writeFileSync(path.join(dir, '.marrow', 'env'), `MARROW_API_KEY=${key}\nMARROW_ALLOWED_BASE_URLS=${baseUrl}\n`, { mode: 0o600 });
       const stored = await runCli(args, { PATH: process.env.PATH, HOME: dir, MARROW_BASE_URL: baseUrl }, dir);
       assert.equal(stored.code, 12, stored.output);
       assert.match(stored.output, /held until a person approves it/);

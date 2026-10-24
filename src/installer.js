@@ -19,9 +19,11 @@ const {
   marrowEnvKeyNames: hermesMarrowEnvKeyNames,
   planHermesMcpConfig,
 } = require('./hermes-config');
-const { ensureOwnerApiKey, readOwnerApiKey } = require('./owner-env');
+const { ensureOwnerApiKey, ownerKeyStoreState, readOwnerKeyDetail } = require('./owner-env');
+const { assertSafeBaseUrl, emitNoticeOnce, ownerKeyBaseUrl } = require('./base-url-policy');
 const { buildOwnToolMatchers } = require('./marrow-own-tools');
 const { detectAgentPlugins, describeAgentPlugin } = require('./agent-plugins');
+const { buildStatusEnv, runSeatbeltStatus, seatbeltLine, seatbeltReport, statusInvocation } = require('./seatbelt-status');
 const {
   delocalizeHookCommand,
   delocalizeHookScriptText,
@@ -870,10 +872,12 @@ function parseArgs(argv, env = process.env) {
     // MARROW_KEY is accepted when MARROW_API_KEY is absent or blank, as the runner and owner files do.
     apiKey: String(env.MARROW_API_KEY || '').trim() || String(env.MARROW_KEY || '').trim(),
     baseUrl: env.MARROW_BASE_URL || DEFAULT_BASE_URL,
+    baseUrlSource: env.MARROW_BASE_URL ? 'MARROW_BASE_URL from the process environment' : null,
     agentId: env.MARROW_FLEET_AGENT_ID || env.MARROW_AGENT_ID || '',
     toolProfile: resolveToolProfile(env.MARROW_TOOL_PROFILE),
     selfTest: true,
     loopGuardSelfTest: true,
+    seatbeltStatus: true,
     selfTestExplicitlyDisabled: false,
     json: false,
     activate: false,
@@ -949,11 +953,21 @@ function parseArgs(argv, env = process.env) {
       options.mode = optionValue() || options.mode;
     }
     else if (arg === '--key') {
-      // A missing value (end of argv, or another option next) is a missing key, never a key.
-      options.apiKey = optionValue(true) || options.apiKey;
-      options.keyFromArg = true;
+      // A missing value (end of argv, or another option next) or a blank one is a missing key, never
+      // a key: the key, and where it may be sent, stay as if --key were absent.
+      const value = optionValue(true);
+      if (String(value).trim()) {
+        options.apiKey = value;
+        options.keyFromArg = true;
+      }
     }
-    else if (arg === '--base-url') options.baseUrl = optionValue() || options.baseUrl;
+    else if (arg === '--base-url') {
+      const value = optionValue();
+      if (value) {
+        options.baseUrl = value;
+        options.baseUrlSource = 'the --base-url option';
+      }
+    }
     else if (arg === '--agent-id') {
       const value = optionValue();
       if (value) {
@@ -2569,6 +2583,13 @@ function missingHooksLine(host) {
   return `Marrow hooks for ${host} are missing. If Marrow was set up here, something removed them. Run npx -y @getmarrow/install@latest --repair to restore them.`;
 }
 
+// Doctor's version of that line for Cursor: doctor cannot see a Cursor plugin (its install layout is unverified),
+// so the line keeps its repair and adds the caveat that a plugin would make the repair a second set.
+const CURSOR_PLUGIN_CAVEAT = 'If you installed a Marrow plugin in Cursor, check Cursor\'s plugin list first: doctor cannot see it (layout unverified) and --repair would add a second set.';
+function doctorMissingHooksLine(host) {
+  return host === 'Cursor' ? `${missingHooksLine(host)} ${CURSOR_PLUGIN_CAVEAT}` : missingHooksLine(host);
+}
+
 // Skipped writes grouped for the report: one entry per host whose hooks are absent, and the
 // writes that belong to no hook host (the AGENTS.md block, the Hermes config) in the older form.
 function groupMissingHosts(entries) {
@@ -3275,17 +3296,22 @@ function buildPlan(detection, options) {
   const planned = updateOnly ? retained : writes;
   const hostOf = (write) => {
     const group = updateHostGroups(detection.paths).find((candidate) => candidate.hooks && candidate.files.includes(write.path));
+    // Doctor only (`update` output is unchanged): .mcp.json is the MCP config several hosts read. It sits in the
+    // Claude Code group, but doctor names Claude Code for it only when Claude Code is detected.
+    if (doctorNamesAbsent && group && write.path === detection.paths.mcpJson && !detection.claudeCode) return { mcp_config_host_unknown: true };
     return group ? { host: group.host } : {};
   };
   const dropped = writes.filter((write) => !retained.includes(write)).map((write) => ({ label: write.label, path: write.path, ...hostOf(write) }));
   const skipped = updateOnly ? dropped : [];
   const absentHosts = doctorNamesAbsent ? dropped.filter((entry) => entry.host) : [];
+  const absentMcpConfig = doctorNamesAbsent ? dropped.filter((entry) => entry.mcp_config_host_unknown) : [];
   return {
     mode,
     root: detection.root,
     writes: planned,
     ...(skipped.length ? { update_skipped: skipped } : {}),
     ...(absentHosts.length ? { absent_hosts: absentHosts } : {}),
+    ...(absentMcpConfig.length ? { absent_mcp_config: absentMcpConfig } : {}),
     mcp_target_version: mcpTargetVersion,
     host_approval_hooks: hostApprovals,
     ...(options.maintenance !== true ? { identityRecordHome: detection.home } : {}),
@@ -3304,6 +3330,49 @@ function updateHostGroups(paths) {
     { host: 'Cursor', hooks: true, files: [paths.cursorHooks, paths.cursorMcp, paths.cursorRules] },
     { host: 'Hermes', hooks: false, files: [paths.hermesConfig] },
   ];
+}
+
+// Doctor only: true when a host's hook or config file would still be written for a host no counted
+// Marrow plugin supplies (so `--repair` stays the right fix there). The project .mcp.json is not
+// counted: it is planned for any project, whichever host is used.
+function uncoveredHostWrites(changes, paths, plugins) {
+  const covered = new Set(plugins.filter((plugin) => plugin.counted).map((plugin) => plugin.name));
+  const groups = updateHostGroups(paths).filter((group) => group.hooks && !covered.has(group.host));
+  return (changes || []).some((change) => change.changed && change.path !== paths.mcpJson && groups.some((group) => group.files.includes(change.path)));
+}
+
+// Doctor, no key, a counted Marrow plugin: the plugin reads the key from ~/.marrow/env and already
+// supplies the hooks, so the fix is the key path, not --repair or activate.
+function pluginKeyFix(plugins) {
+  const claude = plugins.some((plugin) => plugin.host === 'claude-code');
+  const codex = plugins.some((plugin) => plugin.host === 'codex');
+  const reload = claude && codex ? 'run /reload-plugins in Claude Code and restart Codex' : claude ? 'run /reload-plugins in Claude Code' : 'restart Codex';
+  return `Put MARROW_API_KEY in ~/.marrow/env, run chmod 600 ~/.marrow/env, then ${reload}. ${pluginSuppliesSentence(plugins)}`;
+}
+
+function pluginSuppliesSentence(plugins) {
+  return `The ${plugins.length > 1 ? 'plugins already supply' : 'plugin already supplies'} the hooks; do not run --repair or activate.`;
+}
+
+// Doctor, no usable key, and a key entry that is present but blank or an owner env file that cannot be used: a
+// failure, never "no key yet". The line names the entry and its source, never a value.
+function keyProblemLine(problem) {
+  return problem.state === 'empty'
+    ? `${problem.name} is set but empty in ${problem.source}`
+    : `${problem.source} ${problem.reason}, so a key in it is not used`;
+}
+
+function keyProblemFix(problems, homeWritable, plugins) {
+  const files = [...new Set(problems.filter((problem) => problem.state === 'unusable').map((problem) => problem.source))];
+  const empty = problems.filter((problem) => problem.state === 'empty');
+  const parts = [];
+  if (files.length) parts.push(`${files.join(' and ')} must be a plain file you own in a mode-700 ~/.marrow (run ${homeWritable ? 'chmod go-w ~ && ' : ''}chmod 700 ~/.marrow && chmod 600 ${files.join(' ')})`);
+  // A blank environment variable is unset; a blank line in a file is removed.
+  for (const problem of empty) parts.push(`${problem.name} in ${problem.source} must be a real key, not blank (fill it in, or ${problem.source === 'the environment' ? 'unset it' : 'remove the line'})`);
+  // With plugins supplying every host's hooks the plugin sentence ends it; otherwise --repair stays the last step.
+  return plugins
+    ? `${parts.join('; ')}. Then run npx -y @getmarrow/install@latest doctor. ${pluginSuppliesSentence(plugins)}`
+    : `${parts.join('; ')}. Then run npx @getmarrow/install --repair.`;
 }
 
 // The word `update` refreshes what Marrow already configured: no host gets its first Marrow file,
@@ -4013,6 +4082,27 @@ function runLoopGuardSelfTest(options = {}) {
   }
 }
 
+// Doctor only: the pinned MCP's read-only `seatbelt-status` command. It is started as `process.execPath
+// <npm's own npx-cli.js> -y --package=@getmarrow/mcp@<pin> marrow-mcp seatbelt-status`: no shell and no lookup
+// of npx or node on PATH (the loop-guard self-test above still looks npx up on PATH). The script is accepted
+// only at the one place npm puts it beside the node running doctor, with no link in its path and no folder
+// from it up to / that another user could write (src/seatbelt-status.js resolveTrustedNpx); otherwise nothing is
+// started. It runs in a fresh private empty folder, never the project, with an environment built from an
+// allow-list: the key reaches it only as a fixed presence marker, never its value. The status describes this
+// machine's real HOME and ~/.marrow, which the loop-guard's isolated HOME would hide. Nothing the child prints
+// is echoed. Returns { mode, reasons } or null (could not check).
+async function readSeatbeltStatus(options = {}) {
+  if (options.seatbeltStatus !== true) return null;
+  const target = executableMcpTarget(options);
+  // options.seatbeltStatusCommand is set only by API callers (tests); no flag or variable sets it.
+  const invocation = options.seatbeltStatusCommand
+    ? { ...options.seatbeltStatusCommand, env: buildStatusEnv(process.env) }
+    : statusInvocation({ version: target.version });
+  if (!invocation) return null;
+  const limits = Number.isFinite(options.seatbeltStatusTimeoutMs) ? { timeoutMs: options.seatbeltStatusTimeoutMs } : {};
+  return runSeatbeltStatus(invocation, limits);
+}
+
 function isCanonicalTimestamp(value) {
   if (typeof value !== 'string' || value.length === 0) return false;
   const parsed = Date.parse(value);
@@ -4119,7 +4209,8 @@ async function runSelfTest(options) {
   const configuredAgentId = String(options.agentId || '').trim();
   if (configuredAgentId) headers['x-marrow-agent-id'] = configuredAgentId;
 
-  const baseUrl = options.baseUrl.replace(/\/+$/, '');
+  // The last check before the key leaves this process, whoever built the options.
+  const baseUrl = assertSafeBaseUrl(options.baseUrl).replace(/\/+$/, '');
   const selfTestKey = `install-self-test:${crypto.randomUUID()}`;
   const think = await selfTestWrite(`${baseUrl}/v1/agent/think`, {
     method: 'POST',
@@ -4510,6 +4601,17 @@ function buildFirstValueSignal(status, runtime, performance, firstValue = {}, to
   };
 }
 
+// The change labels a counted Marrow plugin supplies for its host: its hooks, and for Claude Code
+// the project .mcp.json server entry the plugin also provides.
+const PLUGIN_SUPPLIED = Object.freeze({
+  'claude-code': { host: 'Claude Code', labels: ['Claude Code MCP passive hooks', 'Project MCP server config'] },
+  codex: { host: 'Codex', labels: ['Codex native hooks'] },
+});
+
+function pluginSuppliedHosts(report) {
+  return (report.doctor?.agent_plugins || []).filter((plugin) => plugin.counted && Object.prototype.hasOwnProperty.call(PLUGIN_SUPPLIED, plugin.host)).map((plugin) => PLUGIN_SUPPLIED[plugin.host]);
+}
+
 function printReport(report, sink) {
   const out = typeof sink === 'function' ? sink : (text) => process.stdout.write(text);
   out(`Marrow passive installer\n`);
@@ -4553,8 +4655,12 @@ function printReport(report, sink) {
     }
   }
 
+  // Doctor only: a host whose counted Marrow plugin supplies its hooks and MCP server has nothing to write.
+  const pluginSupplied = report.writeMode === 'doctor' ? pluginSuppliedHosts(report) : [];
+  const pluginLabels = new Set(pluginSupplied.flatMap((entry) => entry.labels));
   out('\nPlanned changes:\n');
   for (const change of report.changes) {
+    if (!change.applied && change.changed && !change.automatic_repair_suppressed && !change.hook_conflict && pluginLabels.has(change.label)) continue;
     const marker = change.automatic_repair_suppressed
       ? 'preserved unverified-ahead surface; repair suppressed'
       : change.hook_conflict ? 'preserved unmanaged owner file; review required'
@@ -4571,6 +4677,9 @@ function printReport(report, sink) {
       out(`  identity reset: ${divergence.field} ${divergence.replaced} -> ${divergence.applied}. If the previous value was intended, add it to ${divergence.field === 'MARROW_BASE_URL' ? 'MARROW_ALLOWED_BASE_URLS' : 'MARROW_ALLOWED_AGENT_IDS'} and rerun.\n`);
     }
   }
+  for (const entry of pluginSupplied) {
+    if (report.changes.some((change) => entry.labels.includes(change.label))) out(`- ${entry.host} hooks: supplied by the Marrow plugin (nothing to write)\n`);
+  }
   const missing = groupMissingHosts(report.update_skipped);
   for (const [host, entries] of missing.hosts) {
     out(`- ${missingHooksLine(host)}\n`);
@@ -4585,7 +4694,10 @@ function printReport(report, sink) {
     out('\nMCP local runtime:\n');
     out(`- hooks start: ${runtime.hooks_start === 'local_runtime' ? `the verified local copy of @getmarrow/mcp@${runtime.version} (${runtime.path})` : 'no verified local copy yet: Marrow hooks install the pinned copy on their next start; if npm or the registry cannot be reached they warn and let the action run, and any other failure holds it'}\n`);
     for (const filePath of runtime.legacy_npx_hooks || []) out(`- needs repair: ${filePath} still starts @getmarrow/mcp through npx\n`);
-    if (runtime.needs_repair) out('- repair: run npx -y @getmarrow/install@latest --repair (from a terminal outside the project, with --cwd <project folder>)\n');
+    // With a counted plugin and no installer hooks of its own to repair, the installer's hooks would run next to the plugin's.
+    const pluginCounted = (report.doctor?.agent_plugins || []).some((plugin) => plugin.counted);
+    if (runtime.needs_repair && pluginCounted && !(runtime.legacy_npx_hooks || []).length) out('- no installer repair is suggested here: a counted Marrow plugin runs its own launcher and hooks, and the installer\'s hooks would run next to them\n');
+    else if (runtime.needs_repair) out('- repair: run npx -y @getmarrow/install@latest --repair (from a terminal outside the project, with --cwd <project folder>)\n');
     if (runtime.local_runtime_switch === 'ignored') out('- note: MARROW_LOCAL_RUNTIME=0 / --no-local-runtime are ignored; hooks never start npx\n');
     out(`- state: ${runtime.state}${runtime.reason ? ` (${runtime.reason})` : ''}\n`);
     if (runtime.removed_versions?.length) out(`- removed older versions: ${runtime.removed_versions.join(', ')}\n`);
@@ -4617,7 +4729,7 @@ function printReport(report, sink) {
       out(`- backend-projected upgrade-required tools: ${availability.counts.upgrade_required}\n`);
       out(`- backend projection source: ${projection.source}; authorizes calls: no\n`);
     } else {
-      out(`- backend-projected entitlements: unavailable (source: ${projection?.source || 'backend_projection_not_provided'}; non-authorizing)\n`);
+      out(`- backend-projected tools in your plan: unavailable (source: ${projection?.source || 'backend_projection_not_provided'}; non-authorizing)\n`);
     }
   }
   if (report.selfTest.skipped) {
@@ -4753,11 +4865,19 @@ function printReport(report, sink) {
         ? 'server confirmed, restart required'
         : 'no';
     out('\nDoctor:\n');
-    out(`- Marrow active: ${activeLabel}\n`);
+    // A counted Marrow plugin with no key yet runs the seatbelt alone.
+    // A key entry that is blank or unusable is a failure, never "no key yet".
+    const seatbeltOnly = activeLabel === 'no' && pluginSupplied.length > 0 && !(report.doctor.key_problems || []).length
+      && report.doctor.missingEnv.includes('MARROW_API_KEY') && report.doctor.seatbelt?.mode === 'seatbelt';
+    out(`- Marrow active: ${seatbeltOnly ? 'seatbelt only (no key yet)' : activeLabel}\n`);
+    out(`${seatbeltLine(report.doctor.seatbelt)}\n`);
     out(`- missing env: ${report.doctor.missingEnv.length ? report.doctor.missingEnv.join(', ') : 'none'}\n`);
     if (report.doctor.envHints.length) out(`- possible env files: ${report.doctor.envHints.join(', ')}\n`);
-    out(`- missing hooks/config: ${report.doctor.missingHooks.length ? report.doctor.missingHooks.join('; ') : 'none'}\n`);
-    for (const host of groupMissingHosts(report.doctor.hooks_missing_hosts).hosts.keys()) out(`- ${missingHooksLine(host)}\n`);
+    const missingHooks = report.doctor.missingHooks.filter((label) => !pluginLabels.has(label));
+    out(`- missing hooks/config: ${missingHooks.length ? missingHooks.join('; ') : 'none'}\n`);
+    for (const problem of report.doctor.key_problems || []) out(`- key problem: ${problem.summary}\n`);
+    for (const host of groupMissingHosts(report.doctor.hooks_missing_hosts).hosts.keys()) out(`- ${doctorMissingHooksLine(host)}\n`);
+    for (const entry of report.doctor.mcp_config_host_unknown || []) out(`- MCP config (host unknown): ${entry.file} carries no Marrow server entry. No host marker (.claude, CLAUDE.md, .cursor, .codex, ...) names a host for it, so doctor counts it as no host's coverage.\n`);
     const plugins = report.doctor.agent_plugins || [];
     if (!plugins.length) out('- agent plugins: none\n');
     for (const plugin of plugins) out(`- agent plugin: ${plugin.summary}\n`);
@@ -5078,6 +5198,19 @@ async function install(options) {
   // Doctor only: Marrow's agent plugins at the host's own install location (src/agent-plugins.js).
   const agentPlugins = options.doctor ? detectAgentPlugins({ home: detection.home, env: process.env, project: detection.root }) : [];
   const pluginHookLabels = new Set(agentPlugins.filter((plugin) => plugin.counted).map((plugin) => plugin.hook_label));
+  // Doctor only: the keyless seatbelt's status from the pinned MCP (null = could not check).
+  const seatbeltStatus = options.doctor ? await readSeatbeltStatus(options) : null;
+  const countedPlugins = agentPlugins.filter((plugin) => plugin.counted);
+  // Doctor, no usable key: "no key yet" is said only when nothing is stored anywhere. A key entry that is present
+  // but blank, or an owner env file that cannot be used, is a failure with its own fix.
+  const keyState = options.doctor && !options.apiKey ? ownerKeyStoreState(detection.home, process.env) : null;
+  const keyProblems = keyState && keyState.state !== 'key' ? keyState.problems : [];
+  const pluginCoversKeyFix = countedPlugins.length > 0 && !uncoveredHostWrites(changes, detection.paths, countedPlugins);
+  const keyFix = keyProblems.length ? keyProblemFix(keyProblems, keyState.homeWritable, pluginCoversKeyFix ? countedPlugins : null) : null;
+  // The skipped self-test's own hint ends in `activate`, which would put the installer's hooks next to the plugin's.
+  if (selfTest.skipped && selfTest.exact_fix && !options.apiKey && options.doctor && pluginCoversKeyFix) {
+    selfTest = { ...selfTest, exact_fix: keyFix || pluginKeyFix(countedPlugins) };
+  }
   // A host whose Marrow plugin supplies the hooks is not missing them.
   const hooksMissingHosts = (plan.absent_hosts || []).filter((entry) => !(plan.absent_hosts || []).some((other) => other.host === entry.host && pluginHookLabels.has(other.label)));
   // Doctor only: a Codex hooks file that still carries the look-ahead matcher Codex rejects.
@@ -5251,11 +5384,14 @@ async function install(options) {
     doctor: {
       ...(hooksMissingHosts.length ? { hooks_missing_hosts: hooksMissingHosts } : {}),
       active: Boolean(!selfTest.skipped && selfTest.active),
+      ...(options.doctor ? { seatbelt: seatbeltReport(seatbeltStatus) } : {}),
       missingEnv: options.apiKey ? [] : ['MARROW_API_KEY'],
       envHints,
       // A host whose Marrow plugin supplies the hooks is not missing them (doctor reports it instead).
       missingHooks: changes.filter((change) => change.changed && !pluginHookLabels.has(change.label)).map((change) => change.label),
       agent_plugins: agentPlugins.map((plugin) => ({ host: plugin.host, counted: plugin.counted, version: plugin.version || null, path: plugin.path || null, hooks: plugin.events || [], summary: describeAgentPlugin(plugin) })),
+      ...(keyProblems.length ? { key_problems: keyProblems.map((problem) => ({ state: problem.state === 'empty' ? 'key_empty' : 'key_unusable', source: problem.source, ...(problem.state === 'empty' ? { key_name: problem.name } : {}), summary: keyProblemLine(problem) })) } : {}),
+      ...(plan.absent_mcp_config ? { mcp_config_host_unknown: plan.absent_mcp_config.map((entry) => ({ label: entry.label, file: path.relative(detection.root, entry.path) })) } : {}),
       duplicate_hooks: duplicateHooks,
       stale_hooks: staleHooks,
       mcpProcesses: reportedMcpProcesses,
@@ -5273,7 +5409,11 @@ async function install(options) {
       recommendedFix: registryVerificationAction
         || (updateAwaitingRestart ? INSTALLER_RESTART_INSTRUCTION : null)
         || mcpProcesses.exact_fix || mcpConfigurations.exact_fix || (!options.apiKey
-        ? envHints.length
+        ? keyProblems.length
+          ? keyFix
+        : pluginCoversKeyFix
+          ? `${envHints.length ? `MARROW_API_KEY was found in a likely env file at ${envHints[0]}. ` : ''}${pluginKeyFix(countedPlugins)}`
+        : envHints.length
           ? `MARROW_API_KEY was found in a likely env file at ${envHints[0]}. Load that key from trusted secret storage, export only MARROW_API_KEY, then run npx @getmarrow/install --repair.`
           : 'Set MARROW_API_KEY, then run npx @getmarrow/install --repair.'
         : controller.exact_fix || selfTest.recommended_fix || null),
@@ -5420,6 +5560,22 @@ function writeInstallLog(home, text) {
   return filePath;
 }
 
+// Where the key may go, decided once for every installer flow (install, activate, update, doctor and the
+// self-test), by where the key that is sent came from: `ownerKey` is given only when that key is the
+// owner-file key. A key read from the owner file reaches only the default endpoint or one that same file
+// names or lists: a URL that only the environment or --base-url names cannot move it, whatever --key
+// said, and with neither the file's own URL is used. Whatever the source, a URL that is not https
+// (loopback may be http) stops the run before any network call.
+function enforceKeyEndpoint(options, ownerKey) {
+  if (ownerKey && ownerKey.apiKey) {
+    const decision = ownerKeyBaseUrl({ candidate: options.baseUrlSource ? options.baseUrl : '', ownerValues: ownerKey.endpoint, fileName: ownerKey.fileName, source: options.baseUrlSource || undefined });
+    options.baseUrl = decision.baseUrl;
+    emitNoticeOnce(decision.notice);
+  }
+  options.baseUrl = assertSafeBaseUrl(options.baseUrl, options.baseUrlSource === 'the --base-url option' ? '--base-url' : 'MARROW_BASE_URL');
+  return options;
+}
+
 async function runCli(argv) {
   const options = parseArgs(argv);
   if (options.help) {
@@ -5434,7 +5590,7 @@ async function runCli(argv) {
   }
   // An empty or whitespace-only key from any source (environment, --key, owner file) is missing.
   options.apiKey = String(options.apiKey || '').trim();
-  const stored = readOwnerApiKey(options.home);
+  const stored = readOwnerKeyDetail(options.home);
   stored.apiKey = String(stored.apiKey || '').trim();
   const keyInfo = { source: options.apiKey ? 'environment' : null, path: null, owner_files_disagree: stored.conflict };
   if (!options.apiKey && stored.apiKey) {
@@ -5442,6 +5598,7 @@ async function runCli(argv) {
     keyInfo.source = 'owner_env_file';
     keyInfo.path = stored.source;
   }
+  enforceKeyEndpoint(options, keyInfo.source === 'owner_env_file' ? stored : null);
   const oneCommand = Boolean((options.activate || options.update) && !options.dryRun && !options.doctor);
   // Any write run without a key stops here, before anything is written: hooks installed with no
   // key would deny protected actions on the next harness start. Previews, doctor and uninstall
@@ -5509,6 +5666,7 @@ async function runCli(argv) {
 
 module.exports = {
   argumentLabel,
+  enforceKeyEndpoint,
   maintenanceMcpRuntime,
   parseArgs,
   detectEnvironment,

@@ -29,6 +29,8 @@ const OLD = {
 
 const OWN = NAMES.join('|');
 const GEMINI_BUILTINS = 'run_shell_command|write_file|replace|edit_file|delete_file|read_file|read_many_files|glob|grep_search|list_directory|get_file_info|web_search|google_web_search';
+// PKG-H2: web_fetch reaches the Gemini hook too.
+const GEMINI_HOOKED = `${GEMINI_BUILTINS}|web_fetch`;
 
 // The r1 candidate (8371de15) strings, for the "never looser than r1" checks.
 const R1 = (() => {
@@ -48,15 +50,15 @@ const V0170_CODEX = `Bash|apply_patch|Edit|Write|MultiEdit|^(?!mcp__marrow__(?:$
 
 // The exact strings of the rule, assembled here from the JSON (not from the module).
 function expectedStrings() {
-  const tail = `^(?!mcp__marrow__(?:${OWN})$)[\\s\\S]*(?:functions\\.|mcp__)[\\s\\S]*`;
   const cursorMcp = '[\\s\\S]*MCP:[\\s\\S]*';
   return {
-    claude: `Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|${tail}`,
+    // PKG-H2: every label but the exact own labels and the read-only LS / ListMcpResourcesTool.
+    claude: `^(?!(?:mcp__marrow__(?:${OWN})|LS|ListMcpResourcesTool)$)[\\s\\S]*`,
     // Codex: every tool reaches the hook, which skips the exact own names itself.
     codex: '*',
     cursor: `Shell|Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|${cursorMcp}`,
     cursorPreToolUseHostApproval: `Write|Delete|Task|Read|Glob|Grep|Search|WebSearch|List|${cursorMcp}`,
-    gemini: `^(?:${GEMINI_BUILTINS}|mcp_[\\s\\S]*)$|^[^A-Za-z_][\\s\\S]*`,
+    gemini: `^(?:${GEMINI_HOOKED}|mcp_[\\s\\S]*)$|^[^A-Za-z_][\\s\\S]*`,
   };
 }
 
@@ -86,7 +88,7 @@ function codexSelects(matcher, tool) {
   return new RegExp(matcher).test(tool);
 }
 // The Codex matcher is `*`, so the hook alone decides what is skipped. That decision is the real
-// @getmarrow/mcp 3.9.103 one (marrow-mcp 868a9c18): test/fixtures/mcp-3.9.103/ holds dist/ of the pinned
+// @getmarrow/mcp 3.9.106 one (marrow-mcp b8973d3a): test/fixtures/mcp-3.9.106/ holds dist/ of the pinned
 // package, byte for byte (the checksum test below pins it), not a copy of its rules written here. A label
 // is skipped only when it is exactly `mcp__marrow__<own>` AND the host's own Codex configuration proves the
 // `marrow` server is the official one. PROVEN is a temporary CODEX_HOME whose config.toml is the README
@@ -216,19 +218,19 @@ function probes(key) {
 }
 
 // sha256 of each vendored file, written here as well as in MANIFEST.json so that editing one of
-// the two is caught. They are dist/ of @getmarrow/mcp 3.9.103 (marrow-mcp 868a9c18; none of these
-// files changes with the 3.9.103 version bump), and the 3.9.102 baseline (3a2bf85e) the published
-// 0.1.70 pinned.
+// the two is caught. They are dist/ of @getmarrow/mcp 3.9.106 (marrow-mcp b8973d3a; only own-tool.js, which
+// carries the Claude Code matcher, codex-plugin-pins.js and own-server-identity.js differ from the 3.9.103 files), and the 3.9.102
+// baseline (3a2bf85e) the published 0.1.70 pinned.
 const VENDORED_MCP = {
-  sourceSha: '868a9c18530a75fcee5052441d0d3d2383511df4',
+  sourceSha: 'b8973d3a6aa1e2a85a7aa4ac09801d6842f98661',
   files: {
-    'own-tool.js': 'abcfcb24d7f4d55fb3f766528aee72a40c4e8a090e8b26271d5aaf234bb69d17',
+    'own-tool.js': '09e7b5b2c3bae1abe1955bf54bf1763f58bbacc4a4abb258633ab4a81d7a6e8b',
     'tool-catalog.js': 'd413c2b7c46c7ed9c7a8b0694481c1f5afe850c3edc67cd28917dc1153b934cb',
     'model-usage.js': 'c7ddbc3482d5a7514453d0be38fa7c51e2f228a50039f3392544319b8defc577',
     'redact.js': '1f7afe22e5bd8b0b8181978d4dc7149e2aec8591459a51a733130d94c5d8da9b',
-    'own-server-identity.js': 'c8efc9b000c697c6ce0d91a17348d9b47b1667d0928f657135da8822465176c0',
+    'own-server-identity.js': '417d3e92c3b2044d35c55e7e947e4ce3b4d257f083b3d4f42c150df44a59c03e',
     'codex-plugins.js': '697e0444c1dc8856ed61ffa169fb39707b76c9a0f4752f6cb4121e315f4b107f',
-    'codex-plugin-pins.js': 'b44c256251c9ce623f3ea7773fb711e5d4cd6a6da11277b2f1af1a6fbbc892fb',
+    'codex-plugin-pins.js': '4572aea25a1f64e9afef4402ba1d927cba2ca4ccb9346424d545b0202d8eeeef',
     'host-session.js': '422544dfaf4f75a5e78a607ea8565050f8b11368f9ed275f298f8c1b1b7b350e',
   },
 };
@@ -256,15 +258,15 @@ function checkVendored(directory, vendored, version) {
   return manifest;
 }
 
-test('the vendored MCP 3.9.103 files are byte for byte the pinned @getmarrow/mcp, and the real hook lists the registered names', () => {
-  const manifest = checkVendored(MCP_FIXTURES, VENDORED_MCP, '3.9.103');
+test('the vendored MCP 3.9.106 files are byte for byte the pinned @getmarrow/mcp, and the real hook lists the registered names', () => {
+  const manifest = checkVendored(MCP_FIXTURES, VENDORED_MCP, '3.9.106');
   assert.equal(manifest.source_sha, PINS.MCP_ADAPTER_SOURCE_SHA, 'the vendored files are for the pinned MCP source');
   assert.equal(manifest.version, PINS.MCP_ADAPTER_VERSION);
   assert.equal(manifest.integrity, PINS.MCP_ADAPTER_INTEGRITY);
-  // The pin itself: 3.9.103 from marrow-mcp 868a9c18. A pin left at 3.9.102 (or moved without the
+  // The pin itself: 3.9.106 from marrow-mcp b8973d3a. A pin left at 3.9.102 (or moved without the
   // vendored files) fails here and in the manifest checks above.
-  assert.equal(PINS.MCP_ADAPTER_VERSION, '3.9.103');
-  assert.equal(PINS.MCP_ADAPTER_SOURCE_SHA, '868a9c18530a75fcee5052441d0d3d2383511df4');
+  assert.equal(PINS.MCP_ADAPTER_VERSION, '3.9.106');
+  assert.equal(PINS.MCP_ADAPTER_SOURCE_SHA, 'b8973d3a6aa1e2a85a7aa4ac09801d6842f98661');
   assert.match(PINS.MCP_ADAPTER_INTEGRITY, /^sha512-[A-Za-z0-9+/]{86}==$/);
   assert.notEqual(PINS.MCP_ADAPTER_INTEGRITY, 'sha512-hTs4jTJmySLk8hHgsGIZksMo9+eO5kjQmU1EJyDX8Qqm9Z+V+yDkauop19roasVvOAFsK3dJjqLoIh7gRhoXJQ==', 'not the 3.9.102 integrity');
   // The registered names the real module derives from its own catalog are the installer's 58.
@@ -352,7 +354,7 @@ test('every matcher is the exact string of the rule, built from the names, and t
   assert.equal(installer.GEMINI_NATIVE_HOOK_MATCHER, expected.gemini);
   // Byte-identical with @getmarrow/mcp NATIVE_HOOK_MATCHER (MCP_SYNC_STRING in the r2 result).
   assert.equal(installer.NATIVE_HOOK_MATCHER,
-    `Bash|Edit|Write|MultiEdit|Read|Glob|Grep|Search|WebSearch|Task|^(?!mcp__marrow__(?:${OWN})$)[\\s\\S]*(?:functions\\.|mcp__)[\\s\\S]*`);
+    `^(?!(?:mcp__marrow__(?:${OWN})|LS|ListMcpResourcesTool)$)[\\s\\S]*`);
   assert.equal(installer.CODEX_NATIVE_HOOK_MATCHER, '*');
   // Codex (Rust `regex`) has no look-around; its string is its match-all and no regex at all.
   assert.equal(/\(\?<?[=!]/.test(expected.codex), false);
@@ -370,7 +372,8 @@ test('every matcher is the exact string of the rule, built from the names, and t
   }
   // No by-name allow exists any more: the module exports no guard condition (the Cursor
   // beforeMCPExecution guard sends every call, Marrow's own tools included, to the MCP hook).
-  assert.deepEqual(Object.keys(own).sort(), ['MARROW_OWN_SERVER', 'MARROW_OWN_TOOL_NAMES', 'buildOwnToolMatchers']);
+  assert.deepEqual(Object.keys(own).sort(), ['CLAUDE_UNHOOKED_READ_ONLY_TOOLS', 'MARROW_OWN_SERVER', 'MARROW_OWN_TOOL_NAMES', 'buildOwnToolMatchers']);
+  assert.deepEqual(own.CLAUDE_UNHOOKED_READ_ONLY_TOOLS, ['LS', 'ListMcpResourcesTool']);
   assert.equal(own.cursorOwnToolGuardCondition, undefined);
   assert.throws(() => own.buildOwnToolMatchers([]), /invalid Marrow tool name list/);
 });
@@ -557,7 +560,8 @@ test('the named cases for the Claude Code / Codex matcher', () => {
           assert.equal(codexSelects(matcher, tool), true, `codex/${mode}: ${JSON.stringify(tool)} reaches the hook`);
           assert.equal(hookSkips(tool), false, `codex/${mode}: the real hook does not skip ${JSON.stringify(tool)}`);
         }
-        assert.equal(checks(key, matcher, tool, mode), key === 'claude' && tool.startsWith('MCP:') ? false : true, `${key}/${mode}: ${JSON.stringify(tool)}`);
+        // PKG-H2: the Claude Code matcher hooks every label but the exact own ones, so `MCP:` labels (no Claude Code form) reach it too.
+        assert.equal(checks(key, matcher, tool, mode), true, `${key}/${mode}: ${JSON.stringify(tool)}`);
       }
       assert.equal(hookSkips0170('functions.mcp__marrow__marrow_workflow_gate'), true, 'the published 0.1.70 hook skipped it');
       assert.equal(checks(key, matcher, 'mcp__marrow__marrow_commit', mode), false);

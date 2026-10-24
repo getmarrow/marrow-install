@@ -35,6 +35,7 @@ const MATCHER = require('../src/marrow-own-tools').buildOwnToolMatchers().claude
 const command = (entrypoint) => `npx -y --package=${MCP_PIN} marrow-mcp ${entrypoint}`;
 
 const { canonicalHooks } = require('./support/fake-runtime');
+const { installVirtualClock } = require('./support/virtual-clock');
 const { hookTextUsesNpx } = require('../src/mcp-runtime');
 function tempDir(prefix = 'marrow-0166-') {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -774,11 +775,13 @@ test('self-test writes stop at their time limits instead of hanging the install'
     attempts += 1;
     request.signal?.addEventListener('abort', () => reject(Object.assign(new Error('timed out'), { name: 'TimeoutError' })));
   });
-  const started = Date.now();
   // The request timers are unref'd, as a real socket would keep the process alive instead.
   const keepAlive = setInterval(() => {}, 1_000);
+  // Virtual time: the attempt timeouts fire without a real wait, and the test reads the waits the
+  // product asked for instead of measuring how long it took.
+  const clock = installVirtualClock();
   try {
-    await assert.rejects(runSelfTest({
+    await assert.rejects(clock.run(runSelfTest({
       selfTest: true,
       apiKey: 'mrw_fixture_timeout',
       baseUrl: 'https://api.example.test',
@@ -786,13 +789,20 @@ test('self-test writes stop at their time limits instead of hanging the install'
       selfTestRetryDelayMs: 0,
       selfTestAttemptTimeoutMs: 40,
       selfTestDeadlineMs: 2_000,
-    }), /self-test did not return decision_id after 3 attempts \(last: timed out\)/);
+    })), /self-test did not return decision_id after 3 attempts \(last: timed out\)/);
   } finally {
+    clock.restore();
     clearInterval(keepAlive);
     global.fetch = originalFetch;
   }
   assert.equal(attempts, 3);
-  assert.ok(Date.now() - started < 2_000);
+  // Three attempts of 40 ms each and no wait between them: it stops 1.88 s before its 2 s deadline
+  // instead of waiting the deadline out. The events also show a call that blocks the process
+  // (Atomics.wait, a synchronous child); the real-time bound, the old 2 s, is the hang guard for
+  // any other block.
+  assert.deepEqual(clock.events, [{ kind: 'timeout', ms: 40 }, { kind: 'timeout', ms: 40 }, { kind: 'timeout', ms: 40 }]);
+  assert.equal(clock.now, 120);
+  assert.ok(clock.realMs < 2_000, `${Math.round(clock.realMs)} ms of real time`);
 });
 
 const KEYLESS_MESSAGE_ACTIVATE = 'Marrow needs your API key. Nothing was written. Create a key at https://getmarrow.ai/signup, save it as MARROW_API_KEY=your_key in the owner-only file ~/.marrow/env, then run chmod 700 ~/.marrow && chmod 600 ~/.marrow/env, then run: npx -y @getmarrow/install@latest activate  (fallback: MARROW_API_KEY=your_key npx -y @getmarrow/install@latest activate)\n';
@@ -832,7 +842,9 @@ function withLoopGuardStub(env) {
 function runBin(args, { cwd, env, input } = {}) {
   return new Promise((resolve) => {
     // These runs stay offline: the local MCP runtime (an npm install) is tested on its own.
-    const child = spawn(process.execPath, [BIN, ...args], { cwd, env: { MARROW_LOCAL_RUNTIME: '0', ...withLoopGuardStub(env) }, stdio: ['pipe', 'pipe', 'pipe'] });
+    // Doctor's status child is a spawn of the real npm by absolute path, which the PATH stand-in cannot reach: the stub preload answers it.
+    const nodeOptions = [env && env.NODE_OPTIONS, `--require=${path.join(__dirname, 'support', 'status-child-stub.js')}`].filter(Boolean).join(' ');
+    const child = spawn(process.execPath, [BIN, ...args], { cwd, env: { MARROW_LOCAL_RUNTIME: '0', ...withLoopGuardStub(env), NODE_OPTIONS: nodeOptions }, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (chunk) => { stdout += chunk; });
@@ -1054,8 +1066,8 @@ test('day one: Claude Code is found from the user\'s installation, gets project 
   assert.equal(none.instruction, 'Restart the app your agent runs in so it loads Marrow.');
 });
 
-test('day one: SDK files and advice only where the SDK is used, AGENTS.md only for hosts that read it, and the SDK pin is 3.7.65', async () => {
-  assert.equal(PINS.SDK_ADAPTER_VERSION, '3.7.65');
+test('day one: SDK files and advice only where the SDK is used, AGENTS.md only for hosts that read it, and the SDK pin is 3.7.67', async () => {
+  assert.equal(PINS.SDK_ADAPTER_VERSION, '3.7.67');
   const root = tempDir('marrow-day1-sdk-');
   const home = tempDir('marrow-day1-home-');
   try {
@@ -1084,12 +1096,12 @@ test('day one: SDK files and advice only where the SDK is used, AGENTS.md only f
     fs.writeFileSync(path.join(root, '.codex', 'config.toml'), '# owner\n');
     plan = buildPlan(detectEnvironment(root, { HOME: home, PATH: process.env.PATH }), { mode: 'auto' });
     assert.ok(plan.writes.some((write) => write.label === 'Agent instructions'));
-    // The SDK in use: the passive runtime and the advice, at the 3.7.65 pin.
+    // The SDK in use: the passive runtime and the advice, at the 3.7.67 pin.
     fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ dependencies: { '@getmarrow/sdk': '^3.7.0' } }));
     const sdkReport = await install({ cwd: root, home, mode: 'auto', yes: false, dryRun: true, selfTest: false, loopGuardSelfTest: false, controller: false, apiKey: '', baseUrl: 'https://api.getmarrow.ai', agentId: '' });
     assert.equal(sdkReport.mode, 'both');
     assert.equal(sdkReport.sdkDependency.required, true);
-    assert.equal(sdkReport.sdkDependency.install_command, 'npm install @getmarrow/sdk@3.7.65');
+    assert.equal(sdkReport.sdkDependency.install_command, 'npm install @getmarrow/sdk@3.7.67');
   } finally {
     for (const directory of [root, home]) fs.rmSync(directory, { recursive: true, force: true });
   }

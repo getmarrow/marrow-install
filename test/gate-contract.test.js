@@ -19,6 +19,7 @@ const {
   shouldBlock,
 } = require('../src/governed-runner');
 const { firstCapturePath } = require('../src/first-hour');
+const { installVirtualClock } = require('./support/virtual-clock');
 
 // Wire shapes taken from the backend runtime service at 854272f6: the slim projection that
 // package clients receive by default, and the expanded payload returned for response_mode
@@ -526,13 +527,16 @@ test('a hung Marrow write times out and a protected command fails closed within 
     init.signal?.addEventListener('abort', () => reject(Object.assign(new Error('timed out'), { name: 'TimeoutError' })));
   });
   const keepAlive = setInterval(() => {}, 1_000);
-  const started = Date.now();
+  // Virtual time: the attempt timeouts fire without a real wait, and the test reads the waits the
+  // product asked for instead of measuring how long it took.
+  const clock = installVirtualClock();
   let result;
   try {
     const parsed = parseArgs(['run', '--key', 'test-key', '--type', 'deploy', '--action', 'deploy production', '--', ...markerCommand(marker)]);
     Object.assign(parsed.options, { retryDelayMs: 0, requestTimeoutMs: 40, requestDeadlineMs: 2_000 });
-    result = await runGoverned(parsed);
+    result = await clock.run(runGoverned(parsed));
   } finally {
+    clock.restore();
     clearInterval(keepAlive);
     globalThis.fetch = originalFetch;
   }
@@ -541,6 +545,12 @@ test('a hung Marrow write times out and a protected command fails closed within 
   assert.match(result.message, /did not complete after 3 attempts \(last: timed out\)/);
   assert.equal(attempts, 3);
   assert.equal(fs.existsSync(marker), false);
-  assert.ok(Date.now() - started < 2_000);
+  // Three attempts of 40 ms each and no wait between them: it fails closed at once, 1.88 s before
+  // its 2 s deadline, instead of waiting the deadline out. The events also show a call that blocks
+  // the process (Atomics.wait, a synchronous child); the real-time bound, the old 2 s, is the hang
+  // guard for any other block.
+  assert.deepEqual(clock.events, [{ kind: 'timeout', ms: 40 }, { kind: 'timeout', ms: 40 }, { kind: 'timeout', ms: 40 }]);
+  assert.equal(clock.now, 120);
+  assert.ok(clock.realMs < 2_000, `${Math.round(clock.realMs)} ms of real time`);
   fs.rmSync(directory, { recursive: true, force: true });
 });
