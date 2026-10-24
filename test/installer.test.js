@@ -2782,6 +2782,8 @@ test('disabled local control keeps the exact fix for unsafe, unverified, unrespo
 
     fs.chmodSync(childStateDirectory, 0o700);
     child = spawn(process.execPath, [path.join(__dirname, '..', 'bin', 'marrow-install.js'), 'sidecar', '--client', 'codex'], {
+      // The shipped doctor compares this process's /proc command line with the one a controller has, so no --require goes on it.
+      isolationKeepsArgv: true,
       env: {
         PATH: process.env.PATH,
         HOME: home,
