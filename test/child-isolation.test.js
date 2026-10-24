@@ -454,7 +454,7 @@ test('F1: option arity follows git per subcommand: -u, -o, -j, --repo and refspe
     'archive --remote <scp> HEAD': ['archive', '--remote', S, 'HEAD'],
     'archive --remote=<scp> HEAD': ['archive', `--remote=${S}`, 'HEAD'],
   };
-  planRefusedRows(publicOrigin, rows, /^ESPAWNGUARD .*non-local/);
+  planRefusedRows(publicOrigin, rows, /: git [a-z-]+: a non-local address/);
   // The same words with a remote NAME: the name resolves to a public address in the repository config.
   const named = {
     'push -u origin main': ['push', '-u', 'origin', 'main'],
