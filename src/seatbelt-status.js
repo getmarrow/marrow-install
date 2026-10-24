@@ -264,16 +264,18 @@ function systemIo(io) {
 // written by its group or by others. Then no other user can add, rename or replace anything on the way down to `start`.
 // A sticky world-writable /tmp never qualifies. `start` is a folder unless `startIsFile`. Throws on any error: callers
 // treat that as a refusal. `why`, when given, is only written to: the first folder (walking up from `start`) that made it
-// refuse and the reason, as { path, reason } (see refuse). It changes no decision.
+// refuse, the reason, and whether that folder belongs to this user, as { path, reason, owned } (see refuse). It changes no
+// decision.
 function chainClosed(start, io, { startIsFile = false, why = null } = {}) {
   const uid = io.getuid();
   if (!Number.isInteger(uid)) return false;
   for (let current = start; ; ) {
     const stat = io.lstatSync(current);
-    if (stat.isSymbolicLink()) return refuse(why, current, 'link');
-    if (current === start && startIsFile ? !stat.isFile() : !stat.isDirectory()) return refuse(why, current, 'other');
-    if (stat.uid !== 0 && stat.uid !== uid) return refuse(why, current, 'other_owner');
-    if ((stat.mode & 0o022) !== 0) return refuse(why, current, 'writable');
+    const owned = stat.uid === uid;
+    if (stat.isSymbolicLink()) return refuse(why, current, 'link', owned);
+    if (current === start && startIsFile ? !stat.isFile() : !stat.isDirectory()) return refuse(why, current, 'other', owned);
+    if (stat.uid !== 0 && stat.uid !== uid) return refuse(why, current, 'other_owner', owned);
+    if ((stat.mode & 0o022) !== 0) return refuse(why, current, 'writable', owned);
     const parent = path.posix.dirname(current);
     if (parent === current) return true;
     current = parent;
@@ -282,10 +284,13 @@ function chainClosed(start, io, { startIsFile = false, why = null } = {}) {
 
 // Notes into `why` (when there is one) which folder a walk refused at and why, and returns false: the refusal itself.
 // Reasons: 'link', 'other_owner' (not root and not this user), 'writable' (group or others can write), 'other'.
-function refuse(why, folder, reason) {
+// `owned` is whether that folder's owner is the user running doctor, from the same lstat (never a second look); only
+// then may a command be printed for it (see refusalNote).
+function refuse(why, folder, reason, owned = false) {
   if (why) {
     why.path = folder;
     why.reason = reason;
+    why.owned = owned === true;
   }
   return false;
 }
@@ -595,7 +600,7 @@ function releaseBase(held) {
 // removed after in every path (releaseStatusFolder). `invocation` is { command, args, env }. Order: the base is
 // created and checked, then the private folder is made, then noProjectAbove: if a folder above the private one
 // holds a package.json or a node_modules, nothing is started (null). `refusal`, when given, receives only the
-// first unsafe folder of the base walk that refused ({ home, path, reason } or null; see seatbeltWhyLine); it
+// first unsafe folder of the base walk that refused ({ home, path, reason, owned } or null; see seatbeltWhyLine); it
 // changes nothing else.
 async function runSeatbeltStatus(invocation, limits = {}, refusal = null) {
   const held = { cwd: null, parts: [], from: null, noted: false, refusal: null };
@@ -649,10 +654,11 @@ function seatbeltLine(report) {
 // When the base walk (privateBase) refuses, doctor says which folder made it refuse and why, from what that same
 // walk saw. Only three reasons get a line; every other refusal, and every other way of "could not check" (a
 // timeout, an old MCP, an untrusted npm, a package.json above the private folder), prints no extra line, exactly as before.
-//   writable    "is writable by other users", and, when it is safe to paste, `chmod go-w <path>`
+//   writable    "is writable by other users", and, when it is safe to paste and the folder is yours, `chmod go-w <path>`
 //   link        "is a link" (no command)
 //   other_owner "is owned by another user" (no command: never chown or sudo)
-// The only variable text is the path, and the command is printed only for a path of [A-Za-z0-9._/-] that is the
+// The only variable text is the path, and the command is printed only for a folder the walk saw owned by the user
+// running doctor (a root-owned shared folder such as /tmp gets the reason alone) with a path of [A-Za-z0-9._/-] that is the
 // passwd home or below it (see safeFixPath). Any other path is shown with every other character as "?".
 const WHY_LINES = new WeakMap();
 const WHY_PREFIX = '  Doctor skipped this check: ';
@@ -675,12 +681,12 @@ function shownPath(folder) {
   return text.length > PATH_LIMIT ? `${text.slice(0, PATH_LIMIT)}...` : text;
 }
 
-// The extra line for a refusal { home, path, reason } from the base walk, or null for none.
+// The extra line for a refusal { home, path, reason, owned } from the base walk, or null for none.
 function refusalNote(refusal) {
   if (!refusal || typeof refusal !== 'object' || typeof refusal.path !== 'string' || !Object.prototype.hasOwnProperty.call(WHY_REASON_TEXT, refusal.reason)) return null;
   const folder = refusal.path;
   const text = `${WHY_PREFIX}${shownPath(folder)} ${WHY_REASON_TEXT[refusal.reason]}.`;
-  return refusal.reason === 'writable' && safeFixPath(folder, refusal.home) ? `${text} Fix: chmod go-w ${folder}` : text;
+  return refusal.reason === 'writable' && refusal.owned === true && safeFixPath(folder, refusal.home) ? `${text} Fix: chmod go-w ${folder}` : text;
 }
 
 // The extra doctor line (without the newline) for a seatbeltReport() value that was a refusal, or null. It is

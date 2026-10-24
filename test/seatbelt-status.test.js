@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
+const hostFakes = require('./support/status-host-fakes');
 const { install, parseArgs, printReport } = require('../src/installer');
 const PINS = require('../src/pins');
 const {
@@ -446,7 +447,7 @@ test('chainClosed names the first unsafe folder walking up and why, and decides 
     assert.equal(chainClosed(start, io, options), expected.ok, 'same answer without the out-parameter');
     assert.equal(chainClosedBefore(start, io, options), expected.ok, 'same answer as 080a82dc');
     if (expected.ok) assert.deepEqual(note, {}, 'nothing is noted when the chain is closed');
-    else assert.deepEqual(note, { path: expected.path, reason: expected.reason });
+    else assert.deepEqual(note, { path: expected.path, reason: expected.reason, owned: rows.find((row) => row[0] === expected.path)[1] === 1000 }, 'owned: the folder named belongs to the user running (uid 1000)');
   };
   check(SAFE_ROWS, { ok: true });
   check(SAFE_ROWS.map((row) => (row[0] === '/home' ? ['/home', 0, 0o775] : row)), { ok: false, path: '/home', reason: 'writable' });
@@ -466,6 +467,14 @@ test('chainClosed names the first unsafe folder walking up and why, and decides 
   check(withRow('/home/u/.cache', [0, 0o755]), { ok: true });
   check(withRow('/home/u/.cache', [0, 0o777]), { ok: false, path: '/home/u/.cache', reason: 'writable' });
   check(withRow('/home/u', [4242, 0o700]), { ok: false, path: '/home/u', reason: 'other_owner' });
+  // `owned` is the owner of the folder named against the running user, from the same lstat: root and another user are not "owned".
+  const owned = (rows, path_) => { const note = {}; chainClosed(start, fakeChain(rows), { why: note }); assert.equal(note.path, path_); return note.owned; };
+  assert.equal(owned(withRow('/home/u/.cache', [1000, 0o777]), '/home/u/.cache'), true);
+  assert.equal(owned(withRow('/home/u/.cache', [0, 0o777]), '/home/u/.cache'), false, 'a root-owned shared folder is writable but not the user\'s');
+  assert.equal(owned(withRow('/home/u/.cache', [0, 0o1777]), '/home/u/.cache'), false);
+  assert.equal(owned(withRow('/home/u/.cache', [1001, 0o777]), '/home/u/.cache'), false);
+  assert.equal(owned(withRow('/home', [0, 0o775]), '/home'), false, 'a folder above the home that root owns');
+  assert.equal(owned(withRow('/home', [1000, 0o775]), '/home'), true);
   // A link is a link whatever its mode and owner; a file is "other".
   check(withRow('/home/u/.cache', [1000, 0o700, 'link']), { ok: false, path: '/home/u/.cache', reason: 'link' });
   check(withRow('/home/u/.cache', [1001, 0o777, 'link']), { ok: false, path: '/home/u/.cache', reason: 'link' });
@@ -505,14 +514,14 @@ test('chainClosed gives the same answer as 080a82dc on 3000 random chains (owner
     assert.equal(after, before, JSON.stringify(rows));
     assert.equal(run(() => chainClosed('/a/b/c/d', io, { startIsFile })), before);
     if (before === true) closed += 1;
-    if (before === false) assert.ok(note.path && ['link', 'other', 'other_owner', 'writable'].includes(note.reason), JSON.stringify([rows, note]));
+    if (before === false) assert.ok(note.path && ['link', 'other', 'other_owner', 'writable'].includes(note.reason) && typeof note.owned === 'boolean', JSON.stringify([rows, note]));
     else assert.deepEqual(note, {});
   }
   assert.ok(closed > 100 && closed < 2900, `the random chains cover both answers (${closed} closed)`);
 });
 
-const refusalOf = (folder, reason, home = '/home/u') => ({ refusal: { home, path: folder, reason } });
-const whyOf = (folder, reason, home) => seatbeltWhyLine(seatbeltReport(null, refusalOf(folder, reason, home)));
+const refusalOf = (folder, reason, home = '/home/u', owned = true) => ({ refusal: { home, path: folder, reason, owned } });
+const whyOf = (folder, reason, home, owned) => seatbeltWhyLine(seatbeltReport(null, refusalOf(folder, reason, home, owned)));
 
 test('the extra line: three reasons, the fix command only for a writable folder with a safe path under the home', () => {
   const prefix = '  Doctor skipped this check: ';
@@ -527,6 +536,15 @@ test('the extra line: three reasons, the fix command only for a writable folder 
   assert.equal(whyOf('/home/u2/.cache', 'writable'), `${prefix}/home/u2/.cache is writable by other users.`, 'a longer name with the home as a prefix is not under the home');
   assert.equal(whyOf('/etc', 'writable', '/'), `${prefix}/etc is writable by other users.`);
   assert.equal(whyOf('/', 'writable', '/'), `${prefix}/ is writable by other users.`);
+  // LOW-2: the command is printed only for a folder the user running doctor owns (`owned`, from the walk's own lstat). Anything that is
+  // not shown to be the user's (root's shared folder, another user's, a missing or odd value) gets the reason alone.
+  assert.equal(whyOf('/home/u/.cache', 'writable', '/home/u', true), `${prefix}/home/u/.cache is writable by other users. Fix: chmod go-w /home/u/.cache`);
+  for (const owned of [false, null, 'true', 1, 0, {}, []]) {
+    assert.equal(whyOf('/home/u/.cache', 'writable', '/home/u', owned), `${prefix}/home/u/.cache is writable by other users.`, `owned = ${JSON.stringify(owned)}`);
+  }
+  const unnoted = seatbeltWhyLine(seatbeltReport(null, { refusal: { home: '/home/u', path: '/home/u/.cache', reason: 'writable' } }));
+  assert.equal(unnoted, `${prefix}/home/u/.cache is writable by other users.`, 'a record without `owned` gets no command');
+  assert.equal(whyOf('/tmp', 'writable', '/tmp', false), `${prefix}/tmp is writable by other users.`, 'a passwd home of /tmp');
   // Every other reason, and every malformed refusal: no extra line (the first line stands alone, as before).
   for (const reason of ['other', 'unknown', '', null, undefined, 'writable ', 'WRITABLE', '__proto__', 'constructor']) assert.equal(whyOf('/home/u/.cache', reason), null, String(reason));
   for (const bad of [null, undefined, {}, { refusal: null }, { refusal: {} }, { refusal: { reason: 'writable' } }, { refusal: { path: 7, reason: 'writable' } }, { refusal: { path: null, reason: 'link' } }, 'text', 5]) {
@@ -583,5 +601,180 @@ test('the extra line: abuse table for the path (space, quotes, $(...), backtick,
     assert.doesNotMatch(line, /\b(risk|risky|score|classifier)\b/i);
     assert.doesNotMatch(line, /run\b[^.]*\bdoctor/i);
     assert.doesNotMatch(line, /chown|sudo|protect|on\b.*\boff\b/i);
+  }
+});
+
+// LOW-2 (aud-doctor-cache-msg), from the walk to the line: the command only for a folder the running user owns. `uid` is the running user.
+function lineFromWalk(rows, start, home, uid = 1000) {
+  const why = { home };
+  assert.equal(chainClosed(start, fakeChain(rows, uid), { why }), false, 'the walk refuses');
+  return seatbeltWhyLine(seatbeltReport(null, { refusal: why }));
+}
+
+test('LOW-2: a passwd home of /tmp, /var/tmp or any root-owned 1777 folder prints no command; an own folder with group or other write prints chmod go-w', () => {
+  const prefix = '  Doctor skipped this check: ';
+  // Root-owned shared folders, the user is not root: the reason alone (the refusal is the same as before).
+  assert.equal(lineFromWalk([['/', 0, 0o755], ['/tmp', 0, 0o1777]], '/tmp', '/tmp'), `${prefix}/tmp is writable by other users.`);
+  assert.equal(lineFromWalk([['/', 0, 0o755], ['/var', 0, 0o755], ['/var/tmp', 0, 0o1777]], '/var/tmp', '/var/tmp'), `${prefix}/var/tmp is writable by other users.`);
+  assert.equal(lineFromWalk([['/', 0, 0o755], ['/srv', 0, 0o755], ['/srv/shared', 0, 0o1777]], '/srv/shared', '/srv/shared'), `${prefix}/srv/shared is writable by other users.`);
+  assert.equal(lineFromWalk([['/', 0, 0o755], ['/srv', 0, 0o755], ['/srv/shared', 0, 0o777]], '/srv/shared', '/srv/shared'), `${prefix}/srv/shared is writable by other users.`);
+  // Below a root-owned shared home: still no command for the root-owned folder the walk stopped at.
+  assert.equal(lineFromWalk([['/', 0, 0o755], ['/tmp', 0, 0o1777], ['/tmp/.cache', 0, 0o777]], '/tmp/.cache', '/tmp'), `${prefix}/tmp/.cache is writable by other users.`);
+  // The user's own folder, group or other write: the command, for the home, .cache and .cache/marrow.
+  for (const bits of [0o770, 0o702, 0o707, 0o777, 0o1777, 0o720]) {
+    for (const folder of ['/home/u', '/home/u/.cache', '/home/u/.cache/marrow']) {
+      assert.equal(lineFromWalk(withRow(folder, [1000, bits]), '/home/u/.cache/marrow', '/home/u'), `${prefix}${folder} is writable by other users. Fix: chmod go-w ${folder}`, `${folder} ${bits.toString(8)}`);
+    }
+  }
+  // Another user's folder is "owned by another user" (no command), and so is a writable folder above the home (as before).
+  assert.equal(lineFromWalk(withRow('/home/u/.cache', [1001, 0o777]), '/home/u/.cache/marrow', '/home/u'), `${prefix}/home/u/.cache is owned by another user.`);
+  assert.equal(lineFromWalk(withRow('/home', [1000, 0o777]), '/home/u/.cache/marrow', '/home/u'), `${prefix}/home is writable by other users.`);
+  assert.equal(lineFromWalk(withRow('/home', [0, 0o777]), '/home/u/.cache/marrow', '/home/u'), `${prefix}/home is writable by other users.`);
+  // The rule is the owner's uid against the running uid, from the walk's own lstat: if doctor runs as root (uid 0) a root-owned writable
+  // folder is the running user's own, so it keeps the command (root has no other folder to fix it with). Pinned so a change shows up.
+  assert.equal(lineFromWalk([['/', 0, 0o755], ['/root', 0, 0o777]], '/root', '/root', 0), `${prefix}/root is writable by other users. Fix: chmod go-w /root`);
+  assert.equal(lineFromWalk([['/', 0, 0o755], ['/tmp', 0, 0o1777]], '/tmp', '/tmp', 0), `${prefix}/tmp is writable by other users. Fix: chmod go-w /tmp`);
+  // The same row seen by a user who is not root and does not own it, for every uid that is neither 0 nor the owner.
+  for (const uid of [1, 999, 1000, 1001, 65534]) assert.equal(lineFromWalk([['/', 0, 0o755], ['/tmp', 0, 0o1777]], '/tmp', '/tmp', uid), `${prefix}/tmp is writable by other users.`, `uid ${uid}`);
+});
+
+// ---- LOW-1 (aud-doctor-cache-msg): the line is what the walk saw; printing it never looks at the folder again ----
+//
+// The folder changes (chmod, or swapped for a link) right after the lstat that made the walk refuse. The line must still name what the
+// walk saw ("writable", with its command), and no file system call may be made on the way from the refusal to the printed text: a second
+// look at the folder (one more lstat at print time) shows here as an extra call, and, in the swap rows, as a different reason.
+
+let ORIGINAL_PASSWD_HOME = '!throw';
+try {
+  ORIGINAL_PASSWD_HOME = os.userInfo().homedir;
+} catch {
+  // no passwd entry: the tests then put '!throw' back
+}
+
+// A throwaway home with the three base parts, each mode 700, and a mode for the home and for .cache; a mode-700 folder to swap a link to.
+function raceScene({ homeMode = 0o700, cacheMode = 0o700 } = {}) {
+  const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-seatbelt-race-')));
+  const home = path.join(base, 'home');
+  const cache = path.join(home, '.cache');
+  fs.mkdirSync(home);
+  for (const part of [cache, path.join(cache, 'marrow'), path.join(cache, 'marrow', 'doctor-tmp')]) {
+    fs.mkdirSync(part);
+    fs.chmodSync(part, 0o700);
+  }
+  const elsewhere = path.join(base, 'elsewhere');
+  fs.mkdirSync(elsewhere);
+  fs.chmodSync(elsewhere, 0o700);
+  fs.chmodSync(cache, cacheMode);
+  fs.chmodSync(home, homeMode);
+  return { base, home, cache, elsewhere, cleanup: () => fs.rmSync(base, { recursive: true, force: true }) };
+}
+
+// One run of the walk, then the report and the printed doctor text, with every synchronous fs call that touches the scene (or a folder
+// above it) logged. `change(real)` runs right after the `refusingLstat`-th lstat of `folder` has returned its answer (null: nothing
+// changes; the run then counts how many lstats of `folder` there are). `real` holds the unwrapped fs functions.
+async function raceRun(scene, folder, { change = null, refusingLstat = 0, skeleton }) {
+  const logged = [];
+  const real = {};
+  const inScene = (target) => typeof target === 'string' && path.isAbsolute(target)
+    && (target === scene.base || target.startsWith(`${scene.base}/`) || scene.base.startsWith(target.endsWith('/') ? target : `${target}/`));
+  const shown = (target) => target.split(scene.base).join('<B>');
+  let lstats = 0;
+  let fired = false;
+  let everyCall = 0;
+  for (const name of Object.keys(fs).filter((key) => key.endsWith('Sync') && typeof fs[key] === 'function')) {
+    const original = fs[name];
+    real[name] = original;
+    fs[name] = Object.assign(function wrapped(...args) {
+      everyCall += 1;
+      if (inScene(args[0])) logged.push(`${name} ${shown(args[0])}`);
+      const result = original.apply(this, args);
+      if (name === 'lstatSync' && typeof args[0] === 'string' && path.resolve(args[0]) === folder) {
+        lstats += 1;
+        if (change && lstats === refusingLstat) {
+          fired = true;
+          change(real);
+        }
+      }
+      return result;
+    }, original);
+  }
+  const refusal = {};
+  let status;
+  let report;
+  let why;
+  let text;
+  let callsBeforePrint;
+  let callsAfterReport;
+  let loggedBeforePrint;
+  let loggedAfterPrint;
+  hostFakes.setPasswdHome(scene.home);
+  try {
+    status = await runSeatbeltStatus({ command: process.execPath, args: ['-e', ''], env: {} }, { timeoutMs: 800 }, refusal);
+    callsBeforePrint = everyCall;
+    report = seatbeltReport(status, refusal);
+    why = seatbeltWhyLine(report);
+    callsAfterReport = everyCall;
+    loggedBeforePrint = logged.length;
+    skeleton.doctor.seatbelt = report;
+    text = printed(skeleton);
+    loggedAfterPrint = logged.length;
+  } finally {
+    hostFakes.setPasswdHome(ORIGINAL_PASSWD_HOME);
+    for (const [name, original] of Object.entries(real)) fs[name] = original;
+  }
+  return {
+    status, refusal: refusal.refusal, report, why, text, fired, lstats, log: logged.slice(0, loggedBeforePrint),
+    reportCalls: callsAfterReport - callsBeforePrint, printedCalls: logged.slice(loggedBeforePrint, loggedAfterPrint),
+  };
+}
+
+test('LOW-1: the folder changes right after the refusing lstat; the line still names what the walk saw and printing makes no fs call', async () => {
+  const ws = workspace();
+  const scenes = [];
+  try {
+    const skeleton = await install(doctorOptions(ws));
+    const rows = [
+      // [label, scene options, which folder refuses, how many times the walk lstats it (the refusing one is the last), the change made right after that]
+      // The count is fixed here, never read back from a run: a second lookup that comes after the refusing lstat would otherwise move
+      // the change to after itself and never see it. .cache is looked at twice (making the parts, then the closing walk); the home once.
+      ['.cache 777, then chmod 700', { cacheMode: 0o777 }, 'cache', 2, (scene, real) => real.chmodSync(scene.cache, 0o700)],
+      ['.cache 777, then swapped for a link to a mode-700 folder', { cacheMode: 0o777 }, 'cache', 2, (scene, real) => {
+        real.renameSync(scene.cache, `${scene.cache}-moved`);
+        real.symlinkSync(scene.elsewhere, scene.cache);
+      }],
+      ['the home 707, then chmod 700', { homeMode: 0o707 }, 'home', 1, (scene, real) => real.chmodSync(scene.home, 0o700)],
+      ['the home 770, then swapped for a link to a mode-700 folder', { homeMode: 0o770 }, 'home', 1, (scene, real) => {
+        real.renameSync(scene.home, `${scene.home}-moved`);
+        real.symlinkSync(scene.elsewhere, scene.home);
+      }],
+    ];
+    for (const [label, options, which, refusingLstat, change] of rows) {
+      // Calibration: the same scene with nothing changed refuses, and looks at the folder exactly that many times.
+      const calm = raceScene(options);
+      scenes.push(calm);
+      const calibration = await raceRun(calm, calm[which], { skeleton });
+      assert.equal(calibration.status, null, `${label}: calibration refuses`);
+      assert.equal(calibration.lstats, refusingLstat, `${label}: the walk looks at the folder ${refusingLstat} time(s), no more`);
+      assert.equal(calibration.refusal.path, calm[which], `${label}: calibration names the folder`);
+      assert.equal(calibration.refusal.reason, 'writable');
+      // The race: the same scene, changed right after that lstat.
+      const scene = raceScene(options);
+      scenes.push(scene);
+      const folder = scene[which];
+      const run = await raceRun(scene, folder, { change: (real) => change(scene, real), refusingLstat, skeleton });
+      assert.equal(run.fired, true, `${label}: the change was made`);
+      assert.equal(run.lstats, refusingLstat, `${label}: no lstat of the folder after the refusing one`);
+      assert.equal(run.status, null, `${label}: still refused`);
+      assert.deepEqual(run.refusal, { home: scene.home, path: folder, reason: 'writable', owned: true }, `${label}: the record is what the walk saw`);
+      const expected = `  Doctor skipped this check: ${folder} is writable by other users. Fix: chmod go-w ${folder}`;
+      assert.equal(run.why, expected, `${label}: the line still names the walk's reason`);
+      assert.equal(run.reportCalls, 0, `${label}: report and line make no fs call at all`);
+      assert.deepEqual(run.printedCalls, [], `${label}: printing the doctor text makes no fs call on the scene`);
+      assert.ok(run.text.includes(`- Seatbelt: could not check\n${expected}\n- missing env:`), `${label}: the printed text`);
+      assert.deepEqual(run.log, calibration.log, `${label}: the same fs calls on the scene as the run where nothing changed`);
+    }
+  } finally {
+    for (const scene of scenes) scene.cleanup();
+    ws.cleanup();
   }
 });

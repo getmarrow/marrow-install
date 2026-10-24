@@ -1257,3 +1257,39 @@ test('M6 why: doctor --json carries the same fields and values (no new field, no
     ws.cleanup();
   }
 });
+
+// LOW-2 (aud-doctor-cache-msg): a command is printed only for a folder the user running doctor owns. A shared folder that root owns
+// (a passwd home of /tmp or /var/tmp, mode 1777) is told about, with no command. No real system folder is touched: a throwaway home
+// is made to look root-owned (STATUS_TEST_FAKE_OWNER with STATUS_TEST_FAKE_OWNER_UID=0, see status-host-fakes.js).
+test('M7 why: a writable folder that root owns (a shared folder such as /tmp) says why and prints no command; the user\'s own folder keeps `chmod go-w`', () => {
+  const ws = workspace();
+  try {
+    const cache = path.join(ws.home, '.cache');
+    const marrow = path.join(cache, 'marrow');
+    const targets = [['the home (the passwd home is the shared folder)', ws.home], ['.cache', cache], ['.cache/marrow', marrow]];
+    const rootOwned = (target) => baseEnv(ws, { STATUS_TEST_FAKE_OWNER: target, STATUS_TEST_FAKE_OWNER_UID: '0' });
+    for (const bits of [0o777, 0o1777, 0o770, 0o702]) {
+      for (const [label, target] of targets) {
+        makeBase(ws.home);
+        fs.chmodSync(target, bits);
+        try {
+          const run = refusedWith(ws, `${label} root-owned ${bits.toString(8)}`, `${WHY}${target} is writable by other users.`, rootOwned(target));
+          assert.equal(/Fix:|chmod/.test(run.text), false, `${label} root-owned ${bits.toString(8)}: no command anywhere in the output`);
+          // The same folder owned by the user (nothing faked) still gets its command.
+          refusedWith(ws, `${label} own ${bits.toString(8)}`, `${WHY}${target} is writable by other users. Fix: chmod go-w ${target}`);
+        } finally {
+          fs.chmodSync(target, 0o700);
+        }
+        fs.rmSync(cache, { recursive: true, force: true });
+      }
+    }
+    // A root-owned folder that is not writable is fine (as it always was): the check runs.
+    makeBase(ws.home);
+    fs.rmSync(ws.record, { force: true });
+    assert.equal(doctor(ws, rootOwned(cache)).line, '- Seatbelt: on (no account)');
+    // Another user's folder (not root) is still "owned by another user", with no command (M3).
+    refusedWith(ws, 'another uid, writable', `${WHY}${cache} is owned by another user.`, baseEnv(ws, { STATUS_TEST_FAKE_OWNER: cache, STATUS_TEST_FAKE_OWNER_UID: '4242' }));
+  } finally {
+    ws.cleanup();
+  }
+});

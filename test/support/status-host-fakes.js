@@ -82,12 +82,14 @@ process.once('exit', () => {
 });
 
 // 4. Another owner. STATUS_TEST_FAKE_OWNER, when set (as it is when this file loads) to an absolute path, makes lstat, and fstat of a
-//    descriptor opened on that path, report that one folder as owned by another user (this user's uid + 1). Nothing on disk changes:
-//    it is how the tests reach the "owned by another user" refusals without root.
+//    descriptor opened on that path, report that one folder as owned by another user (this user's uid + 1, or the number in
+//    STATUS_TEST_FAKE_OWNER_UID, such as 0 for a root-owned shared folder). Nothing on disk changes: it is how the tests reach the
+//    "owned by another user" refusals, and a writable folder that root owns, without root.
 const fakeOwner = typeof process.env.STATUS_TEST_FAKE_OWNER === 'string' && path.isAbsolute(process.env.STATUS_TEST_FAKE_OWNER)
   ? path.resolve(process.env.STATUS_TEST_FAKE_OWNER)
   : null;
-const withOwner = (stat) => Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { uid: process.getuid() + 1 });
+const fakeOwnerUid = /^[0-9]{1,9}$/.test(process.env.STATUS_TEST_FAKE_OWNER_UID || '') ? Number(process.env.STATUS_TEST_FAKE_OWNER_UID) : process.getuid() + 1;
+const withOwner = (stat) => Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { uid: fakeOwnerUid });
 
 const realLstat = fs.lstatSync;
 fs.lstatSync = function lstatSync(target) {
