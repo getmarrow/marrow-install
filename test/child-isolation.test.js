@@ -513,6 +513,17 @@ test('F1: option arity follows git per subcommand: -u, -o, -j, --repo and refspe
     'push --frobnicate origin (unknown option, every reading is local)': ['push', '--frobnicate', 'origin'],
     'push -x ./bare.git main (unknown option, every reading is local)': ['push', '-x', './bare.git', 'main'],
   });
+  // --all, --multiple and no named remote: every remote in the config is judged, so a public second remote is found.
+  const publicMirror = repoWith(`[remote "origin"]\n\turl = ${bare}\n[remote "mirror"]\n\turl = ${S}\n`);
+  planRefusedRows(publicMirror, {
+    'push --all origin': ['push', '--all', 'origin'],
+    'fetch --all': ['fetch', '--all'],
+    'fetch --multiple origin': ['fetch', '--multiple', 'origin'],
+    'push -u (no remote named)': ['push', '-u'],
+    'fetch -u (no remote named)': ['fetch', '-u'],
+  }, /^ESPAWNGUARD .*(resolves to a non-local|non-local)/);
+  assert.equal(planOf(publicMirror, ['push', '--repo=origin']).refused, null, 'a named local remote through --repo is judged on its own address');
+  assert.equal(planOf(publicMirror, ['push', '-u', 'origin', 'main']).refused, null, 'a named local remote is judged on its own address');
   // Too many options of unknown arity to judge: refused rather than guessed.
   const many = (count) => ['push', ...Array.from({ length: count }, (_, at) => [`--unknown${at}`, `w${at}`]).flat(), './bare.git'];
   assert.equal(planOf(localOrigin, many(4)).refused, null, 'a few unknown options are judged');
