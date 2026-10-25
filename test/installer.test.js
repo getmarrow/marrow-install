@@ -1866,10 +1866,22 @@ test('install reports missing SDK dependency for passive runtime projects', asyn
 test('the public installer never reads, reports or writes npm publishing tokens (N-2)', async () => {
   const installer = require('../src/installer');
   assert.equal(Object.hasOwn(installer, 'inspectNpmTokenConfig'), false);
-  const source = fs.readdirSync(path.join(__dirname, '..', 'src'))
-    .map((name) => fs.readFileSync(path.join(__dirname, '..', 'src', name), 'utf8'))
-    .join('\n');
-  assert.doesNotMatch(source, /NPM_TOKEN|npm-getmarrow-token|_authToken|\.npmrc/);
+  const srcRoot = path.join(__dirname, '..', 'src');
+  const files = [];
+  const walk = (dir) => {
+    for (const name of fs.readdirSync(dir)) {
+      const full = path.join(dir, name);
+      if (fs.statSync(full).isDirectory()) walk(full);
+      else files.push(full);
+    }
+  };
+  walk(srcRoot);
+  const source = files.map((file) => fs.readFileSync(file, 'utf8')).join('\n');
+  assert.doesNotMatch(source, /NPM_TOKEN|npm-getmarrow-token|_authToken/);
+  // marrow-agentd's classifier data names .npmrc only as a path agents may not read or write;
+  // every other source file must not mention it at all.
+  const npmrcAllowed = new Set([path.join(srcRoot, 'agentd', 'policy-baseline.js')]);
+  assert.doesNotMatch(files.filter((file) => !npmrcAllowed.has(file)).map((file) => fs.readFileSync(file, 'utf8')).join('\n'), /\.npmrc/);
   assert.doesNotMatch(source, /credentials['"],\s*['"]marrow-mcp\.env|gateway\.systemd\.env/);
 
   const dir = tempDir();
