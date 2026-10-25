@@ -52,6 +52,8 @@ async function startLegacyController(project, stateDirectory) {
   fs.writeFileSync(path.join(installRoot, 'package.json'), JSON.stringify({ name: '@getmarrow/install', version: '0.1.63' }));
   fs.writeFileSync(path.join(installRoot, 'bin', 'marrow-install.js'), LEGACY_SIDECAR);
   const child = spawn(process.execPath, [path.join(installRoot, 'bin', 'marrow-install.js'), 'sidecar'], {
+    // The shipped manager compares this process's /proc command line with the one it expects, so no --require goes on it.
+    isolationKeepsArgv: true,
     env: { PATH: process.env.PATH, HOME: process.env.HOME, LEGACY_STATE_DIR: stateDirectory, MARROW_CONTROLLER_PROJECT_ROOT: project },
     stdio: 'ignore',
   });

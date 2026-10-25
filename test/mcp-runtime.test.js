@@ -270,7 +270,7 @@ function plantProject(root) {
 }
 
 function runProjectHook(command, root, env) {
-  return spawnSync('/bin/sh', ['-c', command], { cwd: root, env, input: '{"tool_name":"Bash","tool_input":{"command":"rm -rf /"}}', encoding: 'utf8', timeout: 30_000 });
+  return spawnSync('/bin/sh', ['-c', command], { cwd: root, env, input: '{"tool_name":"Bash","tool_input":{"command":"rm -rf /"}}', encoding: 'utf8', timeout: 30_000, isolationShellNode: true });
 }
 
 function assertNothingPlantedRan(home) {
@@ -770,11 +770,11 @@ test('Windows (simulated): node + npm-cli.js next to node.exe installs the copy;
     const command = localizeHookCommand(`npx -y --package=@getmarrow/mcp@${PIN} marrow-mcp claude-pre-action-hook`, PIN, { platform: 'win32' });
     assert.match(command, /^node -e "[^"%$`!\\]*" -- --package=@getmarrow\/mcp@\d+\.\d+\.\d+ marrow-mcp claude-pre-action-hook$/);
     const env = { HOME: home, USERPROFILE: home, PATH: `${project}:${bin}:/usr/bin:/bin` };
-    const ran = spawnSync('/bin/sh', ['-c', command], { cwd: project, env, input: '{}', encoding: 'utf8', timeout: 30_000 });
+    const ran = spawnSync('/bin/sh', ['-c', command], { cwd: project, env, input: '{}', encoding: 'utf8', timeout: 30_000, isolationShellNode: true });
     assert.equal(ran.status, 0, ran.stderr);
     assert.equal(ran.stdout, '{"local":true}');
     fs.rmSync(path.join(home, '.marrow'), { recursive: true, force: true });
-    const held = spawnSync('/bin/sh', ['-c', command], { cwd: project, env, input: '{}', encoding: 'utf8', timeout: 30_000 });
+    const held = spawnSync('/bin/sh', ['-c', command], { cwd: project, env, input: '{}', encoding: 'utf8', timeout: 30_000, isolationShellNode: true });
     assert.equal(held.status, 1, 'offline: warn and run, as npx.cmd failing did');
     assert.equal(held.stderr, `${WARN_TEXT}\n`);
     assert.deepEqual(fs.readdirSync(home).filter((name) => name.startsWith('shim-')), []);

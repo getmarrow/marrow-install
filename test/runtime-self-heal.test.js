@@ -164,7 +164,7 @@ function hookEnv(home, root, extra = {}) {
   return { HOME: home, PATH: `.:node_modules/.bin:${root}:${root}/node_modules/.bin:${path.dirname(process.execPath)}:/usr/bin:/bin`, npm_config_registry: 'http://127.0.0.1:9/', npm_config_prefix: root, ...extra };
 }
 function runHook(command, root, env, spawnOptions = {}) {
-  return spawnSync('/bin/sh', ['-c', command], { cwd: root, env, input: EVENT, encoding: 'utf8', timeout: 90_000, ...spawnOptions });
+  return spawnSync('/bin/sh', ['-c', command], { cwd: root, env, input: EVENT, encoding: 'utf8', timeout: 90_000, isolationShellNode: true, ...spawnOptions });
 }
 const canonical = (sub, version = PIN) => `npx -y --package=@getmarrow/mcp@${version} marrow-mcp ${sub}`;
 // The hook a project file carries, for the stand-in package's integrity (no SDK pin: the stub

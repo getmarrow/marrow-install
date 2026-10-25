@@ -1,5 +1,6 @@
 // PKG-L8: runtime dependencies are exact versions. npm packages do not ship the lockfile, so a range
 // would let every install resolve whatever is newest at install time, not the reviewed release.
+require('./support/isolated-environment');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');

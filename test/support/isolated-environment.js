@@ -1,3 +1,5 @@
+// Loaded first so it reads the real passwd home before any fake of it (status-host-fakes.js, below) hides it.
+const isolation = require('./child-isolation.cjs');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -103,3 +105,16 @@ module.exports = { deadRegistryHome, isolatedHome, testTempRoot };
 
 // Doctor's seatbelt-status child never starts the real npm in a test (see status-child-stub.js).
 require('./status-child-stub');
+
+// Every child a test starts gets the seam and passes the spawn guard (child-isolation.cjs): a private HOME, an empty scratch
+// passwd home that a --require preload answers (never NODE_OPTIONS: runtime-core.js reads that as an outside network setting;
+// the passwd fake of status-host-fakes.js above is left alone), an empty private git config for a child that is not node, and a
+// refusal (even one a test swallows) of any git push, fetch, pull, clone or ls-remote that names a non-local address.
+// Test-only: nothing under bin/ or src/ names it.
+const passwdHome = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-install-test-passwd-'));
+module.exports.passwdHome = passwdHome;
+module.exports.childIsolation = isolation.install({
+  tempRoot: testTempRoot, home: isolatedHome, passwdHome, testHooks: true,
+  // The one node child whose command line the shipped code reads back from /proc and compares: src/controller-manager.js.
+  argvChecked: ['src/controller-manager.js'],
+});
