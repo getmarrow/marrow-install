@@ -2,19 +2,19 @@
 // This is the only place they are set: a release changes the MCP version, source SHA and
 // integrity here together (and the SDK pair together), and the tests read them from here.
 //
-// The MCP pin is @getmarrow/mcp 3.9.106, the release candidate marrow-mcp b8973d3a. The integrity is the
+// The MCP pin is @getmarrow/mcp 3.9.107, the release candidate marrow-mcp 3e0bdb1d. The integrity is the
 // sha512 of that candidate's packed tarball (npm pack, Node 22.23, npm 10.9), and the source SHA is the
-// candidate commit. The eight files in test/fixtures/mcp-3.9.106 are dist/ of the same tarball, byte for
+// candidate commit. The eight files in test/fixtures/mcp-3.9.107 are dist/ of the same tarball, byte for
 // byte, and MANIFEST.json there records them. The SDK pin is @getmarrow/sdk 3.7.67, whose packed tarball
 // the MCP candidate's lockfile and exact dependency also name. One scripted re-pin set all of it together.
 // THE RELEASE CHAIN MUST RE-VERIFY THIS PIN
-// AGAINST THE PUBLISHED @getmarrow/mcp@3.9.106 TARBALL BEFORE THIS INSTALLER IS PUBLISHED, and
+// AGAINST THE PUBLISHED @getmarrow/mcp@3.9.107 TARBALL BEFORE THIS INSTALLER IS PUBLISHED, and
 // change the source SHA and integrity here if the published tarball differs. The same goes for the
 // published @getmarrow/sdk@3.7.67 tarball and SDK_ADAPTER_INTEGRITY.
 module.exports = Object.freeze({
-  MCP_ADAPTER_VERSION: '3.9.106',
-  MCP_ADAPTER_SOURCE_SHA: 'b8973d3a6aa1e2a85a7aa4ac09801d6842f98661',
-  MCP_ADAPTER_INTEGRITY: 'sha512-B7j4eCpzzU1qEv4SewO4Dj4MMPQmLgjgJa9z1LpciS20g7+IhVVQFqYUjVbklJAnJBpUl0+7FLbjOC9nYdjcGQ==',
+  MCP_ADAPTER_VERSION: '3.9.107',
+  MCP_ADAPTER_SOURCE_SHA: '3e0bdb1d2023015c7c5816d813a87519c12f7f82',
+  MCP_ADAPTER_INTEGRITY: 'sha512-hZvk+quqAmD9s4pf74SZkaDblK2rQL9hww0S2cbbA48AoSBtB7ktCgcLLALsze0DynTGU6MpiFzjcfDqmB2M5w==',
   // The first MCP version that ships the host-approval hook entrypoints
   // (claude-permission-request-hook, cursor-context-hook, gemini-context-hook) and reads Cursor's
   // shell/MCP execution events and Gemini's BeforeAgent prompt. The installer writes the
