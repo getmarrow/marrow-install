@@ -1,7 +1,7 @@
 'use strict';
 // Test-only preload (never loaded by the installer; no flag, environment name or file doctor reads loads it). It is
 // loaded by isolated-environment.js (through status-child-stub.js) for in-process runs, and passed through NODE_OPTIONS to
-// the doctor processes the tests start. It does three things:
+// the doctor processes the tests start. It does four things:
 //
 // 1. The passwd home. Doctor builds its private working base under os.userInfo().homedir (src/seatbelt-status.js), which is
 //    the real login home of whoever runs the tests. Here os.userInfo().homedir returns the test's own fake home instead:
@@ -15,6 +15,7 @@
 //    but that root lives in a system temp folder (/tmp: sticky, world-writable, owned by root), which can never pass. For the
 //    processes that load this file, such a folder is looked at as a plain root-owned 0755 folder; everything below it is
 //    checked as it is on disk. A folder owned by the user, not sticky or not world-writable is never changed.
+// 4. Another owner (STATUS_TEST_FAKE_OWNER, below).
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -80,13 +81,43 @@ process.once('exit', () => {
   }
 });
 
+// 4. Another owner. STATUS_TEST_FAKE_OWNER, when set (as it is when this file loads) to an absolute path, makes lstat, and fstat of a
+//    descriptor opened on that path, report that one folder as owned by another user (this user's uid + 1, or the number in
+//    STATUS_TEST_FAKE_OWNER_UID, such as 0 for a root-owned shared folder). Nothing on disk changes: it is how the tests reach the
+//    "owned by another user" refusals, and a writable folder that root owns, without root.
+const fakeOwner = typeof process.env.STATUS_TEST_FAKE_OWNER === 'string' && path.isAbsolute(process.env.STATUS_TEST_FAKE_OWNER)
+  ? path.resolve(process.env.STATUS_TEST_FAKE_OWNER)
+  : null;
+const fakeOwnerUid = /^[0-9]{1,9}$/.test(process.env.STATUS_TEST_FAKE_OWNER_UID || '') ? Number(process.env.STATUS_TEST_FAKE_OWNER_UID) : process.getuid() + 1;
+const withOwner = (stat) => Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { uid: fakeOwnerUid });
+
 const realLstat = fs.lstatSync;
-fs.lstatSync = function lstatSync() {
+fs.lstatSync = function lstatSync(target) {
   const stat = realLstat.apply(this, arguments);
   if (stat && typeof stat.isDirectory === 'function' && stat.isDirectory() && stat.uid === 0 && (stat.mode & 0o1002) === 0o1002) {
     return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { mode: stat.mode & ~0o1022 });
   }
+  if (stat && fakeOwner !== null && typeof target === 'string' && path.resolve(target) === fakeOwner) return withOwner(stat);
   return stat;
 };
+if (fakeOwner !== null) {
+  const opened = new Map();
+  const realOpen = fs.openSync;
+  const realFstat = fs.fstatSync;
+  const realClose = fs.closeSync;
+  fs.openSync = function openSync(target) {
+    const fd = realOpen.apply(this, arguments);
+    if (typeof target === 'string') opened.set(fd, path.resolve(target));
+    return fd;
+  };
+  fs.fstatSync = function fstatSync(fd) {
+    const stat = realFstat.apply(this, arguments);
+    return stat && opened.get(fd) === fakeOwner ? withOwner(stat) : stat;
+  };
+  fs.closeSync = function closeSync(fd) {
+    opened.delete(fd);
+    return realClose.apply(this, arguments);
+  };
+}
 
 module.exports = { setPasswdHome, guardTrips: () => trips.count, guardSelfTestTrips: () => trips.selfTest, realPasswdHome: () => realHome };

@@ -23,7 +23,7 @@ const { ensureOwnerApiKey, ownerKeyStoreState, readOwnerKeyDetail } = require('.
 const { assertSafeBaseUrl, emitNoticeOnce, ownerKeyBaseUrl } = require('./base-url-policy');
 const { buildOwnToolMatchers } = require('./marrow-own-tools');
 const { detectAgentPlugins, describeAgentPlugin } = require('./agent-plugins');
-const { buildStatusEnv, runSeatbeltStatus, seatbeltLine, seatbeltReport, statusInvocation } = require('./seatbelt-status');
+const { buildStatusEnv, runSeatbeltStatus, seatbeltLine, seatbeltReport, seatbeltWhyLine, statusInvocation } = require('./seatbelt-status');
 const {
   delocalizeHookCommand,
   delocalizeHookScriptText,
@@ -4090,8 +4090,9 @@ function runLoopGuardSelfTest(options = {}) {
 // started. It runs in a fresh private empty folder, never the project, with an environment built from an
 // allow-list: the key reaches it only as a fixed presence marker, never its value. The status describes this
 // machine's real HOME and ~/.marrow, which the loop-guard's isolated HOME would hide. Nothing the child prints
-// is echoed. Returns { mode, reasons } or null (could not check).
-async function readSeatbeltStatus(options = {}) {
+// is echoed. Returns { mode, reasons } or null (could not check). `refusal`, when given, is filled with the base
+// folder that made the run refuse and why (src/seatbelt-status.js seatbeltWhyLine); it changes nothing returned.
+async function readSeatbeltStatus(options = {}, refusal = null) {
   if (options.seatbeltStatus !== true) return null;
   const target = executableMcpTarget(options);
   // options.seatbeltStatusCommand is set only by API callers (tests); no flag or variable sets it.
@@ -4100,7 +4101,7 @@ async function readSeatbeltStatus(options = {}) {
     : statusInvocation({ version: target.version });
   if (!invocation) return null;
   const limits = Number.isFinite(options.seatbeltStatusTimeoutMs) ? { timeoutMs: options.seatbeltStatusTimeoutMs } : {};
-  return runSeatbeltStatus(invocation, limits);
+  return runSeatbeltStatus(invocation, limits, refusal);
 }
 
 function isCanonicalTimestamp(value) {
@@ -4871,6 +4872,8 @@ function printReport(report, sink) {
       && report.doctor.missingEnv.includes('MARROW_API_KEY') && report.doctor.seatbelt?.mode === 'seatbelt';
     out(`- Marrow active: ${seatbeltOnly ? 'seatbelt only (no key yet)' : activeLabel}\n`);
     out(`${seatbeltLine(report.doctor.seatbelt)}\n`);
+    const seatbeltWhy = seatbeltWhyLine(report.doctor.seatbelt);
+    if (seatbeltWhy) out(`${seatbeltWhy}\n`);
     out(`- missing env: ${report.doctor.missingEnv.length ? report.doctor.missingEnv.join(', ') : 'none'}\n`);
     if (report.doctor.envHints.length) out(`- possible env files: ${report.doctor.envHints.join(', ')}\n`);
     const missingHooks = report.doctor.missingHooks.filter((label) => !pluginLabels.has(label));
@@ -5199,7 +5202,8 @@ async function install(options) {
   const agentPlugins = options.doctor ? detectAgentPlugins({ home: detection.home, env: process.env, project: detection.root }) : [];
   const pluginHookLabels = new Set(agentPlugins.filter((plugin) => plugin.counted).map((plugin) => plugin.hook_label));
   // Doctor only: the keyless seatbelt's status from the pinned MCP (null = could not check).
-  const seatbeltStatus = options.doctor ? await readSeatbeltStatus(options) : null;
+  const seatbeltRefusal = {};
+  const seatbeltStatus = options.doctor ? await readSeatbeltStatus(options, seatbeltRefusal) : null;
   const countedPlugins = agentPlugins.filter((plugin) => plugin.counted);
   // Doctor, no usable key: "no key yet" is said only when nothing is stored anywhere. A key entry that is present
   // but blank, or an owner env file that cannot be used, is a failure with its own fix.
@@ -5384,7 +5388,7 @@ async function install(options) {
     doctor: {
       ...(hooksMissingHosts.length ? { hooks_missing_hosts: hooksMissingHosts } : {}),
       active: Boolean(!selfTest.skipped && selfTest.active),
-      ...(options.doctor ? { seatbelt: seatbeltReport(seatbeltStatus) } : {}),
+      ...(options.doctor ? { seatbelt: seatbeltReport(seatbeltStatus, seatbeltRefusal) } : {}),
       missingEnv: options.apiKey ? [] : ['MARROW_API_KEY'],
       envHints,
       // A host whose Marrow plugin supplies the hooks is not missing them (doctor reports it instead).
