@@ -1,24 +1,34 @@
 // NH (installer 0.1.76, SPEC-WIN26 NH): native Windows hooks only where one written form is usable AND fail-closed in every
 // Windows hook shell. Rows NH-xx are exported (`rows`, `runRows`) so a CI runner can print "id PASS|FAIL" and nothing else;
 // NH-Wxx rows run only on real Windows (cmd.exe, PowerShell 5.1, pwsh 7, Git Bash invocation of the written command).
-// Off Windows the bash column of every form is run for real (bash with a stand-in node); cmd.exe and PowerShell cells are NOT
-// VERIFIED there and stay `open`/claims until a windows-latest run passes the NH-W rows.
-const { deadRegistryHome } = require('./support/isolated-environment');
+// Off Windows the bash column of every form is run for real (bash with a stand-in node); cmd.exe and PowerShell are NOT VERIFIED
+// there. The measured table in src/windows-hooks.js (FORM_MATRIX, CELL_LENGTH_BOUND) is filled only from a windows-latest run of the
+// probe (test/support/win26-nh-probe.cjs); CLAIMS below are what was expected, not a measurement, and decide nothing.
+require('./support/isolated-environment');
+const probe = require('./support/win26-nh-probe.cjs');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-const PINS = require('../src/pins');
 const {
+  CELL_LENGTH_BOUND,
+  DECISION_STATUSES,
   FORM_MATRIX,
+  HOST_SHELL_EVIDENCE,
+  MEASURE_RUN,
+  WINDOWS_FORMS,
+  WINDOWS_FORM_WRITER_WIRED,
   WINDOWS_HOOK_HOSTS,
   WINDOWS_HOOK_SKIP_REASON,
   WINDOWS_PLUGIN_ROUTE,
   WINDOWS_SHELLS,
   decideForm,
+  decideHost,
+  decideHostWith,
+  hostSkipped,
+  longestCommandLine,
   windowsHookHost,
   windowsHookSkipEntries,
 } = require('../src/windows-hooks');
@@ -27,27 +37,28 @@ const {
   WINDOWS_HOOK_FORMS,
   WINDOWS_HOOK_MAX,
   assertWindowsCmdLength,
-  launcherDigest,
   launcherPath,
   localizeHookCommand,
-  runtimeConfig,
   runtimeCore,
   verifyMcpRuntime,
   windowsCmdLineLength,
   windowsHookCommand,
-  windowsLauncherText,
   windowsStubSource,
   writeWindowsLauncher,
 } = require('../src/mcp-runtime');
 const { applyPlan, buildPlan, detectEnvironment, install, uninstall } = require('../src/installer');
 
-const WIN = process.platform === 'win32';
+const {
+  CFG, EVENT, FAKE, PIN, PRE, WIN, fixture, gitBash, gone, launcherDigest, missingNode, runIn, shellEnv, shellsHere, tempDir, windowsLauncherText,
+} = probe;
 const POSIX_ONLY = !WIN;
-const PIN = PINS.MCP_ADAPTER_VERSION;
-const FAKE = `sha512-${crypto.createHash('sha512').update('nh-runtime').digest('base64')}`;
-const CFG = runtimeConfig(PIN, { integrity: FAKE, sdk: null });
-const EVENT = '{"tool_name":"Bash","tool_input":{"command":"git status"}}';
-const PRE = 'claude-pre-action-hook';
+// What the first builder CLAIMED each form does in each shell. A claim is not a measurement: src/windows-hooks.js holds the CI
+// measurement only (today none). NH-W1 checks these claims on windows-latest; a refuted claim is a finding, never a switch.
+const CLAIMS = Object.freeze({
+  cmd: Object.freeze({ cmd: 'works', bash: 'closed', powershell: 'open', pwsh: 'open' }),
+  bash: Object.freeze({ cmd: 'open', bash: 'works', powershell: 'open', pwsh: 'open' }),
+  powershell: Object.freeze({ cmd: 'open', bash: 'closed', powershell: 'works', pwsh: 'works' }),
+});
 const SUBS = {
   'claude-code': ['claude-context-hook', 'claude-pre-action-hook', 'claude-hook', 'claude-session-hook', 'claude-permission-request-hook'],
   codex: ['codex-context-hook', 'codex-pre-action-hook', 'codex-hook', 'codex-session-hook'],
@@ -61,77 +72,6 @@ const FAILURES = ['node-missing', 'launcher-foreign', 'launcher-edited', 'launch
 const rows = [];
 function row(id, title, fn, { windowsOnly = false, posixOnly = false } = {}) {
   rows.push({ id, title, fn, skip: (windowsOnly && !WIN) ? 'needs real Windows (cmd.exe, PowerShell, Git Bash)' : (posixOnly && WIN) ? 'POSIX mode bits are not meaningful on Windows' : false });
-}
-
-function tempDir(prefix) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-  fs.chmodSync(dir, 0o700);
-  return dir;
-}
-const gone = (...dirs) => { for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true }); };
-
-function fakeRuntimePackage(stage, specs) {
-  const version = specs.find((spec) => spec.startsWith('@getmarrow/mcp@')).slice('@getmarrow/mcp@'.length);
-  const mcp = path.join(stage, 'node_modules', '@getmarrow', 'mcp');
-  fs.mkdirSync(path.join(mcp, 'dist'), { recursive: true });
-  fs.writeFileSync(path.join(mcp, 'package.json'), JSON.stringify({ name: '@getmarrow/mcp', version, bin: { 'marrow-mcp': 'dist/cli.js' } }));
-  fs.writeFileSync(path.join(mcp, 'dist', 'cli.js'), ALLOW_CLI);
-  fs.writeFileSync(path.join(stage, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: { '': {}, 'node_modules/@getmarrow/mcp': { version, integrity: FAKE } } }));
-  return true;
-}
-// The genuine runtime: it records that it ran (a marker in HOME) and allows.
-const ALLOW_CLI = `let i='';process.stdin.on('data',c=>{i+=c});process.stdin.on('end',()=>{require('fs').writeFileSync(require('path').join(process.env.HOME,'genuine-'+process.argv[2]),i);process.stdout.write(JSON.stringify({hookSpecificOutput:{hookEventName:'PreToolUse',permissionDecision:'allow'}}))})`;
-
-// A home with a verified runtime and the launcher; `cwd` holds a stand-in node at the Windows-looking path off Windows.
-function fixture() {
-  const dir = deadRegistryHome(tempDir('marrow-nh-home-'));
-  assert.equal(runtimeCore.ensure({ home: dir, version: PIN, integrity: FAKE, sdk: null, npmInstall: fakeRuntimePackage }).state, 'installed');
-  const launcher = writeWindowsLauncher(dir, CFG);
-  const cwd = tempDir('marrow-nh-cwd-');
-  let nodePath = process.execPath;
-  if (!WIN) {
-    fs.mkdirSync(path.join(cwd, 'C:', 'fx'), { recursive: true });
-    fs.symlinkSync(process.execPath, path.join(cwd, 'C:', 'fx', 'node.exe'));
-    nodePath = 'C:\\fx\\node.exe';
-  }
-  return { dir, cwd, nodePath, ...launcher, cleanup: () => gone(dir, cwd) };
-}
-const missingNode = WIN ? 'C:\\marrow-nh-none\\node.exe' : 'C:\\fx-none\\node.exe';
-
-function shellEnv(home, extra = {}) {
-  if (!WIN) return { HOME: home, PATH: '/usr/bin:/bin', ...extra };
-  const env = { HOME: home, USERPROFILE: home, ...extra };
-  for (const name of ['SystemRoot', 'ComSpec', 'PATH', 'PATHEXT', 'TEMP', 'TMP', 'windir', 'ProgramFiles', 'LOCALAPPDATA', 'APPDATA']) if (process.env[name] !== undefined) env[name] = process.env[name];
-  return env;
-}
-
-function gitBash() {
-  if (!WIN) return ['/bin/bash', '/usr/bin/bash'].find((file) => fs.existsSync(file)) || null;
-  return ['C:\\Program Files\\Git\\bin\\bash.exe', 'C:\\Program Files\\Git\\usr\\bin\\bash.exe'].find((file) => fs.existsSync(file)) || null;
-}
-function onPath(names) {
-  for (const dir of String(process.env.PATH || '').split(path.delimiter)) for (const name of names) if (dir && fs.existsSync(path.join(dir, name))) return path.join(dir, name);
-  return null;
-}
-function shellsHere() {
-  const here = [];
-  if (gitBash()) here.push('bash');
-  if (WIN) {
-    here.push('cmd');
-    if (onPath(['powershell.exe'])) here.push('powershell');
-    if (onPath(['pwsh.exe'])) here.push('pwsh');
-  }
-  return here;
-}
-
-function runIn(shell, command, { cwd, env, input = EVENT }) {
-  // isolationShellNode: the sanctioned seam option for a node child a shell starts (HOME stays a private temp folder).
-  const options = { cwd, env, input, encoding: 'utf8', timeout: 120_000, isolationShellNode: true };
-  if (shell === 'bash') return spawnSync(gitBash(), ['-c', command], options);
-  if (shell === 'cmd') return spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `"${command}"`], { ...options, windowsVerbatimArguments: true });
-  // PowerShell: the text goes in as -EncodedCommand so the harness adds no quoting of its own.
-  const exe = shell === 'pwsh' ? onPath(['pwsh.exe']) : onPath(['powershell.exe']);
-  return spawnSync(exe, ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')], options);
 }
 
 // What one form does in one shell, for a pre-action entry: the allow path and each failure.
@@ -177,40 +117,60 @@ function classOf(obs) {
 }
 // A declared works/closed cell must hold; a declared open cell makes no claim (it is the assumption for a shell nobody ran).
 function claimHolds(form, column, obs) {
-  const declared = FORM_MATRIX[form][column];
+  const declared = CLAIMS[form][column];
   const seen = classOf(obs);
   if (declared === 'works') return seen === 'works';
   if (declared === 'closed') return seen === 'works' || seen === 'closed';
   return true;
 }
-const columnOf = (shell) => (shell === 'pwsh' ? 'powershell' : shell);
 
 // ---------------------------------------------------------------------------------------------------------------------
-row('NH-01', 'decision table: every host gets exactly the form the matrix decides (today none), keeps the L-1 skip entry, and nothing frozen can be edited', () => {
+row('NH-01', 'decision table: with no host shell evidence and no measurement every host gets no form (status skipped, reason recorded), keeps the L-1 skip entry, and nothing frozen can be edited', () => {
   assert.deepEqual(WINDOWS_HOOK_HOSTS.map((entry) => entry.client), ['claude-code', 'codex', 'cursor', 'cline', 'windsurf', 'gemini']);
   for (const entry of WINDOWS_HOOK_HOSTS) {
     assert.equal(entry.form, decideForm(entry), entry.client);
-    assert.equal(entry.form, null, `${entry.client}: no form works in every shell`);
+    assert.equal(entry.form, null, `${entry.client}: no evidence, no measurement`);
+    assert.equal(entry.status, 'skipped', entry.client);
+    assert.equal(entry.reason, entry.candidate === 'plain' ? 'no_host_shell_evidence' : 'no_short_entry', entry.client);
     assert.ok(Object.isFrozen(entry) && Object.isFrozen(entry.shells), entry.client);
     assert.notEqual(windowsHookHost({ windowsHooksSkipped: true }, entry.client), null, entry.client);
   }
   assert.notEqual(windowsHookHost({ windowsHooksSkipped: true }, 'composer'), null, 'the Cursor Composer alias is skipped too');
   assert.ok(Object.isFrozen(WINDOWS_HOOK_HOSTS) && Object.isFrozen(FORM_MATRIX) && WINDOWS_HOOK_FORMS.every((form) => Object.isFrozen(FORM_MATRIX[form])));
+  assert.ok(Object.isFrozen(HOST_SHELL_EVIDENCE) && Object.isFrozen(CELL_LENGTH_BOUND) && WINDOWS_HOOK_FORMS.every((form) => Object.isFrozen(CELL_LENGTH_BOUND[form])));
   assert.equal(WINDOWS_HOOK_SKIP_REASON, 'windows_hook_shell_unverified');
+  assert.equal(WINDOWS_FORM_WRITER_WIRED, false, 'the installer has no Windows form writer');
 });
 
-row('NH-02', 'matrix: every form x shell cell is works, closed or open, and NO form works in all three shells (the reason no host is written)', () => {
+row('NH-02', 'measured table: 3 forms x 4 shells (cmd.exe, Git Bash, Windows PowerShell 5.1, pwsh 7), every cell unmeasured until a CI run fills it; evidence empty; the run id, bounds and cells are all-or-nothing', () => {
   assert.deepEqual(Object.keys(FORM_MATRIX).sort(), [...WINDOWS_HOOK_FORMS].sort());
+  assert.deepEqual([...WINDOWS_FORMS].sort(), [...WINDOWS_HOOK_FORMS].sort());
+  assert.deepEqual([...WINDOWS_SHELLS], ['cmd', 'bash', 'powershell', 'pwsh']);
+  const cells = [];
   for (const form of WINDOWS_HOOK_FORMS) {
     assert.deepEqual(Object.keys(FORM_MATRIX[form]).sort(), [...WINDOWS_SHELLS].sort(), form);
-    for (const shell of WINDOWS_SHELLS) assert.ok(['works', 'closed', 'open'].includes(FORM_MATRIX[form][shell]), `${form}/${shell}`);
-    assert.equal(FORM_MATRIX[form][form === 'powershell' ? 'powershell' : 'bash'] === 'works' || FORM_MATRIX[form].cmd === 'works', true, `${form} works in its own shell`);
-    assert.equal(WINDOWS_SHELLS.every((shell) => FORM_MATRIX[form][shell] === 'works'), false, `${form} must not claim all three shells`);
+    for (const shell of WINDOWS_SHELLS) {
+      assert.ok(['works', 'closed', 'open', 'unmeasured'].includes(FORM_MATRIX[form][shell]), `${form}/${shell}`);
+      cells.push(FORM_MATRIX[form][shell]);
+    }
   }
-  // A forged facts object or a forged matrix cannot enable a host: only a frozen all-works row does.
+  for (const form of WINDOWS_HOOK_FORMS) {
+    assert.deepEqual(Object.keys(CELL_LENGTH_BOUND[form]).sort(), [...WINDOWS_SHELLS].sort(), form);
+    assert.ok(Object.values(CELL_LENGTH_BOUND[form]).every((bound) => Number.isInteger(bound) && bound >= 0), form);
+  }
+  // All-or-nothing: a measured cell or bound exists only together with the CI run id that produced it, and a partial matrix is refused.
+  const bounds = WINDOWS_HOOK_FORMS.flatMap((form) => Object.values(CELL_LENGTH_BOUND[form]));
+  const measured = cells.some((cell) => cell !== 'unmeasured') || bounds.some((bound) => bound > 0);
+  assert.equal(measured, MEASURE_RUN !== null, 'a measurement without a run id, or a run id without a measurement');
+  if (MEASURE_RUN !== null) assert.match(MEASURE_RUN, /^[0-9]{6,20}$/);
+  if (measured) assert.ok(cells.every((cell) => cell !== 'unmeasured'), 'a partial measurement is not accepted');
+  assert.deepEqual(Object.keys(HOST_SHELL_EVIDENCE), [], 'no host shell evidence is supplied today');
+  // Nothing forged can enable a host: the tables are frozen and the decision reads only the module's own constants.
+  assert.throws(() => { 'use strict'; FORM_MATRIX.cmd.cmd = 'works'; }, TypeError);
+  assert.throws(() => { 'use strict'; CELL_LENGTH_BOUND.cmd.cmd = 9000; }, TypeError);
+  assert.throws(() => { 'use strict'; HOST_SHELL_EVIDENCE['claude-code'] = {}; }, TypeError);
   assert.equal(decideForm({ candidate: 'plain' }), null);
   assert.equal(decideForm({ candidate: 'guard' }), null);
-  assert.throws(() => { 'use strict'; FORM_MATRIX.cmd.powershell = 'works'; }, TypeError);
 });
 
 row('NH-03', 'length: every entry of every host in every form is at most WINDOWS_HOOK_MAX characters and its cmd.exe line at most 8191, even with the longest version, entrypoint and node path (500 characters, a 200+ character profile)', () => {
@@ -248,7 +208,7 @@ row('NH-05', 'bash column, run for real: each form with a stand-in node: allow r
   for (const form of WINDOWS_HOOK_FORMS) {
     const obs = observe(form, 'bash');
     assert.equal(claimHolds(form, 'bash', obs), true, `${form}: ${JSON.stringify(obs)}`);
-    if (FORM_MATRIX[form].bash === 'works') {
+    if (CLAIMS[form].bash === 'works') {
       assert.equal(obs.allow, 0, `${form} allow`);
       assert.equal(obs.allowRan, true);
     }
@@ -416,7 +376,7 @@ row('NH-14', 'Q5 on the win32 path: the staged runtime sits under the real path 
     const home = path.join(work, 'link', 'real');
     assert.notEqual(fs.realpathSync(home), home);
     const stages = [];
-    const result = runtimeCore.ensure({ home, version: PIN, integrity: FAKE, sdk: null, platform: 'win32', npmInstall: (stage, specs) => { stages.push(stage); return fakeRuntimePackage(stage, specs); } });
+    const result = runtimeCore.ensure({ home, version: PIN, integrity: FAKE, sdk: null, platform: 'win32', npmInstall: (stage, specs) => { stages.push(stage); return probe.fakeRuntimePackage(probe.ALLOW_CLI)(stage, specs); } });
     assert.equal(result.state, 'installed', JSON.stringify(result));
     assert.ok(stages[0].startsWith(path.join(fs.realpathSync(realHome), '.marrow', 'runtime', 'mcp', '.stage-')), stages[0]);
     assert.ok(verifyMcpRuntime(home, PIN, FAKE, { platform: 'win32' }));
@@ -442,6 +402,299 @@ row('NH-15', 'POSIX hook text is untouched: no localized Linux or macOS command 
 });
 
 // ---------------------------------------------------------------------------------------------------------------------
+// The switch-on rule (decideHostWith) with INJECTED tables. Production reads only the frozen module constants (NH-01, NH-02, NH-19);
+// these rows show that a host is decided only when every proof is present, and that each missing proof leaves the L-1 skip.
+const NEEDED = longestCommandLine();
+const record = (over = {}) => ({ shells: ['cmd'], selection: 'pinned', source: 'live-check', ref: 'live check on a real Windows machine', ownerAccepted: false, deny: 'exit2', denyRef: 'live check, exit 2 blocked', ...over });
+const tablesWith = (over = {}, evidence = record(), client = 'claude-code') => ({
+  matrix: {
+    cmd: { cmd: 'works', bash: 'closed', powershell: 'open', pwsh: 'open' },
+    bash: { cmd: 'open', bash: 'works', powershell: 'open', pwsh: 'open' },
+    powershell: { cmd: 'open', bash: 'closed', powershell: 'works', pwsh: 'works' },
+  },
+  bounds: {
+    cmd: { cmd: 8191, bash: 0, powershell: 0, pwsh: 0 },
+    bash: { cmd: 0, bash: 8192, powershell: 0, pwsh: 0 },
+    powershell: { cmd: 0, bash: 0, powershell: 8192, pwsh: 8192 },
+  },
+  run: '24999999999',
+  evidence: { [client]: evidence },
+  ...over,
+});
+const decideFor = (tables, facts = { client: 'claude-code', candidate: 'plain' }) => decideHostWith(facts, tables);
+
+row('NH-16', 'switch-on rule: a host is decided only with a host shell record, a CI-measured works cell in EVERY shell of that record, a length bound that covers the longest command, a run id and a deny path of exit 2; each missing proof keeps the skip', () => {
+  const ok = decideFor(tablesWith());
+  assert.deepEqual({ ...ok }, { form: 'cmd', status: 'form_decided', reason: 'proven' });
+  assert.equal(decideFor(tablesWith({}, record({ shells: ['bash'] }))).form, 'bash');
+  assert.equal(decideFor(tablesWith({}, record({ shells: ['powershell'] }))).form, 'powershell');
+  assert.equal(decideFor(tablesWith({}, record({ shells: ['powershell', 'pwsh'], selection: 'fixed-set' }))).form, 'powershell');
+  const skipped = (tables, reason, facts) => {
+    const d = decideFor(tables, facts);
+    assert.equal(d.form, null, reason);
+    assert.equal(d.status, 'skipped', reason);
+    assert.equal(d.reason, reason);
+  };
+  // every allowed shell needs the SAME form to work: one open, closed or unmeasured cell skips the host
+  skipped(tablesWith({}, record({ shells: ['cmd', 'bash'], selection: 'fixed-set' })), 'no_form_works_in_every_shell');
+  skipped(tablesWith({}, record({ shells: ['cmd', 'pwsh'], selection: 'fixed-set' })), 'no_form_works_in_every_shell');
+  for (const cell of ['open', 'closed', 'unmeasured']) {
+    const tables = tablesWith({}, record({ shells: ['powershell', 'pwsh'], selection: 'fixed-set' }));
+    tables.matrix.powershell.pwsh = cell;
+    skipped(tables, 'no_form_works_in_every_shell');
+    const one = tablesWith();
+    one.matrix.cmd.cmd = cell;
+    skipped(one, 'no_form_works_in_every_shell');
+  }
+  // no short entry, no record, a record for another host
+  for (const candidate of ['guard', 'script', 'wrapper', undefined, '']) skipped(tablesWith(), 'no_short_entry', { client: 'claude-code', candidate });
+  skipped(tablesWith({ evidence: {} }), 'no_host_shell_evidence');
+  skipped(tablesWith({}, record(), 'codex'), 'no_host_shell_evidence');
+  skipped(tablesWith(), 'no_host_shell_evidence', { client: '__proto__', candidate: 'plain' });
+  skipped(tablesWith(), 'no_host_shell_evidence', { client: 'constructor', candidate: 'plain' });
+  skipped(tablesWith(), 'no_host_shell_evidence', { candidate: 'plain' });
+  // a shell chosen by user setup is never switched on; a deny that is not exit 2 cannot be produced by the written forms
+  skipped(tablesWith({}, record({ selection: 'user-setup' })), 'shell_chosen_by_user_setup');
+  skipped(tablesWith({}, record({ deny: 'json' })), 'deny_path_unproven');
+  // malformed records are the same as no record
+  const malformed = [
+    { shells: [] }, { shells: ['cmd', 'cmd'], selection: 'fixed-set' }, { shells: ['zsh'] }, { shells: 'cmd' }, { shells: ['cmd', 'bash'] },
+    { selection: 'maybe' }, { source: 'blog' }, { ref: '' }, { ref: 'café' }, { ref: 'x'.repeat(401) }, { denyRef: '' },
+    { ownerAccepted: 'yes' }, { ownerAccepted: undefined }, { deny: 'exit1' },
+  ];
+  for (const over of malformed) skipped(tablesWith({}, record(over)), 'evidence_invalid');
+  for (const key of Object.keys(record())) {
+    const partial = record();
+    delete partial[key];
+    skipped(tablesWith({}, partial), 'evidence_invalid');
+  }
+  skipped(tablesWith({}, { ...record(), extra: 'x' }), 'evidence_invalid');
+  skipped(tablesWith({}, null), 'evidence_invalid');
+  skipped(tablesWith({}, [record()]), 'evidence_invalid');
+  // the length bound: it must cover the longest command line the generator can write, in EVERY allowed shell
+  assert.equal(NEEDED, windowsCmdLineLength('x'.repeat(WINDOWS_HOOK_MAX)));
+  assert.ok(NEEDED < WINDOWS_CMD_LIMIT);
+  const bounded = (n) => { const t = tablesWith(); t.bounds.cmd.cmd = n; return t; };
+  assert.equal(decideFor(bounded(NEEDED)).form, 'cmd');
+  skipped(bounded(NEEDED - 1), 'length_bound_unproven');
+  skipped(bounded(0), 'length_bound_unproven');
+  skipped(bounded(100), 'length_bound_unproven');
+  // the bound is per form and shell: a long bound for another form or another shell does not help
+  const otherShell = bounded(0);
+  otherShell.bounds.cmd.bash = 8192;
+  skipped(otherShell, 'length_bound_unproven');
+  const otherForm = bounded(0);
+  otherForm.bounds.bash.cmd = 8192;
+  skipped(otherForm, 'length_bound_unproven');
+  const two = tablesWith({}, record({ shells: ['powershell', 'pwsh'], selection: 'fixed-set' }));
+  two.bounds.powershell.pwsh = 100;
+  skipped(two, 'length_bound_unproven');
+  // a second form that works in the same shell with a proven bound is chosen over a first form whose bound is short
+  const second = tablesWith({}, record({ shells: ['bash'] }));
+  second.matrix.cmd.bash = 'works';
+  second.bounds.cmd.bash = 10;
+  second.bounds.bash.bash = 8192;
+  assert.equal(decideFor(second).form, 'bash');
+  const lacksForm = tablesWith();
+  delete lacksForm.bounds.powershell;
+  skipped(lacksForm, 'tables_invalid');
+  const lacksShell = tablesWith();
+  delete lacksShell.bounds.cmd.pwsh;
+  skipped(lacksShell, 'tables_invalid');
+  const fraction = tablesWith();
+  fraction.bounds.cmd.cmd = 8191.5;
+  skipped(fraction, 'tables_invalid');
+  // the measurement must name its CI run
+  skipped(tablesWith({ run: null }), 'measurement_run_unrecorded');
+  skipped(tablesWith({ run: 'abc' }), 'tables_invalid');
+  skipped(tablesWith({ run: 12345678 }), 'tables_invalid');
+  // a malformed table is a skip, never a throw
+  skipped(tablesWith({ matrix: null }), 'tables_invalid');
+  const odd = tablesWith();
+  odd.matrix.cmd.cmd = 'maybe';
+  skipped(odd, 'tables_invalid');
+  const lacking = tablesWith();
+  delete lacking.matrix.powershell;
+  skipped(lacking, 'tables_invalid');
+  assert.equal(decideHostWith(null, tablesWith()).reason, 'facts_invalid');
+  assert.equal(decideHostWith({ client: 'claude-code', candidate: 'plain' }, null).reason, 'facts_invalid');
+});
+
+row('NH-17', 'vendor document alone is "ready, owner decision" and still skipped; the owner accepting it, or a live check, decides; the status words are fixed', () => {
+  const vendor = (accepted) => record({ source: 'vendor-doc', ref: 'https://example.invalid/hooks (quoted sentence, 2026-10-26)', ownerAccepted: accepted });
+  const waiting = decideFor(tablesWith({}, vendor(false)));
+  assert.deepEqual({ ...waiting }, { form: null, status: 'ready_owner_decision', reason: 'vendor_doc_needs_owner_decision' });
+  assert.equal(decideFor(tablesWith({}, vendor(true))).form, 'cmd');
+  assert.equal(decideFor(tablesWith({}, record({ source: 'live-check', ownerAccepted: false }))).form, 'cmd');
+  // "ready" is only reported when everything else holds: a vendor document with an open cell, no run id or a short bound is a plain skip
+  const open = tablesWith({}, vendor(false));
+  open.matrix.cmd.cmd = 'open';
+  assert.equal(decideFor(open).status, 'skipped');
+  assert.equal(decideFor(tablesWith({ run: null }, vendor(false))).status, 'skipped');
+  const short = tablesWith({}, vendor(false));
+  short.bounds.cmd.cmd = 10;
+  assert.equal(decideFor(short).status, 'skipped');
+  assert.equal(decideFor(tablesWith({}, { ...vendor(false), deny: 'json' })).status, 'skipped');
+  assert.deepEqual([...DECISION_STATUSES], ['skipped', 'ready_owner_decision', 'form_decided']);
+  assert.ok(WINDOWS_HOOK_HOSTS.every((entry) => DECISION_STATUSES.includes(entry.status)));
+});
+
+row('NH-18', 'probe classes: exit 2 is the only block; a PowerShell parse error (exit 1), a missing program (9009, 127), any other code, a signal or timeout is OPEN; code that must not run, run, is OPEN; the length rows set the bound, not the class', () => {
+  const { runClass, failClass, foldCell, PROBE_ROWS } = probe;
+  // failure rows (node missing, launcher missing or edited, runtime swapped): exit 2 with nothing forbidden run is the only safe end
+  assert.equal(failClass(2, false), 'closed');
+  for (const status of [0, 1, 3, 9009, 127, 126, 99, 255, null, undefined]) assert.equal(failClass(status, false), 'open', `fail row, exit ${status}`);
+  assert.equal(failClass(2, true), 'open', 'exit 2 after tampered code ran');
+  // run rows: the answer must arrive; a PowerShell 5.1 parse error ends in exit 1 and counts as OPEN, never closed
+  assert.equal(runClass(0, true, 0), 'works');
+  assert.equal(runClass(2, true, 2), 'works');
+  assert.equal(runClass(2, false, 2), 'closed');
+  assert.equal(runClass(2, false, 0), 'closed');
+  assert.equal(runClass(2, true, 0), 'closed', 'a block of an allowed call is safe but unusable');
+  for (const [status, ran, expect] of [[1, false, 0], [1, false, 2], [1, true, 2], [0, false, 0], [0, false, 2], [0, true, 2], [9009, false, 2], [127, false, 0], [null, false, 0], [1, true, 0]]) {
+    assert.equal(runClass(status, ran, expect), 'open', `run row exit ${status} ran ${ran} expect ${expect}`);
+  }
+  // fold: open dominates; LEN-8192 only sets the bound; an error or a missing row is not a measurement
+  const all = (klass, over = {}) => PROBE_ROWS.map((id) => [id, over[id] || (/^P-(NODE|LAUNCHER|RUNTIME)/.test(id) ? 'closed' : klass)]);
+  assert.deepEqual(foldCell(all('works')), { class: 'works', bound: 8192 });
+  assert.deepEqual(foldCell(all('works', { 'P-LEN-8192': 'open' })), { class: 'works', bound: 8191 });
+  assert.deepEqual(foldCell(all('works', { 'P-LEN-8192': 'open', 'P-LEN-8191': 'open' })), { class: 'works', bound: 8190 });
+  assert.deepEqual(foldCell(all('works', { 'P-LEN-8190': 'open' })), { class: 'works', bound: 0 }, 'a gap below makes the bound 0');
+  assert.deepEqual(foldCell(all('works', { 'P-LEN-8191': 'open' })), { class: 'works', bound: 8190 }, 'a longer row cannot raise the bound over a failed shorter one');
+  assert.deepEqual(foldCell(all('works', { 'P-LEN-8192': 'closed', 'P-LEN-8191': 'works' })), { class: 'works', bound: 8191 });
+  assert.deepEqual(foldCell(all('works', { 'P-DENY': 'open' })), { class: 'open', bound: 8192 });
+  assert.deepEqual(foldCell(all('works', { 'P-NODE-MISSING': 'open' })), { class: 'open', bound: 8192 });
+  assert.deepEqual(foldCell(all('works', { 'P-CWD-PLANT': 'open' })).class, 'open');
+  assert.equal(foldCell(all('works', { 'P-ALLOW': 'closed' })).class, 'closed');
+  assert.deepEqual(foldCell(all('closed')), { class: 'closed', bound: 0 });
+  assert.equal(foldCell([...all('works'), ['P-ERROR', 'open']]), null);
+  assert.equal(foldCell(all('works').slice(1)), null);
+  assert.equal(foldCell(all('works').map(([id, c]) => [id, id === 'P-ALLOW' ? 'maybe' : c])), null);
+});
+
+row('NH-19', 'forged inputs cannot flip the decision: extra facts fields, an injected platform, env or argv, a polluted prototype and a second argument are all ignored by decideForm and decideHost', () => {
+  const real = WINDOWS_HOOK_HOSTS.map((entry) => entry.form);
+  assert.deepEqual(real, [null, null, null, null, null, null]);
+  const forged = { client: 'claude-code', candidate: 'plain', form: 'cmd', status: 'form_decided', evidence: record(), shells: ['cmd'], matrix: tablesWith().matrix, bounds: tablesWith().bounds, run: '24999999999', platform: 'win32', writes: true };
+  assert.equal(decideForm(forged), null);
+  assert.equal(decideForm(forged, tablesWith()), null, 'a second argument is not read');
+  assert.equal(decideHost(forged, tablesWith()).status, 'skipped');
+  const original = process.argv.slice();
+  const env = { A: process.env.MARROW_WINDOWS_HOOKS, B: process.env.MARROW_NH_FORM };
+  process.env.MARROW_WINDOWS_HOOKS = '1';
+  process.env.MARROW_NH_FORM = 'cmd';
+  process.argv.push('--windows-hooks', '--form=cmd', '--platform=win32');
+  try {
+    assert.equal(decideForm({ client: 'claude-code', candidate: 'plain' }), null);
+  } finally {
+    process.argv.length = 0;
+    process.argv.push(...original);
+    for (const [name, value] of [['MARROW_WINDOWS_HOOKS', env.A], ['MARROW_NH_FORM', env.B]]) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
+  }
+  // inherited properties are never evidence
+  const holder = {};
+  Object.prototype['claude-code'] = record();
+  try {
+    assert.equal(decideFor({ ...tablesWith(), evidence: holder }).reason, 'no_host_shell_evidence');
+    assert.equal(decideForm({ client: 'claude-code', candidate: 'plain' }), null);
+  } finally {
+    delete Object.prototype['claude-code'];
+  }
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'windows-hooks.js'), 'utf8').split('\n').filter((line) => !line.trimStart().startsWith('//')).join('\n');
+  assert.equal(/process\.(env|argv)/.test(source), false, 'the decision reads no environment and no argv');
+  assert.equal((source.match(/process\.platform/g) || []).length, 1, 'process.platform is read once, by windowsHooksSkipped only');
+  // the installer and the other modules call decideForm/decideHost only through windows-hooks.js; none can inject tables
+  const callers = fs.readdirSync(path.join(__dirname, '..', 'src')).filter((name) => name.endsWith('.js') && name !== 'windows-hooks.js').filter((name) => /decideHostWith|HOST_SHELL_EVIDENCE|hostSkipped|WINDOWS_FORM_WRITER_WIRED/.test(fs.readFileSync(path.join(__dirname, '..', 'src', name), 'utf8')));
+  assert.deepEqual(callers, [], 'no other module imports the injectable decision or the evidence');
+});
+
+row('NH-20', 'a decided form is not written: the installer has no Windows form writer, so every host stays on the skip entry even when the tables decide a form', () => {
+  const decided = decideFor(tablesWith());
+  assert.equal(decided.form, 'cmd');
+  const entry = { client: 'claude-code', form: decided.form };
+  assert.equal(hostSkipped(entry), true, 'writer not wired: still skipped');
+  assert.equal(hostSkipped(entry, false), true);
+  assert.equal(hostSkipped(entry, 'true'), true, 'only the boolean true counts');
+  assert.equal(hostSkipped(entry, 1), true);
+  assert.equal(hostSkipped(entry, true), false, 'once a writer is wired and audited, a decided form is not skipped');
+  assert.equal(hostSkipped({ client: 'claude-code', form: null }, true), true, 'no form is always skipped');
+  for (const host of WINDOWS_HOOK_HOSTS) assert.notEqual(windowsHookHost({ windowsHooksSkipped: true }, host.client), null, host.client);
+  assert.equal(windowsHookSkipEntries({ windowsHooksSkipped: true, paths: {}, claudeCode: true, codex: true, cursor: true, cline: true, windsurf: true, gemini: true }).length, 6);
+});
+
+row('NH-21', 'probe, bash column run for real: the bash form works in every row (bound 8192), the cmd and PowerShell forms are closed and never open; every printed line is `<form>/<shell> <row-id> works|closed|open`', () => {
+  if (!gitBash()) return;
+  // the padded rows really are 8190, 8191 and 8192 characters long in the cmd.exe line, in every form
+  for (const form of WINDOWS_HOOK_FORMS) {
+    for (const [id, length] of Object.entries(probe.LENGTH_ROWS)) {
+      const command = windowsHookCommand(PIN, PRE, { form, nodePath: 'C:\\Program Files\\nodejs\\node.exe', digest: launcherDigest(windowsLauncherText(CFG)) });
+      const padded = probe.pad(form, command, length);
+      assert.equal(windowsCmdLineLength(padded), length, `${form} ${id}`);
+      assert.ok(padded.includes(`marrow-mcp ${PRE} x`), `${form}: the padding is an argument of the node command`);
+    }
+  }
+  const lines = probe.probeLines(['bash']);
+  assert.equal(lines.length, 3 * probe.PROBE_ROWS.length);
+  for (const line of lines) assert.match(line, /^(cmd|bash|powershell)\/(cmd|bash|powershell|pwsh) P-[A-Z0-9-]+ (works|closed|open)$/, 'no command text and no path in a line');
+  const cell = (form) => lines.filter((line) => line.startsWith(`${form}/bash `)).map((line) => line.split(' ').slice(1));
+  assert.deepEqual(probe.foldCell(cell('bash')), { class: 'works', bound: 8192 });
+  for (const [id, klass] of cell('bash')) assert.equal(klass, /^P-(NODE|LAUNCHER|RUNTIME)/.test(id) ? 'closed' : 'works', id);
+  for (const form of ['cmd', 'powershell']) {
+    assert.deepEqual(probe.foldCell(cell(form)), { class: 'closed', bound: 0 }, form);
+    assert.ok(cell(form).every(([, klass]) => klass === 'closed'), `${form} in bash is never open`);
+  }
+}, { posixOnly: true });
+
+row('NH-22', 'a shell that cannot be started is no measurement: the probe row throws (P-ERROR), it is never classed open or closed; the cell stays unmeasured', () => {
+  const { probeCell, foldCell } = probe;
+  if (!gitBash()) return;
+  const spawn = require('node:child_process');
+  const original = spawn.spawnSync;
+  let calls = 0;
+  spawn.spawnSync = (...args) => { calls += 1; return { status: null, error: Object.assign(new Error('refused'), { code: 'ESPAWNGUARD' }), stdout: '', stderr: '' }; };
+  try {
+    delete require.cache[require.resolve('./support/win26-nh-probe.cjs')];
+    const fresh = require('./support/win26-nh-probe.cjs');
+    const result = fresh.probeCell('bash', 'bash');
+    assert.ok(calls >= 1);
+    assert.deepEqual(result, [['P-ERROR', 'open']], 'the first refused start ends the cell with one error row');
+    assert.equal(fresh.foldCell(result), null);
+  } finally {
+    spawn.spawnSync = original;
+    delete require.cache[require.resolve('./support/win26-nh-probe.cjs')];
+  }
+  void probeCell; void foldCell;
+}, { posixOnly: true });
+
+row('NH-23', 'collisions: the hook command differs for every host entrypoint and every form, and for every launcher digest; the digest of a one-byte edit differs; nothing secret-looking is in a command', () => {
+  const node = 'C:\\Program Files\\nodejs\\node.exe';
+  const base = launcherDigest(windowsLauncherText(CFG));
+  const edited = launcherDigest(`${windowsLauncherText(CFG)}\n`);
+  assert.notEqual(base, edited, 'one appended byte changes the digest');
+  const seen = new Map();
+  let count = 0;
+  for (const [client, subs] of Object.entries(SUBS)) {
+    for (const sub of subs) {
+      for (const form of WINDOWS_HOOK_FORMS) {
+        for (const digest of [base, edited]) {
+          const command = windowsHookCommand(PIN, sub, { form, nodePath: node, digest });
+          count += 1;
+          assert.equal(seen.has(command), false, `${client}/${sub}/${form}: same command as ${seen.get(command)}`);
+          seen.set(command, `${client}/${sub}/${form}`);
+          assert.ok(command.includes(digest), 'the command carries the digest of the launcher it will run');
+          assert.doesNotMatch(command, /(?:api[_-]?key|token|secret|password|bearer)\s*[:=]/i);
+        }
+      }
+    }
+  }
+  assert.equal(seen.size, count, 'no two commands collide');
+  // the same entrypoint at another MCP version or another node path is another command
+  const a = windowsHookCommand(PIN, PRE, { form: 'cmd', nodePath: node, digest: base });
+  assert.notEqual(a, windowsHookCommand(PIN.replace(/\d+$/, (n) => String(Number(n) + 1)), PRE, { form: 'cmd', nodePath: node, digest: base }));
+  assert.notEqual(a, windowsHookCommand(PIN, PRE, { form: 'cmd', nodePath: 'C:\\nodejs\\node.exe', digest: base }));
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
 // Real Windows only.
 const WIN_ONLY = { windowsOnly: true };
 function eachShell(fn) {
@@ -456,7 +709,7 @@ row('NH-W1', 'every written form run in every shell on this machine (cmd.exe, Wi
   const wrong = [];
   eachShell((form, shell) => {
     const obs = observe(form, shell);
-    if (!claimHolds(form, columnOf(shell), obs)) wrong.push(`${form}/${shell}`);
+    if (!claimHolds(form, shell, obs)) wrong.push(`${form}/${shell}`);
     if (obs.ranOnFailure.length) wrong.push(`${form}/${shell} ran the runtime on ${obs.ranOnFailure.join(',')}`);
   });
   assert.deepEqual(wrong, []);
