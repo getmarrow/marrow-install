@@ -132,12 +132,15 @@ These behaviors shipped in v0.1.73 and still apply.
 - **Every Claude Code tool is checked.** The Claude Code hook matcher now sends every tool call to Marrow's hook except Marrow's own exact tool names and the read-only `LS` and `ListMcpResourcesTool`. Before, a fixed list of tools reached it, so `Monitor` and `PowerShell` (which run shell commands), `WebFetch`, `Agent`, `Skill` and tools added later were not checked. The Gemini matcher also covers `web_fetch`. Run `update` once to replace the old matcher; your own hooks are kept as they are, and a second run changes nothing.
 - **A URL in the environment cannot redirect your key.** When the key comes from `~/.marrow/env` (or `env.local`), `install`, `update`, `activate`, `doctor`, the governed runner and the controller send it only to the default Marrow URL, to the URL that same file names with `MARROW_BASE_URL`, or to an exact origin it lists in `MARROW_ALLOWED_BASE_URLS`. A URL named only by the process environment or `--base-url` is ignored with one notice that names the source and never the key or the URL. A key from the process environment or a real `--key` value keeps its URL, as before; an empty, blank or missing `--key` value is no key, so the key from `~/.marrow/env` and its rule above apply. Every URL the installer uses must be https (plain http only for `localhost`, `127.0.0.1` and `[::1]`). If you run a staging or self-hosted endpoint with a key in `~/.marrow/env`, add `MARROW_BASE_URL=` or `MARROW_ALLOWED_BASE_URLS=` to that file; the installer does not write a URL into that file for you.
 
-## What's New in v0.1.75
-
-v0.1.75 installs MCP `3.9.108` and SDK `3.7.67`. In short (the full entry is in the [CHANGELOG](https://github.com/getmarrow/marrow-install/blob/master/CHANGELOG.md)):
+These behaviors shipped in v0.1.75 and still apply.
 
 - **Doctor says why it could not check the seatbelt.** When a folder on the way down to `~/.cache/marrow/doctor-tmp` (from `/` to your home) can be written by other users, is a link, or belongs to another user, `doctor` still refuses to run the check, exactly as before: no status command is started, nothing is created, and the exit code and the `--json` fields are the same. The line `- Seatbelt: could not check` is unchanged, and one more line under it now names the first such folder (the one nearest `~/.cache/marrow`) and the reason. For a writable folder that you own, inside your home, with a plain path, it also prints the one command, `chmod go-w <folder>`; for a link or a folder that belongs to another user it prints the reason and no command. Any other cause prints the first line alone, as before. The new line says only that doctor skipped this check, not whether protection is on.
-- **MCP 3.9.108 and SDK 3.7.67.** The installer pins them (`src/pins.js`). 3.9.108 is a security hotfix on 3.9.106; after the update some approvals are asked once more, because a hold or a learned approval made before it never matches again (see the MCP's release notes). The SDK pin is unchanged.
+
+## What's New in v0.1.76
+
+v0.1.76 installs MCP `3.9.108` and SDK `3.7.67`. In short (the full entry is in the [CHANGELOG](https://github.com/getmarrow/marrow-install/blob/master/CHANGELOG.md)):
+
+- **MCP 3.9.108 and SDK 3.7.67.** The installer pins them (`src/pins.js`). The SDK pin is unchanged.
 
 Earlier release notes are in the [CHANGELOG](https://github.com/getmarrow/marrow-install/blob/master/CHANGELOG.md).
 
@@ -145,7 +148,7 @@ Earlier release notes are in the [CHANGELOG](https://github.com/getmarrow/marrow
 
 These changes shipped in v0.1.72 and still apply. The Codex checks below need v0.1.72 or later plus the one-time `/hooks` step.
 
-- **MCP 3.9.108.** v0.1.75 installs `@getmarrow/mcp` 3.9.108 (built from marrow-mcp `e3752f3b`; `src/pins.js`). Since 3.9.103 it no longer decides Marrow's own tools by label alone on Codex and Cursor: it reads the host's own MCP configuration, as the bullets below describe.
+- **MCP 3.9.108.** v0.1.76 installs `@getmarrow/mcp` 3.9.108 (built from marrow-mcp `e3752f3b`; `src/pins.js`). Since 3.9.103 it no longer decides Marrow's own tools by label alone on Codex and Cursor: it reads the host's own MCP configuration, as the bullets below describe.
 - **Codex tool calls are checked.** The Codex hooks in `.codex/hooks.json` use the matcher `*` for `PreToolUse` and `PostToolUse`, so every tool call Codex sends to its hooks reaches Marrow's hook, which decides whether to hold it. The matcher itself skips nothing, and no own-tool name is in any Marrow matcher for Codex. The matcher v0.1.70 wrote uses look-ahead, which Codex rejects (it reports `invalid matcher` and loads no `PreToolUse` hook), so with v0.1.70 no Codex tool call is checked.
 - **Upgrade with `update`.** Run `npx @getmarrow/install@latest update` once. A project whose `.codex` holds only Marrow's own `hooks.json` counts as a Codex project, so `--yes`, `update` and `doctor` find it and rewrite the old matcher in place, once and without duplicate entries; your own hook groups are kept. `doctor` lists a Codex hooks file that still has the old matcher as stale and names the same command. The same `update` replaces the v0.1.70 Cursor guard (below) and moves every Marrow command and MCP entry to the pinned MCP version in `src/pins.js`.
 - **Codex: Marrow's own tools are skipped only when the configuration proves the server.** The hook (`@getmarrow/mcp` 3.9.108) skips a call without a check only when both are true. The label is exactly `mcp__marrow__<name>` and `<name>` is one of the 58 tool names the `marrow` server registers (`src/marrow-own-tools.js`). And the Codex configuration the hook reads proves that the `marrow` server is the official Marrow MCP server: the README entry (`command = "npx"`, `args = ["-y", "@getmarrow/mcp"]`, or the `--package=@getmarrow/mcp@<version> marrow-mcp` form), the installed `marrow-mcp` bin or the installer's verified-runtime launch, in `$CODEX_HOME/config.toml` or a project `.codex/config.toml`; or the official Marrow Codex plugin, enabled in `$CODEX_HOME/config.toml`, with every pinned file unchanged and installed alone. The labels `functions.mcp__marrow__<name>`, `MCP:marrow:<name>` and `MCP:<name>` and a nested `use_tool` form are never skipped on Codex. Another case, padding, a suffix, an unregistered `marrow_*` name or any other label goes through the hook's normal path, as does a call when the configuration proves nothing.
@@ -307,7 +310,7 @@ Never connect an agent to the email inbox that receives Marrow approval mail. An
 
 ### Hooks the installer writes
 
-These hooks are written with MCP `3.9.99` and later (`MCP_HOST_APPROVAL_HOOKS_SINCE` in `src/pins.js`). v0.1.75 installs MCP `3.9.108`, so `install` and `update` write them; with an older MCP the earlier layout stays. `update` also uses a registry-verified MCP at or above that version.
+These hooks are written with MCP `3.9.99` and later (`MCP_HOST_APPROVAL_HOOKS_SINCE` in `src/pins.js`). v0.1.76 installs MCP `3.9.108`, so `install` and `update` write them; with an older MCP the earlier layout stays. `update` also uses a registry-verified MCP at or above that version.
 
 | Host | Hooks for approvals | How the operator answers |
 | --- | --- | --- |

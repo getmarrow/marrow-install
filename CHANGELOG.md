@@ -2,6 +2,13 @@
 
 Release notes for `@getmarrow/install`, newest first. The README describes only the current version.
 
+## v0.1.76
+
+v0.1.76. Two installer fixes and the MCP pin: v0.1.76 installs MCP `3.9.108` (source `e3752f3baa511bb3071b73f521ba2b3bb526d0fd`, packed integrity `sha512-tbgRVlydUbc1or+i68xOO3QprN4Vp9tV0LBGhxD4WhIHeycyS7TqGg2sn4epMajx/nHcO0txjpjOdgqFf/1eEw==`); the SDK pin stays `3.7.67` (packed integrity `sha512-0Lwg4XLxm9eXxMgQtFAH1y4mXi9CXg3poQlGbeK0AW+EHP+yfUWQUH4d1XYO03QNzwHLAYKfARDmnl5GpBnKUw==`).
+
+- Windows: new installs no longer write over-long hook commands; hooks from an earlier install are left unchanged for now.
+- Hooks now verify and start the local runtime when your home folder sits behind a symlinked parent folder (previously an integrity mismatch on install).
+
 ## v0.1.75
 
 v0.1.75. `doctor` says why it could not check the seatbelt, a test-only guard, and the MCP pin: v0.1.75 installs MCP `3.9.107` (source `3e0bdb1d2023015c7c5816d813a87519c12f7f82`, packed integrity `sha512-hZvk+quqAmD9s4pf74SZkaDblK2rQL9hww0S2cbbA48AoSBtB7ktCgcLLALsze0DynTGU6MpiFzjcfDqmB2M5w==`); the SDK pin stays `3.7.67` (packed integrity `sha512-0Lwg4XLxm9eXxMgQtFAH1y4mXi9CXg3poQlGbeK0AW+EHP+yfUWQUH4d1XYO03QNzwHLAYKfARDmnl5GpBnKUw==`).
