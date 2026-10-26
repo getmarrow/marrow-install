@@ -116,10 +116,10 @@ test('F-2c node path: only an absolute drive path to node.exe that no shell read
   for (const sub of ['', 'Claude-hook', 'a b', "x'y", 'a'.repeat(65), '-x']) assert.throws(() => windowsStubCommand(PIN, sub, { nodePath: NODE, digest }), /invalid entrypoint/, sub);
 });
 
-test('F-2c form: node by absolute path, the stub carries no quote, $, %, !, backslash or backtick, no PATH/cwd lookup and no spawn; the cmd tail only on pre-action entrypoints', () => {
+test('F-2c form: node by absolute path, the stub carries no quote, $, %, !, backslash or backtick, no PATH/cwd lookup and no spawn; the `|| exit 2` tail only on pre-action entrypoints', () => {
   const digest = launcherDigest(windowsLauncherText(CFG));
   const pre = windowsStubCommand(PIN, 'claude-pre-action-hook', { nodePath: NODE, digest });
-  assert.equal(pre, `"${NODE}" -e "${windowsStubSource(digest)}" -- --package=@getmarrow/mcp@${PIN} marrow-mcp claude-pre-action-hook || (if errorlevel 2 (exit 2) else if errorlevel 1 (exit 1) else exit 2)`);
+  assert.equal(pre, `"${NODE}" -e "${windowsStubSource(digest)}" -- --package=@getmarrow/mcp@${PIN} marrow-mcp claude-pre-action-hook || exit 2`);
   assert.equal(windowsStubCommand(PIN, 'claude-hook', { nodePath: NODE, digest }), `"${NODE}" -e "${windowsStubSource(digest)}" -- --package=@getmarrow/mcp@${PIN} marrow-mcp claude-hook`);
   const stub = windowsStubSource(digest);
   assert.doesNotMatch(stub, /["$%!\\`\n\r]/);
@@ -280,7 +280,7 @@ test('F-2c outage rule unchanged: launcher valid, no runtime, registry unreachab
   }
 });
 
-test('F-2c Git Bash stand-in: the pre-action form is a bash syntax error (exit 2, nothing runs: fail-closed but never allows); the other form without node exits 127', () => {
+test('F-2c Git Bash stand-in: the cmd form with a backslash node path never runs in bash (no / in the word: PATH search, 127) and the tail turns that into exit 2; the other form without node exits 127', () => {
   const digest = launcherDigest(windowsLauncherText(CFG));
   const bash = ['/bin/bash', '/usr/bin/bash'].find((file) => fs.existsSync(file));
   if (!bash) return;
@@ -288,7 +288,7 @@ test('F-2c Git Bash stand-in: the pre-action form is a bash syntax error (exit 2
   try {
     const pre = spawnSync(bash, ['-c', windowsStubCommand(PIN, 'claude-pre-action-hook', { nodePath: NODE, digest })], { cwd, input: EVENT, encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } });
     assert.equal(pre.status, 2, pre.stderr);
-    assert.match(pre.stderr, /syntax error/);
+    assert.match(pre.stderr, /not found|No such file/);
     const other = spawnSync(bash, ['-c', windowsStubCommand(PIN, 'claude-hook', { nodePath: NODE, digest })], { cwd, input: EVENT, encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } });
     assert.equal(other.status, 127);
   } finally {

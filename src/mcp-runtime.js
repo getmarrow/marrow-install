@@ -477,10 +477,9 @@ function mcpServerLaunchVersion(entry) {
 // exit 2) or failure text (exit 1). The launcher file is the inline loader, byte for byte, so the code
 // that runs is the same runtimeCore with the same configuration. A missing launcher holds; it is not
 // healed by the hook (the installer and --repair write it). An error thrown while the runtime starts
-// holds too. The tail after the node command is cmd.exe syntax: any start failure of node (9009, 3,
-// a crash code) becomes 2 for a pre-action entrypoint, while node's own 0, 1 (the outage warning) and
-// 2 pass through. No installer path writes this form while every Windows hook host is skipped
-// (windows-hooks.js); it is kept here, tested, for a host whose hook shell is proven.
+// holds too. The tail after the node command (windowsHookCommand) turns every pre-action end but 0 into 2,
+// whatever the shell. Which host may be given this form is decided in windows-hooks.js (a host is written only
+// when one form works in every Windows hook shell; today none, so no installer path writes it).
 // ---------------------------------------------------------------------------
 
 const WINDOWS_HOOK_MAX = 2048;
@@ -529,14 +528,67 @@ function windowsStubSource(digest) {
 
 // The full Windows hook command for one entrypoint. Throws when an input is unsafe or the result
 // would be longer than WINDOWS_HOOK_MAX (a caller then skips the host; it never writes a long form).
-function windowsStubCommand(version, sub, { nodePath, digest } = {}) {
+function windowsStubCommand(version, sub, options = {}) {
+  return windowsHookCommand(version, sub, { ...options, form: 'cmd' });
+}
+
+// NH (installer 0.1.76): one Windows hook command per hook shell. No single text is usable and fail-closed in
+// cmd.exe, Git Bash and PowerShell at once (windows-hooks.js holds the matrix and the per-host decision), so each
+// form is written for ONE shell and every other shell must hold or fail it closed:
+//   cmd         `"<node>" -e "<stub>" -- <args> || exit 2`
+//   bash        the same text with the node path in forward slashes (a backslash word has no `/`, so bash would search PATH)
+//   powershell  `try { & "<node>" -e "<stub>" -- <args>; $c = $LASTEXITCODE } catch { $c = 99 }; if ($c -eq 0) { exit 0 } else { exit 2 }`
+// Only a pre-action entrypoint carries the tail: it lets exit 0 through and turns EVERY other end into 2: node's
+// own 2 (hold), its 1 (the outage warning POSIX passes: on Windows a runtime that is missing and cannot be fetched
+// blocks, a tightening), node missing (9009, 127, not recognized), a crash code, a signal. Another entrypoint
+// cannot block and is the bare node command. The node path is validated once (absolute drive path, nothing a
+// shell reads inside double quotes, no `.`/`..` part, no curly quote).
+const WINDOWS_HOOK_FORMS = Object.freeze(['cmd', 'bash', 'powershell']);
+const WINDOWS_CMD_LIMIT = 8191;
+// How a host's shell:true spawn wraps the text: cmd.exe /d /s /c "<text>".
+const WINDOWS_CMD_WRAP = 'cmd.exe /d /s /c "';
+
+function windowsCmdLineLength(command) {
+  return WINDOWS_CMD_WRAP.length + String(command).length + 1;
+}
+
+// The cmd.exe limit as a check of its own, apart from the (much lower) WINDOWS_HOOK_MAX of the generator.
+function assertWindowsCmdLength(command) {
+  if (typeof command !== 'string' || windowsCmdLineLength(command) > WINDOWS_CMD_LIMIT) {
+    throw new Error(`the Windows hook command line would be longer than ${WINDOWS_CMD_LIMIT} characters`);
+  }
+  return command;
+}
+
+function windowsHookCommand(version, sub, { form = 'cmd', nodePath, digest, limit = WINDOWS_HOOK_MAX } = {}) {
   if (!VERSION_RE.test(String(version || '')) || String(version).length > 32) throw new Error('invalid MCP version for a Windows hook');
   if (!/^[a-z][a-z-]{0,63}$/.test(String(sub || ''))) throw new Error('invalid entrypoint for a Windows hook');
-  if (typeof nodePath !== 'string' || nodePath.length > WINDOWS_NODE_MAX || !WINDOWS_NODE_RE.test(nodePath)) throw new Error('node is not at a safe absolute Windows path');
-  const tail = PRE_ACTION_SUB_RE.test(sub) ? ' || (if errorlevel 2 (exit 2) else if errorlevel 1 (exit 1) else exit 2)' : '';
-  const command = `"${nodePath}" -e "${windowsStubSource(digest)}" -- --package=@getmarrow/mcp@${version} marrow-mcp ${sub}${tail}`;
-  if (command.length > WINDOWS_HOOK_MAX) throw new Error(`the Windows hook command is ${command.length} characters (limit ${WINDOWS_HOOK_MAX})`);
-  return command;
+  if (!WINDOWS_HOOK_FORMS.includes(form)) throw new Error('unknown Windows hook form');
+  if (typeof nodePath !== 'string' || nodePath.length > WINDOWS_NODE_MAX || !WINDOWS_NODE_RE.test(nodePath) || !windowsNodePathSane(nodePath)) throw new Error('node is not at a safe absolute Windows path');
+  const pre = PRE_ACTION_SUB_RE.test(sub);
+  const args = `-- --package=@getmarrow/mcp@${version} marrow-mcp ${sub}`;
+  const stub = windowsStubSource(digest);
+  let command;
+  if (form === 'powershell') {
+    const run = `& "${nodePath}" -e "${stub}" ${args}`;
+    command = pre ? `try { ${run}; $c = $LASTEXITCODE } catch { $c = 99 }; if ($c -eq 0) { exit 0 } else { exit 2 }` : run;
+  } else if (form === 'bash') {
+    const run = `"${nodePath.replace(/\\/g, '/')}" -e "${stub}" ${args}`;
+    command = pre ? `${run} || exit 2` : run;
+  } else {
+    const run = `"${nodePath}" -e "${stub}" ${args}`;
+    command = pre ? `${run} || exit 2` : run;
+  }
+  // The generator's own cap is far under cmd.exe's 8191; a caller can only lower it, never raise it.
+  if (command.length > Math.min(WINDOWS_HOOK_MAX, limit)) throw new Error(`the Windows hook command is ${command.length} characters (limit ${Math.min(WINDOWS_HOOK_MAX, limit)})`);
+  return assertWindowsCmdLength(command);
+}
+
+// A node path with no `.` or `..` component, no component ending in a space or dot, and no curly quote
+// (PowerShell reads U+2018..U+201E as quotes).
+function windowsNodePathSane(nodePath) {
+  if (/[\u2018-\u201e]/.test(nodePath)) return false;
+  return nodePath.split('\\').slice(1).every((part) => part !== '.' && part !== '..' && !/[ .]$/.test(part));
 }
 
 function privateDirectory(directory) {
@@ -623,10 +675,16 @@ module.exports = {
   runtimeDir,
   runtimeRoot,
   verifyMcpRuntime,
+  WINDOWS_CMD_LIMIT,
+  WINDOWS_HOOK_FORMS,
   WINDOWS_HOOK_MAX,
+  assertWindowsCmdLength,
   launcherDigest,
   launcherPath,
+  windowsCmdLineLength,
+  windowsHookCommand,
   windowsLauncherText,
+  windowsNodePathSane,
   windowsStubCommand,
   windowsStubSource,
   writeWindowsLauncher,
