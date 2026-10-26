@@ -380,7 +380,7 @@ row('NH-12', 'skip route: every skipped host carries the I-1 plugin-route text a
     assert.equal(entry.action, 'skipped');
     assert.ok(entry.message.endsWith(WINDOWS_PLUGIN_ROUTE), entry.host);
   }
-  assert.equal(WINDOWS_PLUGIN_ROUTE, 'On Windows, use the Marrow Claude Code plugin or Cursor plugin for hook protection.');
+  assert.equal(WINDOWS_PLUGIN_ROUTE, 'On Windows, this installer does not set up Marrow hooks yet. Windows hook support is coming in a later release.');
   assert.deepEqual(windowsHookSkipEntries({ ...detection, windowsHooksSkipped: false }).length, process.platform === 'win32' ? 6 : 0);
 });
 

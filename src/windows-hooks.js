@@ -25,9 +25,9 @@
 const WINDOWS_HOOK_SKIP_REASON = 'windows_hook_shell_unverified';
 const SHELLS = Object.freeze(['cmd.exe (spawn shell:true)', 'Git Bash', 'Windows PowerShell 5.1', 'PowerShell 7']);
 
-// Owner ruling L-1 (21 Oct 2026): the installer's Windows skip text points users to the plugins, the
-// supported Windows route. Plain ASCII; every skipped_hosts[].message and the report's `next:` line carry it.
-const WINDOWS_PLUGIN_ROUTE = 'On Windows, use the Marrow Claude Code plugin or Cursor plugin for hook protection.';
+// Owner item 21 (26 Oct 2026): no plugin route on Windows today (the Cursor plugin's win32 fix ships in a later
+// release), so the skip text is neutral. Plain ASCII; every skipped_hosts[].message and the report's `next:` line carry it.
+const WINDOWS_PLUGIN_ROUTE = 'On Windows, this installer does not set up Marrow hooks yet. Windows hook support is coming in a later release.';
 
 // NH (installer 0.1.76): the decision per host is DATA, not a switch. A host gets a native Windows hook only
 // when ONE written form is usable AND fail-closed in every hook shell the host may run it with. FORM_MATRIX
