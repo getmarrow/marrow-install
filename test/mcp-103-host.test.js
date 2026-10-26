@@ -12,8 +12,8 @@ const { mcpServerLaunch, runtimeDir } = require('../src/mcp-runtime');
 const { fakeRuntime } = require('./support/fake-runtime');
 const host = require('./support/mcp-host');
 
-// Installer 0.1.75 against the pinned MCP 3.9.107 (marrow-mcp 3e0bdb1d): what the installer writes
-// for Codex and Cursor, and what the real MCP decision (test/fixtures/mcp-3.9.107, byte for byte)
+// Installer 0.1.75 against the pinned MCP 3.9.108 (marrow-mcp e3752f3b): what the installer writes
+// for Codex and Cursor, and what the real MCP decision (test/fixtures/mcp-3.9.108, byte for byte)
 // does with it. Every host here is a temporary HOME/CODEX_HOME and project; npm_config_* is unset
 // unless a case sets it (test/support/mcp-host.js).
 
@@ -144,7 +144,7 @@ test('Cursor guard with the MCP decision in the loop: official installer config 
   withFixture('marrow-cursor-loop-', {}, (fixture) => {
     installInto(fixture);
     const guard = readJson(path.join(fixture.root, '.cursor', 'hooks.json')).hooks.beforeMCPExecution.find((entry) => isMarrowCommand(entry.command)).command;
-    // The stand-in runtime runs the vendored 3.9.107 decision (test/support/cursor-hook-decision.js).
+    // The stand-in runtime runs the vendored 3.9.108 decision (test/support/cursor-hook-decision.js).
     const driver = path.join(__dirname, 'support', 'cursor-hook-decision.js');
     fakeRuntime(fixture.home, PINS.MCP_ADAPTER_VERSION, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(driver)}\n`);
     const run = (event) => {
@@ -244,7 +244,7 @@ test('an install written by the published 0.1.70: the old Cursor guard (allows s
   });
 });
 
-test('the .cursor/mcp.json the published 0.1.70 wrote is not proven by the 3.9.107 MCP (only the exact launch of the loader that started the hook is), so its own tools are checked, not skipped, until the repair rewrites the entry', () => {
+test('the .cursor/mcp.json the published 0.1.70 wrote is not proven by the 3.9.108 MCP (only the exact launch of the loader that started the hook is), so its own tools are checked, not skipped, until the repair rewrites the entry', () => {
   withFixture('marrow-upgrade-0170-mcp-', {}, (fixture) => {
     load0170(fixture);
     const config = readJson(path.join(fixture.root, '.cursor', 'mcp.json'));

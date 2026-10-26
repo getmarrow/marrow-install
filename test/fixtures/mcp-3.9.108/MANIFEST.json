@@ -1,10 +1,10 @@
 {
   "package": "@getmarrow/mcp",
-  "version": "3.9.107",
+  "version": "3.9.108",
   "source": "marrow-mcp",
-  "source_sha": "3e0bdb1d2023015c7c5816d813a87519c12f7f82",
-  "integrity": "sha512-hZvk+quqAmD9s4pf74SZkaDblK2rQL9hww0S2cbbA48AoSBtB7ktCgcLLALsze0DynTGU6MpiFzjcfDqmB2M5w==",
-  "note": "dist/ files of the 3.9.107 tarball packed from marrow-mcp 3e0bdb1d (src/pins.js), byte for byte. The release chain re-verifies the pin against the published tarball before the installer is published.",
+  "source_sha": "e3752f3baa511bb3071b73f521ba2b3bb526d0fd",
+  "integrity": "sha512-tbgRVlydUbc1or+i68xOO3QprN4Vp9tV0LBGhxD4WhIHeycyS7TqGg2sn4epMajx/nHcO0txjpjOdgqFf/1eEw==",
+  "note": "dist/ files of the 3.9.108 tarball packed from marrow-mcp e3752f3b (src/pins.js), byte for byte. The release chain re-verifies the pin against the published tarball before the installer is published.",
   "files": {
     "own-tool.js": {
       "from": "dist/own-tool.js",
@@ -38,7 +38,7 @@
     },
     "codex-plugin-pins.js": {
       "from": "dist/codex-plugin-pins.js",
-      "sha256": "4572aea25a1f64e9afef4402ba1d927cba2ca4ccb9346424d545b0202d8eeeef",
+      "sha256": "fb8c933d044f2487f5ca68fa04fc83cfffcfd0de0704f373311e60a7c8a06489",
       "bytes": 4204
     },
     "host-session.js": {
