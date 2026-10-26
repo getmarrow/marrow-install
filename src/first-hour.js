@@ -1,3 +1,9 @@
+const { grokHooksSkipped } = require('./grok-platform');
+const { windowsHookWriteSkipped } = require('./windows-hooks');
+
+// Native Windows (F-2c): a hook host whose native hooks are not written has no hooks to restart, trust or capture with.
+const hooked = (detection, flag, client) => Boolean(detection[flag]) && !windowsHookWriteSkipped(detection, client);
+
 function wroteHarnessConfig(changes = []) {
   return (changes || []).some((change) => {
     if (!change || !(change.applied || change.changed)) return false;
@@ -7,43 +13,44 @@ function wroteHarnessConfig(changes = []) {
 
 function harnessReloadPlan(detection = {}, changes = []) {
   const clients = [];
-  if (detection.claudeCode) {
+  if (hooked(detection, 'claudeCode', 'claude-code')) {
     clients.push({
       client: 'claude-code',
       restart: 'Restart Claude Code so native hooks and MCP load.',
     });
   }
-  if (detection.cursor) {
+  if (hooked(detection, 'cursor', 'cursor')) {
     clients.push({
       client: 'cursor',
       restart: 'Restart Cursor or Composer, then review the trusted workspace hooks with /hooks so native lifecycle hooks and project MCP load.',
     });
   }
-  if (detection.cline) {
+  if (hooked(detection, 'cline', 'cline')) {
     clients.push({
       client: 'cline',
       restart: 'Enable Hooks in Cline, trust the project hook executables and workspace, then restart Cline. TaskComplete remains unverified.',
     });
   }
-  if (detection.windsurf) {
+  if (hooked(detection, 'windsurf', 'windsurf')) {
     clients.push({
       client: 'windsurf',
       restart: 'Restart Windsurf, trust the workspace hook configuration, and leave Restricted Mode so native hooks can run.',
     });
   }
-  if (detection.gemini) {
+  if (hooked(detection, 'gemini', 'gemini')) {
     clients.push({
       client: 'gemini',
       restart: 'Restart Gemini CLI, open /hooks panel, and review and approve the project hook fingerprints before treating native hooks as live.',
     });
   }
-  if (detection.grok) {
+  // Native Windows (F-2G): no Grok hooks are written, so there is nothing to restart or trust.
+  if (detection.grok && !grokHooksSkipped(detection)) {
     clients.push({
       client: 'grok',
       restart: 'Restart Grok, inspect /hooks, and confirm the trusted global Marrow hooks are enabled before treating them as live.',
     });
   }
-  if (detection.codex) {
+  if (hooked(detection, 'codex', 'codex')) {
     clients.push({
       client: 'codex',
       restart: 'Start a new Codex session, then review the repository hooks with /hooks before treating them as trusted or live.',
@@ -72,7 +79,7 @@ function harnessReloadPlan(detection = {}, changes = []) {
 }
 
 function firstCapturePath(detection = {}) {
-  if (detection.claudeCode) {
+  if (hooked(detection, 'claudeCode', 'claude-code')) {
     return {
       client: 'claude-code',
       capability_level: 'native_hooks',
@@ -80,7 +87,7 @@ function firstCapturePath(detection = {}) {
       instruction: 'After restart, Claude native hooks capture the next prompt, tool, and session-end automatically.',
     };
   }
-  if (detection.cursor) {
+  if (hooked(detection, 'cursor', 'cursor')) {
     return {
       client: 'cursor',
       capability_level: 'native_hooks',
@@ -88,7 +95,7 @@ function firstCapturePath(detection = {}) {
       instruction: 'After restart and trusted-workspace /hooks review, Cursor and Composer use the same native pre-action, action-result, and outcome-closeout hooks. MCP tools remain on demand. Configuration does not verify runtime coverage.',
     };
   }
-  if (detection.cline) {
+  if (hooked(detection, 'cline', 'cline')) {
     return {
       client: 'cline',
       capability_level: 'native_hooks',
@@ -96,7 +103,7 @@ function firstCapturePath(detection = {}) {
       instruction: 'After Enable Hooks, executable/workspace trust, and restart, Cline uses native PreToolUse, PostToolUse, and TaskCancel hooks. MCP remains on demand. TaskComplete is documented as coming soon and is not verified coverage; configuration does not prove passive runtime coverage.',
     };
   }
-  if (detection.windsurf) {
+  if (hooked(detection, 'windsurf', 'windsurf')) {
     return {
       client: 'windsurf',
       capability_level: 'native_hooks',
@@ -104,7 +111,7 @@ function firstCapturePath(detection = {}) {
       instruction: 'After restart, workspace trust review, and leaving Restricted Mode, Windsurf uses native pre-action, success-result, and response-closeout hooks. MCP tools remain on demand. Configuration does not verify runtime coverage.',
     };
   }
-  if (detection.gemini) {
+  if (hooked(detection, 'gemini', 'gemini')) {
     return {
       client: 'gemini',
       capability_level: 'native_hooks',
@@ -112,7 +119,7 @@ function firstCapturePath(detection = {}) {
       instruction: 'After restart and project fingerprint review and approval in /hooks panel, Gemini CLI uses native BeforeTool, AfterTool, and AfterAgent hooks. MCP tools remain on demand. Explicit hook disablement is preserved, and configuration does not verify runtime coverage.',
     };
   }
-  if (detection.codex) {
+  if (hooked(detection, 'codex', 'codex')) {
     return {
       client: 'codex',
       capability_level: 'native_hooks',
@@ -120,7 +127,7 @@ function firstCapturePath(detection = {}) {
       instruction: 'After restart and owner /hooks trust review, Codex native hooks capture prompt, pre-action, action-result, and session-end events. Configuration alone does not verify runtime coverage.',
     };
   }
-  if (detection.grok) {
+  if (detection.grok && !grokHooksSkipped(detection)) {
     return {
       client: 'grok',
       capability_level: 'native_hooks',

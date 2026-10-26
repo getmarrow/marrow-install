@@ -11,6 +11,20 @@ const {
   stopProjectControllers,
 } = require('./controller-manager');
 const { firstCapturePath, harnessReloadPlan } = require('./first-hour');
+const {
+  GROK_WINDOWS_SKIP_LABEL,
+  GROK_WINDOWS_SKIP_NOTICE,
+  GROK_WINDOWS_SKIP_REASON,
+  grokHooksSkipped,
+} = require('./grok-platform');
+const {
+  WINDOWS_HOOK_SKIP_REASON,
+  WINDOWS_PLUGIN_ROUTE,
+  windowsHookHost,
+  windowsHookNotice,
+  windowsHookSkipEntries,
+  windowsHookWriteSkipped,
+} = require('./windows-hooks');
 const { evidence: localControlEvidence } = require('./control-state');
 const {
   hermesEnvHasKey,
@@ -1221,6 +1235,19 @@ function assertSafeGrokHookTarget(homePath, targetPath) {
   }
 }
 
+// What a skipped Grok write is reported as (plan, install report, doctor). Never `configured`.
+function grokSkipEntry(detection) {
+  return {
+    host: 'Grok',
+    label: GROK_WINDOWS_SKIP_LABEL,
+    path: detection.paths.grokHooks,
+    action: 'skipped',
+    reason: GROK_WINDOWS_SKIP_REASON,
+    configured: false,
+    message: `${GROK_WINDOWS_SKIP_NOTICE} ${WINDOWS_PLUGIN_ROUTE}`,
+  };
+}
+
 function findUp(startDir, names, maxDepth = 8) {
   let dir = path.resolve(startDir);
   for (let depth = 0; depth <= maxDepth; depth += 1) {
@@ -1240,7 +1267,9 @@ function projectRoot(startDir) {
   return marker ? path.dirname(marker) : path.resolve(startDir);
 }
 
-function detectEnvironment(cwd = process.cwd(), env = process.env) {
+// `options.platform` is a test seam: it can only ADD the Grok skip on another platform (F-2G); the
+// real process.platform decides on a real host, whatever the environment or arguments say.
+function detectEnvironment(cwd = process.cwd(), env = process.env, options = {}) {
   const root = projectRoot(cwd);
   const home = env.HOME || env.USERPROFILE || os.homedir();
   const paths = {
@@ -1296,6 +1325,10 @@ function detectEnvironment(cwd = process.cwd(), env = process.env) {
     windsurf: exists(path.join(root, '.windsurf')),
     gemini: exists(path.join(root, '.gemini')),
     grok: exists(path.join(home, '.grok')) || exists(path.join(root, '.grok')),
+    // True on native Windows: Grok may be present, but its native hooks are neither written nor counted (F-2G).
+    grokHooksSkipped: process.platform === 'win32' || options?.platform === 'win32',
+    // True on native Windows: no host's Windows hook shell is proven fail-closed, so no native hooks are written (F-2c).
+    windowsHooksSkipped: process.platform === 'win32' || options?.platform === 'win32',
     codexProject,
     codex: codexProject || codexHooksCarryMarrow(paths.codexHooks) || agentsMdHasOwnerContent(paths.agentsMd),
     hermes: homeHarnesses.hermes === true,
@@ -2328,9 +2361,19 @@ function clineNativeHookFingerprint(detection) {
   })).digest('hex');
 }
 
+// Grok on native Windows (F-2G): no native hooks are written, so the registry's native_hooks entry
+// does not describe it. It is reported as the explicit bounded wrapper fallback with no automatic hooks.
+function grokWindowsRegistry(entry) {
+  return { ...entry, capability_level: 'governed_wrapper', automatic: [], install_surface: 'runner' };
+}
+
 function activationProfile(detection, plan, changes, client) {
-  const registry = HARNESS_CAPABILITY_REGISTRY.find((entry) => entry.client === client)
+  const grokSkipped = client === 'grok' && grokHooksSkipped(detection);
+  // Native Windows (F-2c): a hook host whose hooks were not written is never counted, whatever its files hold.
+  const windowsSkip = windowsHookHost(detection, client);
+  const registryEntry = HARNESS_CAPABILITY_REGISTRY.find((entry) => entry.client === client)
     || HARNESS_CAPABILITY_REGISTRY.find((entry) => entry.client === 'custom');
+  const registry = grokSkipped || windowsSkip ? grokWindowsRegistry(registryEntry) : registryEntry;
   const sdkDependency = inspectSdkDependency(detection, { sdkMode: plan.mode === 'sdk' || plan.mode === 'both' });
   const capabilityLevel = client === 'custom' && (plan.mode === 'sdk' || plan.mode === 'both')
     ? 'sdk_passive_runtime'
@@ -2354,8 +2397,11 @@ function activationProfile(detection, plan, changes, client) {
   const cursorSettings = safeJsonObject(detection.paths.cursorHooks);
   const windsurfSettings = safeJsonObject(detection.paths.windsurfHooks);
   const geminiSettings = safeJsonObject(detection.paths.geminiSettings);
-  const grokSettings = safeJsonObject(detection.paths.grokHooks);
-  if (client === 'codex') {
+  // A Grok hook file found on native Windows is never counted: Marrow did not write it and cannot prove it.
+  const grokSettings = grokSkipped ? {} : safeJsonObject(detection.paths.grokHooks);
+  if (windowsSkip) {
+    // Nothing observed: Marrow wrote no hooks for this host here.
+  } else if (client === 'codex') {
     if (exactHookConfigured(codexSettings, 'UserPromptSubmit', targetCommand(CODEX_CONTEXT_HOOK_COMMAND))) observedHooks.push('prompt');
     if (exactHookConfigured(codexSettings, 'PreToolUse', targetCommand(CODEX_PRE_ACTION_HOOK_COMMAND), CODEX_NATIVE_HOOK_MATCHER)) observedHooks.push('pre_action');
     if (exactHookConfigured(codexSettings, 'PostToolUse', targetCommand(CODEX_ACTION_RESULT_HOOK_COMMAND), CODEX_NATIVE_HOOK_MATCHER)) observedHooks.push('action_result');
@@ -2526,7 +2572,20 @@ function activationProfile(detection, plan, changes, client) {
       session_end_delivery_claimed: false,
       deterministic_closeout: 'AfterAgent',
     } : {}),
-    ...(client === 'grok' ? {
+    ...(grokSkipped ? {
+      grok_native_windows: 'not_governed',
+      skipped_reason: GROK_WINDOWS_SKIP_REASON,
+      notice: GROK_WINDOWS_SKIP_NOTICE,
+      global_hook_path: null,
+      governed_wrapper_fallback: 'explicit_bounded_only',
+    } : {}),
+    ...(windowsSkip ? {
+      native_windows: 'not_governed',
+      skipped_reason: WINDOWS_HOOK_SKIP_REASON,
+      notice: windowsHookNotice(windowsSkip.host),
+      governed_wrapper_fallback: 'explicit_bounded_only',
+    } : {}),
+    ...(client === 'grok' && !grokSkipped ? {
       hooks_user_toggleable: true,
       hook_review_required: true,
       restart_required: true,
@@ -2940,7 +2999,12 @@ function inspectSdkDependency(detection, { sdkMode = false } = {}) {
 
 function defaultHarnessInstallMatrix(detection = detectEnvironment(process.cwd())) {
   const node = Boolean(detection.node);
-  return HARNESS_CAPABILITY_REGISTRY.map((entry) => {
+  return HARNESS_CAPABILITY_REGISTRY.map((registryEntry) => {
+    // Native Windows (F-2G): Grok is detected, never configured, and not a native_hooks host.
+    const grokSkipped = registryEntry.client === 'grok' && grokHooksSkipped(detection);
+    // Native Windows (F-2c): a hook host whose hooks are not written is never configured or native_hooks.
+    const windowsSkip = windowsHookHost(detection, registryEntry.client);
+    const entry = grokSkipped || windowsSkip ? grokWindowsRegistry(registryEntry) : registryEntry;
     const detected = detectedClient(detection) === entry.client
       || (entry.client === 'claude-code' && detection.claudeCode)
       || (entry.client === 'cursor' && detection.cursor)
@@ -3005,7 +3069,7 @@ function defaultHarnessInstallMatrix(detection = detectEnvironment(process.cwd()
         undefined, GEMINI_CLOSEOUT_TIMEOUT_MS,
       ));
     const grokSettings = entry.client === 'grok' ? safeJsonObject(detection.paths.grokHooks) : null;
-    const grokConfigured = Boolean(grokSettings
+    const grokConfigured = !grokSkipped && Boolean(grokSettings
       && exactGrokHookConfigured(
         grokSettings, 'PreToolUse', GROK_PRE_ACTION_HOOK_COMMAND, GROK_NATIVE_HOOK_MATCHER, 7,
       )
@@ -3038,9 +3102,10 @@ function defaultHarnessInstallMatrix(detection = detectEnvironment(process.cwd()
             : entry.client === 'grok' ? detection.grok
             : false,
         ),
-        governed_wrapper: entry.capability_level === 'governed_wrapper',
+        governed_wrapper: entry.capability_level === 'governed_wrapper' && !grokSkipped && !windowsSkip,
       },
-      configured_locally: entry.client === 'codex' ? codexConfigured
+      configured_locally: windowsSkip ? false
+        : entry.client === 'codex' ? codexConfigured
         : ['cursor', 'composer'].includes(entry.client) ? cursorConfigured
         : entry.client === 'cline' ? clineConfigured
         : entry.client === 'windsurf' ? windsurfConfigured
@@ -3048,7 +3113,13 @@ function defaultHarnessInstallMatrix(detection = detectEnvironment(process.cwd()
         : entry.client === 'grok' ? grokConfigured
         : detected && entry.automatic.length > 0,
       verified_passive: false,
-      unsupported_claim: entry.client === 'cline'
+      ...(grokSkipped ? { skipped_reason: GROK_WINDOWS_SKIP_REASON } : {}),
+      ...(windowsSkip ? { skipped_reason: WINDOWS_HOOK_SKIP_REASON } : {}),
+      unsupported_claim: grokSkipped
+        ? GROK_WINDOWS_SKIP_NOTICE
+        : windowsSkip
+        ? windowsHookNotice(windowsSkip.host)
+        : entry.client === 'cline'
         ? 'TaskComplete is documented as coming soon and is not configured or counted as observed coverage.'
         : entry.client === 'windsurf'
         ? 'Restricted Mode disables hooks; configuration requires restart and trust review and never verifies passive coverage.'
@@ -3185,7 +3256,7 @@ function buildPlan(detection, options) {
   }
 
   if (mode === 'mcp' || mode === 'both') {
-    if (detection.claudeCode) {
+    if (detection.claudeCode && !windowsHookWriteSkipped(detection, 'claude-code')) {
       writes.push({
         type: 'json-transform',
         path: detection.paths.claudeSettings,
@@ -3193,7 +3264,7 @@ function buildPlan(detection, options) {
         transform: (filePath) => localize(retarget(upsertClaudeHooks(filePath, { hostApprovals })), filePath),
       });
     }
-    if (detection.codex) {
+    if (detection.codex && !windowsHookWriteSkipped(detection, 'codex')) {
       writes.push({
         type: 'json-transform',
         path: detection.paths.codexHooks,
@@ -3201,7 +3272,7 @@ function buildPlan(detection, options) {
         transform: (filePath) => localize(retarget(upsertCodexHooks(filePath)), filePath),
       });
     }
-    if (detection.cline) {
+    if (detection.cline && !windowsHookWriteSkipped(detection, 'cline')) {
       for (const hook of clineHookContract(detection)) {
         writes.push({
           type: 'owned-executable',
@@ -3215,7 +3286,7 @@ function buildPlan(detection, options) {
         });
       }
     }
-    if (detection.windsurf) {
+    if (detection.windsurf && !windowsHookWriteSkipped(detection, 'windsurf')) {
       writes.push({
         type: 'json-transform',
         path: detection.paths.windsurfHooks,
@@ -3223,7 +3294,7 @@ function buildPlan(detection, options) {
         transform: (filePath) => localize(retarget(upsertWindsurfHooks(filePath)), filePath),
       });
     }
-    if (detection.gemini) {
+    if (detection.gemini && !windowsHookWriteSkipped(detection, 'gemini')) {
       writes.push({
         type: 'json-transform',
         path: detection.paths.geminiSettings,
@@ -3231,7 +3302,7 @@ function buildPlan(detection, options) {
         transform: (filePath) => localize(retarget(upsertGeminiHooks(filePath, { hostApprovals })), filePath),
       });
     }
-    if (detection.grok) {
+    if (detection.grok && !grokHooksSkipped(detection)) {
       writes.push({
         type: 'managed-json-transform',
         path: detection.paths.grokHooks,
@@ -3259,12 +3330,14 @@ function buildPlan(detection, options) {
       });
     }
     if (detection.cursor) {
-      writes.push({
-        type: 'json-transform',
-        path: detection.paths.cursorHooks,
-        label: 'Cursor native hooks',
-        transform: (filePath) => localize(retarget(upsertCursorHooks(filePath, { hostApprovals })), filePath),
-      });
+      if (!windowsHookWriteSkipped(detection, 'cursor')) {
+        writes.push({
+          type: 'json-transform',
+          path: detection.paths.cursorHooks,
+          label: 'Cursor native hooks',
+          transform: (filePath) => localize(retarget(upsertCursorHooks(filePath, { hostApprovals })), filePath),
+        });
+      }
       writes.push(mcpConfigWrite(detection.paths.cursorMcp, 'Cursor MCP server config'));
     }
   }
@@ -3289,6 +3362,11 @@ function buildPlan(detection, options) {
     });
   }
 
+  // Native Windows (F-2G, F-2c): the Grok and hook-host writes above are not planned; say so, and
+  // never call those hosts configured.
+  const skippedHosts = mode === 'mcp' || mode === 'both'
+    ? [...windowsHookSkipEntries(detection), ...(detection.grok && grokHooksSkipped(detection) ? [grokSkipEntry(detection)] : [])]
+    : [];
   const updateOnly = update && options.updateOnly === true;
   // Doctor reads the same filter, only to name the hosts whose hooks are absent; it writes nothing.
   const doctorNamesAbsent = !updateOnly && options.doctor === true && options.maintenance !== true;
@@ -3310,6 +3388,7 @@ function buildPlan(detection, options) {
     root: detection.root,
     writes: planned,
     ...(skipped.length ? { update_skipped: skipped } : {}),
+    ...(skippedHosts.length ? { skipped_hosts: skippedHosts } : {}),
     ...(absentHosts.length ? { absent_hosts: absentHosts } : {}),
     ...(absentMcpConfig.length ? { absent_mcp_config: absentMcpConfig } : {}),
     mcp_target_version: mcpTargetVersion,
@@ -3809,6 +3888,11 @@ async function uninstall(options = {}) {
           changes.push({ ...change, action: 'skipped', reason: 'not managed by Marrow' });
           continue;
         }
+        // Native Windows (F-2G): the same explicit skip as install; the proof below cannot pass there.
+        if (grokHooksSkipped(detection)) {
+          changes.push({ ...change, action: 'skipped', reason: GROK_WINDOWS_SKIP_REASON });
+          continue;
+        }
         assertSafeGrokHookTarget(writeRoot, step.path);
       }
       assertContainedManagedTarget(writeRoot, step.path);
@@ -4025,11 +4109,32 @@ function selfTestDecisionId(data) {
   return typeof decisionId === 'string' && decisionId ? decisionId : undefined;
 }
 
+// How the isolated loop-guard self-test starts the pinned MCP (F-2b). POSIX: `npx`, as before.
+// Windows: Node refuses to spawn a .cmd file without a shell (EINVAL), and a shell command line
+// built from paths would be an injection risk, so the running node starts npm's own npx-cli.js
+// (next to node, the same layout npmInvocation uses for npm-cli.js) with the arguments as an array.
+// No shell, no .cmd. When npx-cli.js is not there the self-test fails closed: it is never skipped.
+// `platform` and `execPath` are test seams; a real host reads process.platform and process.execPath.
+function loopGuardInvocation(version, { platform = process.platform, execPath = process.execPath } = {}) {
+  const args = ['-y', `--package=@getmarrow/mcp@${version}`, 'marrow-mcp', 'loop-guard-self-test'];
+  if (platform !== 'win32') return { command: 'npx', args };
+  const cli = path.join(path.dirname(execPath), 'node_modules', 'npm', 'bin', 'npx-cli.js');
+  let found = false;
+  try {
+    found = fs.statSync(cli).isFile();
+  } catch {
+    found = false;
+  }
+  if (!found) return { command: null, args, reason: `npx-cli.js was not found next to node (${cli}); repair the Node.js and npm installation, then run npx @getmarrow/install --repair` };
+  return { command: execPath, args: [cli, ...args] };
+}
+
 function runLoopGuardSelfTest(options = {}) {
   const target = executableMcpTarget(options);
+  const planned = loopGuardInvocation(target.version, { platform: options.loopGuardPlatform, execPath: options.loopGuardExecPath });
+  if (!planned.command) throw new Error(`MCP ${target.version} isolated loop-guard self-test failed: ${planned.reason}`);
   const isolatedHome = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-install-loop-guard-'));
-  const command = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-  const args = ['-y', `--package=@getmarrow/mcp@${target.version}`, 'marrow-mcp', 'loop-guard-self-test'];
+  const { command, args } = planned;
   try {
     const invocation = {
       command,
@@ -4689,6 +4794,10 @@ function printReport(report, sink) {
   for (const skipped of missing.others) {
     out(`- left alone by update: ${skipped.label} (${skipped.path}) has no Marrow config; ${UPDATE_SKIPPED_FIX}\n`);
   }
+  for (const skipped of report.skipped_hosts || []) {
+    out(`- skipped: ${skipped.label} (${skipped.path}) [${skipped.reason}]\n`);
+    out(`  ${skipped.message}\n`);
+  }
 
   if (report.mcp_runtime) {
     const runtime = report.mcp_runtime;
@@ -4710,7 +4819,10 @@ function printReport(report, sink) {
   out(`- configured: ${report.loop_guard_configured ? 'yes' : 'no'}\n`);
   out(`- isolated self-test passed: ${report.loop_guard_self_tested ? 'yes' : 'no'}\n`);
   out(`- observed in a reloaded host: ${report.loop_guard_observed ? 'yes' : 'no'}\n`);
-  if (!report.loop_guard_observed) {
+  if (!report.loop_guard_observed && (report.skipped_hosts || []).some((skipped) => skipped.reason === WINDOWS_HOOK_SKIP_REASON)) {
+    // Native Windows (F-2c): no native hooks were written, so there is no hook to restart or trust.
+    out(`- next: no native hooks were written on native Windows (see skipped above); wrap protected commands with npx @getmarrow/install run -- <command>. ${WINDOWS_PLUGIN_ROUTE}\n`);
+  } else if (!report.loop_guard_observed) {
     out('- next: restart the host and complete its hook trust/review step before relying on live enforcement\n');
   }
 
@@ -4881,6 +4993,7 @@ function printReport(report, sink) {
     for (const problem of report.doctor.key_problems || []) out(`- key problem: ${problem.summary}\n`);
     for (const host of groupMissingHosts(report.doctor.hooks_missing_hosts).hosts.keys()) out(`- ${doctorMissingHooksLine(host)}\n`);
     for (const entry of report.doctor.mcp_config_host_unknown || []) out(`- MCP config (host unknown): ${entry.file} carries no Marrow server entry. No host marker (.claude, CLAUDE.md, .cursor, .codex, ...) names a host for it, so doctor counts it as no host's coverage.\n`);
+    for (const skipped of report.doctor.skipped_hosts || []) out(`- ${skipped.host} coverage: not configured (${skipped.reason}). ${skipped.message}\n`);
     const plugins = report.doctor.agent_plugins || [];
     if (!plugins.length) out('- agent plugins: none\n');
     for (const plugin of plugins) out(`- agent plugin: ${plugin.summary}\n`);
@@ -5385,7 +5498,9 @@ async function install(options) {
     mcp_runtime: mcpRuntimeReport(mcpRuntime, { legacyNpxHooks: legacyNpxHookFiles(detection), switchIgnored: options.localRuntimeSwitchIgnored === true }),
     changes,
     ...(plan.update_skipped ? { update_skipped: plan.update_skipped } : {}),
+    ...(plan.skipped_hosts ? { skipped_hosts: plan.skipped_hosts } : {}),
     doctor: {
+      ...(plan.skipped_hosts ? { skipped_hosts: plan.skipped_hosts } : {}),
       ...(hooksMissingHosts.length ? { hooks_missing_hosts: hooksMissingHosts } : {}),
       active: Boolean(!selfTest.skipped && selfTest.active),
       ...(options.doctor ? { seatbelt: seatbeltReport(seatbeltStatus, seatbeltRefusal) } : {}),
@@ -5535,6 +5650,7 @@ function installSummaryLines(report, options) {
         : `Kept agent identity ${kept.value} (recorded by this installer) in ${change.path}.`);
     }
   }
+  for (const skipped of report.skipped_hosts || []) lines.push(`Skipped ${skipped.label}: ${skipped.message}`);
   const missingHosts = groupMissingHosts(report.update_skipped);
   for (const host of missingHosts.hosts.keys()) lines.push(missingHooksLine(host));
   if (missingHosts.others.length) {
@@ -5679,6 +5795,7 @@ module.exports = {
   install,
   runSelfTest,
   runLoopGuardSelfTest,
+  loopGuardInvocation,
   runCli,
   passiveRuntimeSource,
   inspectSdkDependency,

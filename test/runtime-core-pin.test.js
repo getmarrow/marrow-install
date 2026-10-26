@@ -20,8 +20,8 @@ const host = require('./support/mcp-host');
 //   1. add the new core's SHA-256 (RUNTIME_CORE_SOURCE_SHA256 below) to INSTALLER_RUNTIME_CORE_SHA256
 //      in marrow-mcp and release that MCP first;
 //   2. re-vendor test/fixtures/mcp-* from it and set the constants here.
-const RUNTIME_CORE_FILE_SHA256 = '5d6eb93bef4d5318f2853f89291f1cb7b61a1f714049c6e2703efc2fa152283c';
-const RUNTIME_CORE_SOURCE_SHA256 = '73ea57796c017abfd144b43f3b91c9c935314c156ba523cbca525ebc1f977cb0';
+const RUNTIME_CORE_FILE_SHA256 = '3d498df4cdd7e96bbc7a9553594c8d12e3cb6b3bc277c932276fff66f75c5a80';
+const RUNTIME_CORE_SOURCE_SHA256 = '7c363a3e1d08561f8c31990df306b3ecdcbb9786929a46f2008b15658f84703a';
 const CHANGE_MESSAGE = 'src/runtime-core.js changed: its SHA-256 must first be added to @getmarrow/mcp INSTALLER_RUNTIME_CORE_SHA256 '
   + '(src/own-server-identity.ts) and that MCP released and re-vendored (test/fixtures/mcp-*); only then update the constants in this test';
 

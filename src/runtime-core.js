@@ -14,7 +14,11 @@
 // npm-cli.js exists), shell:false, --ignore-scripts, --no-bin-links, an explicit
 // private --prefix stage that is also the working directory, every npm-owned npm_* variable removed except
 // an exact allowlist of network settings (registry, proxy, CA) from npm_config_* env, and the
-// pinned sha512 integrity, version and entry checked before the stage is renamed into place. When
+// pinned sha512 integrity, version and entry checked before the stage is renamed into place. The
+// stage sits under the real path of ~/.marrow/runtime/mcp (Q5): npm keys its lockfile by the real
+// path, so a HOME behind a symlinked parent (macOS /var, Fedora Atomic /home) still gets the exact
+// node_modules/@getmarrow/mcp key. ~/.marrow and its runtime folders must still not be links, and a
+// real path that cannot be read or is not private holds (unsafe_directory). When
 // a network setting is passed, the install must be exactly the pinned MCP and SDK, each with its
 // pinned integrity, so the registry it names can only serve the pinned bytes.
 // npm auth (FU-1): the owner's npm config, and so their auth, is used only when no network
@@ -369,7 +373,14 @@ function runtimeCore() {
     let stage = null;
     try {
       ensurePrivateRoot(home);
-      stage = path.join(rootOf(home), '.stage-' + version + '-' + process.pid + '-' + crypto.randomBytes(4).toString('hex'));
+      let realRoot = null;
+      try {
+        realRoot = fs.realpathSync.native(rootOf(home));
+      } catch {
+        realRoot = null;
+      }
+      if (!realRoot || !SAFE_PATH_RE.test(realRoot) || !privateDirectoryOk(realRoot, platform)) return { state: 'failed', reason: 'unsafe_directory' };
+      stage = path.join(realRoot, '.stage-' + version + '-' + process.pid + '-' + crypto.randomBytes(4).toString('hex'));
       fs.mkdirSync(stage, { mode: 0o700 });
       const dependencies = { '@getmarrow/mcp': version };
       const pin = sdkPin(sdk);
@@ -419,9 +430,9 @@ function runtimeCore() {
       }, null, 2) + '\n', { mode: 0o600 });
       const raced = verify(home, version, integrity, { platform });
       if (raced) return { ...raced, state: 'present', removed_versions: pruned() };
-      removeQuietly(directory);
+      removeQuietly(path.join(realRoot, version));
       try {
-        fs.renameSync(stage, directory);
+        fs.renameSync(stage, path.join(realRoot, version));
       } catch (error) {
         const other = verify(home, version, integrity, { platform });
         if (other) return { ...other, state: 'present', removed_versions: pruned() };

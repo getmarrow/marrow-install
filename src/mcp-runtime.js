@@ -24,6 +24,7 @@
 // Hook commands reach the runtime through the home directory, so project hook files stay the same
 // for every user and name no local path.
 
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const zlib = require('node:zlib');
@@ -127,11 +128,20 @@ function loaderFor(cfg) {
   return loaderCache.get(source);
 }
 
+// The cores earlier installers shipped (SHA-256 of the core text a loader embeds, the value
+// @getmarrow/mcp lists as INSTALLER_RUNTIME_CORE_SHA256): installers 0.1.70-0.1.73. A loader with
+// one of them, in exactly the launcher layout, is still Marrow's own, so update and repair rewrite,
+// and uninstall removes, the hooks those installers wrote instead of reading them as owner hooks.
+// Such a command is never kept as it is: the keep check (localizeHookSettingsText) asks for
+// today's core only.
+const PREVIOUS_CORE_SHA256 = new Set(['73ea57796c017abfd144b43f3b91c9c935314c156ba523cbca525ebc1f977cb0']);
+const LAUNCHER_TAIL = ')().main(CFG, global.MARROW_L);\n';
+
 // The configuration a loader carries, only when it decodes to exactly the launcher this module
 // writes for that configuration (compressed bytes may differ between zlib builds; the code that
-// runs may not). A write with another configuration (integrity) than the current target's
-// replaces the command.
-function loaderConfig(loader) {
+// runs may not), or the same launcher around a previous core (unless `current` is set). A write
+// with another configuration (integrity) than the current target's replaces the command.
+function loaderConfig(loader, { current = false } = {}) {
   const match = String(loader || '').match(new RegExp(`^${LOADER_PATTERN}$`));
   if (!match) return null;
   let source;
@@ -150,7 +160,13 @@ function loaderConfig(loader) {
   }
   if (!parsed || typeof parsed !== 'object' || !VERSION_RE.test(String(parsed.version || ''))) return null;
   const cfg = core.configOf(parsed.version, parsed.integrity, parsed.sdk);
-  return launcherSource(cfg) === source ? cfg : null;
+  const expected = launcherSource(cfg);
+  if (expected === source) return cfg;
+  if (current) return null;
+  const head = expected.slice(0, expected.indexOf('\n(') + 2);
+  if (!source.startsWith(head) || !source.endsWith(LAUNCHER_TAIL) || source.length < head.length + LAUNCHER_TAIL.length) return null;
+  const previous = source.slice(head.length, source.length - LAUNCHER_TAIL.length);
+  return PREVIOUS_CORE_SHA256.has(crypto.createHash('sha256').update(previous).digest('hex')) ? cfg : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -236,10 +252,10 @@ function withCanonicalLoaders(command, cfg) {
 }
 
 // The configuration of every loader in a command, when all are valid and carry the same one.
-function commandConfig(loaders) {
+function commandConfig(loaders, options = {}) {
   let cfg = null;
   for (const loader of loaders) {
-    const found = loaderConfig(loader);
+    const found = loaderConfig(loader, options);
     if (!found || (cfg && JSON.stringify(found) !== JSON.stringify(cfg))) return null;
     cfg = found;
   }
@@ -378,7 +394,8 @@ function localizeHookSettingsText(text, version, { platform = process.platform, 
       mapHookCommands(JSON.parse(previousText), (command) => {
         const canonical = delocalizeHookCommand(command);
         const loaders = [...command.matchAll(new RegExp(LOADER_PATTERN, 'g'))].map((match) => match[0]);
-        const cfg = loaders.length ? commandConfig(loaders) : null;
+        // Only a command on today's core is kept; one on a previous core is rewritten.
+        const cfg = loaders.length ? commandConfig(loaders, { current: true }) : null;
         if (canonical !== command && cfg && JSON.stringify(cfg) === expected
           && (platform === 'win32') === command.startsWith('node -e "')) keep.set(canonical, command);
         return command;
@@ -451,6 +468,116 @@ function mcpServerLaunchVersion(entry) {
   return ['linux', 'win32'].some((platform) => JSON.stringify(mcpServerLaunch(version, { ...cfg, platform })) === written) ? version : null;
 }
 
+// ---------------------------------------------------------------------------
+// F-2c: the short Windows hook form. The inline loader is over 9000 characters and cmd.exe stops at
+// 8191, so a Windows hook carries only a short stub: node by its absolute path (no PATH or
+// current-folder lookup) on a stub that reads ~/.marrow/runtime/launcher/<sha256>.cjs once, runs it
+// only when those exact bytes hash to the digest the stub carries and the folders and file are
+// private (owner, no link; POSIX: no group or other bits), and otherwise prints the hold (pre-action,
+// exit 2) or failure text (exit 1). The launcher file is the inline loader, byte for byte, so the code
+// that runs is the same runtimeCore with the same configuration. A missing launcher holds; it is not
+// healed by the hook (the installer and --repair write it). An error thrown while the runtime starts
+// holds too. The tail after the node command is cmd.exe syntax: any start failure of node (9009, 3,
+// a crash code) becomes 2 for a pre-action entrypoint, while node's own 0, 1 (the outage warning) and
+// 2 pass through. No installer path writes this form while every Windows hook host is skipped
+// (windows-hooks.js); it is kept here, tested, for a host whose hook shell is proven.
+// ---------------------------------------------------------------------------
+
+const WINDOWS_HOOK_MAX = 2048;
+const WINDOWS_NODE_MAX = 500;
+const DIGEST_RE = /^[0-9a-f]{64}$/;
+// An absolute drive path to node.exe with nothing cmd, PowerShell or bash would read inside double
+// quotes: no UNC or \\?\ prefix, no quote, %, !, ^, &, |, <, >, $, backtick or control character.
+const WINDOWS_NODE_RE = /^[A-Za-z]:\\(?:[^\\/:*?"<>|%!^&$`'\u0000-\u001f]+\\)*node\.exe$/i;
+// Inside double quotes cmd.exe, bash and PowerShell read none of these (no quote, $, %, !, backslash or backtick).
+const STUB_SAFE_RE = /^[A-Za-z0-9 _.,;:(){}[\]=+*/?'#@~<>&|-]+$/;
+
+function launcherDir(home) {
+  return path.join(home, '.marrow', 'runtime', 'launcher');
+}
+
+function launcherPath(home, digest) {
+  return path.join(launcherDir(home), `${digest}.cjs`);
+}
+
+// The launcher file's exact bytes for a configuration: the inline loader itself.
+function windowsLauncherText(cfg) {
+  return loaderFor(cfg);
+}
+
+function launcherDigest(text) {
+  return crypto.createHash('sha256').update(Buffer.from(text, 'utf8')).digest('hex');
+}
+
+// The stub's own JavaScript. It reads the launcher once and hashes the same bytes it runs.
+function windowsStubSource(digest) {
+  if (!DIGEST_RE.test(String(digest || ''))) throw new Error('invalid launcher digest');
+  const fail = (text) => `'${text}'`;
+  const source = [
+    "(()=>{const f=require('fs'),p=require('path'),a=process.argv.slice(1),pre=String(a[2]).endsWith('-pre-action-hook');",
+    `const no=()=>{process.stderr.write((pre?${fail(HOLD_TEXT)}:${fail(UNAVAILABLE_TEXT)})+String.fromCharCode(10));process.exitCode=pre?2:1};`,
+    "let t=null;try{const u=process.getuid?process.getuid():null,w=process.platform==='win32',",
+    'ok=(s,d)=>(d?s.isDirectory():s.isFile())&&s.isSymbolicLink()==false&&(u===null||s.uid===u)&&(w||(s.mode&63)==0);',
+    "let x=require('os').homedir();for(const n of ['.marrow','runtime','launcher']){x=p.join(x,n);if(ok(f.lstatSync(x),1)==false)throw 0}",
+    `x=p.join(x,'${digest}.cjs');if(ok(f.lstatSync(x),0)==false)throw 0;t=f.readFileSync(x);`,
+    `if((require('crypto').createHash('sha256').update(t).digest('hex')=='${digest}')==false)t=null}catch{t=null}`,
+    "if(t===null){no();return}try{eval(t+'')}catch{no()}})()",
+  ].join('');
+  if (!STUB_SAFE_RE.test(source)) throw new Error('the Windows hook stub carries a character a shell could read');
+  return source;
+}
+
+// The full Windows hook command for one entrypoint. Throws when an input is unsafe or the result
+// would be longer than WINDOWS_HOOK_MAX (a caller then skips the host; it never writes a long form).
+function windowsStubCommand(version, sub, { nodePath, digest } = {}) {
+  if (!VERSION_RE.test(String(version || '')) || String(version).length > 32) throw new Error('invalid MCP version for a Windows hook');
+  if (!/^[a-z][a-z-]{0,63}$/.test(String(sub || ''))) throw new Error('invalid entrypoint for a Windows hook');
+  if (typeof nodePath !== 'string' || nodePath.length > WINDOWS_NODE_MAX || !WINDOWS_NODE_RE.test(nodePath)) throw new Error('node is not at a safe absolute Windows path');
+  const tail = PRE_ACTION_SUB_RE.test(sub) ? ' || (if errorlevel 2 (exit 2) else if errorlevel 1 (exit 1) else exit 2)' : '';
+  const command = `"${nodePath}" -e "${windowsStubSource(digest)}" -- --package=@getmarrow/mcp@${version} marrow-mcp ${sub}${tail}`;
+  if (command.length > WINDOWS_HOOK_MAX) throw new Error(`the Windows hook command is ${command.length} characters (limit ${WINDOWS_HOOK_MAX})`);
+  return command;
+}
+
+function privateDirectory(directory) {
+  try {
+    fs.mkdirSync(directory, { mode: 0o700 });
+  } catch (error) {
+    if (!error || error.code !== 'EEXIST') throw error;
+  }
+  const stat = fs.lstatSync(directory);
+  const me = typeof process.getuid === 'function' ? process.getuid() : null;
+  if (!stat.isDirectory() || stat.isSymbolicLink() || (me !== null && stat.uid !== me)) throw new Error(`unsafe runtime directory ${directory}`);
+  if ((stat.mode & 0o077) !== 0) fs.chmodSync(directory, 0o700);
+}
+
+// Writes (or keeps) the launcher for a configuration: ~/.marrow, ~/.marrow/runtime and the launcher
+// folder private (0700, owner, not links), the file 0600, written beside and renamed into place.
+function writeWindowsLauncher(home, cfg) {
+  const text = windowsLauncherText(cfg);
+  const digest = launcherDigest(text);
+  for (const directory of [path.join(home, '.marrow'), path.join(home, '.marrow', 'runtime'), launcherDir(home)]) privateDirectory(directory);
+  const target = launcherPath(home, digest);
+  try {
+    const stat = fs.lstatSync(target);
+    if (stat.isFile() && fs.readFileSync(target, 'utf8') === text) {
+      if ((stat.mode & 0o077) !== 0) fs.chmodSync(target, 0o600);
+      return { path: target, digest, state: 'present' };
+    }
+  } catch {
+    // absent: written below
+  }
+  const temp = `${target}.${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
+  fs.writeFileSync(temp, text, { mode: 0o600, flag: 'wx' });
+  try {
+    fs.renameSync(temp, target);
+  } catch (error) {
+    fs.rmSync(temp, { force: true });
+    throw error;
+  }
+  return { path: target, digest, state: 'written' };
+}
+
 // Whether a hook file's text still starts @getmarrow/mcp through npx (the canonical form, an
 // earlier local form with its npx fallback, or a guard that spawns npx): such a file needs repair.
 function hookTextUsesNpx(text) {
@@ -496,4 +623,11 @@ module.exports = {
   runtimeDir,
   runtimeRoot,
   verifyMcpRuntime,
+  WINDOWS_HOOK_MAX,
+  launcherDigest,
+  launcherPath,
+  windowsLauncherText,
+  windowsStubCommand,
+  windowsStubSource,
+  writeWindowsLauncher,
 };
