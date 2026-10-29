@@ -1,7 +1,7 @@
 'use strict';
 
 // Hermetic host fixtures for the pinned @getmarrow/mcp decision. The decision code is the real
-// dist/ of 3.9.108 (test/fixtures/mcp-3.9.108, pinned by sha256 in own-tool-matchers.test.js), not a
+// dist/ of 3.9.109 (test/fixtures/mcp-3.9.109, pinned by sha256 in own-tool-matchers.test.js), not a
 // copy of its rules. Every fixture is a temporary HOME (and CODEX_HOME) plus a temporary project:
 // the decision reads only those, never the operator's home or npm configuration, and runs with
 // every `npm_config_*` name unset and no real process ancestor, so a result never depends on the
@@ -10,7 +10,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const MCP_FIXTURES = path.join(__dirname, '..', 'fixtures', 'mcp-3.9.108');
+const MCP_FIXTURES = path.join(__dirname, '..', 'fixtures', 'mcp-3.9.109');
 const PLUGIN_FIXTURE = path.join(__dirname, '..', 'fixtures', 'codex-plugin-b446393', 'marrow');
 const identity = require(path.join(MCP_FIXTURES, 'own-server-identity.js'));
 const ownTool = require(path.join(MCP_FIXTURES, 'own-tool.js'));

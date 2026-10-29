@@ -88,7 +88,7 @@ function codexSelects(matcher, tool) {
   return new RegExp(matcher).test(tool);
 }
 // The Codex matcher is `*`, so the hook alone decides what is skipped. That decision is the real
-// @getmarrow/mcp 3.9.108 one (marrow-mcp e3752f3b): test/fixtures/mcp-3.9.108/ holds dist/ of the pinned
+// @getmarrow/mcp 3.9.109 one (marrow-mcp 5e3cd3aa): test/fixtures/mcp-3.9.109/ holds dist/ of the pinned
 // package, byte for byte (the checksum test below pins it), not a copy of its rules written here. A label
 // is skipped only when it is exactly `mcp__marrow__<own>` AND the host's own Codex configuration proves the
 // `marrow` server is the official one. PROVEN is a temporary CODEX_HOME whose config.toml is the README
@@ -218,20 +218,21 @@ function probes(key) {
 }
 
 // sha256 of each vendored file, written here as well as in MANIFEST.json so that editing one of
-// the two is caught. They are dist/ of @getmarrow/mcp 3.9.108 (marrow-mcp e3752f3b; only own-tool.js, which
-// carries the Claude Code matcher, codex-plugin-pins.js and own-server-identity.js differ from the 3.9.103 files), and the 3.9.102
+// the two is caught. They are dist/ of @getmarrow/mcp 3.9.109 (marrow-mcp 5e3cd3aa; only redact.js differs from the 3.9.108 files and key-class.js (which redact.js requires) is new,
+// and only own-tool.js, which carries the Claude Code matcher, codex-plugin-pins.js and own-server-identity.js differ from the 3.9.103 files), and the 3.9.102
 // baseline (3a2bf85e) the published 0.1.70 pinned.
 const VENDORED_MCP = {
-  sourceSha: 'e3752f3baa511bb3071b73f521ba2b3bb526d0fd',
+  sourceSha: '5e3cd3aa8e745ddaaa1d5982d53980d0aeaceaed',
   files: {
     'own-tool.js': '09e7b5b2c3bae1abe1955bf54bf1763f58bbacc4a4abb258633ab4a81d7a6e8b',
     'tool-catalog.js': 'd413c2b7c46c7ed9c7a8b0694481c1f5afe850c3edc67cd28917dc1153b934cb',
     'model-usage.js': 'c7ddbc3482d5a7514453d0be38fa7c51e2f228a50039f3392544319b8defc577',
-    'redact.js': '1f7afe22e5bd8b0b8181978d4dc7149e2aec8591459a51a733130d94c5d8da9b',
+    'redact.js': 'e3b1410f17b9a6ae22f710a20ff7224cdd0678a6c4392b9274dc685432356de3',
     'own-server-identity.js': '9871e4975ba881a375a496c261f896d6255204d913389348961f4b1a1096bf78',
     'codex-plugins.js': '697e0444c1dc8856ed61ffa169fb39707b76c9a0f4752f6cb4121e315f4b107f',
     'codex-plugin-pins.js': 'fb8c933d044f2487f5ca68fa04fc83cfffcfd0de0704f373311e60a7c8a06489',
     'host-session.js': '422544dfaf4f75a5e78a607ea8565050f8b11368f9ed275f298f8c1b1b7b350e',
+    'key-class.js': '8cc54418067038fcfe9cece67ff4490e761fd407cfdfcc0bf8dafef4e29d6665',
   },
 };
 const VENDORED_MCP_0170 = {
@@ -258,15 +259,15 @@ function checkVendored(directory, vendored, version) {
   return manifest;
 }
 
-test('the vendored MCP 3.9.108 files are byte for byte the pinned @getmarrow/mcp, and the real hook lists the registered names', () => {
-  const manifest = checkVendored(MCP_FIXTURES, VENDORED_MCP, '3.9.108');
+test('the vendored MCP 3.9.109 files are byte for byte the pinned @getmarrow/mcp, and the real hook lists the registered names', () => {
+  const manifest = checkVendored(MCP_FIXTURES, VENDORED_MCP, '3.9.109');
   assert.equal(manifest.source_sha, PINS.MCP_ADAPTER_SOURCE_SHA, 'the vendored files are for the pinned MCP source');
   assert.equal(manifest.version, PINS.MCP_ADAPTER_VERSION);
   assert.equal(manifest.integrity, PINS.MCP_ADAPTER_INTEGRITY);
-  // The pin itself: 3.9.108 from marrow-mcp e3752f3b. A pin left at 3.9.102 (or moved without the
+  // The pin itself: 3.9.109 from marrow-mcp 5e3cd3aa. A pin left at 3.9.102 (or moved without the
   // vendored files) fails here and in the manifest checks above.
-  assert.equal(PINS.MCP_ADAPTER_VERSION, '3.9.108');
-  assert.equal(PINS.MCP_ADAPTER_SOURCE_SHA, 'e3752f3baa511bb3071b73f521ba2b3bb526d0fd');
+  assert.equal(PINS.MCP_ADAPTER_VERSION, '3.9.109');
+  assert.equal(PINS.MCP_ADAPTER_SOURCE_SHA, '5e3cd3aa8e745ddaaa1d5982d53980d0aeaceaed');
   assert.match(PINS.MCP_ADAPTER_INTEGRITY, /^sha512-[A-Za-z0-9+/]{86}==$/);
   assert.notEqual(PINS.MCP_ADAPTER_INTEGRITY, 'sha512-hTs4jTJmySLk8hHgsGIZksMo9+eO5kjQmU1EJyDX8Qqm9Z+V+yDkauop19roasVvOAFsK3dJjqLoIh7gRhoXJQ==', 'not the 3.9.102 integrity');
   // The registered names the real module derives from its own catalog are the installer's 58.
