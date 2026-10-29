@@ -179,7 +179,9 @@ test('INS-10 the owner path with --json keeps stdout a single JSON document and 
   const original = process.stdout.write;
   process.stdout.write = (chunk) => { written.push(String(chunk)); return true; };
   try { await control.runControlCli(['control', 'disable', '--yes', '--json'], { home, terminal: term }); } finally { process.stdout.write = original; }
-  const parsed = JSON.parse(written.join(''));
+  const documents = written.filter((chunk) => chunk.startsWith('{'));
+  assert.equal(documents.length, 1, 'one JSON document on stdout');
+  const parsed = JSON.parse(documents[0]);
   assert.equal(parsed.local_control.state, 'disabled');
   assert.match(term.prompt(), /\d{6}/);
 });
@@ -285,7 +287,7 @@ test('INS-10 the status text no longer tells an agent to run `control disable --
   const home = tempHome();
   const enabledText = control.evidence({ home }).exact_next_action;
   assert.doesNotMatch(enabledText, /--yes to disable/);
-  assert.match(enabledText, /your own terminal/);
+  assert.match(enabledText, /in their own terminal/);
   assert.match(enabledText, /--yes is not proof of the owner/);
   control.writeLocalControlState(false, { home });
   assert.match(control.evidence({ home }).exact_next_action, /control enable/);

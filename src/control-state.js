@@ -2,6 +2,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const readline = require('node:readline');
 const { DEFAULT_BASE_URL, assertSafeBaseUrl, emitNoticeOnce } = require('./base-url-policy');
 
 const CONTROL_STATE_VERSION = 1;
@@ -69,7 +70,7 @@ function writeLocalControlState(enabled, options = {}) {
   return { enabled, state: enabled ? 'enabled' : 'disabled', changed_at: value.changed_at, change_id: value.change_id, changed: true, receipt: { action: enabled ? 'local control enabled' : 'local control disabled', change_id: value.change_id, changed_at: value.changed_at } };
 }
 function evidence(options = {}) {
-  try { const s = readLocalControlState(options); return { ...s, bypass_recording_available: Boolean(options.apiKey), exact_next_action: s.enabled ? 'Run npx @getmarrow/install control disable --yes to disable local enforcement.' : 'Run npx @getmarrow/install control enable to resume local enforcement; hooks poll local state without reinstalling.' }; }
+  try { const s = readLocalControlState(options); return { ...s, bypass_recording_available: Boolean(options.apiKey), exact_next_action: s.enabled ? 'To disable local enforcement, the account owner runs npx @getmarrow/install control disable --yes in their own terminal and types the confirmation code it shows (--yes is not proof of the owner).' : 'Run npx @getmarrow/install control enable to resume local enforcement; hooks poll local state without reinstalling.' }; }
   catch { return { enabled: false, state: 'error', changed_at: null, bypass_recording_available: false, exact_next_action: 'Inspect and replace unsafe ~/.marrow/control.json, then run npx @getmarrow/install control status; protected actions remain blocked.' }; }
 }
 async function bestEffortLifecycle(event, options = {}) {
@@ -113,17 +114,52 @@ async function recordGovernedBypass(input, options = {}) {
   const remote_delivered = await bestEffortLifecycle({ event_type: 'pre_action_checked', ...receipt }, options);
   return { bypass_recorded: true, remote_delivered, receipt };
 }
+// INS-10: turning control OFF while it is ON needs the account owner at their own terminal. --yes is only a
+// typo guard: an agent can pass it. The owner terminal is stdin, stdout and stderr all being a terminal, and
+// the owner types back a random one-time code shown there. A process that can drive a pseudo-terminal can
+// still read and answer the code; this check is the installer's part, not the whole defence (the MCP holds
+// the command and the backend tells the owner). `options.terminal` and `options.confirmTimeoutMs` are test seams.
+const CONFIRM_TIMEOUT_MS = 120000;
+const NOT_OWNER_TERMINAL = 'control disable was refused: turning Marrow local control off needs the account owner at their own terminal (stdin, stdout and stderr all a terminal), where it asks for a confirmation code. --yes is a typo guard, not proof of the owner. No state was changed.';
+const NOT_CONFIRMED = 'control disable was not confirmed by the account owner; no state was changed';
+
+function readOneLine(input, timeoutMs) {
+  return new Promise((resolve) => {
+    const lines = readline.createInterface({ input, terminal: false });
+    const timer = setTimeout(() => finish(null), timeoutMs);
+    let done = false;
+    function finish(value) { if (done) return; done = true; clearTimeout(timer); lines.close(); resolve(value); }
+    lines.once('line', (line) => finish(line));
+    lines.once('close', () => finish(null));
+  });
+}
+async function confirmOwnerDisable(options = {}) {
+  const terminal = options.terminal || {};
+  const streams = { stdin: terminal.stdin || process.stdin, stdout: terminal.stdout || process.stdout, stderr: terminal.stderr || process.stderr };
+  if (streams.stdin.isTTY !== true || streams.stdout.isTTY !== true || streams.stderr.isTTY !== true) throw new Error(NOT_OWNER_TERMINAL);
+  const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+  streams.stderr.write(`Turning Marrow local control off lets agents on this machine act without Marrow holds. Only the account owner should do this.\nTo confirm, type ${code} and press Enter (anything else cancels): `);
+  const typed = await readOneLine(streams.stdin, Number.isFinite(options.confirmTimeoutMs) ? options.confirmTimeoutMs : CONFIRM_TIMEOUT_MS);
+  streams.stderr.write('\n');
+  if (typed === null || typed.trim() !== code) throw new Error(NOT_CONFIRMED);
+}
+
 async function runControlCli(argv, options = {}) {
   const action = argv[1] || 'status'; const json = argv.includes('--json');
   if (!['status', 'disable', 'enable'].includes(action)) throw new Error('control action must be status, disable, or enable');
   if (action === 'disable' && !argv.includes('--yes')) throw new Error('control disable requires --yes owner confirmation; no state was changed');
+  // The state is read first: unsafe state fails closed with no prompt, and turning off a control that is already off asks nothing.
+  if (action === 'disable' && readLocalControlState(options).enabled) await confirmOwnerDisable(options);
   let result = action === 'status' ? evidence(options) : writeLocalControlState(action === 'enable', options);
   if (result.changed) {
     const delivered = await bestEffortLifecycle({ event_type: 'journey_update', action: result.receipt.action, source: 'client_self_reported', harness: 'installer', agent_id: boundedIdentity(options.agentId || process.env.MARROW_FLEET_AGENT_ID || process.env.MARROW_AGENT_ID, 'local-owner'), correlation_id: result.change_id }, options);
     result = { ...result, lifecycle_delivered: delivered };
   }
   if (json) process.stdout.write(`${JSON.stringify({ ok: result.state !== 'error', local_control: result }, null, 2)}\n`);
-  else process.stdout.write(`Marrow local control: ${result.state}. ${result.exact_next_action || ''}\n`);
+  else {
+    process.stdout.write(`Marrow local control: ${result.state}. ${result.exact_next_action || ''}\n`);
+    if (action === 'disable' && result.changed) process.stdout.write(`${result.lifecycle_delivered ? 'Marrow was told local control is off.' : 'Marrow could not be told right now (offline or no key).'}\n`);
+  }
   return result;
 }
 
