@@ -4,10 +4,18 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { PassThrough } = require('node:stream');
 const control = require('../src/control-state');
 const runner = require('../src/governed-runner');
 
 function tempHome() { return fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-owner-control-')); }
+// INS-10: turning control off while it is on needs the owner at their own terminal; this one types back the code it is shown.
+function ownerTerminal() {
+  const stdin = new PassThrough(); const stdout = new PassThrough(); const stderr = new PassThrough();
+  stdin.isTTY = true; stdout.isTTY = true; stderr.isTTY = true;
+  stderr.on('data', (chunk) => { const shown = String(chunk).match(/type (\d{6}) and press Enter/); if (shown) stdin.write(`${shown[1]}\n`); });
+  return { stdin, stdout, stderr };
+}
 
 test('tests resolve default control state in an isolated home without Marrow credentials', async () => {
   assert.equal(os.homedir(), isolatedHome);
@@ -26,7 +34,7 @@ test('owner control requires confirmation and disable/enable are byte-idempotent
   assert.deepEqual(control.readLocalControlState({ home }), { enabled: true, state: 'default_enabled', changed_at: null });
   await assert.rejects(control.runControlCli(['control', 'disable'], { home }), /requires --yes/);
   assert.equal(fs.existsSync(path.join(home, '.marrow')), false);
-  const disabled = await control.runControlCli(['control', 'disable', '--yes'], { home });
+  const disabled = await control.runControlCli(['control', 'disable', '--yes'], { home, terminal: ownerTerminal() });
   assert.equal(disabled.state, 'disabled');
   const target = path.join(home, '.marrow', 'control.json');
   assert.equal(fs.statSync(path.dirname(target)).mode & 0o777, 0o700);
