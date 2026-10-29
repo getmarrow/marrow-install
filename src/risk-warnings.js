@@ -80,7 +80,7 @@ function riskWarnings({ settings, env, keyPresent, localControl, selfTest, agent
     add('control_state_unsafe', 'The local Marrow control state (~/.marrow/control.json) is unsafe or invalid, so protected actions stay blocked. Inspect it, then run npx @getmarrow/install control status.');
   }
   if (!keyPresent) {
-    add('keyless_hooks', 'No Marrow API key was found in this shell or in ~/.marrow/env or ~/.marrow/env.local. Hooks that start without a key skip silently: holds and approvals are not recorded, and only the local seatbelt applies. Save MARROW_API_KEY in ~/.marrow/env (chmod 600) or start the host with it, then restart the host.');
+    add('keyless_hooks', 'No Marrow API key was found in this shell or in ~/.marrow/env or ~/.marrow/env.local. Hooks that start without a key skip silently: holds and approvals are not recorded, and only the local seatbelt applies. Save MARROW_API_KEY in the owner-only file ~/.marrow/env or start the host with it, then restart the host.');
   }
   const offIn = [];
   if (env && own(env, 'MARROW_AUTO_HOOK') && turnsHooksOff(env.MARROW_AUTO_HOOK)) offIn.push('in this shell');
