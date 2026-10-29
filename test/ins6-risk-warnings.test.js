@@ -177,6 +177,85 @@ test('abuse: a directory, a looping link, an oversized file and non-object files
   } finally { ws.cleanup(); }
 });
 
+// ---- U-1: a settings file Marrow cannot read is a warning, never silence (the file may still hold a blanket allow) -----
+
+// The installer's own merge into the PROJECT .claude/settings.json throws on a file it cannot parse (doctor and setup stop
+// loudly, as on 0.1.76), so those cases are listed for the user and local files only.
+const ALL_SCOPES = ['user', 'project', 'local'];
+const UNREADABLE_CASES = [
+  ['invalid JSON (trailing comma)', 'invalid', 'not a JSON object', ['user', 'local'], (file, marker) => put(file, `{"permissions":{"allow":["Bash",]},"note":"${marker}"}`)],
+  ['oversized (over 1 MiB)', 'too_large', 'over 1 MiB, not read', ALL_SCOPES, (file, marker) => put(file, `{"permissions":{"allow":["Bash"]},"pad":"${marker}${'x'.repeat(1_100_000)}"}`)],
+  ['a directory', 'unreadable', 'cannot be read', ['user', 'local'], (file) => fs.mkdirSync(file, { recursive: true })],
+  ['not an object (array)', 'invalid', 'not a JSON object', ['user', 'local'], (file, marker) => put(file, `["Bash","${marker}"]`)],
+  ['a byte-order mark before the object', 'invalid', 'not a JSON object', ALL_SCOPES, (file, marker) => put(file, `\ufeff{"permissions":{"allow":["Bash"]},"note":"${marker}"}`)],
+];
+for (const [what, state, word, scopes, make] of UNREADABLE_CASES) {
+  for (const scope of scopes) {
+    const file = { user: USER, project: PROJECT, local: LOCAL }[scope];
+    test(`U-1 ${what} in the ${scope} settings file warns (doctor and setup), naming only the file and the state`, async () => {
+      const ws = workspace();
+      try {
+        const marker = dummy();
+        make(file(ws), marker);
+        for (const mode of ['doctor', 'setup']) {
+          const { report, text, json } = await run(ws, {}, mode);
+          if (mode === 'doctor') assert.equal(report.doctor.claude_settings.files.find((entry) => entry.label === LABELS[scope]).state, state, 'doctor: state');
+          assert.ok(ids(report).includes('settings_unreadable'), `${mode}: ${ids(report)}`);
+          const warning = report.risk_warnings.find((entry) => entry.id === 'settings_unreadable');
+          assert.ok(warning.text.includes(`${LABELS[scope]} (${word})`), `${mode}: names the file and the state`);
+          assert.ok(text.includes(warning.text), `${mode}: the warning is printed`);
+          assert.doesNotMatch(`${text}${json}`, new RegExp(marker), `${mode}: no file content`);
+          assert.doesNotMatch(warning.text, /chmod|Fix:|Bash\(|permissions|MARROW_API_KEY/, `${mode}: no rule, key name or command`);
+        }
+      } finally { ws.cleanup(); }
+    });
+  }
+}
+
+test('U-1 an unparseable PROJECT settings file stops doctor and setup loudly (the installer cannot merge hooks into it): never silent', async () => {
+  const ws = workspace();
+  try {
+    put(PROJECT(ws), '{ nope');
+    await assert.rejects(() => run(ws, {}, 'doctor'), /JSON/);
+    await assert.rejects(() => run(ws, {}, 'setup'), /JSON/);
+  } finally { ws.cleanup(); }
+});
+
+test('U-1 several unreadable files are named in one warning; missing and valid files give none', async () => {
+  const ws = workspace();
+  try {
+    const none = await run(ws);
+    assert.ok(!ids(none.report).includes('settings_unreadable'), 'no file at all');
+    put(USER(ws), { permissions: { allow: ['Read'] } });
+    put(PROJECT(ws), {});
+    assert.ok(!ids((await run(ws)).report).includes('settings_unreadable'), 'valid files');
+    fs.rmSync(USER(ws));
+    fs.mkdirSync(USER(ws));
+    put(LOCAL(ws), '{ nope');
+    const both = await run(ws);
+    assert.equal(ids(both.report).filter((id) => id === 'settings_unreadable').length, 1);
+    const text = both.report.risk_warnings.find((entry) => entry.id === 'settings_unreadable').text;
+    assert.ok(text.includes(`${LABELS.user} (cannot be read)`) && text.includes(`${LABELS.local} (not a JSON object)`));
+    assert.equal((text.match(/\((?:cannot be read|not a JSON object|over 1 MiB, not read)\)/g) || []).length, 2, 'only the two unreadable files are named');
+  } finally { ws.cleanup(); }
+});
+
+test('U-1 abuse: forged silence fields, env names and owner-file lines never remove a warning', async () => {
+  const ws = workspace();
+  const names = ['MARROW_RISK_WARNINGS', 'MARROW_WARNINGS', 'MARROW_QUIET', 'MARROW_NO_WARN', 'MARROW_SUPPRESS_WARNINGS', 'MARROW_DOCTOR_QUIET', 'MARROW_IGNORE_RISK', 'MARROW_SILENT'];
+  try {
+    put(USER(ws), { permissions: { allow: ['Bash'] }, env: { MARROW_AUTO_HOOK: 'off' }, marrow: { warnings: false, suppress: true }, riskWarnings: 'off', suppressWarnings: true, _marrow_ignore: ['blanket_bash_allow', 'auto_hook_off', 'keyless_hooks'] });
+    put(path.join(ws.home, '.marrow', 'env'), names.map((name) => `${name}=1`).join('\n'));
+    put(path.join(ws.home, '.marrow', 'env.local'), names.map((name) => `${name}=1`).join('\n'));
+    for (const mode of ['doctor', 'setup']) {
+      let got;
+      const setEnv = (index) => (index === names.length ? run(ws, {}, mode).then((value) => { got = value; }) : withEnv(names[index], '1', () => setEnv(index + 1)));
+      await setEnv(0);
+      for (const id of ['blanket_bash_allow', 'auto_hook_off', 'keyless_hooks']) assert.ok(ids(got.report).includes(id), `${mode}: ${id} stays`);
+    }
+  } finally { ws.cleanup(); }
+});
+
 test('abuse: a link to a regular file elsewhere is read (read-only) and its content is never printed; a link to a directory is unreadable', async () => {
   const ws = workspace();
   try {

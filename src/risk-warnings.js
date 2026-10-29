@@ -18,8 +18,12 @@ const SAFE_AGENT_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 
 const BLANKET_BASH_TEXT = 'Claude Code allows every Bash command without a dialog, so Marrow holds on Bash can never be approved on this host. Replace the blanket rule with narrow allow rules, or add ask rules for the commands Marrow holds.';
 
+// Settings file states other than read/missing: Marrow could not check the file, so the answer is a warning that names
+// the file and the state, never silence (a file Marrow cannot parse can still be read by Claude Code).
+const UNCHECKED_STATE_WORDS = { invalid: 'not a JSON object', too_large: 'over 1 MiB, not read', unreadable: 'cannot be read' };
+
 const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
-const plain = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+const plain =(value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 
 // One settings file: a regular file (a link to one is followed, read-only) of at most 1 MiB holding a JSON
 // object. Anything else is a state name, never an exception and never content.
@@ -90,6 +94,11 @@ function riskWarnings({ settings, env, keyPresent, localControl, selfTest, agent
   }
   if (settings && settings.blanket_bash_allow.length) {
     add('blanket_bash_allow', `${BLANKET_BASH_TEXT} Found in: ${settings.blanket_bash_allow.join(', ')}.`);
+  }
+  const unchecked = settings && Array.isArray(settings.files) ? settings.files.filter((file) => file.state !== 'read' && file.state !== 'missing') : [];
+  if (unchecked.length) {
+    const named = unchecked.map((file) => `${file.label} (${UNCHECKED_STATE_WORDS[file.state] || UNCHECKED_STATE_WORDS.unreadable})`).join(', ');
+    add('settings_unreadable', `Marrow could not check ${named} for a blanket Bash allow or MARROW_AUTO_HOOK set to off, so a risky setting there would not show in this report, and Claude Code may still use ${unchecked.length > 1 ? 'those files' : 'that file'}. Make ${unchecked.length > 1 ? 'each' : 'the'} file a valid JSON object of at most 1 MiB, or remove it, then run npx @getmarrow/install doctor again.`);
   }
   if (selfTest && selfTest.key_binding === 'unbound') {
     const id = typeof agentId === 'string' && SAFE_AGENT_ID.test(agentId) ? `agent "${agentId}"` : 'this agent';
