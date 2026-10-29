@@ -563,7 +563,7 @@ test('Windsurf hook installation rejects invalid JSON, symlink, and out-of-root 
       const plan = buildPlan(detection, { mode: 'mcp' });
       assert.throws(
         () => applyPlan(plan, { yes: true, dryRun: false, doctor: false }),
-        /Unexpected token|Expected property|unsafe managed target|outside project root/,
+        /Invalid JSON in|unsafe managed target|outside project root/,
       );
       assert.equal(fs.existsSync(path.join(root, '.mcp.json')), false);
       assert.equal(fs.existsSync(path.join(root, 'AGENTS.md')), false);
@@ -877,7 +877,7 @@ test('Gemini hook installation rejects invalid JSON, symlink, and out-of-root ta
       const plan = buildPlan(detection, { mode: 'mcp' });
       assert.throws(
         () => applyPlan(plan, { yes: true, dryRun: false, doctor: false }),
-        /Unexpected token|Expected property|unsafe managed target|outside project root/,
+        /Invalid JSON in|unsafe managed target|outside project root/,
       );
       assert.equal(fs.existsSync(path.join(root, '.mcp.json')), false);
       assert.equal(fs.existsSync(path.join(root, 'AGENTS.md')), false);

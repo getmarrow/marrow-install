@@ -27,6 +27,7 @@ const {
 } = require('./windows-hooks');
 const { evidence: localControlEvidence } = require('./control-state');
 const { claudeSettingsFacts, riskWarnings } = require('./risk-warnings');
+const { parseUserJson } = require('./user-json');
 const {
   hermesEnvHasKey,
   hermesPaths,
@@ -1497,9 +1498,9 @@ MARROW_PASSIVE_TOKEN_USAGE=true
 // start through npx or the local runtime, so every check and merge sees one spelling; writes
 // switch them to the local runtime again when it is verified.
 function parseJsonObject(filePath) {
-  const raw = safeRead(filePath).trim();
-  if (!raw) return {};
-  const parsed = JSON.parse(raw);
+  const text = safeRead(filePath);
+  if (!text.trim()) return {};
+  const parsed = parseUserJson(text, filePath);
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new Error(`Expected JSON object in ${filePath}`);
   }

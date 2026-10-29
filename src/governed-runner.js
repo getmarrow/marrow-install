@@ -35,6 +35,7 @@ const {
 } = require('./installer');
 const { createHostUsageCapture } = require('./usage-telemetry');
 const { readLocalControlState, recordGovernedBypass } = require('./control-state');
+const { parseUserJson } = require('./user-json');
 
 const DEFAULT_BASE_URL = 'https://api.getmarrow.ai';
 const MCP_SETUP_COMMAND = `npx -y --package=${ADAPTER_PROVENANCE.mcp.package}@${ADAPTER_PROVENANCE.mcp.version} marrow-mcp setup`;
@@ -1431,8 +1432,8 @@ async function durableRequestJson(options, route, body, idempotencyKey) {
 
 function proofFromFile(filePath) {
   if (!filePath) return null;
-  const raw = fs.readFileSync(path.resolve(filePath), 'utf8');
-  return JSON.parse(raw);
+  const resolved = path.resolve(filePath);
+  return parseUserJson(fs.readFileSync(resolved, 'utf8'), resolved);
 }
 
 function defaultProof(input) {
