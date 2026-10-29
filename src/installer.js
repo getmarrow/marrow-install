@@ -26,6 +26,7 @@ const {
   windowsHookWriteSkipped,
 } = require('./windows-hooks');
 const { evidence: localControlEvidence } = require('./control-state');
+const { claudeSettingsFacts, riskWarnings } = require('./risk-warnings');
 const {
   hermesEnvHasKey,
   hermesPaths,
@@ -1660,6 +1661,41 @@ function claudeHostApprovalHooksConfigured(settings, targetCommand = (command) =
     permission_request: exactHookConfigured(settings, 'PermissionRequest', targetCommand(MCP_PERMISSION_REQUEST_HOOK_COMMAND), NATIVE_HOOK_MATCHER),
     post_tool_batch: exactHookConfigured(settings, 'PostToolBatch', targetCommand(MCP_ACTION_RESULT_HOOK_COMMAND)),
   };
+}
+
+// Doctor, INS-6: how many of the Claude Code hook entries this installer writes are in a settings file
+// (the user-level one), as counts. A command that differs from the current one only in the pinned MCP
+// version is "other version": the hook is there, written by another pin. Anything else that differs is missing.
+// Read-only: it changes no plan and prints no command.
+const MCP_PIN_IN_COMMAND = /@getmarrow\/mcp@\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]*)?/g;
+function pinNeutral(command) { return String(command).replace(MCP_PIN_IN_COMMAND, '@getmarrow/mcp@*'); }
+function pinNeutralSettings(settings) {
+  const hooks = settings && typeof settings === 'object' && !Array.isArray(settings) ? settings.hooks : null;
+  if (!hooks || typeof hooks !== 'object' || Array.isArray(hooks)) return {};
+  const neutralHook = (hook) => (hook && typeof hook === 'object' && !Array.isArray(hook) && typeof hook.command === 'string' ? { ...hook, command: pinNeutral(hook.command.trim()) } : hook);
+  const neutralEntry = (entry) => (entry && typeof entry === 'object' && !Array.isArray(entry) && Array.isArray(entry.hooks) ? { ...entry, hooks: entry.hooks.map(neutralHook) } : entry);
+  return { hooks: Object.fromEntries(Object.entries(hooks).map(([event, entries]) => [event, Array.isArray(entries) ? entries.map(neutralEntry) : entries])) };
+}
+function claudeHookCounts(settings) {
+  const specs = [
+    ['UserPromptSubmit', MCP_CONTEXT_HOOK_COMMAND, undefined],
+    ['PreToolUse', MCP_PRE_ACTION_HOOK_COMMAND, NATIVE_HOOK_MATCHER],
+    ['PostToolUse', MCP_ACTION_RESULT_HOOK_COMMAND, NATIVE_HOOK_MATCHER],
+    ['PostToolUseFailure', MCP_ACTION_RESULT_HOOK_COMMAND, NATIVE_HOOK_MATCHER],
+    ['Stop', MCP_SESSION_END_HOOK_COMMAND, undefined],
+    ...(hostApprovalHooksSupported() ? [
+      ['PermissionRequest', MCP_PERMISSION_REQUEST_HOOK_COMMAND, NATIVE_HOOK_MATCHER],
+      ['PostToolBatch', MCP_ACTION_RESULT_HOOK_COMMAND, undefined],
+    ] : []),
+  ];
+  const neutral = pinNeutralSettings(settings);
+  const counts = { expected: specs.length, current: 0, other_version: 0, missing: 0 };
+  for (const [event, command, matcher] of specs) {
+    if (exactHookConfigured(settings, event, command, matcher)) counts.current += 1;
+    else if (exactHookConfigured(neutral, event, pinNeutral(command), matcher)) counts.other_version += 1;
+    else counts.missing += 1;
+  }
+  return counts;
 }
 
 function claudeNativeHookFingerprint(settings, options = {}) {
@@ -4021,9 +4057,20 @@ async function requestJson(url, options) {
   }
   if (!res.ok) {
     const message = json.error || json.message || `HTTP ${res.status}`;
-    throw new Error(String(message));
+    throw refusalError(String(message), res.status, json);
   }
   return json.data || json;
+}
+
+// INS-6: an HTTP refusal as an Error. Marrow can say a key is not bound to the agent the call named
+// (HTTP 409 with key_binding "unbound"); only that exact status and value set `keyBinding`, any other
+// answer, casing, type or shape leaves it unset.
+function refusalError(message, status, json) {
+  const error = new Error(message);
+  const data = json && typeof json.data === 'object' && json.data !== null && !Array.isArray(json.data) ? json.data : {};
+  const binding = typeof json?.key_binding === 'string' ? json.key_binding : typeof data.key_binding === 'string' ? data.key_binding : '';
+  if (status === 409 && binding === 'unbound') error.keyBinding = 'unbound';
+  return error;
 }
 
 const SELF_TEST_WRITE_ATTEMPTS = 3;
@@ -4094,7 +4141,7 @@ async function selfTestWrite(url, options, { idempotencyKey, complete, retryDela
       const reason = String(json.error || json.message || '').slice(0, 200);
       lastState = reason ? `HTTP ${res.status}: ${reason}` : `HTTP ${res.status}`;
     } else {
-      throw new Error(String(json.error || json.message || `HTTP ${res.status}`));
+      throw refusalError(String(json.error || json.message || `HTTP ${res.status}`), res.status, json);
     }
     if (attempt < SELF_TEST_WRITE_ATTEMPTS) {
       const wait = Math.min(selfTestRetryDelayMs(res, data, retryDelayMs), Math.max(0, deadline - Date.now()));
@@ -5022,6 +5069,15 @@ function printReport(report, sink) {
       out(`- verify after restart: ${report.doctor.verification_command}\n`);
     }
     out(`- live health: ${report.doctor.healthCommand}\n`);
+    const settingsRead = report.doctor.claude_settings;
+    if (settingsRead) {
+      const stateWords = { read: 'read', missing: 'not found', too_large: 'too large, not read' };
+      out(`- Claude Code settings read: ${settingsRead.files.map((file) => `${file.label} (${stateWords[file.state] || 'unreadable'})`).join(', ')}\n`);
+      const hooks = settingsRead.user_hooks;
+      if (hooks && hooks.state === 'read') {
+        out(`- Claude Code user-level hooks (~/.claude/settings.json): ${hooks.current + hooks.other_version} of ${hooks.expected} configured${hooks.other_version ? ` (other version: ${hooks.other_version})` : ''}\n`);
+      }
+    }
   }
 
   if (report.writeMode === 'dry-run') {
@@ -5296,6 +5352,7 @@ async function install(options) {
       skipped: false,
       active: false,
       error: message,
+      ...(error && error.keyBinding === 'unbound' ? { key_binding: 'unbound' } : {}),
       mcp_tool_profile: initialToolProfileReport(options.toolProfile),
     };
   }
@@ -5458,6 +5515,16 @@ async function install(options) {
         : `Config repair ran, but self-test failed: ${selfTest.error || 'unknown error'}.`,
     }
     : null;
+  // INS-6: warnings for risky local configurations (names, labels and counts only; see src/risk-warnings.js).
+  const claudeSettings = claudeSettingsFacts({ home: detection.home, root: detection.root, userHooks: claudeHookCounts });
+  const riskList = riskWarnings({
+    settings: claudeSettings,
+    env: process.env,
+    keyPresent: Boolean(String(options.apiKey || '').trim()),
+    localControl,
+    selfTest,
+    agentId: configuredAgentId,
+  });
   return {
     root: detection.root,
     adapterProvenance: adapterProvenanceForMcpTarget(mcpTarget),
@@ -5499,7 +5566,9 @@ async function install(options) {
     changes,
     ...(plan.update_skipped ? { update_skipped: plan.update_skipped } : {}),
     ...(plan.skipped_hosts ? { skipped_hosts: plan.skipped_hosts } : {}),
+    risk_warnings: riskList,
     doctor: {
+      claude_settings: claudeSettings,
       ...(plan.skipped_hosts ? { skipped_hosts: plan.skipped_hosts } : {}),
       ...(hooksMissingHosts.length ? { hooks_missing_hosts: hooksMissingHosts } : {}),
       active: Boolean(!selfTest.skipped && selfTest.active),
@@ -5544,6 +5613,7 @@ async function install(options) {
     local_control: localControl,
     selfTest,
     warnings: [
+      ...riskList.map((entry) => entry.text),
       ...(options.keyFromArg
         ? ['Avoid --key in shared shells because command-line arguments can be visible in process listings. Prefer MARROW_API_KEY in your environment or secret manager.']
         : []),
@@ -5660,6 +5730,7 @@ function installSummaryLines(report, options) {
   if (divergences.length) {
     lines.push(`MCP config identity reset: ${divergences.map((divergence) => `${divergence.field} in ${divergence.path}`).join('; ')}. Details and the allowlist fix are in the full report.`);
   }
+  for (const warning of report.risk_warnings || []) lines.push(`Warning: ${warning.text}`);
   const reload = report.harnessReload || {};
   if (reload.required && reload.instruction && hermes.state !== 'configured') lines.push(`Restart: ${reload.instruction}`);
   else if (reload.required && reload.clients?.some((entry) => entry.client !== 'hermes')) {
