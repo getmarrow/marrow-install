@@ -451,3 +451,19 @@ test('a clean machine (key, control on, narrow rules, no AUTO_HOOK) has no risk 
     assert.deepEqual(report.risk_warnings, []);
   } finally { ws.cleanup(); }
 });
+
+// The seatbelt "why" tests (seatbelt-status-child M1, M4, M7) assert that doctor prints no `chmod` or `Fix:` command
+// for an unsafe folder; a warning of ours must not break that, so no warning text carries either.
+test('no risk warning text carries a chmod command or a "Fix:" line', async () => {
+  const ws = workspace();
+  try {
+    put(USER(ws), { permissions: { allow: ['Bash'] }, env: { MARROW_AUTO_HOOK: 'false' } });
+    writeLocalControlState(false, { home: ws.home });
+    const { report } = await run(ws);
+    assert.ok(report.risk_warnings.length >= 4);
+    for (const entry of report.risk_warnings) assert.doesNotMatch(entry.text, /chmod|Fix:/, entry.id);
+    const unbound = await selfTestWith(ws, 409, { error: 'x', key_binding: 'unbound' });
+    assert.ok(unbound.report.risk_warnings.some((entry) => entry.id === 'key_unbound'));
+    for (const entry of unbound.report.risk_warnings) assert.doesNotMatch(entry.text, /chmod|Fix:/, entry.id);
+  } finally { ws.cleanup(); }
+});
