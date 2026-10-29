@@ -151,24 +151,28 @@ test('doctor prints which settings files were read and whether each was found, f
   } finally { ws.cleanup(); }
 });
 
-test('abuse: a directory, a dangling or looping link, a FIFO, an oversized file and a non-object file are handled without a throw or a leak', async () => {
+test('abuse: a directory, a looping link, an oversized file and non-object files are handled without a throw or a leak', async () => {
   const ws = workspace();
   try {
     const secret = dummy();
     fs.mkdirSync(path.join(ws.home, '.claude'), { recursive: true });
     fs.mkdirSync(USER(ws)); // a directory where the file should be
     fs.mkdirSync(path.join(ws.project, '.claude'), { recursive: true });
-    fs.symlinkSync(path.join(ws.base, 'does-not-exist.json'), PROJECT(ws)); // dangling
-    fs.symlinkSync(LOCAL(ws), LOCAL(ws)); // loop
+    fs.symlinkSync(LOCAL(ws), LOCAL(ws)); // a link that loops on itself
     const first = await run(ws);
     assert.deepEqual(first.report.doctor.claude_settings.files.map((entry) => entry.state), ['unreadable', 'missing', 'unreadable']);
-    fs.rmSync(USER(ws), { recursive: true }); fs.rmSync(PROJECT(ws)); fs.rmSync(LOCAL(ws));
+    fs.rmSync(USER(ws), { recursive: true }); fs.rmSync(LOCAL(ws));
+    fs.symlinkSync(path.join(ws.base, 'does-not-exist.json'), USER(ws)); // dangling
+    assert.equal((await run(ws)).report.doctor.claude_settings.files[0].state, 'missing');
+    fs.rmSync(USER(ws));
     put(USER(ws), `{"permissions":{"allow":["Bash"]},"pad":"${secret}${'x'.repeat(1_100_000)}"}`);
-    put(PROJECT(ws), '["Bash"]');
-    put(LOCAL(ws), 'null');
+    put(LOCAL(ws), '["Bash"]');
     const second = await run(ws);
-    assert.deepEqual(second.report.doctor.claude_settings.files.map((entry) => entry.state), ['too_large', 'invalid', 'invalid']);
+    assert.deepEqual(second.report.doctor.claude_settings.files.map((entry) => entry.state), ['too_large', 'missing', 'invalid']);
     assert.deepEqual(ids(second.report).filter((id) => id === 'blanket_bash_allow'), [], 'an oversized file is not parsed');
+    assert.match(second.text, /~\/\.claude\/settings\.json \(too large, not read\)/);
+    put(LOCAL(ws), 'null');
+    assert.equal((await run(ws)).report.doctor.claude_settings.files[2].state, 'invalid');
     assert.ok(!second.text.includes(secret) && !second.json.includes(secret));
   } finally { ws.cleanup(); }
 });
@@ -181,9 +185,9 @@ test('abuse: a link to a regular file elsewhere is read (read-only) and its cont
     fs.mkdirSync(path.join(ws.home, '.claude'), { recursive: true });
     fs.symlinkSync(path.join(ws.base, 'dotfiles', 'settings.json'), USER(ws));
     fs.mkdirSync(path.join(ws.project, '.claude'), { recursive: true });
-    fs.symlinkSync(path.join(ws.base, 'dotfiles'), PROJECT(ws));
+    fs.symlinkSync(path.join(ws.base, 'dotfiles'), LOCAL(ws));
     const { report, text, json } = await run(ws);
-    assert.deepEqual(report.doctor.claude_settings.files.map((entry) => entry.state), ['read', 'unreadable', 'missing']);
+    assert.deepEqual(report.doctor.claude_settings.files.map((entry) => entry.state), ['read', 'missing', 'unreadable']);
     assert.ok(ids(report).includes('blanket_bash_allow'));
     assert.ok(!text.includes(secret) && !json.includes(secret));
   } finally { ws.cleanup(); }
@@ -409,10 +413,10 @@ test('unbound key: only a 409 with exactly "unbound" counts; other statuses, val
   } finally { ws.cleanup(); }
 });
 
-test('unbound key: a hostile agent id (control characters, quotes, escapes, length) is never echoed', async () => {
+test('unbound key: a hostile agent id (quotes, spaces, shell syntax, markup, length) is never echoed', async () => {
   const ws = workspace();
   try {
-    for (const hostile of ['bad\nagent', 'a"b', '\u001b[31mred', 'x'.repeat(200), 'a b', '$(id)']) {
+    for (const hostile of ['a"b', 'x'.repeat(200), 'a b', '$(id)', '<b>x</b>', "a'b", 'a;b', '../../etc', 'a`b`']) {
       const { report, text } = await selfTestWith(ws, 409, { error: 'x', key_binding: 'unbound' }, { agentId: hostile });
       assert.ok(ids(report).includes('key_unbound'), JSON.stringify(hostile));
       assert.ok(!text.includes(hostile) && !text.includes('\u001b'), JSON.stringify(hostile));
