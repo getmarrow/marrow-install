@@ -249,6 +249,20 @@ test('D-3 a partial, a mismatched-matcher and a lookalike hook set are counted a
   } finally { ws.cleanup(); }
 });
 
+test('D-3 a wrong or missing matcher on a hook at the PINNED version is counted as missing, never as configured', async () => {
+  const ws = workspace();
+  try {
+    const wrong = hookSettings(pins.MCP_ADAPTER_VERSION);
+    wrong.hooks.PreToolUse[0].matcher = '*'; // same command as the pinned pre-action hook, another matcher
+    delete wrong.hooks.PostToolUse[0].matcher; // same command, no matcher at all
+    wrong.hooks.PermissionRequest[0].matcher = 'Bash'; // same command, a narrower matcher
+    put(USER(ws), wrong);
+    const { report, text } = await run(ws);
+    assert.deepEqual(report.doctor.claude_settings.user_hooks, { state: 'read', expected: 7, current: 4, other_version: 0, missing: 3 });
+    assert.match(userHookLine(text) || '', /: 4 of 7 configured$/);
+  } finally { ws.cleanup(); }
+});
+
 test('D-3 the user-level read never changes the plan: project hooks still read as missing and would be written', async () => {
   const ws = workspace();
   try {
