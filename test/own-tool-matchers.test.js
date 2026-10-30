@@ -88,7 +88,7 @@ function codexSelects(matcher, tool) {
   return new RegExp(matcher).test(tool);
 }
 // The Codex matcher is `*`, so the hook alone decides what is skipped. That decision is the real
-// @getmarrow/mcp 3.9.109 one (marrow-mcp 5e3cd3aa): test/fixtures/mcp-3.9.109/ holds dist/ of the pinned
+// @getmarrow/mcp 3.9.109 one (marrow-mcp 990aaaa6): test/fixtures/mcp-3.9.109/ holds dist/ of the pinned
 // package, byte for byte (the checksum test below pins it), not a copy of its rules written here. A label
 // is skipped only when it is exactly `mcp__marrow__<own>` AND the host's own Codex configuration proves the
 // `marrow` server is the official one. PROVEN is a temporary CODEX_HOME whose config.toml is the README
@@ -218,11 +218,11 @@ function probes(key) {
 }
 
 // sha256 of each vendored file, written here as well as in MANIFEST.json so that editing one of
-// the two is caught. They are dist/ of @getmarrow/mcp 3.9.109 (marrow-mcp 5e3cd3aa; only redact.js differs from the 3.9.108 files and key-class.js (which redact.js requires) is new,
+// the two is caught. They are dist/ of @getmarrow/mcp 3.9.109 (marrow-mcp 990aaaa6; only redact.js differs from the 3.9.108 files and key-class.js (which redact.js requires) is new,
 // and only own-tool.js, which carries the Claude Code matcher, codex-plugin-pins.js and own-server-identity.js differ from the 3.9.103 files), and the 3.9.102
 // baseline (3a2bf85e) the published 0.1.70 pinned.
 const VENDORED_MCP = {
-  sourceSha: '5e3cd3aa8e745ddaaa1d5982d53980d0aeaceaed',
+  sourceSha: '990aaaa673a3d117599a33a8972dedc1398e240e',
   files: {
     'own-tool.js': '09e7b5b2c3bae1abe1955bf54bf1763f58bbacc4a4abb258633ab4a81d7a6e8b',
     'tool-catalog.js': 'd413c2b7c46c7ed9c7a8b0694481c1f5afe850c3edc67cd28917dc1153b934cb',
@@ -264,10 +264,10 @@ test('the vendored MCP 3.9.109 files are byte for byte the pinned @getmarrow/mcp
   assert.equal(manifest.source_sha, PINS.MCP_ADAPTER_SOURCE_SHA, 'the vendored files are for the pinned MCP source');
   assert.equal(manifest.version, PINS.MCP_ADAPTER_VERSION);
   assert.equal(manifest.integrity, PINS.MCP_ADAPTER_INTEGRITY);
-  // The pin itself: 3.9.109 from marrow-mcp 5e3cd3aa. A pin left at 3.9.102 (or moved without the
+  // The pin itself: 3.9.109 from marrow-mcp 990aaaa6. A pin left at 3.9.102 (or moved without the
   // vendored files) fails here and in the manifest checks above.
   assert.equal(PINS.MCP_ADAPTER_VERSION, '3.9.109');
-  assert.equal(PINS.MCP_ADAPTER_SOURCE_SHA, '5e3cd3aa8e745ddaaa1d5982d53980d0aeaceaed');
+  assert.equal(PINS.MCP_ADAPTER_SOURCE_SHA, '990aaaa673a3d117599a33a8972dedc1398e240e');
   assert.match(PINS.MCP_ADAPTER_INTEGRITY, /^sha512-[A-Za-z0-9+/]{86}==$/);
   assert.notEqual(PINS.MCP_ADAPTER_INTEGRITY, 'sha512-hTs4jTJmySLk8hHgsGIZksMo9+eO5kjQmU1EJyDX8Qqm9Z+V+yDkauop19roasVvOAFsK3dJjqLoIh7gRhoXJQ==', 'not the 3.9.102 integrity');
   // The registered names the real module derives from its own catalog are the installer's 58.
