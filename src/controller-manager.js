@@ -574,6 +574,21 @@ async function ensureCurrentGovernanceController(options) {
   };
 }
 
+// Stops every live controller of this project whose state directory is not the current identity's, whatever id hashed
+// it (each is proven by its private state file, its PID and its authenticated /health as for any stop). An older
+// controller keeps rewriting the config with the id it was launched with, so update never leaves one running.
+async function stopSupersededControllers(options) {
+  const currentDirectory = path.resolve(controllerDirectory(options));
+  const stopped = [];
+  for (const entry of await projectControllers({ ...options, scanAll: true })) {
+    if (path.resolve(entry.directory) === currentDirectory) continue;
+    if (!entry.status.active && entry.status.state !== 'unreachable') continue;
+    await stopGovernanceController({ ...options, stateDirectory: entry.directory });
+    stopped.push(entry.status.installer_version || 'unknown');
+  }
+  return stopped;
+}
+
 async function stopProjectControllers(options) {
   const stopped = [];
   for (const entry of await projectControllers(options)) {
@@ -600,4 +615,5 @@ module.exports = {
   startGovernanceController,
   stopGovernanceController,
   stopProjectControllers,
+  stopSupersededControllers,
 };

@@ -2,6 +2,18 @@
 
 Release notes for `@getmarrow/install`, newest first. The README describes only the current version.
 
+## Unreleased
+
+`update` and the controller's background check no longer take the agent id from the shell that runs them. In 0.1.77 an update run from a shell that exported another agent's id wrote that id into the MCP config, and the controller kept doing it every five minutes, so every MCP tool call answered 403.
+
+- **`update` never reads the agent id from your shell or key.** The id in a managed MCP config is the one Marrow recorded for that file (`~/.marrow/identity-record.json`), the one you pass with `--agent-id <id>`, or none. A config that differs from the record is restored, with one printed line that names the id it held and the command to keep it. An id that was never recorded is removed, never replaced by another.
+- **An unsafe identity record changes nothing.** If the record is a link, shared, owned by someone else, has more than one link or is not valid JSON, `update` and the controller's check write nothing, print one line with the fix for that state, and `update` exits 3.
+- **`update --fix-identity`** asks `GET /v1/agent/status` which agent each config's own key is bound to, and switches the file to it. It never uses the shell's key, refuses when the key is bound to several agents and the file's id is not one of them, and changes nothing if the answer cannot be checked (exit 4).
+- **The controller started by `update` carries the id Marrow decided**, and every controller left for the same project under another id is stopped.
+- **`MARROW_ALLOWED_AGENT_IDS` no longer keeps an id on `update` or in the controller's check.** The base-URL allowlist is unchanged.
+- **After an update changes a host's MCP config, the output names that host's own next step** (Claude Code: `/mcp`, then Reconnect; Cursor: restart), never "Nothing else to do."
+- `--agent-id` with no value (or written `--agent-id=`) is refused instead of being ignored.
+
 ## v0.1.77
 
 v0.1.77. Warnings about risky local configuration in `setup` and `doctor`, the owner's own terminal for `control disable`, settings errors that no longer quote file text, and the MCP pin: v0.1.77 installs MCP `3.9.109` (source `990aaaa673a3d117599a33a8972dedc1398e240e`, packed integrity `sha512-tgGXtv7vTxhtD2/HRbAGBjPpZ3fQYWXPN6XkJhVx07YCvg2sGfhkFbD+QfP+c56FbeVa5Rwbe4B50kiRuM+rdQ==`); the SDK pin stays `3.7.67` (packed integrity `sha512-0Lwg4XLxm9eXxMgQtFAH1y4mXi9CXg3poQlGbeK0AW+EHP+yfUWQUH4d1XYO03QNzwHLAYKfARDmnl5GpBnKUw==`).
