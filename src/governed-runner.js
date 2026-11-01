@@ -3124,8 +3124,8 @@ async function sidecarOnly(parsed) {
     // Maintenance re-applies the controller's own base URL. A different base URL found in managed MCP
     // config is replaced unless the owner allowlisted it, and the divergence is reported. The agent id
     // is never the controller's launch id: the identity record restores the id Marrow recorded for each
-    // file, an id it did not record is removed, and an unsafe record changes nothing (INS-1). It never
-    // edits the owner's Hermes config. Hooks are written in the local MCP runtime form (never npx); the
+    // file, an id that fails SAFE_AGENT_ID is removed (any other id the file holds is kept), and an unsafe
+    // record changes nothing (INS-1). It never edits the owner's Hermes config. Hooks are written in the local MCP runtime form (never npx); the
     // copy is checked, never installed, here.
     const mcpRuntime = maintenanceMcpRuntime(detection);
     const plan = buildPlan(detection, {
@@ -3164,7 +3164,7 @@ async function sidecarOnly(parsed) {
             ? 'Marrow reset MARROW_BASE_URL in managed MCP config to the controller\'s configured value. If the previous value was intended, add it to MARROW_ALLOWED_BASE_URLS and rerun npx -y @getmarrow/install@latest update.'
             : null,
           identityDivergence.some((divergence) => divergence.field === 'MARROW_FLEET_AGENT_ID')
-            ? 'Marrow restored or removed MARROW_FLEET_AGENT_ID in managed MCP config: only the id Marrow recorded for a file is kept. If you set it yourself, run npx -y @getmarrow/install@latest update --agent-id <id>.'
+            ? 'Marrow restored or removed MARROW_FLEET_AGENT_ID in managed MCP config: a file gets back the id Marrow recorded for it, and an id that is not a valid agent id is removed. If you set it yourself, run npx -y @getmarrow/install@latest update --agent-id <id>.'
             : null,
         ].filter(Boolean).join(' ')
         : null,

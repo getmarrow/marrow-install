@@ -26,6 +26,14 @@ function printableId(value) {
   return typeof value === 'string' && SAFE_AGENT_ID.test(value) ? value : NOT_AN_ID;
 }
 
+// What a path may look like in an identity line: the path itself when it is plain (no space, quote, control, format or
+// non-ASCII character, so a directory name cannot carry a sentence into the line), else a fixed label.
+const NOT_A_PATH = '[unsafe path]';
+const PLAIN_PATH = /^[A-Za-z0-9._~/:@+=,\\-]{1,1024}$/;
+function printablePath(value) {
+  return typeof value === 'string' && PLAIN_PATH.test(value) ? value : NOT_A_PATH;
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // The record is unsafe: one line, per state (symlink: never chmod through it; extra link: remove it; other owner or
 // bad JSON: delete it and pass --agent-id).
@@ -47,9 +55,10 @@ const UNSAFE_STATES = {
 
 function unsafeRecordLine(recordPath, reason) {
   const known = UNSAFE_STATES[reason] || UNSAFE_STATES.unreadable;
-  const fix = known.fix.replace('{path}', recordPath);
+  const shown = printablePath(recordPath);
+  const fix = known.fix.replace('{path}', shown);
   const again = /run update again/.test(fix) ? '' : ', then run update again';
-  return `Identity: ${recordPath} is not safe to trust (${known.state}), so update changed nothing. Fix: ${fix}${again}.`;
+  return `Identity: ${shown} is not safe to trust (${known.state}), so update changed nothing. Fix: ${fix}${again}.`;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -58,9 +67,13 @@ function unsafeRecordLine(recordPath, reason) {
 //   recordState  'valid' | 'absent' (an unsafe record never gets here: update stops first)
 //   recordedId   the id the valid record holds for this exact file ('' when it holds none)
 //   explicitId   --agent-id, or the id --fix-identity read from the server for this file
-// Nothing here consults the runner's environment or any allowlist. Reset always means REMOVE the variable.
+// Nothing here consults the runner's environment or any allowlist. Under a valid record, on every maintenance pass, and when
+// --fix-identity found the id among the agents the file's own key is bound to (confirmed), an id the file holds that passes
+// SAFE_AGENT_ID and that nothing above overrides is KEPT and reported, never recorded (record: false). With no record file
+// the one-time keep of a plain owner-set id (preRecordEligible) still applies; any other held id is removed, as is one that
+// fails SAFE_AGENT_ID. Whether Marrow should keep or remove an id it did not record is the owner's call (audit O8).
 // ---------------------------------------------------------------------------------------------------------------
-function decideAgentIdentity({ held, recordState, recordedId, explicitId, via, preRecordEligible }) {
+function decideAgentIdentity({ held, recordState, recordedId, explicitId, via, preRecordEligible, maintenance, confirmed }) {
   if (explicitId) {
     return {
       id: explicitId,
@@ -73,8 +86,13 @@ function decideAgentIdentity({ held, recordState, recordedId, explicitId, via, p
     if (held === recordedId) return { id: recordedId, recordId: recordedId, kept: { reason: 'recorded', value: recordedId }, divergence: null };
     return { id: recordedId, recordId: recordedId, kept: null, divergence: { reason: 'restored', held, applied: recordedId } };
   }
-  if (held && recordState === 'absent' && preRecordEligible) {
-    return { id: held, recordId: held, kept: { reason: 'pre_record', value: held }, divergence: null };
+  if (held && SAFE_AGENT_ID.test(held)) {
+    if (recordState === 'absent' && preRecordEligible) {
+      return { id: held, recordId: held, kept: { reason: 'pre_record', value: held }, divergence: null };
+    }
+    if (recordState === 'valid' || maintenance === true || confirmed === true) {
+      return { id: held, recordId: held, record: false, kept: { reason: 'unrecorded', value: held }, divergence: null };
+    }
   }
   return {
     id: '',
@@ -88,7 +106,8 @@ function decideAgentIdentity({ held, recordState, recordedId, explicitId, via, p
 // The exact U2 lines. A line carries a runnable `--agent-id <C>` only for a home file whose id passes SAFE_AGENT_ID:
 // an id from a project file or a hostile one is never put into a command an agent might run.
 // ---------------------------------------------------------------------------------------------------------------
-function identityLine(divergence, { file, homeScope }) {
+function identityLine(divergence, { file: filePath, homeScope }) {
+  const file = printablePath(filePath);
   const held = divergence.held == null ? null : printableId(divergence.held);
   const runnable = homeScope && held && held !== NOT_AN_ID;
   const adopt = (verb) => (runnable
@@ -144,24 +163,15 @@ function readMarrowEnvBlock(filePath) {
   }
 }
 
-function perIdKeyName(agentId) {
-  return `MARROW_KEY_${String(agentId).toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
-}
+// The names an MCP server reads a key or a per-agent key pair from in its env block (MCP 3.9.109 resolveMarrowEnv). `update`
+// rebuilds that block without them, so a decision made on one of them would be stale by the end of the same run, and the
+// server picks among them by rules this module does not model.
+const BLOCK_KEY_NAMES = /^(MARROW_API_KEY|MARROW_KEY|MARROW_KEY_.*|MARROW_AGENT_ID_.*)$/;
 
-// { key, source, ownerDetail } or { cannot: 'host_env' | 'ambiguous' }.
+// { key, source, ownerDetail } or { cannot: 'block_key' | 'host_env' }. Only the owner-file key is ever checked, and only
+// when the file's block names none of the key names above.
 function resolveFileKey({ block, home }) {
-  for (const name of ['MARROW_API_KEY', 'MARROW_KEY']) {
-    const key = concrete(block[name]);
-    if (key) return { key, source: 'env_block' };
-    if (typeof block[name] === 'string' && block[name].trim()) return { cannot: 'host_env' }; // a ${PLACEHOLDER}: the host's own env
-  }
-  const held = concrete(block.MARROW_FLEET_AGENT_ID);
-  const perIdNames = Object.keys(block).filter((name) => /^MARROW_KEY_[A-Z0-9_]+$/.test(name) && name !== 'MARROW_KEY_');
-  if (perIdNames.length) {
-    const wanted = held ? perIdKeyName(held) : null;
-    const key = wanted && perIdNames.includes(wanted) ? concrete(block[wanted]) : '';
-    return key ? { key, source: 'env_block' } : { cannot: 'ambiguous' };
-  }
+  if (Object.keys(block).some((name) => BLOCK_KEY_NAMES.test(name))) return { cannot: 'block_key' };
   let detail = null;
   try { detail = readOwnerKeyDetail(home); } catch { detail = null; }
   if (detail && detail.apiKey) return { key: detail.apiKey, source: 'owner_file', ownerDetail: detail };
@@ -212,21 +222,23 @@ async function readBoundAgents({ baseUrl, key, fetchImpl = fetch, timeoutMs = ST
 }
 
 // Decides --fix-identity for each managed MCP config file; `files` = [{ path, key }] with the realpath key the identity
-// record uses. Returns { targets: Map(key -> id), lines, stop } where stop = { exitCode: 4, lines } and nothing is
-// written when any file cannot be checked, errors, or has several candidate ids (never guessed).
+// record uses. Returns { targets: Map(key -> id), confirmed: Set(key), lines, stop } where stop = { exitCode: 4, lines } and
+// nothing is written when any file cannot be checked, errors, or has several candidate ids (never guessed).
 async function resolveIdentityFixes({ files, home, fetchImpl, timeoutMs }) {
   const targets = new Map();
+  const confirmed = new Set();
   const notes = [];
   const failures = [];
   for (const file of files) {
     const block = readMarrowEnvBlock(file.path);
     if (!block) continue;
+    const shown = printablePath(file.path);
     const held = concrete(block.MARROW_FLEET_AGENT_ID);
     const resolved = resolveFileKey({ block, home });
     if (resolved.cannot) {
-      failures.push(resolved.cannot === 'ambiguous'
-        ? `Identity: cannot check ${file.path}: it names per-agent keys and none matches its agent id. Nothing was changed.`
-        : `Identity: cannot check ${file.path}: this host's key comes from its own environment. Nothing was changed.`);
+      failures.push(resolved.cannot === 'block_key'
+        ? `Identity: cannot check ${shown}: its MCP config names its own key (MARROW_API_KEY, MARROW_KEY, MARROW_KEY_<id> or MARROW_AGENT_ID_<id>), and update cannot tell which key the server uses there. Nothing was changed and no request was made.`
+        : `Identity: cannot check ${shown}: this host's key comes from its own environment. Nothing was changed.`);
       continue;
     }
     let target;
@@ -236,25 +248,28 @@ async function resolveIdentityFixes({ files, home, fetchImpl, timeoutMs }) {
       target = { refused: true };
     }
     if (target.refused) {
-      failures.push(`Identity: cannot check ${file.path}: MARROW_BASE_URL there must be an https URL (http is allowed only for localhost, 127.0.0.1 and [::1]) with no user name, password, query or fragment. Nothing was changed and no key was sent.`);
+      failures.push(`Identity: cannot check ${shown}: MARROW_BASE_URL there must be an https URL (http is allowed only for localhost, 127.0.0.1 and [::1]) with no user name, password, query or fragment. Nothing was changed and no key was sent.`);
       continue;
     }
     const answer = await readBoundAgents({ baseUrl: target.baseUrl, key: resolved.key, fetchImpl, timeoutMs });
     if (answer.error) {
-      failures.push(`Identity: could not read this key's agent binding for ${file.path} (${answer.error}). Nothing was changed.`);
+      failures.push(`Identity: could not read this key's agent binding for ${shown} (${answer.error}). Nothing was changed.`);
       continue;
     }
     const bound = answer.ids;
     if (bound.length === 0) {
-      notes.push(`Identity: ${file.path}: This key is not bound to an agent; keeping ${held ? printableId(held) : 'no agent id'}.`);
+      notes.push(`Identity: ${shown}: This key is not bound to an agent; keeping ${held ? printableId(held) : 'no agent id'}.`);
     } else if (bound.length === 1) {
       if (held && held !== bound[0]) targets.set(file.key, bound[0]);
-    } else if (held && !bound.includes(held)) {
-      failures.push(`Identity: ${file.path} uses MARROW_FLEET_AGENT_ID=${printableId(held)}, but this key is bound to several agents (${bound.length}). Choose one: ${bound.join(', ')}; then run ${UPDATE_COMMAND} --agent-id <id>. Nothing was changed.`);
+      else if (held) confirmed.add(file.key);
+    } else if (held && bound.includes(held)) {
+      confirmed.add(file.key);
+    } else if (held) {
+      failures.push(`Identity: ${shown} uses MARROW_FLEET_AGENT_ID=${printableId(held)}, but this key is bound to several agents (${bound.length}). Choose one: ${bound.join(', ')}; then run ${UPDATE_COMMAND} --agent-id <id>. Nothing was changed.`);
     }
   }
-  if (failures.length) return { targets: new Map(), lines: [], stop: { exitCode: 4, lines: failures } };
-  return { targets, lines: notes, stop: null };
+  if (failures.length) return { targets: new Map(), confirmed: new Set(), lines: [], stop: { exitCode: 4, lines: failures } };
+  return { targets, confirmed, lines: notes, stop: null };
 }
 
 function displayPath(filePath, home) {
@@ -272,6 +287,7 @@ module.exports = {
   hostStepLines,
   identityLine,
   printableId,
+  printablePath,
   readBoundAgents,
   readMarrowEnvBlock,
   resolveFileKey,

@@ -39,7 +39,7 @@ const {
 const { ensureOwnerApiKey, ownerKeyStoreState, readOwnerKeyDetail } = require('./owner-env');
 const { assertSafeBaseUrl, emitNoticeOnce, ownerKeyBaseUrl } = require('./base-url-policy');
 const { buildOwnToolMatchers } = require('./marrow-own-tools');
-const { decideAgentIdentity, displayPath, hostStepLines, identityLine, printableId, resolveIdentityFixes, unsafeRecordLine } = require('./identity-record');
+const { decideAgentIdentity, displayPath, hostStepLines, identityLine, printableId, printablePath, resolveIdentityFixes, unsafeRecordLine } = require('./identity-record');
 const { detectAgentPlugins, describeAgentPlugin } = require('./agent-plugins');
 const { buildStatusEnv, runSeatbeltStatus, seatbeltLine, seatbeltReport, seatbeltWhyLine, statusInvocation } = require('./seatbelt-status');
 const {
@@ -2909,6 +2909,8 @@ function upsertMcpServerConfig(filePath, options = {}) {
   let keptAgentId = agentId;
   // An allowlisted id is recorded only if it was already: it stays kept only while allowlisted.
   let recordAgentId = null;
+  // False for an id the file holds that Marrow did not record: it stays in the file and stays out of the record.
+  let recordKept = true;
   if (options.identityRule === true) {
     // Update and the controller maintenance pass (INS-1): identity-record.js decideAgentIdentity is the whole
     // rule. The id is the recorded one, or the one --agent-id / --fix-identity names, or none; never the runner's.
@@ -2921,12 +2923,15 @@ function upsertMcpServerConfig(filePath, options = {}) {
       recordedId: recorded?.MARROW_FLEET_AGENT_ID || '',
       explicitId: fixed || (explicit ? agentId : ''),
       via: fixed ? '--fix-identity' : '--agent-id',
+      maintenance: options.preRecordKeep === false,
+      confirmed: options.fixIdentityConfirmed instanceof Set && options.fixIdentityConfirmed.has(fileKey),
       // The one-time keep is an update's: the maintenance pass never kept an id that was not recorded.
       preRecordEligible: Boolean(held && recordState === 'absent' && options.preRecordScope && options.preRecordKeep !== false
         && preRecordAgentIdEligible(filePath, existingEnv.MARROW_FLEET_AGENT_ID, options.preRecordScope)),
     });
     keptAgentId = decision.id;
     recordAgentId = decision.recordId;
+    recordKept = decision.record !== false;
     if (decision.kept) reportKept({ field: 'MARROW_FLEET_AGENT_ID', value: decision.kept.value, reason: decision.kept.reason });
     if (decision.divergence) {
       const { reason, held: replacedId, applied, via } = decision.divergence;
@@ -2979,7 +2984,7 @@ function upsertMcpServerConfig(filePath, options = {}) {
     env,
   };
   config.mcpServers = servers;
-  if (typeof options.onApplied === 'function') options.onApplied(recordAgentId ?? keptAgentId);
+  if (typeof options.onApplied === 'function') options.onApplied(recordAgentId ?? keptAgentId, { record: recordKept });
   return JSON.stringify(config, null, 2) + '\n';
 }
 
@@ -3306,6 +3311,7 @@ function buildPlan(detection, options) {
       mcpConfigOptions.identityRule = true;
       mcpConfigOptions.preRecordKeep = options.maintenance !== true;
       mcpConfigOptions.fixIdentityTargets = options.fixIdentityTargets;
+      mcpConfigOptions.fixIdentityConfirmed = options.fixIdentityConfirmed;
       // An unsafe record makes the whole plan empty: nothing is written (no config, hook, record or runtime).
       if (mcpConfigOptions.identityRecord.state === 'invalid') identityUnsafe = { reason: mcpConfigOptions.identityRecord.reason };
     }
@@ -3333,7 +3339,7 @@ function buildPlan(detection, options) {
         onDivergence: (divergence) => write.identityDivergence.push(divergence),
         onKept: (kept) => write.identityKept.push(kept),
         onRecordInvalid: () => { write.identityRecordInvalid = true; },
-        onApplied: (agentId) => { write.appliedAgentId = agentId; },
+        onApplied: (agentId, applied) => { write.appliedAgentId = agentId; write.recordApplied = applied?.record !== false; },
       }));
     };
     return write;
@@ -3799,7 +3805,7 @@ function applyPlan(plan, options) {
       ...(write.mcpHost && changed && fileExists && mcpEnvDiffers(before, after) ? { mcp_host: write.mcpHost, mcp_env_changed: true } : {}),
       ...(changed ? { change_class: changeClass(write, fileExists, before, after) } : {}),
     });
-    if (write.appliedAgentId !== undefined && writeApplied && !hookConflict) {
+    if (write.appliedAgentId !== undefined && write.recordApplied !== false && writeApplied && !hookConflict) {
       recordIdentities[identityRecordKey(write.path)] = write.appliedAgentId;
     }
     if (contentChanged && writeApplied) {
@@ -4891,7 +4897,9 @@ function printReport(report, sink) {
     if (identityChanges.some((change) => change.identity_record_invalid)) out(`- ${IDENTITY_RECORD_INVALID_LINE}\n`);
     for (const change of identityChanges) {
       for (const kept of change.identity_kept || []) {
-        out(kept.reason === 'pre_record'
+        out(kept.reason === 'unrecorded'
+          ? `- kept agent identity ${printableId(kept.value)} (set in the file, not recorded by Marrow) in ${printablePath(change.path)}\n`
+          : kept.reason === 'pre_record'
           ? `- kept agent identity ${kept.value} (set before this installer recorded identities) in ${change.path}\n`
           : `- kept ${kept.field} ${kept.value} (recorded by this installer) in ${change.path}\n`);
       }
@@ -5404,6 +5412,7 @@ async function install(options) {
       const fix = await resolveIdentityFixes({ files, home: detection.home, fetchImpl: options.statusFetch, timeoutMs: options.statusTimeoutMs });
       if (fix.stop) return { root: detection.root, writeMode: 'blocked', identity_stop: { exitCode: fix.stop.exitCode, reason: 'fix_identity', lines: fix.stop.lines } };
       options.fixIdentityTargets = fix.targets;
+      options.fixIdentityConfirmed = fix.confirmed;
       options.identityFixNotes = fix.lines;
     }
   }
@@ -5906,7 +5915,9 @@ function installSummaryLines(report, options) {
   if ((report.changes || []).some((change) => change.identity_record_invalid)) lines.push(`Note: ${IDENTITY_RECORD_INVALID_LINE}.`);
   for (const change of report.changes || []) {
     for (const kept of change.identity_kept || []) {
-      lines.push(kept.reason === 'pre_record'
+      lines.push(kept.reason === 'unrecorded'
+        ? `Kept agent identity ${printableId(kept.value)} (set in the file, not recorded by Marrow) in ${printablePath(change.path)}.`
+        : kept.reason === 'pre_record'
         ? `Kept agent identity ${kept.value} (set before this installer recorded identities) in ${change.path}.`
         : `Kept agent identity ${kept.value} (recorded by this installer) in ${change.path}.`);
     }
