@@ -9,6 +9,7 @@ const {
   controllerSupportedPlatform,
   ensureCurrentGovernanceController,
   stopProjectControllers,
+  stopSupersededControllers,
 } = require('./controller-manager');
 const { firstCapturePath, harnessReloadPlan } = require('./first-hour');
 const {
@@ -38,6 +39,7 @@ const {
 const { ensureOwnerApiKey, ownerKeyStoreState, readOwnerKeyDetail } = require('./owner-env');
 const { assertSafeBaseUrl, emitNoticeOnce, ownerKeyBaseUrl } = require('./base-url-policy');
 const { buildOwnToolMatchers } = require('./marrow-own-tools');
+const { decideAgentIdentity, displayPath, hostStepLines, identityLine, printableId, printablePath, unsafeRecordLine } = require('./identity-record');
 const { detectAgentPlugins, describeAgentPlugin } = require('./agent-plugins');
 const { buildStatusEnv, runSeatbeltStatus, seatbeltLine, seatbeltReport, seatbeltWhyLine, statusInvocation } = require('./seatbelt-status');
 const {
@@ -985,12 +987,17 @@ function parseArgs(argv, env = process.env) {
       }
     }
     else if (arg === '--agent-id') {
+      // A missing or empty value is refused, never ignored: ignoring it would leave the id the shell
+      // exported in place. Repeated, the last one wins.
       const value = optionValue();
-      if (value) {
-        options.agentId = value;
-        options.agentIdFromArg = true;
-      }
+      if (!String(value).trim()) throw new Error('--agent-id needs a value: write --agent-id <id>');
+      options.agentId = value;
+      options.agentIdFromArg = true;
     }
+    else if (arg.startsWith('--agent-id=')) {
+      throw new Error('--agent-id needs a value written as a separate word: --agent-id <id> (the --agent-id=<id> form is not accepted)');
+    }
+    else if (arg === '--fix-identity') options.fixIdentity = true;
     else if (arg === '--mcp') {
       explicitOperation = true;
       options.mode = 'mcp';
@@ -1014,6 +1021,9 @@ function parseArgs(argv, env = process.env) {
     }
   }
 
+  // update never takes the agent id from the runner's environment or key: only --agent-id may set one. Setup and
+  // activate keep their first-time identity.
+  if (options.update && !options.agentIdFromArg) options.agentId = '';
   if (options.all && !options.uninstall) {
     throw new Error('--all is only valid with uninstall');
   }
@@ -2669,6 +2679,8 @@ function identityAllowlist(env = process.env) {
 // written over.
 const IDENTITY_RECORD_FILE = 'identity-record.json';
 const IDENTITY_RECORD_MAX_BYTES = 64 * 1024;
+// `update --fix-identity` is only a refusal (INS-1 cut): one fixed line, no path, id or file text in it.
+const FIX_IDENTITY_STOP = Object.freeze({ exitCode: 4, reason: 'fix_identity', lines: Object.freeze(['--fix-identity is not available in this version; nothing was changed']) });
 const IDENTITY_RECORD_INVALID_LINE = 'identity record ~/.marrow/identity-record.json is unsafe or unreadable (it must be an owner-only file in an owner-only ~/.marrow); ignored: agent ids were reset as before';
 const UPDATE_SKIPPED_FIX = 'run npx -y @getmarrow/install@latest --repair to add or restore it';
 
@@ -2713,38 +2725,50 @@ function identityRecordPath(home) {
 
 function readIdentityRecord(home) {
   const absent = { state: 'absent', entries: {}, text: null };
-  const invalid = { state: 'invalid', entries: {}, text: null };
-  if (!home) return invalid;
+  // `reason` names why a record is unsafe, so update can print the fix for that state (identity-record.js).
+  const invalid = (reason) => ({ state: 'invalid', reason, entries: {}, text: null });
+  if (!home) return invalid('unreadable');
   const filePath = identityRecordPath(home);
   try {
     const directory = fs.lstatSync(path.dirname(filePath));
-    if (!directory.isDirectory() || !ownerOnly(directory, 0o022)) return invalid;
+    if (directory.isSymbolicLink()) return invalid('dir_link');
+    if (!directory.isDirectory() || !ownerOnly(directory, 0o022)) {
+      return invalid(directory.isDirectory() && directory.uid === (typeof process.getuid === 'function' ? process.getuid() : directory.uid) ? 'dir_mode' : 'dir_other');
+    }
   } catch (error) {
-    return error?.code === 'ENOENT' ? absent : invalid;
+    return error?.code === 'ENOENT' ? absent : invalid('unreadable');
   }
   let descriptor = -1;
   try {
     descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
   } catch (error) {
-    return error?.code === 'ENOENT' ? absent : invalid;
+    return error?.code === 'ENOENT' ? absent : invalid(error?.code === 'ELOOP' ? 'symlink' : 'unreadable');
   }
   try {
     const stat = fs.fstatSync(descriptor);
-    if (!stat.isFile() || stat.nlink !== 1 || !ownerOnly(stat, 0o077) || stat.size > IDENTITY_RECORD_MAX_BYTES) return invalid;
+    if (!stat.isFile()) return invalid('not_regular');
+    if (stat.nlink !== 1) return invalid('nlink');
+    if (!ownerOnly(stat, 0o077)) return invalid(typeof process.getuid === 'function' && stat.uid !== process.getuid() ? 'owner' : 'mode');
+    if (stat.size > IDENTITY_RECORD_MAX_BYTES) return invalid('too_large');
     const text = fs.readFileSync(descriptor, 'utf8');
-    const parsed = JSON.parse(text);
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return invalid('bad_json');
+    }
     if (!parsed || parsed.version !== 1 || !parsed.entries || typeof parsed.entries !== 'object'
-      || Array.isArray(parsed.entries)) return invalid;
+      || Array.isArray(parsed.entries)) return invalid('bad_shape');
     const entries = {};
     for (const [key, entry] of Object.entries(parsed.entries)) {
-      if (!path.isAbsolute(key) || !entry || typeof entry !== 'object' || Array.isArray(entry)) return invalid;
+      if (!path.isAbsolute(key) || !entry || typeof entry !== 'object' || Array.isArray(entry)) return invalid('bad_shape');
       const agentId = entry.MARROW_FLEET_AGENT_ID;
-      if (agentId !== undefined && (typeof agentId !== 'string' || !AGENT_ID_RE.test(agentId))) return invalid;
+      if (agentId !== undefined && (typeof agentId !== 'string' || !AGENT_ID_RE.test(agentId))) return invalid('bad_shape');
       entries[key] = agentId === undefined ? {} : { MARROW_FLEET_AGENT_ID: agentId };
     }
     return { state: 'valid', entries, text };
   } catch {
-    return invalid;
+    return invalid('unreadable');
   } finally {
     fs.closeSync(descriptor);
   }
@@ -2881,7 +2905,40 @@ function upsertMcpServerConfig(filePath, options = {}) {
   let keptAgentId = agentId;
   // An allowlisted id is recorded only if it was already: it stays kept only while allowlisted.
   let recordAgentId = null;
-  if (existingAgentId && existingAgentId !== agentId && !derivedAgentIds.has(existingAgentId)) {
+  // False for an id the file holds that Marrow did not record: it stays in the file and stays out of the record.
+  let recordKept = true;
+  if (options.identityRule === true) {
+    // Update and the controller maintenance pass (INS-1): identity-record.js decideAgentIdentity is the whole
+    // rule. The id is the recorded one, or the one --agent-id names, or none; never the runner's.
+    const held = existingAgentId && !derivedAgentIds.has(existingAgentId) ? existingAgentId : '';
+    const decision = decideAgentIdentity({
+      held,
+      recordState,
+      recordedId: recorded?.MARROW_FLEET_AGENT_ID || '',
+      explicitId: explicit ? agentId : '',
+      via: '--agent-id',
+      maintenance: options.preRecordKeep === false,
+      // The one-time keep (kept and recorded) is an update's: maintenance keeps a held id without recording it.
+      preRecordEligible: Boolean(held && recordState === 'absent' && options.preRecordScope && options.preRecordKeep !== false
+        && preRecordAgentIdEligible(filePath, existingEnv.MARROW_FLEET_AGENT_ID, options.preRecordScope)),
+    });
+    keptAgentId = decision.id;
+    recordAgentId = decision.recordId;
+    recordKept = decision.record !== false;
+    if (decision.kept) reportKept({ field: 'MARROW_FLEET_AGENT_ID', value: decision.kept.value, reason: decision.kept.reason });
+    if (decision.divergence) {
+      const { reason, held: replacedId, applied, via } = decision.divergence;
+      report({
+        field: 'MARROW_FLEET_AGENT_ID',
+        replaced: replacedId ? safeIdentityValue('MARROW_FLEET_AGENT_ID', replacedId) : null,
+        applied: applied ? safeIdentityValue('MARROW_FLEET_AGENT_ID', applied) : 'unset (resolved by Marrow)',
+        reason,
+        held: replacedId ? safeIdentityValue('MARROW_FLEET_AGENT_ID', replacedId) : null,
+        homeScope: options.preRecordScope?.homeScope === true,
+        ...(via ? { via } : {}),
+      });
+    }
+  } else if (existingAgentId && existingAgentId !== agentId && !derivedAgentIds.has(existingAgentId)) {
     if (allowlist.agentIds.has(existingAgentId)) {
       keptAgentId = existingAgentId;
       recordAgentId = recorded?.MARROW_FLEET_AGENT_ID === existingAgentId ? existingAgentId : '';
@@ -2920,7 +2977,7 @@ function upsertMcpServerConfig(filePath, options = {}) {
     env,
   };
   config.mcpServers = servers;
-  if (typeof options.onApplied === 'function') options.onApplied(recordAgentId ?? keptAgentId);
+  if (typeof options.onApplied === 'function') options.onApplied(recordAgentId ?? keptAgentId, { record: recordKept });
   return JSON.stringify(config, null, 2) + '\n';
 }
 
@@ -3216,7 +3273,12 @@ function buildPlan(detection, options) {
   const client = options.client || detectedClient(detection);
   // Server-facing configuration carries only a configured agent id. Without one, the MCP
   // server, SDK and hooks let Marrow resolve the key's bound agent or the plan seat.
-  const agentId = String(options.agentId || '').trim();
+  // INS-1: on update and on the controller's maintenance pass the id is never the runner's. Only the id the
+  // operator passed with --agent-id counts as given; the rest comes from the record (identity-record.js).
+  const identityRule = (options.update === true && options.doctor !== true) || options.maintenance === true;
+  const agentId = identityRule
+    ? (options.maintenance !== true && options.agentIdFromArg === true ? String(options.agentId || '').trim() : '')
+    : String(options.agentId || '').trim();
   const derivedAgentIds = derivedAgentIdsFor(detection.root);
   const baseUrl = String(options.baseUrl || DEFAULT_BASE_URL).trim() || DEFAULT_BASE_URL;
   const mcpConfigOptions = {
@@ -3227,19 +3289,35 @@ function buildPlan(detection, options) {
     allowlist: options.identityAllowlist || identityAllowlist(),
   };
   // Update and repair keep the identity this installer recorded (and, once, an owner-set id from
-  // before it recorded any); doctor shows the same decision; the controller's maintenance pass
-  // does not use the record.
+  // before it recorded any); doctor reads the record but does not use the update rule (it shows the
+  // allowlist decision); the controller's maintenance pass reads the record too but never writes it.
   const update = options.update === true && options.maintenance !== true;
-  if (update || (options.doctor === true && options.maintenance !== true)) {
+  let identityUnsafe = null;
+  if (update || identityRule || (options.doctor === true && options.maintenance !== true)) {
     mcpConfigOptions.identityRecord = readIdentityRecord(detection.home);
     mcpConfigOptions.preRecordScope = {
       homeScope: identityRecordKey(detection.root) === identityRecordKey(detection.home),
       home: detection.home,
     };
-    mcpConfigOptions.explicitAgentId = options.agentIdFromArg === true && Boolean(agentId);
+    mcpConfigOptions.explicitAgentId = options.agentIdFromArg === true && options.maintenance !== true && Boolean(agentId);
+    if (identityRule) {
+      mcpConfigOptions.identityRule = true;
+      mcpConfigOptions.preRecordKeep = options.maintenance !== true;
+      // An unsafe record makes the whole plan empty: nothing is written (no config, hook, record or runtime).
+      if (mcpConfigOptions.identityRecord.state === 'invalid') identityUnsafe = { reason: mcpConfigOptions.identityRecord.reason };
+    }
   }
-  const mcpConfigWrite = (filePath, label) => {
-    const write = { type: 'json-transform', path: filePath, label, identityDivergence: [], identityKept: [] };
+  // The id the SDK files carry: the one the project's own MCP config ends up with (never the runner's).
+  const passiveAgentId = () => {
+    if (!identityRule) return agentId;
+    const file = detection.paths.mcpJson;
+    if (identityUnsafe || !file || !exists(file)) return '';
+    let decided = '';
+    upsertMcpServerConfig(file, { ...mcpConfigOptions, onApplied: (id) => { decided = id || ''; } });
+    return decided;
+  };
+  const mcpConfigWrite = (filePath, label, mcpHost) => {
+    const write = { type: 'json-transform', path: filePath, label, mcpHost, identityDivergence: [], identityKept: [] };
     write.transform = (target) => {
       write.identityDivergence = [];
       write.identityKept = [];
@@ -3252,7 +3330,7 @@ function buildPlan(detection, options) {
         onDivergence: (divergence) => write.identityDivergence.push(divergence),
         onKept: (kept) => write.identityKept.push(kept),
         onRecordInvalid: () => { write.identityRecordInvalid = true; },
-        onApplied: (agentId) => { write.appliedAgentId = agentId; },
+        onApplied: (agentId, applied) => { write.appliedAgentId = agentId; write.recordApplied = applied?.record !== false; },
       }));
     };
     return write;
@@ -3281,13 +3359,13 @@ function buildPlan(detection, options) {
       type: 'file',
       path: detection.paths.passiveRuntime,
       label: 'SDK passive runtime preload',
-      content: passiveRuntimeSource({ agentId, baseUrl }),
+      content: passiveRuntimeSource({ agentId: passiveAgentId(), baseUrl }),
     });
     writes.push({
       type: 'file',
       path: detection.paths.passiveEnv,
       label: 'Marrow passive env example',
-      content: envExample({ agentId, baseUrl, client }),
+      content: envExample({ agentId: passiveAgentId(), baseUrl, client }),
       overwrite: false,
     });
   }
@@ -3350,7 +3428,7 @@ function buildPlan(detection, options) {
         transform: (filePath) => localize(retarget(upsertGrokHooks(filePath)), filePath),
       });
     }
-    writes.push(mcpConfigWrite(detection.paths.mcpJson, 'Project MCP server config'));
+    writes.push(mcpConfigWrite(detection.paths.mcpJson, 'Project MCP server config', 'Claude Code'));
     // The owner's Hermes config changes only on an explicit install or update, never from the
     // controller's background maintenance pass.
     if (detection.hermesConfig && options.maintenance !== true && hermesTargetIsSafe(detection)) {
@@ -3375,7 +3453,7 @@ function buildPlan(detection, options) {
           transform: (filePath) => localize(retarget(upsertCursorHooks(filePath, { hostApprovals })), filePath),
         });
       }
-      writes.push(mcpConfigWrite(detection.paths.cursorMcp, 'Cursor MCP server config'));
+      writes.push(mcpConfigWrite(detection.paths.cursorMcp, 'Cursor MCP server config', 'Cursor'));
     }
   }
 
@@ -3423,14 +3501,15 @@ function buildPlan(detection, options) {
   return {
     mode,
     root: detection.root,
-    writes: planned,
+    writes: identityUnsafe ? [] : planned,
+    ...(identityUnsafe ? { identity_record_unsafe: identityUnsafe } : {}),
     ...(skipped.length ? { update_skipped: skipped } : {}),
     ...(skippedHosts.length ? { skipped_hosts: skippedHosts } : {}),
     ...(absentHosts.length ? { absent_hosts: absentHosts } : {}),
     ...(absentMcpConfig.length ? { absent_mcp_config: absentMcpConfig } : {}),
     mcp_target_version: mcpTargetVersion,
     host_approval_hooks: hostApprovals,
-    ...(options.maintenance !== true ? { identityRecordHome: detection.home } : {}),
+    ...(options.maintenance !== true && !identityUnsafe ? { identityRecordHome: detection.home } : {}),
   };
 }
 
@@ -3713,9 +3792,11 @@ function applyPlan(plan, options) {
       ...(write.identityDivergence?.length && changed ? { identity_divergence: write.identityDivergence } : {}),
       ...(write.identityKept?.length ? { identity_kept: write.identityKept } : {}),
       ...(write.identityRecordInvalid ? { identity_record_invalid: true } : {}),
+      // A changed marrow env block: the host that reads this file must reconnect (printed by update).
+      ...(write.mcpHost && changed && fileExists && mcpEnvDiffers(before, after) ? { mcp_host: write.mcpHost, mcp_env_changed: true } : {}),
       ...(changed ? { change_class: changeClass(write, fileExists, before, after) } : {}),
     });
-    if (write.appliedAgentId !== undefined && writeApplied && !hookConflict) {
+    if (write.appliedAgentId !== undefined && write.recordApplied !== false && writeApplied && !hookConflict) {
       recordIdentities[identityRecordKey(write.path)] = write.appliedAgentId;
     }
     if (contentChanged && writeApplied) {
@@ -3733,6 +3814,14 @@ function applyPlan(plan, options) {
     } catch {}
   }
   return changes;
+}
+
+// True when the marrow env block of an MCP config differs between two texts (a new file counts).
+function mcpEnvDiffers(before, after) {
+  const envOf = (text) => {
+    try { return JSON.stringify(JSON.parse(text)?.mcpServers?.marrow?.env ?? null); } catch { return null; }
+  };
+  return envOf(before) !== envOf(after);
 }
 
 // What a planned write changes, for the report: a new file, only Marrow's block, only the pinned
@@ -4799,12 +4888,19 @@ function printReport(report, sink) {
     if (identityChanges.some((change) => change.identity_record_invalid)) out(`- ${IDENTITY_RECORD_INVALID_LINE}\n`);
     for (const change of identityChanges) {
       for (const kept of change.identity_kept || []) {
-        out(kept.reason === 'pre_record'
+        out(kept.reason === 'unrecorded'
+          ? `- kept agent identity ${printableId(kept.value)} (set in the file, not recorded by Marrow) in ${printablePath(change.path)}\n`
+          : kept.reason === 'pre_record'
           ? `- kept agent identity ${kept.value} (set before this installer recorded identities) in ${change.path}\n`
           : `- kept ${kept.field} ${kept.value} (recorded by this installer) in ${change.path}\n`);
       }
       for (const divergence of change.identity_divergence || []) {
-        out(`- reset ${divergence.field} ${divergence.replaced} -> ${divergence.applied} in ${change.path}${divergence.via ? ` (${divergence.via})` : ''}\n`);
+        const line = divergence.reason === 'restored' || divergence.reason === 'removed'
+          ? identityLine(divergence, { file: change.path, homeScope: divergence.homeScope })
+          : null;
+        out(line
+          ? `- ${line}\n`
+          : `- reset ${divergence.field} ${divergence.replaced} -> ${divergence.applied} in ${change.path}${divergence.via ? ` (${divergence.via})` : ''}\n`);
       }
     }
   }
@@ -4828,6 +4924,8 @@ function printReport(report, sink) {
     }
     if (change.hook_conflict && change.exact_fix) out(`  exact fix: ${change.exact_fix}\n`);
     for (const divergence of change.identity_divergence || []) {
+      // The agent id has no allowlist on update (its line is in the Identity section above).
+      if (divergence.field === 'MARROW_FLEET_AGENT_ID' && divergence.reason) continue;
       out(`  identity reset: ${divergence.field} ${divergence.replaced} -> ${divergence.applied}. If the previous value was intended, add it to ${divergence.field === 'MARROW_BASE_URL' ? 'MARROW_ALLOWED_BASE_URLS' : 'MARROW_ALLOWED_AGENT_IDS'} and rerun.\n`);
     }
   }
@@ -5085,6 +5183,11 @@ function printReport(report, sink) {
     out('\nRun with --yes to write these changes.\n');
   }
 
+  if (report.identity_next_steps?.length) {
+    out('\nNext step for the changed MCP identity:\n');
+    for (const line of report.identity_next_steps) out(`- ${line}\n`);
+  }
+
   if (report.warnings.length > 0) {
     out('\nWarnings:\n');
     for (const warning of report.warnings) {
@@ -5212,14 +5315,54 @@ function mcpRuntimeReport(runtime, { legacyNpxHooks = [], switchIgnored = false 
   };
 }
 
+// The id update applied to the root's own MCP config (Claude Code's .mcp.json, else Cursor's): the id the
+// controller is launched with. Empty when no config carries one.
+function decidedControllerAgentId(plan, detection) {
+  for (const file of [detection.paths.mcpJson, detection.paths.cursorMcp]) {
+    const write = (plan.writes || []).find((entry) => entry.path === file && entry.appliedAgentId);
+    if (write) return write.appliedAgentId;
+  }
+  return '';
+}
+
+// Own-uid process commands from /proc, or null when they cannot be listed (no /proc, not Linux).
+function readOwnProcessCommands(procRoot = '/proc') {
+  if (process.platform !== 'linux') return null;
+  try {
+    const uid = typeof process.getuid === 'function' ? process.getuid() : null;
+    return fs.readdirSync(procRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name))
+      .filter((entry) => {
+        try { return uid === null || fs.statSync(path.join(procRoot, entry.name)).uid === uid; } catch { return false; }
+      })
+      .map((entry) => {
+        try { return fs.readFileSync(path.join(procRoot, entry.name, 'cmdline'), 'utf8'); } catch { return ''; }
+      })
+      .filter(Boolean);
+  } catch {
+    return null;
+  }
+}
+
+// { listed, running }: whether own-uid processes could be listed, and whether a Marrow MCP server runs among them.
+function marrowMcpListing(options = {}) {
+  const commands = Array.isArray(options.processCommands) ? options.processCommands.map(String) : readOwnProcessCommands(options.procRoot);
+  if (!commands) return { listed: false, running: false };
+  return { listed: true, running: commands.some(isMcpProcessCommand) };
+}
+
 function localControllerAgentId(root, client, configuredAgentId = '') {
   return String(configuredAgentId || '').trim() || stableAgentId(root, client);
 }
 
 async function install(options) {
   // Only a configured agent id is sent to Marrow. The controller keeps a local identity for its
-  // state directory, which is never sent.
-  const configuredAgentId = String(options.agentId || '').trim();
+  // state directory, which is never sent. On update the configured id is the one --agent-id named,
+  // never an id the runner's shell exported (whoever built the options).
+  const identityRule = (options.update === true && options.doctor !== true) || options.maintenance === true;
+  const configuredAgentId = identityRule
+    ? (options.maintenance !== true && options.agentIdFromArg === true ? String(options.agentId || '').trim() : '')
+    : String(options.agentId || '').trim();
   if (options.activate && (options.yes !== true || options.dryRun || options.doctor)) {
     throw new Error('activate requires write mode (--yes) because hooks must be installed during this run');
   }
@@ -5241,10 +5384,19 @@ async function install(options) {
     USERPROFILE: options.home || options.cwd,
   });
   if (options.repair || options.update) assertUpdateTargetsManagedRoot(detection);
+  if (identityRule && options.maintenance !== true) {
+    // An unsafe identity record makes update write nothing at all (no config, hook, record, runtime or
+    // controller) and print one line.
+    const record = readIdentityRecord(detection.home);
+    if (record.state === 'invalid') {
+      return { root: detection.root, writeMode: 'blocked', identity_stop: { exitCode: 3, reason: record.reason, lines: [unsafeRecordLine(identityRecordPath(detection.home), record.reason)] } };
+    }
+  }
   const client = detectedClient(detection);
   options.client = client;
   options.agentId = configuredAgentId;
-  const controllerIdentityAgentId = localControllerAgentId(detection.root, client, configuredAgentId);
+  let controllerIdentityAgentId = localControllerAgentId(detection.root, client, configuredAgentId);
+  let controllerAgentId = configuredAgentId;
   const observedMcpProcesses = inspectMcpProcesses({ commands: options.processCommands });
   const observedMcpConfigurations = inspectMcpConfigurations(detection, { paths: options.mcpConfigPaths });
   const registryMetadata = await readMcpRegistryMetadata(options);
@@ -5266,6 +5418,11 @@ async function install(options) {
   const plan = buildPlan(detection, options);
   const writeMode = options.doctor ? 'doctor' : options.dryRun ? 'dry-run' : options.repair ? 'repair' : options.yes ? 'write' : 'dry-run';
   const changes = applyPlan(plan, options);
+  if (identityRule) {
+    // The controller runs with the id this update decided for the root's MCP config, or none: never the runner's.
+    controllerAgentId = decidedControllerAgentId(plan, detection);
+    controllerIdentityAgentId = localControllerAgentId(detection.root, client, controllerAgentId);
+  }
   let profile = activationProfile(detection, plan, changes, client);
   const localControl = localControlEvidence({
     apiKey: options.apiKey,
@@ -5464,8 +5621,9 @@ async function install(options) {
       controller = await ensureCurrentGovernanceController({
         apiKey: options.apiKey,
         baseUrl: options.baseUrl,
-        agentId: configuredAgentId,
+        agentId: controllerAgentId,
         identityAgentId: controllerIdentityAgentId,
+        scanAll: identityRule,
         client,
         root: detection.root,
         mode: plan.mode,
@@ -5482,6 +5640,16 @@ async function install(options) {
         error: message,
       };
       if (options.activate) throw new Error(`Marrow activation failed: local controller did not start: ${message}`);
+    }
+  }
+  // A controller left by an earlier update under another id's directory keeps running its own maintenance
+  // pass, so an update that did not start the current controller still stops those (INS-1, M3).
+  if (identityRule && !shouldEnsureController && options.yes && !options.dryRun && options.controller !== false
+    && controllerSupportedPlatform(controllerPlatform)) {
+    try {
+      await stopSupersededControllers({ root: detection.root, identityAgentId: controllerIdentityAgentId, platform: controllerPlatform });
+    } catch {
+      // The status report below still says what runs.
     }
   }
   // Only a controller that is simply not running is expected while the owner has disabled
@@ -5526,9 +5694,15 @@ async function install(options) {
     selfTest,
     agentId: configuredAgentId,
   });
+  // A run that changed a marrow env block names each affected host's own next step (never "nothing to do").
+  const identityHosts = changes.filter((change) => change.applied && change.mcp_env_changed).map((change) => change.mcp_host);
+  const identityNextSteps = options.update === true && options.doctor !== true && identityHosts.length
+    ? hostStepLines(identityHosts, { running: marrowMcpListing(options).running })
+    : [];
   return {
     root: detection.root,
     adapterProvenance: adapterProvenanceForMcpTarget(mcpTarget),
+    ...(identityNextSteps.length ? { identity_next_steps: identityNextSteps } : {}),
     mode: plan.mode,
     writeMode,
     toolProfile: selfTest.mcp_tool_profile || initialToolProfileReport(options.toolProfile),
@@ -5716,7 +5890,9 @@ function installSummaryLines(report, options) {
   if ((report.changes || []).some((change) => change.identity_record_invalid)) lines.push(`Note: ${IDENTITY_RECORD_INVALID_LINE}.`);
   for (const change of report.changes || []) {
     for (const kept of change.identity_kept || []) {
-      lines.push(kept.reason === 'pre_record'
+      lines.push(kept.reason === 'unrecorded'
+        ? `Kept agent identity ${printableId(kept.value)} (set in the file, not recorded by Marrow) in ${printablePath(change.path)}.`
+        : kept.reason === 'pre_record'
         ? `Kept agent identity ${kept.value} (set before this installer recorded identities) in ${change.path}.`
         : `Kept agent identity ${kept.value} (recorded by this installer) in ${change.path}.`);
     }
@@ -5727,7 +5903,18 @@ function installSummaryLines(report, options) {
   if (missingHosts.others.length) {
     lines.push(`Update left ${missingHosts.others.length} file(s) alone that have no Marrow config (${missingHosts.others.map((skipped) => skipped.label).join(', ')}); ${UPDATE_SKIPPED_FIX}.`);
   }
-  const divergences = (report.changes || []).flatMap((change) => (change.identity_divergence || []).map((divergence) => ({ ...divergence, path: change.path })));
+  const identityLines = [];
+  const divergences = [];
+  for (const change of report.changes || []) {
+    for (const divergence of change.identity_divergence || []) {
+      const line = divergence.reason === 'restored' || divergence.reason === 'removed'
+        ? identityLine(divergence, { file: change.path, homeScope: divergence.homeScope })
+        : null;
+      if (line) identityLines.push(line);
+      else divergences.push({ ...divergence, path: change.path });
+    }
+  }
+  lines.push(...identityLines);
   if (divergences.length) {
     lines.push(`MCP config identity reset: ${divergences.map((divergence) => `${divergence.field} in ${divergence.path}`).join('; ')}. Details and the allowlist fix are in the full report.`);
   }
@@ -5737,6 +5924,7 @@ function installSummaryLines(report, options) {
   else if (reload.required && reload.clients?.some((entry) => entry.client !== 'hermes')) {
     lines.push(`Restart: ${reload.clients.filter((entry) => entry.client !== 'hermes').map((entry) => entry.restart).join(' ')}`);
   }
+  lines.push(...(report.identity_next_steps || []));
   return { lines, selfTestFailed };
 }
 
@@ -5768,8 +5956,19 @@ function enforceKeyEndpoint(options, ownerKey) {
   return options;
 }
 
+function printIdentityStop(options, stop) {
+  if (options.json) process.stdout.write(`${JSON.stringify({ ok: false, identity: stop }, null, 2)}\n`);
+  else process.stdout.write(`${stop.lines.join('\n')}\n`);
+  process.exitCode = stop.exitCode;
+}
+
 async function runCli(argv) {
   const options = parseArgs(argv);
+  // --fix-identity is refused before anything else runs: no file is opened, no request is made, nothing is spawned or changed.
+  if (options.fixIdentity === true) {
+    printIdentityStop(options, FIX_IDENTITY_STOP);
+    return;
+  }
   if (options.help) {
     process.stdout.write(usage());
     return;
@@ -5819,6 +6018,11 @@ async function runCli(argv) {
     process.exitCode = 1;
     return;
   }
+  // An unsafe identity record changed nothing and says why.
+  if (report.identity_stop) {
+    printIdentityStop(options, report.identity_stop);
+    return;
+  }
   // Claude Code opened from the desktop app, an IDE or a new terminal has no MARROW_API_KEY.
   // The MCP server and hooks read ~/.marrow/env, so a first install stores a key that came
   // from the environment there (owner-only), once the self-test passed by the same verdict the
@@ -5859,6 +6063,7 @@ async function runCli(argv) {
 module.exports = {
   argumentLabel,
   enforceKeyEndpoint,
+  identityRecordPath,
   maintenanceMcpRuntime,
   parseArgs,
   detectEnvironment,

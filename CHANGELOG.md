@@ -2,6 +2,19 @@
 
 Release notes for `@getmarrow/install`, newest first. The README describes only the current version.
 
+## Unreleased
+
+`update` and the controller's background check no longer take the agent id from the shell that runs them. In 0.1.77 an update run from a shell that exported another agent's id wrote that id into the MCP config, and the controller kept doing it every five minutes, so every MCP tool call answered 403.
+
+- **`update` never reads the agent id from your shell or key.** The id in a managed MCP config is the one Marrow recorded for that file (`~/.marrow/identity-record.json`), the one you pass with `--agent-id <id>`, or none. A config that differs from the record is restored, with one printed line that names the id it held and the command to keep it. When a record exists but has no entry for the file, an id the file holds is kept and reported (one printed line, never written to the record), never replaced by another; the controller's background check keeps a held id the same way. With no record file at all, `update` keeps once, and records, a plain id set in your own home config before Marrow recorded identities, and removes any other id (a project file's id included). An id that is not a valid agent id (letters, digits and `._:-`) is always removed.
+- **An unsafe identity record changes nothing.** If the record is a link, shared, owned by someone else, has more than one link or is not valid JSON, `update` and the controller's check write nothing, print one line with the fix for that state, and `update` exits 3.
+- **`update --fix-identity` is not available in this version.** The flag is accepted only to be refused: it prints one fixed line (`--fix-identity is not available in this version; nothing was changed`) and exits 4 before anything is read, requested or changed. No MCP config, identity record or key file is opened, no request is made, nothing is spawned and nothing is written, whatever the files are (plain, linked or missing).
+- **The controller started by `update` carries the id Marrow decided**, and every controller left for the same project under another id is stopped.
+- **`MARROW_ALLOWED_AGENT_IDS` no longer decides anything on `update` or in the controller's check.** The base-URL allowlist is unchanged.
+- **Identity lines name a path only when it is plain.** A path with a space, quote, control or non-ASCII character is printed as `[unsafe path]` in the identity lines, so a directory name cannot carry text into them.
+- **After an update changes a host's MCP config, the output names that host's own next step** (Claude Code: `/mcp`, then Reconnect; Cursor: restart), never "Nothing else to do."
+- `--agent-id` with no value (or written `--agent-id=`) is refused instead of being ignored.
+
 ## v0.1.77
 
 v0.1.77. Warnings about risky local configuration in `setup` and `doctor`, the owner's own terminal for `control disable`, settings errors that no longer quote file text, and the MCP pin: v0.1.77 installs MCP `3.9.109` (source `990aaaa673a3d117599a33a8972dedc1398e240e`, packed integrity `sha512-tgGXtv7vTxhtD2/HRbAGBjPpZ3fQYWXPN6XkJhVx07YCvg2sGfhkFbD+QfP+c56FbeVa5Rwbe4B50kiRuM+rdQ==`); the SDK pin stays `3.7.67` (packed integrity `sha512-0Lwg4XLxm9eXxMgQtFAH1y4mXi9CXg3poQlGbeK0AW+EHP+yfUWQUH4d1XYO03QNzwHLAYKfARDmnl5GpBnKUw==`).

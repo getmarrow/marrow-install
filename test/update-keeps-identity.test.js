@@ -111,21 +111,24 @@ test('pre-record migration: an owner-set home agent id is kept once, printed, an
   }
 });
 
-test('a recorded identity edited by an agent is reset and reported', () => {
+test('a recorded identity edited by an agent is restored to the recorded id and reported', () => {
   const home = homeWithMcp({ MARROW_BASE_URL: DEFAULT_URL, MARROW_FLEET_AGENT_ID: 'devon' });
   try {
     writeRecord(home, { [path.join(home, '.mcp.json')]: { MARROW_FLEET_AGENT_ID: 'cliff' } });
+    // INS-1: the helper's agentId is the runner's id (no --agent-id was passed); update restores the record, never that id.
     const result = run(home, home);
-    assert.equal(result.env.MARROW_FLEET_AGENT_ID, 'codex-bob');
-    assert.deepEqual(result.change.identity_divergence, [{ field: 'MARROW_FLEET_AGENT_ID', replaced: 'devon', applied: 'codex-bob' }]);
+    assert.equal(result.env.MARROW_FLEET_AGENT_ID, 'cliff');
+    assert.deepEqual(result.change.identity_divergence, [{
+      field: 'MARROW_FLEET_AGENT_ID', replaced: 'devon', applied: 'cliff', reason: 'restored', held: 'devon', homeScope: true,
+    }]);
     assert.equal(result.change.identity_kept, undefined);
-    assert.match(report(result.changes), /reset MARROW_FLEET_AGENT_ID devon -> codex-bob/);
+    assert.match(report(result.changes), /had MARROW_FLEET_AGENT_ID=devon, but Marrow recorded cliff for this file; restored cliff\./);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
 });
 
-test('migration fails closed: tracked, group-writable, duplicate or escaped key, malformed id, project scope, and a link are all reset', () => {
+test('migration fails closed: tracked, group-writable, duplicate or escaped key, malformed id, project scope, and a link are all removed (never replaced by the runner id)', () => {
   const cases = [
     ['git-tracked home config', (home) => {
       const git = (...args) => spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.test', ...args], { cwd: home });
@@ -147,9 +150,10 @@ test('migration fails closed: tracked, group-writable, duplicate or escaped key,
     try {
       mutate(home);
       const result = run(home, home);
-      assert.equal(result.env.MARROW_FLEET_AGENT_ID, 'codex-bob', name);
+      assert.equal(Object.hasOwn(result.env, 'MARROW_FLEET_AGENT_ID'), false, name);
       assert.equal(result.change.identity_kept, undefined, name);
       assert.equal(result.change.identity_divergence?.[0]?.field, 'MARROW_FLEET_AGENT_ID', name);
+      assert.equal(result.change.identity_divergence?.[0]?.reason, 'removed', name);
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }
@@ -160,8 +164,9 @@ test('migration fails closed: tracked, group-writable, duplicate or escaped key,
   const project = homeWithMcp({ MARROW_BASE_URL: DEFAULT_URL, MARROW_FLEET_AGENT_ID: 'cliff' });
   try {
     const result = run(project, home);
-    assert.equal(result.env.MARROW_FLEET_AGENT_ID, 'codex-bob');
+    assert.equal(Object.hasOwn(result.env, 'MARROW_FLEET_AGENT_ID'), false);
     assert.equal(result.change.identity_divergence[0].replaced, 'cliff');
+    assert.equal(result.change.identity_divergence[0].reason, 'removed');
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
     fs.rmSync(project, { recursive: true, force: true });
@@ -207,17 +212,17 @@ test('a base URL is never kept by migration or by a record, only by the allowlis
   }
 });
 
-test('an allowlisted agent id is kept as before but not recorded, so it is reset once it leaves the allowlist', () => {
+test('the agent-id allowlist is no longer consulted on update: an allowlisted id that is not the recorded one is restored away', () => {
   const home = homeWithMcp({ MARROW_BASE_URL: DEFAULT_URL, MARROW_FLEET_AGENT_ID: 'devon' });
   const mcp = path.join(home, '.mcp.json');
   try {
     writeRecord(home, { [mcp]: { MARROW_FLEET_AGENT_ID: 'codex-bob' } });
+    // INS-1 (M4): the allowlist came from the runner's environment, so it can no longer keep an id.
     const allowed = run(home, home, { identityAllowlist: { baseUrls: new Set(), agentIds: new Set(['devon']) } });
-    assert.equal(allowed.env.MARROW_FLEET_AGENT_ID, 'devon');
-    assert.deepEqual(readRecord(home)[mcp], {}, 'an allowlist keep is not recorded');
-    const after = run(home, home);
-    assert.equal(after.env.MARROW_FLEET_AGENT_ID, 'codex-bob');
-    assert.equal(after.change.identity_divergence[0].replaced, 'devon');
+    assert.equal(allowed.env.MARROW_FLEET_AGENT_ID, 'codex-bob');
+    assert.deepEqual(readRecord(home)[mcp], { MARROW_FLEET_AGENT_ID: 'codex-bob' });
+    assert.equal(allowed.change.identity_kept, undefined);
+    assert.deepEqual(allowed.change.identity_divergence.map((entry) => [entry.replaced, entry.applied, entry.reason]), [['devon', 'codex-bob', 'restored']]);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
@@ -300,27 +305,29 @@ test('doctor shows the decision update makes, and the one-command summary prints
   }
 });
 
-test('an unsafe or foreign record is ignored: link, shared mode, another owner, another path; a record never authorizes another file', () => {
+test('an unsafe record stops update with nothing written; a record for another path never authorizes this file', () => {
   const home = tempDir();
   const project = homeWithMcp({ MARROW_BASE_URL: DEFAULT_URL, MARROW_FLEET_AGENT_ID: 'devon' });
   const projectMcp = path.join(project, '.mcp.json');
-  const reset = (label) => {
+  // INS-1 (T3): an unsafe record used to be ignored (the runner's id was applied); now the plan is empty and says why.
+  const stops = (label, reason) => {
     const result = run(project, home, { dryRun: true });
-    assert.equal(result.change.identity_kept, undefined, label);
-    assert.equal(result.change.identity_divergence?.[0]?.replaced, 'devon', label);
+    assert.equal(result.plan.identity_record_unsafe?.reason, reason, label);
+    assert.deepEqual(result.plan.writes, [], label);
+    assert.equal(result.change, undefined, label);
   };
   try {
     writeRecord(home, { [projectMcp]: { MARROW_FLEET_AGENT_ID: 'devon' } });
     assert.equal(run(project, home, { dryRun: true }).change.identity_kept[0].reason, 'recorded', 'control: a safe record keeps it');
 
     fs.chmodSync(recordPath(home), 0o644);
-    reset('0644 record');
+    stops('0644 record', 'mode');
     fs.chmodSync(recordPath(home), 0o600);
 
     const realGetuid = process.getuid;
     process.getuid = () => realGetuid() + 1;
     try {
-      reset('record owned by another user');
+      stops('record owned by another user', 'dir_other');
     } finally {
       process.getuid = realGetuid;
     }
@@ -328,18 +335,21 @@ test('an unsafe or foreign record is ignored: link, shared mode, another owner, 
     const elsewhere = path.join(home, 'elsewhere.json');
     fs.renameSync(recordPath(home), elsewhere);
     fs.symlinkSync(elsewhere, recordPath(home));
-    reset('linked record');
+    stops('linked record', 'symlink');
     fs.unlinkSync(recordPath(home));
 
     fs.chmodSync(path.join(home, '.marrow'), 0o770);
     writeRecord(home, { [projectMcp]: { MARROW_FLEET_AGENT_ID: 'devon' } });
     fs.chmodSync(path.join(home, '.marrow'), 0o770);
-    reset('group-writable record folder');
+    stops('group-writable record folder', 'dir_mode');
     fs.chmodSync(path.join(home, '.marrow'), 0o700);
 
-    // Collision: the home's record for its own file never authorizes the project file.
+    // Collision: the home's record for its own file never authorizes the project file. The id is kept and reported as NOT
+    // recorded (INS-1 PI3), never as recorded, and nothing is removed or recorded for it.
     writeRecord(home, { [path.join(home, '.mcp.json')]: { MARROW_FLEET_AGENT_ID: 'devon' } });
-    reset('record for another path');
+    const foreign = run(project, home, { dryRun: true });
+    assert.deepEqual(foreign.change.identity_kept, [{ field: 'MARROW_FLEET_AGENT_ID', value: 'devon', reason: 'unrecorded' }], 'record for another path');
+    assert.equal(foreign.change.identity_divergence, undefined);
 
     // Two files with two ids keep two records.
     fs.writeFileSync(path.join(home, '.mcp.json'), mcpText({ MARROW_FLEET_AGENT_ID: 'cliff' }));
@@ -354,14 +364,14 @@ test('an unsafe or foreign record is ignored: link, shared mode, another owner, 
     assert.equal(run(home, home).env.MARROW_FLEET_AGENT_ID, 'cliff');
     assert.equal(run(project, home).env.MARROW_FLEET_AGENT_ID, 'devon');
     fs.writeFileSync(projectMcp, mcpText({ MARROW_FLEET_AGENT_ID: 'cliff' }));
-    assert.equal(run(project, home).env.MARROW_FLEET_AGENT_ID, 'codex-bob', 'cliff is recorded for the home file only');
+    assert.equal(run(project, home).env.MARROW_FLEET_AGENT_ID, 'devon', 'cliff is recorded for the home file only: the project file gets its own recorded id back');
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
     fs.rmSync(project, { recursive: true, force: true });
   }
 });
 
-test('MARROW_ALLOWED_AGENT_IDS in a repo .env is ignored, and maintenance never uses the record', () => {
+test('MARROW_ALLOWED_AGENT_IDS in a repo .env is ignored, and maintenance restores the record and never writes it', () => {
   const home = tempDir();
   const project = homeWithMcp({ MARROW_BASE_URL: DEFAULT_URL, MARROW_FLEET_AGENT_ID: 'devon' });
   try {
@@ -370,9 +380,10 @@ test('MARROW_ALLOWED_AGENT_IDS in a repo .env is ignored, and maintenance never 
     const changes = applyPlan(buildPlan(detection, { mode: 'mcp', update: true, agentId: 'codex-bob', baseUrl: DEFAULT_URL }), { yes: true, dryRun: true });
     assert.equal(changes.find((change) => change.path === path.join(project, '.mcp.json')).identity_divergence[0].replaced, 'devon');
 
+    // INS-1 (R1c): maintenance reads the record too, so a recorded id stays and the launch id is never written.
     writeRecord(home, { [path.join(project, '.mcp.json')]: { MARROW_FLEET_AGENT_ID: 'devon' } });
     const maintained = run(project, home, { update: false, repair: false, maintenance: true });
-    assert.equal(maintained.env.MARROW_FLEET_AGENT_ID, 'codex-bob');
+    assert.equal(maintained.env.MARROW_FLEET_AGENT_ID, 'devon');
     assert.equal(readRecord(home)[path.join(project, '.mcp.json')].MARROW_FLEET_AGENT_ID, 'devon', 'maintenance records nothing');
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
@@ -509,6 +520,8 @@ function installOptions(home, extra = {}) {
 
 async function installHome(home, extra = {}) {
   const report = await install(installOptions(home, extra));
+  // INS-1: an unsafe identity record stops update before any report exists; runCli prints identity_stop.lines.
+  if (report.identity_stop) return { report, printed: report.identity_stop.lines.join('\n'), summary: [] };
   const lines = [];
   printReport(report, (text) => lines.push(text));
   return { report, printed: lines.join(''), summary: installSummaryLines(report, installOptions(home, extra)).lines };
@@ -529,7 +542,7 @@ function readRecordBytes(home) {
   }
 }
 
-test('F1: on the home config, a record that exists but is unsafe, unreadable or lacks the entry keeps nothing and opens no migration', async () => {
+test('F1: on the home config, a record that exists but is unsafe or unreadable stops update with nothing written, and one that lacks the entry keeps the held id and reports it as not recorded', async () => {
   const cases = [
     ['entry removed (A03)', (home) => fs.writeFileSync(recordPath(home), JSON.stringify({ version: 1, entries: {} }), { mode: 0o600 }), false],
     ['record 0644 (A04)', (home) => fs.chmodSync(recordPath(home), 0o644), true],
@@ -564,24 +577,25 @@ test('F1: on the home config, a record that exists but is unsafe, unreadable or 
       setHomeMcpId(home, 'devon');
       tamper(home);
       const before = readRecordBytes(home);
+      const configBefore = fs.readFileSync(homeMcp(home));
       for (const round of [1, 2]) {
-        const { report, printed, summary } = await installHome(home, { agentId: 'codex-bob', update: true, repair: true, updateOnly: true });
-        assert.equal(homeMcpId(home), 'codex-bob', `${name} round ${round}: reset as master`);
-        const change = report.changes.find((entry) => entry.path === homeMcp(home));
-        if (round === 1) {
-          assert.equal(change.identity_divergence?.[0]?.replaced, 'devon', `${name}: reset reported`);
-          assert.match(printed, /reset MARROW_FLEET_AGENT_ID devon -> codex-bob/, name);
-        }
-        assert.equal(change.identity_kept, undefined, `${name} round ${round}: nothing kept`);
-        assert.doesNotMatch(printed, /kept agent identity/, name);
+        const { report, printed } = await installHome(home, { agentId: 'codex-bob', update: true, repair: true, updateOnly: true });
         if (invalid) {
-          assert.equal(change.identity_record_invalid, true, name);
-          assert.match(printed, /identity record ~\/\.marrow\/identity-record\.json is unsafe or unreadable/, name);
-          assert.ok(summary.some((line) => /identity record .* is unsafe or unreadable/.test(line)), `${name}: summary says so`);
-          // Never written over or through, so nothing is re-recorded from it.
+          // INS-1 (T3): never written over or through, and no config, hook or record changes.
+          assert.equal(report.identity_stop?.exitCode, 3, `${name} round ${round}: update stops`);
+          assert.equal(report.identity_stop.lines.length, 1, name);
+          assert.deepEqual(fs.readFileSync(homeMcp(home)), configBefore, `${name} round ${round}: config untouched`);
           assert.deepEqual(readRecordBytes(home), before, `${name} round ${round}: record untouched`);
+          continue;
         }
-        setHomeMcpId(home, 'devon');
+        // INS-1 (PI3): a valid record without an entry for this file keeps the held id (never the runner's), reports it as
+        // not recorded, and writes no record entry for it.
+        assert.equal(homeMcpId(home), 'devon', `${name} round ${round}: kept, never replaced by the runner's id`);
+        const change = report.changes.find((entry) => entry.path === homeMcp(home));
+        assert.deepEqual(change.identity_kept, [{ field: 'MARROW_FLEET_AGENT_ID', value: 'devon', reason: 'unrecorded' }], `${name} round ${round}: kept and reported`);
+        assert.equal(change.identity_divergence, undefined, `${name} round ${round}: nothing removed`);
+        assert.match(printed, /kept agent identity devon \(set in the file, not recorded by Marrow\) in /, name);
+        assert.deepEqual(readRecordBytes(home), before, `${name} round ${round}: the held id was recorded`);
       }
     } finally {
       try { fs.chmodSync(path.join(home, '.marrow'), 0o700); } catch {}
@@ -716,7 +730,7 @@ test('F4: the one-time keep refuses a hard-linked home config (tracked elsewhere
         assert.equal(spawnSync('git', ['-C', repo, 'add', 'mcp.json']).status, 0);
       }
       await installHome(home, { agentId: 'codex-bob', update: true, repair: true, updateOnly: true });
-      assert.equal(homeMcpId(home), 'codex-bob', `hard link (tracked: ${tracked}) reset`);
+      assert.equal(homeMcpId(home), undefined, `hard link (tracked: ${tracked}) removed, never replaced by the runner's id`);
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }
@@ -733,7 +747,7 @@ test('F5: an installer-derived <client>-<hash> id from any folder or host is not
       fs.rmSync(recordPath(home));
       setHomeMcpId(home, id);
       await installHome(home, { agentId: 'owner-set', update: true, repair: true, updateOnly: true });
-      assert.equal(homeMcpId(home), kept ? id : 'owner-set', id);
+      assert.equal(homeMcpId(home), kept ? id : undefined, id);
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }

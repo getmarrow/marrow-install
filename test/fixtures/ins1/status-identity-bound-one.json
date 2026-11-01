@@ -1,0 +1,18 @@
+{
+ "case": "bound_one",
+ "envelope": "data",
+ "identity": {
+  "account_id": "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+  "agent_id": "cliff-agent",
+  "api_key_id": "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+  "bound_agent_ids": [
+   "cliff-agent"
+  ]
+ },
+ "placeholders": [
+  "account_id",
+  "api_key_id"
+ ],
+ "request_agent_id_header": "cliff-agent",
+ "source": "GET /v1/agent/status (default compact, live, read-only, 2026-11-01)"
+}

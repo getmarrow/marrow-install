@@ -1,0 +1,34 @@
+{
+ "cases": {
+  "no_agent_header": {
+   "body_names_bound_id": true,
+   "bound_count": 1,
+   "error_code": null,
+   "error_keys": null,
+   "http": 200,
+   "identity_agent_id_is_bound": true,
+   "identity_keys": [
+    "account_id",
+    "agent_id",
+    "api_key_id",
+    "bound_agent_ids"
+   ],
+   "top_keys": [
+    "data"
+   ]
+  },
+  "wrong_agent_header": {
+   "body_names_bound_id": true,
+   "error_code": "Agent-bound key cannot access another agent.",
+   "error_keys": null,
+   "http": 403,
+   "identity_keys": null,
+   "top_keys": [
+    "code",
+    "details",
+    "error"
+   ]
+  }
+ },
+ "source": "GET /v1/agent/status live read-only 2026-11-01, names/codes only"
+}
