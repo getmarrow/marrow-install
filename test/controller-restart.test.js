@@ -195,7 +195,11 @@ test('controller maintenance resets a redirected MCP identity and reports it as 
       ['MARROW_BASE_URL', 'https://redirect.example.test:8443', 'http://127.0.0.1:9'],
       ['MARROW_FLEET_AGENT_ID', 'someone-elses-agent', 'unset (resolved by Marrow)'],
     ]);
-    assert.match(maintenance.exact_fix, /MARROW_ALLOWED_BASE_URLS or MARROW_ALLOWED_AGENT_IDS/);
+    // INS-1 (M4): the base-URL allowlist still applies; the agent-id allowlist no longer does, so the id text points at the
+    // id Marrow recorded and at update --agent-id instead.
+    assert.match(maintenance.exact_fix, /add it to MARROW_ALLOWED_BASE_URLS and rerun/);
+    assert.match(maintenance.exact_fix, /only the id Marrow recorded for a file is kept.*update --agent-id <id>/);
+    assert.doesNotMatch(maintenance.exact_fix, /MARROW_ALLOWED_AGENT_IDS/);
     assert.doesNotMatch(JSON.stringify(maintenance), /fixture-pass|fixture-user/);
     const env = JSON.parse(fs.readFileSync(path.join(project, '.mcp.json'), 'utf8')).mcpServers.marrow.env;
     assert.equal(env.MARROW_BASE_URL, 'http://127.0.0.1:9');
