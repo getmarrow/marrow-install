@@ -2,23 +2,13 @@
 
 // INS-1: `update` and the controller maintenance pass never take the agent id from the runner's
 // environment. An owner-only identity record (installer.js readIdentityRecord) restores the id Marrow
-// recorded for a file; an unsafe record changes nothing; `update --fix-identity` reads the key's
-// binding from the live status contract (GET /v1/agent/status, test/fixtures/ins1/STATUS-CONTRACT.md).
-// This module holds the pure decision, the exact lines, the per-file key lookup and the status client.
-// It reads no environment variable and prints nothing: callers print what it returns.
+// recorded for a file; an unsafe record changes nothing. This module holds the pure decision and the exact lines.
+// It reads no file and no environment variable and prints nothing: callers print what it returns.
 
-const fs = require('node:fs');
 const path = require('node:path');
 
-const { assertSafeBaseUrl, DEFAULT_BASE_URL, ownerKeyBaseUrl, parseKeyTarget } = require('./base-url-policy');
-const { readOwnerKeyDetail } = require('./owner-env');
-
 const SAFE_AGENT_ID = /^[A-Za-z0-9._:-]{1,128}$/;
-const PLACEHOLDER_RE = /\$\{[^}]*\}|^\$[A-Za-z_]/;
 const UPDATE_COMMAND = 'npx -y @getmarrow/install@latest update';
-const STATUS_MAX_BYTES = 256 * 1024;
-const STATUS_MAX_IDS = 64;
-const STATUS_TIMEOUT_MS = 10_000;
 const NOT_AN_ID = '[invalid agent id]';
 
 // What an id may look like in a line: the id itself when it passes SAFE_AGENT_ID, else a fixed label.
@@ -66,14 +56,15 @@ function unsafeRecordLine(recordPath, reason) {
 //   held         the concrete MARROW_FLEET_AGENT_ID in the file's marrow env block ('' when absent or installer-derived)
 //   recordState  'valid' | 'absent' (an unsafe record never gets here: update stops first)
 //   recordedId   the id the valid record holds for this exact file ('' when it holds none)
-//   explicitId   --agent-id, or the id --fix-identity read from the server for this file
-// Nothing here consults the runner's environment or any allowlist. Under a valid record, on every maintenance pass, and when
-// --fix-identity found the id among the agents the file's own key is bound to (confirmed), an id the file holds that passes
-// SAFE_AGENT_ID and that nothing above overrides is KEPT and reported, never recorded (record: false). With no record file
-// the one-time keep of a plain owner-set id (preRecordEligible) still applies; any other held id is removed, as is one that
-// fails SAFE_AGENT_ID. Whether Marrow should keep or remove an id it did not record is the owner's call (audit O8).
+//   explicitId   --agent-id
+// Nothing here consults the runner's environment or any allowlist. Under a valid record, and on every maintenance pass, an id
+// the file holds that passes SAFE_AGENT_ID and that nothing above overrides is KEPT and reported, never recorded
+// (record: false). With no record file, `update` keeps once (preRecordEligible) a plain id set in the owner's home config and
+// removes any other held id, a project file's id included; maintenance keeps any id that passes SAFE_AGENT_ID. An id that
+// fails SAFE_AGENT_ID is removed everywhere. Whether Marrow should keep or remove an id it did not record is the owner's
+// call (audit O8).
 // ---------------------------------------------------------------------------------------------------------------
-function decideAgentIdentity({ held, recordState, recordedId, explicitId, via, preRecordEligible, maintenance, confirmed }) {
+function decideAgentIdentity({ held, recordState, recordedId, explicitId, via, preRecordEligible, maintenance }) {
   if (explicitId) {
     return {
       id: explicitId,
@@ -90,7 +81,7 @@ function decideAgentIdentity({ held, recordState, recordedId, explicitId, via, p
     if (recordState === 'absent' && preRecordEligible) {
       return { id: held, recordId: held, kept: { reason: 'pre_record', value: held }, divergence: null };
     }
-    if (recordState === 'valid' || maintenance === true || confirmed === true) {
+    if (recordState === 'valid' || maintenance === true) {
       return { id: held, recordId: held, record: false, kept: { reason: 'unrecorded', value: held }, divergence: null };
     }
   }
@@ -143,135 +134,6 @@ function hostStepLines(hosts, { running }) {
   return lines;
 }
 
-// ---------------------------------------------------------------------------------------------------------------
-// --fix-identity: the key a config file's MCP server would use, resolved in-process (the runner's MARROW_* variables
-// are never read here), and the status call made with that key alone.
-// ---------------------------------------------------------------------------------------------------------------
-function concrete(value) {
-  const text = typeof value === 'string' ? value.trim() : '';
-  return text && !PLACEHOLDER_RE.test(text) ? text : '';
-}
-
-function readMarrowEnvBlock(filePath) {
-  try {
-    const config = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-    const entry = config?.mcpServers?.marrow;
-    if (!entry || typeof entry !== 'object') return null;
-    return entry.env && typeof entry.env === 'object' && !Array.isArray(entry.env) ? entry.env : {};
-  } catch {
-    return null;
-  }
-}
-
-// The names an MCP server reads a key or a per-agent key pair from in its env block (MCP 3.9.109 resolveMarrowEnv). `update`
-// rebuilds that block without them, so a decision made on one of them would be stale by the end of the same run, and the
-// server picks among them by rules this module does not model.
-const BLOCK_KEY_NAMES = /^(MARROW_API_KEY|MARROW_KEY|MARROW_KEY_.*|MARROW_AGENT_ID_.*)$/;
-
-// { key, source, ownerDetail } or { cannot: 'block_key' | 'host_env' }. Only the owner-file key is ever checked, and only
-// when the file's block names none of the key names above.
-function resolveFileKey({ block, home }) {
-  if (Object.keys(block).some((name) => BLOCK_KEY_NAMES.test(name))) return { cannot: 'block_key' };
-  let detail = null;
-  try { detail = readOwnerKeyDetail(home); } catch { detail = null; }
-  if (detail && detail.apiKey) return { key: detail.apiKey, source: 'owner_file', ownerDetail: detail };
-  return { cannot: 'host_env' };
-}
-
-// The endpoint for that key: the server's own MARROW_BASE_URL when it is a URL a key may be sent to, an owner-file key
-// only where the owner file allows (base-url-policy). A URL that is not https (loopback may be http) is refused before
-// the key leaves.
-function statusBaseUrl({ block, resolved }) {
-  const named = typeof block.MARROW_BASE_URL === 'string' ? block.MARROW_BASE_URL.trim() : '';
-  if (named && !parseKeyTarget(named)) return { refused: true };
-  if (resolved.source === 'owner_file') {
-    const decision = ownerKeyBaseUrl({ candidate: named, ownerValues: resolved.ownerDetail.endpoint, fileName: resolved.ownerDetail.fileName, source: 'MARROW_BASE_URL in the MCP config' });
-    return { baseUrl: assertSafeBaseUrl(decision.baseUrl) };
-  }
-  return { baseUrl: assertSafeBaseUrl(named || DEFAULT_BASE_URL) };
-}
-
-// GET /v1/agent/status, default compact form, NO X-Marrow-Agent-Id header (a wrong one is a 403 whose body is never
-// read for ids). Only an HTTP 200 whose data.identity.bound_agent_ids is an array of SAFE_AGENT_ID strings counts.
-// Nothing from any body is returned except those validated ids.
-async function readBoundAgents({ baseUrl, key, fetchImpl = fetch, timeoutMs = STATUS_TIMEOUT_MS }) {
-  let response;
-  try {
-    response = await fetchImpl(`${String(baseUrl).replace(/\/+$/, '')}/v1/agent/status`, {
-      method: 'GET',
-      headers: { authorization: `Bearer ${key}`, accept: 'application/json' },
-      redirect: 'error',
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-  } catch (error) {
-    return { error: error && error.name === 'TimeoutError' ? 'no answer in time' : 'could not connect' };
-  }
-  const code = Number(response?.status);
-  if (code !== 200) return { error: Number.isInteger(code) && code >= 100 && code <= 599 ? `HTTP ${code}` : 'unexpected answer' };
-  let text;
-  try { text = await response.text(); } catch { return { error: 'could not read the answer' }; }
-  if (text.length > STATUS_MAX_BYTES) return { error: 'answer too large' };
-  let body;
-  try { body = JSON.parse(text); } catch { return { error: 'answer not in the expected shape' }; }
-  const identity = body && typeof body === 'object' && body.data && typeof body.data === 'object' ? body.data.identity : null;
-  const ids = identity && typeof identity === 'object' ? identity.bound_agent_ids : null;
-  if (!Array.isArray(ids) || ids.length > STATUS_MAX_IDS || !ids.every((id) => typeof id === 'string' && SAFE_AGENT_ID.test(id))) {
-    return { error: 'answer not in the expected shape' };
-  }
-  return { ids: [...new Set(ids)] };
-}
-
-// Decides --fix-identity for each managed MCP config file; `files` = [{ path, key }] with the realpath key the identity
-// record uses. Returns { targets: Map(key -> id), confirmed: Set(key), lines, stop } where stop = { exitCode: 4, lines } and
-// nothing is written when any file cannot be checked, errors, or has several candidate ids (never guessed).
-async function resolveIdentityFixes({ files, home, fetchImpl, timeoutMs }) {
-  const targets = new Map();
-  const confirmed = new Set();
-  const notes = [];
-  const failures = [];
-  for (const file of files) {
-    const block = readMarrowEnvBlock(file.path);
-    if (!block) continue;
-    const shown = printablePath(file.path);
-    const held = concrete(block.MARROW_FLEET_AGENT_ID);
-    const resolved = resolveFileKey({ block, home });
-    if (resolved.cannot) {
-      failures.push(resolved.cannot === 'block_key'
-        ? `Identity: cannot check ${shown}: its MCP config names its own key (MARROW_API_KEY, MARROW_KEY, MARROW_KEY_<id> or MARROW_AGENT_ID_<id>), and update cannot tell which key the server uses there. Nothing was changed and no request was made.`
-        : `Identity: cannot check ${shown}: this host's key comes from its own environment. Nothing was changed.`);
-      continue;
-    }
-    let target;
-    try {
-      target = statusBaseUrl({ block, resolved });
-    } catch {
-      target = { refused: true };
-    }
-    if (target.refused) {
-      failures.push(`Identity: cannot check ${shown}: MARROW_BASE_URL there must be an https URL (http is allowed only for localhost, 127.0.0.1 and [::1]) with no user name, password, query or fragment. Nothing was changed and no key was sent.`);
-      continue;
-    }
-    const answer = await readBoundAgents({ baseUrl: target.baseUrl, key: resolved.key, fetchImpl, timeoutMs });
-    if (answer.error) {
-      failures.push(`Identity: could not read this key's agent binding for ${shown} (${answer.error}). Nothing was changed.`);
-      continue;
-    }
-    const bound = answer.ids;
-    if (bound.length === 0) {
-      notes.push(`Identity: ${shown}: This key is not bound to an agent; keeping ${held ? printableId(held) : 'no agent id'}.`);
-    } else if (bound.length === 1) {
-      if (held && held !== bound[0]) targets.set(file.key, bound[0]);
-      else if (held) confirmed.add(file.key);
-    } else if (held && bound.includes(held)) {
-      confirmed.add(file.key);
-    } else if (held) {
-      failures.push(`Identity: ${shown} uses MARROW_FLEET_AGENT_ID=${printableId(held)}, but this key is bound to several agents (${bound.length}). Choose one: ${bound.join(', ')}; then run ${UPDATE_COMMAND} --agent-id <id>. Nothing was changed.`);
-    }
-  }
-  if (failures.length) return { targets: new Map(), confirmed: new Set(), lines: [], stop: { exitCode: 4, lines: failures } };
-  return { targets, confirmed, lines: notes, stop: null };
-}
-
 function displayPath(filePath, home) {
   const relative = path.relative(home, filePath);
   return relative && !relative.startsWith('..') && !path.isAbsolute(relative) ? `~/${relative}` : filePath;
@@ -288,10 +150,5 @@ module.exports = {
   identityLine,
   printableId,
   printablePath,
-  readBoundAgents,
-  readMarrowEnvBlock,
-  resolveFileKey,
-  resolveIdentityFixes,
-  statusBaseUrl,
   unsafeRecordLine,
 };
