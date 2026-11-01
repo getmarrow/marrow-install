@@ -310,19 +310,19 @@ async function plantedProject(ws, planted) {
   return { project, file };
 }
 
-test('T7: a project .mcp.json id with no record entry is removed (not kept, not the runner id) and the line offers no runnable command with it', async () => {
+test('T7 (PI3, owner item O8): a project .mcp.json id with no record entry is kept and reported (never recorded, never the runner id) and the line offers no runnable command with it', async () => {
   const ws = world();
   try {
     const { project, file } = await plantedProject(ws, 'victim');
+    const recordBefore = fs.readFileSync(recordPath(ws.home));
     const report = await updateFromShell(project, { MARROW_FLEET_AGENT_ID: RUNNER }, { home: ws.home });
-    assert.equal(mcpEnv(ws.home, file).MARROW_FLEET_AGENT_ID, undefined, 'the planted id stayed or the runner id replaced it');
+    assert.equal(mcpEnv(ws.home, file).MARROW_FLEET_AGENT_ID, 'victim', 'the planted id was removed or the runner id replaced it');
     const lines = summary(report);
-    const removed = lines.find((line) => /^Identity: removed MARROW_FLEET_AGENT_ID=victim from /.test(line));
-    assert.ok(removed, `no "removed" line: ${JSON.stringify(lines)}`);
-    assert.match(removed, /\(not set by you or recorded by Marrow\)/);
-    assert.match(removed, /If you set victim yourself, run update with --agent-id and that id\.$/);
+    assert.deepEqual(lines.filter((line) => /^Kept agent identity/.test(line)), [`Kept agent identity victim (set in the file, not recorded by Marrow) in ${fs.realpathSync(file)}.`]);
+    assert.ok(!lines.some((line) => /^Identity: removed /.test(line)), 'a removal line was printed');
     assert.ok(!allText(report).includes('--agent-id victim'), 'a runnable command carries the planted id');
     assert.ok(!allText(report).includes(RUNNER));
+    assert.ok(fs.readFileSync(recordPath(ws.home)).equals(recordBefore), 'the planted id was recorded');
     assert.equal(readRecord(ws.home)[mcpPath(ws.home)].MARROW_FLEET_AGENT_ID, 'cliff-agent', 'the home entry is untouched');
   } finally { ws.cleanup(); }
 });
@@ -343,16 +343,17 @@ test('T7: an id that fails SAFE_AGENT_ID is removed and never echoed or offered 
   } finally { ws.cleanup(); }
 });
 
-test('T7b: a planted project id is still removed when the runner env allowlists it (MARROW_ALLOWED_AGENT_IDS is not consulted)', async () => {
+test('T7b: a planted project id that fails SAFE_AGENT_ID is removed even when the runner env allowlists it (MARROW_ALLOWED_AGENT_IDS is not consulted)', async () => {
   const ws = world();
   const prior = process.env.MARROW_ALLOWED_AGENT_IDS;
+  const hostile = 'victim;touch pwned';
   try {
-    const { project, file } = await plantedProject(ws, 'victim');
-    process.env.MARROW_ALLOWED_AGENT_IDS = 'victim';
-    await updateFromShell(project, { MARROW_FLEET_AGENT_ID: RUNNER, MARROW_ALLOWED_AGENT_IDS: 'victim' }, { home: ws.home, identityAllowlist: undefined });
+    const { project, file } = await plantedProject(ws, hostile);
+    process.env.MARROW_ALLOWED_AGENT_IDS = hostile;
+    await updateFromShell(project, { MARROW_FLEET_AGENT_ID: RUNNER, MARROW_ALLOWED_AGENT_IDS: hostile }, { home: ws.home, identityAllowlist: undefined });
     assert.equal(mcpEnv(ws.home, file).MARROW_FLEET_AGENT_ID, undefined, 'the runner allowlist kept the planted id');
     // The maintenance pass: same rule.
-    setEnvBlock(file, { MARROW_FLEET_AGENT_ID: 'victim' });
+    setEnvBlock(file, { MARROW_FLEET_AGENT_ID: hostile });
     const detection = detectEnvironment(project, { HOME: ws.home, PATH: process.env.PATH });
     applyPlan(buildPlan(detection, { mode: 'mcp', agentId: RUNNER, baseUrl: DEFAULT_URL, maintenance: true }), { yes: true, dryRun: false, doctor: false });
     assert.equal(mcpEnv(ws.home, file).MARROW_FLEET_AGENT_ID, undefined, 'maintenance kept an allowlisted planted id');

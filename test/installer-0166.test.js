@@ -700,20 +700,26 @@ test('managed MCP config carries the configured identity; other values are reset
         .find((entry) => entry.label === 'Project MCP server config');
       return { change, env: JSON.parse(fs.readFileSync(mcpPath, 'utf8')).mcpServers.marrow.env };
     };
-    // A planted redirect and a foreign agent id are replaced by the controller's own values.
+    // A planted redirect is replaced by the controller's own value. INS-1 (PI3): a held agent id that passes the id check is
+    // KEPT on every maintenance pass (never replaced by the launch id, never removed), so only the base URL is reported.
     write({ MARROW_BASE_URL: 'https://fixture-user:fixture-pass@redirect.example.test:8443/api', MARROW_FLEET_AGENT_ID: 'someone-elses-agent' });
     const maintained = run({ maintenance: true, baseUrl: 'https://api.getmarrow.ai', agentId: '', identityAllowlist: { baseUrls: new Set(), agentIds: new Set() } });
     assert.equal(maintained.env.MARROW_BASE_URL, 'https://api.getmarrow.ai');
-    assert.equal(Object.hasOwn(maintained.env, 'MARROW_FLEET_AGENT_ID'), false);
-    // INS-1: an id divergence also carries why it was replaced (here: no record entry, so removed) for the printed line.
+    assert.equal(maintained.env.MARROW_FLEET_AGENT_ID, 'someone-elses-agent');
     assert.deepEqual(maintained.change.identity_divergence, [
       { field: 'MARROW_BASE_URL', replaced: 'https://redirect.example.test:8443', applied: 'https://api.getmarrow.ai' },
-      { field: 'MARROW_FLEET_AGENT_ID', replaced: 'someone-elses-agent', applied: 'unset (resolved by Marrow)', reason: 'removed', held: 'someone-elses-agent', homeScope: true },
     ]);
+    assert.deepEqual(maintained.change.identity_kept, [{ field: 'MARROW_FLEET_AGENT_ID', value: 'someone-elses-agent', reason: 'unrecorded' }]);
     assert.doesNotMatch(JSON.stringify(maintained.change), /fixture-pass|fixture-user/);
+    // With the launch id set to the held id, or to another one, the result is the same.
+    for (const launchId of ['someone-elses-agent', 'controller-launch-id']) {
+      write({ MARROW_BASE_URL: 'https://api.getmarrow.ai', MARROW_FLEET_AGENT_ID: 'someone-elses-agent' });
+      const launched = run({ maintenance: true, baseUrl: 'https://api.getmarrow.ai', agentId: launchId, identityAllowlist: { baseUrls: new Set(), agentIds: new Set() } });
+      assert.equal(launched.env.MARROW_FLEET_AGENT_ID, 'someone-elses-agent', launchId);
+    }
 
     // An owner-allowlisted base URL is kept and nothing is reported. The agent-id allowlist is no longer consulted on
-    // maintenance (INS-1, M4): an id that is not the recorded one is removed even when allowlisted.
+    // maintenance (INS-1, M4): an id that fails the id check is removed even when allowlisted.
     write({ MARROW_BASE_URL: 'https://staging.example.test' });
     const allowed = run({
       maintenance: true,
@@ -723,12 +729,12 @@ test('managed MCP config carries the configured identity; other values are reset
     });
     assert.equal(allowed.env.MARROW_BASE_URL, 'https://staging.example.test');
     assert.equal(allowed.change?.identity_divergence, undefined);
-    write({ MARROW_BASE_URL: 'https://staging.example.test', MARROW_FLEET_AGENT_ID: 'owner-registered-agent' });
+    write({ MARROW_BASE_URL: 'https://staging.example.test', MARROW_FLEET_AGENT_ID: 'owner registered agent' });
     const allowlistedId = run({
       maintenance: true,
       baseUrl: 'https://api.getmarrow.ai',
       agentId: '',
-      identityAllowlist: { baseUrls: new Set(['https://staging.example.test']), agentIds: new Set(['owner-registered-agent']) },
+      identityAllowlist: { baseUrls: new Set(['https://staging.example.test']), agentIds: new Set(['owner registered agent']) },
     });
     assert.equal(Object.hasOwn(allowlistedId.env, 'MARROW_FLEET_AGENT_ID'), false);
     assert.deepEqual(allowlistedId.change.identity_divergence.map((entry) => [entry.field, entry.reason]), [['MARROW_FLEET_AGENT_ID', 'removed']]);

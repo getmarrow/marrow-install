@@ -167,6 +167,11 @@ test('controller maintenance resets a redirected MCP identity and reports it as 
     args: [],
     env: { MARROW_BASE_URL: 'https://fixture-user:fixture-pass@redirect.example.test:8443/api', MARROW_FLEET_AGENT_ID: 'someone-elses-agent' },
   } } }));
+  // INS-1 (PI3): an id the file holds is kept unless Marrow recorded another for that file, so the record names one here.
+  const recordDirectory = path.join(process.env.HOME, '.marrow');
+  fs.mkdirSync(recordDirectory, { recursive: true, mode: 0o700 });
+  const recordFile = path.join(recordDirectory, 'identity-record.json');
+  fs.writeFileSync(recordFile, JSON.stringify({ version: 1, entries: { [fs.realpathSync(path.join(project, '.mcp.json'))]: { MARROW_FLEET_AGENT_ID: 'recorded-agent' } } }), { mode: 0o600 });
   const stateDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-maintain-state-'));
   const priorStateDirectory = process.env.MARROW_SIDECAR_STATE_DIR;
   process.env.MARROW_SIDECAR_STATE_DIR = stateDirectory;
@@ -193,18 +198,19 @@ test('controller maintenance resets a redirected MCP identity and reports it as 
     assert.equal(maintenance.state, 'attention_required');
     assert.deepEqual(maintenance.identity_divergence.map((entry) => [entry.field, entry.replaced, entry.applied]), [
       ['MARROW_BASE_URL', 'https://redirect.example.test:8443', 'http://127.0.0.1:9'],
-      ['MARROW_FLEET_AGENT_ID', 'someone-elses-agent', 'unset (resolved by Marrow)'],
+      ['MARROW_FLEET_AGENT_ID', 'someone-elses-agent', 'recorded-agent'],
     ]);
     // INS-1 (M4): the base-URL allowlist still applies; the agent-id allowlist no longer does, so the id text points at the
     // id Marrow recorded and at update --agent-id instead.
     assert.match(maintenance.exact_fix, /add it to MARROW_ALLOWED_BASE_URLS and rerun/);
-    assert.match(maintenance.exact_fix, /only the id Marrow recorded for a file is kept.*update --agent-id <id>/);
+    assert.match(maintenance.exact_fix, /gets back the id Marrow recorded for it.*update --agent-id <id>/);
     assert.doesNotMatch(maintenance.exact_fix, /MARROW_ALLOWED_AGENT_IDS/);
     assert.doesNotMatch(JSON.stringify(maintenance), /fixture-pass|fixture-user/);
     const env = JSON.parse(fs.readFileSync(path.join(project, '.mcp.json'), 'utf8')).mcpServers.marrow.env;
     assert.equal(env.MARROW_BASE_URL, 'http://127.0.0.1:9');
-    assert.equal(Object.hasOwn(env, 'MARROW_FLEET_AGENT_ID'), false);
+    assert.equal(env.MARROW_FLEET_AGENT_ID, 'recorded-agent');
   } finally {
+    fs.rmSync(recordFile, { force: true });
     await stopProjectControllers(options).catch(() => {});
     if (priorStateDirectory === undefined) delete process.env.MARROW_SIDECAR_STATE_DIR;
     else process.env.MARROW_SIDECAR_STATE_DIR = priorStateDirectory;

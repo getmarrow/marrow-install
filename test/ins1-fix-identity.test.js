@@ -137,7 +137,6 @@ const ANSWERS = [
   ['an id over 128 characters', ({ send }) => send(200, { data: { identity: { bound_agent_ids: ['x'.repeat(129)] } } })],
   ['a good id beside a bad one', ({ send }) => send(200, { data: { identity: { bound_agent_ids: ['cliff-agent', 'bad id'] } } })],
   ['ids that are not strings', ({ send }) => send(200, { data: { identity: { bound_agent_ids: [1, null] } } })],
-  ['a redirect', ({ send }) => { send(302, ''); }],
 ];
 
 for (const [label, answer] of ANSWERS) {
@@ -161,12 +160,35 @@ for (const [label, answer] of ANSWERS) {
   });
 }
 
+// PI1 (audit B1): the redirect row used to send a 302 with no Location, so a followed redirect could not fail it. The 3xx
+// now points at a SECOND server that answers a bound body to any request; following it would switch the id to victim-id.
+for (const code of [301, 302, 303, 307, 308]) {
+  test(`T12: status answer "a redirect" (${code}) to a second server that answers a bound body: no change, exit 4, the second server saw 0 requests`, async () => {
+    const ws = world();
+    const fileKey = dummyKey();
+    const second = await fakeApi({ statusOverride: ({ send }) => send(200, statusBody(['victim-id'])) });
+    const first = await fakeApi({ statusOverride: ({ send }) => send(code, '', { location: `${second.url}/v1/agent/status` }) });
+    try {
+      await staleHome(ws, { fileKey, baseUrl: first.url });
+      const before = treeHashes(ws.home);
+      const report = await fixRun(ws.home, { baseUrl: first.url });
+      assert.equal(report.identity_stop?.exitCode, 4, `${code}`);
+      assert.equal(report.identity_stop.lines.length, 1);
+      assert.equal(first.statusCalls().length, 1, 'the first server was asked once');
+      assert.equal(second.seen.length, 0, `the redirect was followed: ${JSON.stringify(second.seen)}`);
+      assert.deepEqual(treeHashes(ws.home), before, 'a file changed');
+      const text = textOf(report);
+      for (const forbidden of ['victim-id', fileKey, second.url]) assert.ok(!text.includes(forbidden), `the output carried "${forbidden}"`);
+    } finally { await first.close(); await second.close(); ws.cleanup(); }
+  });
+}
+
 test('T12: an http:// or unlisted base URL is refused before the key leaves (no request is made with it)', async () => {
   for (const [label, block, ownerFile] of [
-    ['block key, http:// non-loopback URL', { MARROW_API_KEY: dummyKey(), MARROW_BASE_URL: 'http://evil.example' }, false],
+    ['owner key, http:// non-loopback address in the config', { MARROW_BASE_URL: 'http://203.0.113.9' }, true],
     ['owner key, http:// non-loopback URL in the config', { MARROW_BASE_URL: 'http://evil.example' }, true],
     ['owner key, https URL the owner file does not list', { MARROW_BASE_URL: 'https://evil.example' }, true],
-    ['block key, URL with a user name', { MARROW_API_KEY: dummyKey(), MARROW_BASE_URL: 'https://user:pw@api.getmarrow.ai' }, false],
+    ['owner key, URL with a user name', { MARROW_BASE_URL: 'https://user:pw@api.getmarrow.ai' }, true],
   ]) {
     const ws = world();
     const calls = [];
@@ -193,7 +215,10 @@ test('T12: an http:// or unlisted base URL is refused before the key leaves (no 
 // ---- M2 (G10): the key each file's MCP server would use ----------------------------------------------------------------
 
 test('M2: a key that can only come from the host environment: --fix-identity exits 4, changes nothing and sends no request (the runner key is never used)', async () => {
-  for (const [label, block] of [['no key anywhere', {}], ['a ${PLACEHOLDER} key in the block', { MARROW_API_KEY: '${MARROW_API_KEY}' }]]) {
+  for (const [label, block, line] of [
+    ['no key anywhere', {}, /this host's key comes from its own environment/],
+    ['a ${PLACEHOLDER} key in the block', { MARROW_API_KEY: '${MARROW_API_KEY}' }, /its MCP config names its own key/],
+  ]) {
     const ws = world();
     const runnerKey = dummyKey();
     const api = await fakeApi({ keys: { [keyTag(runnerKey)]: [RUNNER] } });
@@ -203,7 +228,7 @@ test('M2: a key that can only come from the host environment: --fix-identity exi
       const before = treeHashes(ws.home);
       const report = await fixRun(ws.home, { runnerKey, baseUrl: api.url, shellEnv: { MARROW_API_KEY: runnerKey, MARROW_KEY: runnerKey } });
       assert.equal(report.identity_stop?.exitCode, 4, label);
-      assert.match(report.identity_stop.lines.join('\n'), /this host's key comes from its own environment/);
+      assert.match(report.identity_stop.lines.join('\n'), line);
       assert.deepEqual(treeHashes(ws.home), before, 'a file changed');
       assert.equal(api.seen.length, 0, `${label}: a request was made (${JSON.stringify(api.seen)})`);
       assert.notEqual(mcpEnv(ws.home).MARROW_FLEET_AGENT_ID, RUNNER);
@@ -211,7 +236,7 @@ test('M2: a key that can only come from the host environment: --fix-identity exi
   }
 });
 
-test('M2: the block key beats the owner file key; a per-agent key is matched by id; an unmatched per-agent key cannot be checked', async () => {
+test('M2 (PI2): only the owner-file key is checked; a block that names a key, a per-agent key or a per-agent id is not checked at all', async () => {
   const ws = world();
   const blockKey = dummyKey();
   const ownerKey = dummyKey();
@@ -223,25 +248,25 @@ test('M2: the block key beats the owner file key; a per-agent key is matched by 
   } });
   try {
     await staleHome(ws, { fileKey: ownerKey, baseUrl: api.url });
-    setEnvBlock(mcpPath(ws.home), { MARROW_API_KEY: blockKey, MARROW_BASE_URL: api.url });
+    // a block that names no key: the owner-file key is the one the server uses, and the one sent
     await fixRun(ws.home, { runnerKey, baseUrl: api.url });
-    assert.deepEqual([...new Set(api.statusCalls().map((entry) => entry.tag))], [keyTag(blockKey)]);
-    assert.equal(mcpEnv(ws.home).MARROW_FLEET_AGENT_ID, 'cliff-agent');
-    // per-agent key, matched by the id the file names
-    api.seen.length = 0;
-    setEnvBlock(mcpPath(ws.home), { MARROW_FLEET_AGENT_ID: 'cliff', MARROW_KEY_CLIFF: perIdKey, MARROW_BASE_URL: api.url });
-    await fixRun(ws.home, { runnerKey, baseUrl: api.url });
-    assert.deepEqual([...new Set(api.statusCalls().map((entry) => entry.tag))], [keyTag(perIdKey)]);
-    assert.equal(mcpEnv(ws.home).MARROW_FLEET_AGENT_ID, 'per-id-agent');
-    // a per-agent key for another id: cannot tell which key the server uses
-    api.seen.length = 0;
-    setEnvBlock(mcpPath(ws.home), { MARROW_FLEET_AGENT_ID: 'cliff', MARROW_KEY_DEVON: otherKey, MARROW_BASE_URL: api.url });
-    const before = treeHashes(ws.home);
-    const report = await fixRun(ws.home, { runnerKey, baseUrl: api.url });
-    assert.equal(report.identity_stop?.exitCode, 4);
-    assert.equal(api.seen.length, 0);
-    assert.deepEqual(treeHashes(ws.home), before);
-    assert.ok(![...api.seen].some((entry) => entry.tag === keyTag(runnerKey)));
+    assert.deepEqual([...new Set(api.statusCalls().map((entry) => entry.tag))], [keyTag(ownerKey)]);
+    assert.equal(mcpEnv(ws.home).MARROW_FLEET_AGENT_ID, 'owner-agent');
+    // each of these blocks names its own key or per-agent key: update drops them and the server picks among them by rules
+    // this installer does not model, so nothing is sent and nothing changes
+    for (const [label, patch] of [
+      ['MARROW_API_KEY beside the owner file key', { MARROW_API_KEY: blockKey }],
+      ['a per-agent key matched by the id the file names', { MARROW_FLEET_AGENT_ID: 'cliff', MARROW_KEY_CLIFF: perIdKey }],
+      ['a per-agent key for another id', { MARROW_FLEET_AGENT_ID: 'cliff', MARROW_KEY_DEVON: otherKey }],
+    ]) {
+      setEnvBlock(mcpPath(ws.home), { MARROW_BASE_URL: api.url, ...patch });
+      api.seen.length = 0;
+      const before = treeHashes(ws.home);
+      const report = await fixRun(ws.home, { runnerKey, baseUrl: api.url });
+      assert.equal(report.identity_stop?.exitCode, 4, label);
+      assert.equal(api.seen.length, 0, `${label}: a request was made`);
+      assert.deepEqual(treeHashes(ws.home), before, `${label}: a file changed`);
+    }
   } finally { await api.close(); ws.cleanup(); }
 });
 

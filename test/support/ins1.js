@@ -125,8 +125,8 @@ async function fakeApi({ keys = {}, statusOverride } = {}) {
     seen.push({ method: req.method, url: req.url, agent, tag });
     req.resume();
     req.on('end', () => {
-      const send = (code, body) => {
-        res.writeHead(code, { 'content-type': 'application/json' });
+      const send = (code, body, headers = {}) => {
+        res.writeHead(code, { 'content-type': 'application/json', ...headers });
         res.end(typeof body === 'string' ? body : JSON.stringify(body));
       };
       if (req.method === 'GET' && req.url.split('?')[0] === '/v1/agent/status') {
@@ -148,6 +148,23 @@ async function fakeApi({ keys = {}, statusOverride } = {}) {
   };
 }
 
+// The real MCP resolver (@getmarrow/mcp 3.9.109 dist/env.js, from `npm pack`) when INS1_MCP_PACK names the unpacked
+// package folder; null otherwise, and the rows that use it check what they can without it. It answers what a host's
+// MCP server would resolve for a config file: the key (as a tag, never the value), where it came from, and the agent id.
+function realResolver() {
+  const pack = process.env.INS1_MCP_PACK;
+  if (!pack || !fs.existsSync(path.join(pack, 'dist', 'env.js'))) return null;
+  const { resolveMarrowEnv } = require(path.join(pack, 'dist', 'env.js'));
+  return (file, home, launcherEnv = {}) => {
+    let block = {};
+    try { block = readJson(file).mcpServers.marrow.env || {}; } catch { block = {}; }
+    const found = resolveMarrowEnv({ env: { HOME: home, ...launcherEnv, ...block }, cwd: home, home });
+    return { source: found.source || null, agentId: found.agentId || '', key: found.apiKey ? keyTag(found.apiKey) : '' };
+  };
+}
+// Every launcher env the host could export around the server: none, and another agent's id.
+const LAUNCHERS = [{}, { MARROW_AGENT_ID: 'codex-bob' }, { MARROW_FLEET_AGENT_ID: 'codex-bob' }];
+
 function printedReport(report) {
   const { printReport } = require('../../src/installer');
   let text = '';
@@ -157,5 +174,5 @@ function printedReport(report) {
 
 module.exports = {
   DEFAULT_URL, FIXTURES, dummyKey, keyTag, world, quiet, hostLayout, setup, mcpPath, readJson, mcpEnv, recordPath, readRecord, writeRecord,
-  setEnvBlock, sha, treeHashes, filesContaining, fixture, statusBody, fakeApi, printedReport,
+  setEnvBlock, sha, treeHashes, filesContaining, fixture, statusBody, fakeApi, printedReport, realResolver, LAUNCHERS,
 };

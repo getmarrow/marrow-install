@@ -344,11 +344,12 @@ test('an unsafe record stops update with nothing written; a record for another p
     stops('group-writable record folder', 'dir_mode');
     fs.chmodSync(path.join(home, '.marrow'), 0o700);
 
-    // Collision: the home's record for its own file never authorizes the project file (its id is removed, not kept).
+    // Collision: the home's record for its own file never authorizes the project file. The id is kept and reported as NOT
+    // recorded (INS-1 PI3), never as recorded, and nothing is removed or recorded for it.
     writeRecord(home, { [path.join(home, '.mcp.json')]: { MARROW_FLEET_AGENT_ID: 'devon' } });
     const foreign = run(project, home, { dryRun: true });
-    assert.equal(foreign.change.identity_kept, undefined, 'record for another path');
-    assert.deepEqual(foreign.change.identity_divergence.map((entry) => [entry.replaced, entry.reason]), [['devon', 'removed']]);
+    assert.deepEqual(foreign.change.identity_kept, [{ field: 'MARROW_FLEET_AGENT_ID', value: 'devon', reason: 'unrecorded' }], 'record for another path');
+    assert.equal(foreign.change.identity_divergence, undefined);
 
     // Two files with two ids keep two records.
     fs.writeFileSync(path.join(home, '.mcp.json'), mcpText({ MARROW_FLEET_AGENT_ID: 'cliff' }));
@@ -541,7 +542,7 @@ function readRecordBytes(home) {
   }
 }
 
-test('F1: on the home config, a record that exists but is unsafe or unreadable stops update with nothing written, and one that lacks the entry removes the held id', async () => {
+test('F1: on the home config, a record that exists but is unsafe or unreadable stops update with nothing written, and one that lacks the entry keeps the held id and reports it as not recorded', async () => {
   const cases = [
     ['entry removed (A03)', (home) => fs.writeFileSync(recordPath(home), JSON.stringify({ version: 1, entries: {} }), { mode: 0o600 }), false],
     ['record 0644 (A04)', (home) => fs.chmodSync(recordPath(home), 0o644), true],
@@ -587,15 +588,14 @@ test('F1: on the home config, a record that exists but is unsafe or unreadable s
           assert.deepEqual(readRecordBytes(home), before, `${name} round ${round}: record untouched`);
           continue;
         }
-        assert.equal(homeMcpId(home), undefined, `${name} round ${round}: removed, never replaced by the runner's id`);
+        // INS-1 (PI3): a valid record without an entry for this file keeps the held id (never the runner's), reports it as
+        // not recorded, and writes no record entry for it.
+        assert.equal(homeMcpId(home), 'devon', `${name} round ${round}: kept, never replaced by the runner's id`);
         const change = report.changes.find((entry) => entry.path === homeMcp(home));
-        if (round === 1) {
-          assert.deepEqual([change.identity_divergence?.[0]?.replaced, change.identity_divergence?.[0]?.reason], ['devon', 'removed'], `${name}: removal reported`);
-          assert.match(printed, /removed MARROW_FLEET_AGENT_ID=devon from /, name);
-        }
-        assert.equal(change.identity_kept, undefined, `${name} round ${round}: nothing kept`);
-        assert.doesNotMatch(printed, /kept agent identity/, name);
-        setHomeMcpId(home, 'devon');
+        assert.deepEqual(change.identity_kept, [{ field: 'MARROW_FLEET_AGENT_ID', value: 'devon', reason: 'unrecorded' }], `${name} round ${round}: kept and reported`);
+        assert.equal(change.identity_divergence, undefined, `${name} round ${round}: nothing removed`);
+        assert.match(printed, /kept agent identity devon \(set in the file, not recorded by Marrow\) in /, name);
+        assert.deepEqual(readRecordBytes(home), before, `${name} round ${round}: the held id was recorded`);
       }
     } finally {
       try { fs.chmodSync(path.join(home, '.marrow'), 0o700); } catch {}
