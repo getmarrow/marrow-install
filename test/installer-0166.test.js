@@ -1494,8 +1494,15 @@ test('--key followed by a subcommand word is a missing key: exit 2, zero files (
   for (const args of writing) {
     const { run, homeUnchanged, projectUnchanged } = await runKeylessCase(args);
     const label = args.join(' ');
-    assert.equal(run.status, 2, `${label}: ${run.stderr}`);
-    assert.match(run.stdout, /^Marrow needs your API key\. Nothing was written\./, label);
+    // INS-2: the plain `update` word on a machine where nothing carries Marrow answers with the setup line (exit 0)
+    // instead of asking for a key it has no use for; every other writing word still asks for the key.
+    if (args.includes('update') && !args.includes('activate')) {
+      assert.equal(run.status, 0, `${label}: ${run.stderr}`);
+      assert.match(run.stdout, /^Marrow is not set up here\. Run: npx -y @getmarrow\/install@latest\n/, label);
+    } else {
+      assert.equal(run.status, 2, `${label}: ${run.stderr}`);
+      assert.match(run.stdout, /^Marrow needs your API key\. Nothing was written\./, label);
+    }
     assert.equal(homeUnchanged && projectUnchanged, true, label);
   }
   // The subcommand word is still parsed as the subcommand: read-only ones stay read-only.

@@ -28,6 +28,7 @@ const {
 const { evidence: localControlEvidence } = require('./control-state');
 const { claudeSettingsFacts, riskWarnings } = require('./risk-warnings');
 const { parseUserJson } = require('./user-json');
+const { scanOwnerPins } = require('./owner-pins');
 const {
   hermesEnvHasKey,
   hermesPaths,
@@ -85,6 +86,8 @@ const ADAPTER_PROVENANCE = Object.freeze({
 const MCP_REGISTRY_LATEST_URL = 'https://registry.npmjs.org/%40getmarrow%2Fmcp/latest';
 const MCP_REGISTRY_VERIFICATION_COMMAND = 'npm view @getmarrow/mcp@latest name version dist.integrity dist.tarball --json --registry=https://registry.npmjs.org';
 const INSTALLER_UPDATE_COMMAND = 'npx -y @getmarrow/install@latest update';
+const INSTALLER_SETUP_COMMAND = 'npx -y @getmarrow/install@latest';
+const UPDATE_NOT_SET_UP_LINE = `Marrow is not set up here. Run: ${INSTALLER_SETUP_COMMAND}`;
 const INSTALLER_DOCTOR_COMMAND = 'npx -y @getmarrow/install@latest doctor --self-test';
 const STALE_CODEX_HOOKS_FIX = 'npx @getmarrow/install@latest update';
 const INSTALLER_RESTART_INSTRUCTION = 'After the update completes, restart the detected owning harnesses once. Running Marrow MCP processes remain unchanged until that restart.';
@@ -3407,7 +3410,12 @@ function buildPlan(detection, options) {
   const updateOnly = update && options.updateOnly === true;
   // Doctor reads the same filter, only to name the hosts whose hooks are absent; it writes nothing.
   const doctorNamesAbsent = !updateOnly && options.doctor === true && options.maintenance !== true;
-  const retained = updateOnly || doctorNamesAbsent ? updateWrites(writes, detection, options) : writes;
+  // `update` writes only what groups that already carry Marrow own, and nothing when none does; doctor keeps the
+  // filter it always read.
+  const strictUpdate = updateOnly && options.activate !== true;
+  const state = strictUpdate ? updateState(detection) : null;
+  const retained = strictUpdate ? updateOnlyWrites(writes, detection, options, state)
+    : updateOnly || doctorNamesAbsent ? updateWrites(writes, detection, options) : writes;
   const planned = updateOnly ? retained : writes;
   const hostOf = (write) => {
     const group = updateHostGroups(detection.paths).find((candidate) => candidate.hooks && candidate.files.includes(write.path));
@@ -3417,7 +3425,9 @@ function buildPlan(detection, options) {
     return group ? { host: group.host } : {};
   };
   const dropped = writes.filter((write) => !retained.includes(write)).map((write) => ({ label: write.label, path: write.path, ...hostOf(write) }));
-  const skipped = updateOnly ? dropped : [];
+  const notSetUp = strictUpdate && !state.setUp;
+  const skipped = updateOnly && !notSetUp ? dropped : [];
+  const added = strictUpdate && !notSetUp ? updateAddedFiles(retained, state, detection.root) : [];
   const absentHosts = doctorNamesAbsent ? dropped.filter((entry) => entry.host) : [];
   const absentMcpConfig = doctorNamesAbsent ? dropped.filter((entry) => entry.mcp_config_host_unknown) : [];
   return {
@@ -3425,6 +3435,8 @@ function buildPlan(detection, options) {
     root: detection.root,
     writes: planned,
     ...(skipped.length ? { update_skipped: skipped } : {}),
+    ...(added.length ? { update_added: added } : {}),
+    ...(notSetUp ? { update_not_set_up: updateNotSetUp() } : {}),
     ...(skippedHosts.length ? { skipped_hosts: skippedHosts } : {}),
     ...(absentHosts.length ? { absent_hosts: absentHosts } : {}),
     ...(absentMcpConfig.length ? { absent_mcp_config: absentMcpConfig } : {}),
@@ -3432,6 +3444,32 @@ function buildPlan(detection, options) {
     host_approval_hooks: hostApprovals,
     ...(options.maintenance !== true ? { identityRecordHome: detection.home } : {}),
   };
+}
+
+// What `update` says when no host file, AGENTS.md block or SDK runtime file carries Marrow: it writes nothing.
+function updateNotSetUp() {
+  return { setup_command: INSTALLER_SETUP_COMMAND, message: UPDATE_NOT_SET_UP_LINE };
+}
+
+// The plain `update` word: not repair, activate, doctor or the controller's maintenance pass.
+function plainUpdateRun(options) {
+  return options.update === true && options.updateOnly === true && options.activate !== true
+    && options.maintenance !== true && options.doctor !== true;
+}
+
+function updateNotSetUpReport(detection, options) {
+  return {
+    mode: options.mode,
+    root: detection.root,
+    writeMode: options.dryRun ? 'dry-run' : 'update',
+    changes: [],
+    update_not_set_up: updateNotSetUp(),
+  };
+}
+
+function printUpdateNotSetUp(report, options) {
+  if (options.json) process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+  else process.stdout.write(`${report.update_not_set_up.message}\nUpdate changes only hosts that already have Marrow; nothing was written.\n`);
 }
 
 // The files of each host, as `update` reads them. `hooks` is false for a host with no hook file.
@@ -3513,6 +3551,225 @@ function updateWrites(writes, detection, options) {
     const host = hosts.find((files) => files.includes(write.path));
     return !host || host.some(carriesMarrow);
   });
+}
+
+// ---- `update`: which host files already carry Marrow (the installer's own recognizers) ----------------------------
+// A hook command that is Marrow's own entrypoint: alone, one part of a chain (`a && b`, `a; b`, `a || b`,
+// a pipe) or inside `sh -c "..."`. The owner's other parts are never read as Marrow's and never edited.
+const BARE_MARROW_HOOK_RE = /^(?:npx\s+(?:-y\s+)?)?marrow-mcp\s+(?:(?:claude|cline|codex|cursor|gemini|grok|windsurf)-)?(?:context-hook|pre-action-hook|hook|session-hook|permission-request-hook)$/;
+const SHELL_C_RE = /\b(?:ba|z|da|k)?sh\s+-[a-z]*c[a-z]*\s+(?:"((?:[^"\\]|\\.)*)"|'([^']*)')/g;
+
+// A command written by an installer too old for delocalizeHookCommand to map back: the pinned package spec, the
+// marrow-mcp binary and a hook entrypoint word, in that order, in one command.
+const STALE_HOOK_WORD_RE = /\b(?:(?:claude|cline|codex|cursor|gemini|grok|windsurf)-)?(?:context-hook|pre-action-hook|session-hook|permission-request-hook|hook)\b/;
+function staleMarrowHookText(command) {
+  const pin = command.search(/@getmarrow\/mcp@\d+\.\d+\.\d+/);
+  if (pin < 0) return false;
+  const binary = command.indexOf('marrow-mcp', pin);
+  return binary >= 0 && STALE_HOOK_WORD_RE.test(command.slice(binary + 'marrow-mcp'.length));
+}
+
+function marrowOwnHookCommand(command, depth = 0) {
+  if (typeof command !== 'string' || command.length > 20000 || depth > 2) return false;
+  const direct = (value) => {
+    const canonical = delocalizeHookCommand(value.trim());
+    return Boolean(marrowHookSubcommand(canonical) || cursorMarrowHookSubcommand(canonical)
+      || grokMarrowHookSubcommand(canonical) || geminiMarrowHookEntrypoint(canonical)
+      || BARE_MARROW_HOOK_RE.test(canonical) || staleMarrowHookText(canonical));
+  };
+  if (direct(command)) return true;
+  const parts = command.split(/&&|\|\||;|\||\r?\n/);
+  if (parts.length > 1 && parts.some((part) => part.trim() && direct(part))) return true;
+  for (const match of command.matchAll(SHELL_C_RE)) {
+    if (marrowOwnHookCommand(match[1] !== undefined ? match[1] : match[2], depth + 1)) return true;
+  }
+  return false;
+}
+
+// The `command` strings under a host file's `hooks` (and, for Gemini, handlers named `marrow-...`).
+function hookCommandStrings(value, { named = false } = {}, out = { commands: [], named: false }, depth = 0) {
+  if (!value || typeof value !== 'object' || depth > 8 || out.commands.length > 2000) return out;
+  if (Array.isArray(value)) {
+    for (const item of value) hookCommandStrings(item, { named }, out, depth + 1);
+    return out;
+  }
+  if (named && typeof value.name === 'string' && value.name.startsWith('marrow-')) out.named = true;
+  for (const [key, item] of Object.entries(value)) {
+    if (key === 'command' && typeof item === 'string') out.commands.push(item);
+    else if (item && typeof item === 'object') hookCommandStrings(item, { named }, out, depth + 1);
+  }
+  return out;
+}
+
+function marrowOwnMcpEntry(entry) {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
+  if (mcpServerLaunchVersion(entry)) return true;
+  return [entry.command, ...(Array.isArray(entry.args) ? entry.args : [])]
+    .some((value) => typeof value === 'string' && MARROW_MANAGED_TEXT_RE.test(value));
+}
+
+// The block of `mcp_servers.marrow` in a Hermes config, comments left out ('' when there is none).
+function hermesMarrowBlock(text) {
+  const lines = text.split(/\r?\n/);
+  const top = lines.findIndex((line) => /^(?:"mcp_servers"|'mcp_servers'|mcp_servers)\s*:\s*(?:#.*)?$/.test(line));
+  if (top < 0) return '';
+  for (let index = top + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!line.trim() || /^\s*#/.test(line)) continue;
+    if (!/^\s/.test(line)) return '';
+    const key = line.match(/^(\s+)(?:"marrow"|'marrow'|marrow)\s*:\s*(?:#.*)?$/);
+    if (!key) continue;
+    const block = [];
+    for (let next = index + 1; next < lines.length; next += 1) {
+      if (lines[next].trim() && indentOfLine(lines[next]) <= key[1].length && !/^\s*#/.test(lines[next])) break;
+      if (!/^\s*#/.test(lines[next])) block.push(lines[next]);
+    }
+    return block.join('\n');
+  }
+  return '';
+}
+
+const indentOfLine = (line) => line.length - line.trimStart().length;
+
+// Whether one host file carries Marrow, by what kind of file it is. A file that cannot be parsed falls back to the
+// plain text test, so a hand-edited file is never treated as less set up than before.
+function hostFileCarriesMarrow(filePath, kind) {
+  let text;
+  try {
+    const stat = fs.lstatSync(filePath);
+    if (!stat.isFile() || stat.size > 2 * 1024 * 1024) return false;
+    text = fs.readFileSync(filePath, 'utf8');
+  } catch {
+    return false;
+  }
+  if (kind === 'text') return MARROW_MANAGED_TEXT_RE.test(text);
+  if (kind === 'cline') return /marrow-mcp\s+cline-(?:pre-action-hook|hook|session-hook)\b/.test(text);
+  if (kind === 'hermes') return MARROW_MANAGED_TEXT_RE.test(hermesMarrowBlock(text));
+  let config;
+  try {
+    config = parseJsonObject(filePath);
+  } catch {
+    return MARROW_MANAGED_TEXT_RE.test(text);
+  }
+  const servers = config.mcpServers;
+  const ownMcpEntry = Boolean(servers && typeof servers === 'object' && !Array.isArray(servers)
+    && Object.prototype.hasOwnProperty.call(servers, 'marrow') && marrowOwnMcpEntry(servers.marrow));
+  if (kind === 'mcp') return ownMcpEntry;
+  const found = hookCommandStrings(config.hooks, { named: kind === 'gemini' });
+  // Gemini keeps its MCP servers in the same settings file as its hooks, so a Marrow entry there is a set-up host.
+  return (kind === 'gemini' && ownMcpEntry) || found.named || found.commands.some((command) => marrowOwnHookCommand(command));
+}
+
+function updateHostFileKinds(paths) {
+  return new Map([
+    [paths.claudeSettings, 'hooks'], [paths.mcpJson, 'mcp'], [paths.codexHooks, 'hooks'],
+    [paths.clinePreToolUseHook, 'cline'], [paths.clinePostToolUseHook, 'cline'], [paths.clineTaskCancelHook, 'cline'],
+    [paths.windsurfHooks, 'hooks'], [paths.geminiSettings, 'gemini'], [paths.grokHooks, 'hooks'],
+    [paths.cursorHooks, 'hooks'], [paths.cursorMcp, 'mcp'], [paths.cursorRules, 'text'], [paths.hermesConfig, 'hermes'],
+  ]);
+}
+
+// What `update` sees: for each host group the files that carry Marrow, and whether anything is set up at all
+// (a host file, AGENTS.md's block, or the SDK passive runtime file Marrow wrote).
+function updateState(detection) {
+  const { paths } = detection;
+  const kinds = updateHostFileKinds(paths);
+  const groups = updateHostGroups(paths).map((group) => ({
+    ...group,
+    carrying: group.files.filter((file) => hostFileCarriesMarrow(file, kinds.get(file) || 'text')),
+  }));
+  const agentsBlock = Boolean(marrowManagedBlockInText(safeRead(paths.agentsMd)));
+  let passiveRuntime = false;
+  try {
+    const stat = fs.lstatSync(paths.passiveRuntime);
+    passiveRuntime = stat.isFile() && stat.size <= 2 * 1024 * 1024;
+  } catch {
+    passiveRuntime = false;
+  }
+  return { paths, groups, agentsBlock, passiveRuntime, setUp: groups.some((group) => group.carrying.length > 0) || agentsBlock || passiveRuntime };
+}
+
+// `update` (not repair, doctor or the controller's pass): the host files of groups that already carry Marrow, and
+// nothing when none does. A group that carries Marrow keeps every write it always had; one that does not gets none.
+function updateOnlyWrites(writes, detection, options, state = updateState(detection)) {
+  if (!state.setUp) return [];
+  const explicitMd = options.mode === 'md' || options.mode === 'both';
+  return writes.filter((write) => {
+    if (write.type === 'md-block') return explicitMd || Boolean(marrowManagedBlockInText(safeRead(write.path)));
+    const group = state.groups.find((candidate) => candidate.files.includes(write.path));
+    return !group || group.carrying.length > 0;
+  });
+}
+
+// Files a set-up group gets although they carried no Marrow yet (one line per host).
+function updateAddedFiles(retained, state, root) {
+  const shown = (file) => (file.startsWith(`${root}${path.sep}`) ? path.relative(root, file) : file);
+  const added = [];
+  for (const group of state.groups) {
+    if (!group.carrying.length) continue;
+    const writes = retained.filter((write) => group.files.includes(write.path) && !group.carrying.includes(write.path));
+    if (!writes.length) continue;
+    added.push({
+      host: group.host,
+      labels: writes.map((write) => write.label),
+      paths: writes.map((write) => write.path),
+      carried_by: group.carrying,
+      line: `Marrow was already set up for ${group.host} in ${group.carrying.map(shown).join(', ')}, so update also adds ${writes.map((write) => `${write.label} (${shown(write.path)})`).join(', ')}.`,
+    });
+  }
+  return added;
+}
+
+// The owner's own commands (not Marrow-written ones) in the host files that carry Marrow: the only places an
+// owner script can be named for the pin report.
+function ownerCommandsOf(state) {
+  const kinds = updateHostFileKinds({ ...state.paths });
+  const commands = [];
+  for (const group of state.groups) {
+    for (const file of group.carrying) {
+      const kind = kinds.get(file);
+      if (kind !== 'hooks' && kind !== 'gemini' && kind !== 'mcp') continue;
+      let config;
+      try {
+        config = parseJsonObject(file);
+      } catch {
+        continue;
+      }
+      if (kind === 'mcp') {
+        const entry = config.mcpServers && typeof config.mcpServers === 'object' ? config.mcpServers.marrow : null;
+        if (entry && typeof entry === 'object' && !mcpServerLaunchVersion(entry)) {
+          commands.push(...[entry.command, ...(Array.isArray(entry.args) ? entry.args : [])].filter((value) => typeof value === 'string'));
+        }
+        continue;
+      }
+      commands.push(...hookCommandStrings(config.hooks).commands.filter((command) => !marrowHookIsInstallers(command)));
+    }
+  }
+  return commands;
+}
+
+// A hook command the installer wrote or recognizes as its own entrypoint, whole (a chain with an owner part is the owner's).
+function marrowHookIsInstallers(command) {
+  const canonical = delocalizeHookCommand(String(command).trim());
+  return Boolean(marrowHookSubcommand(canonical) || cursorMarrowHookSubcommand(canonical)
+    || grokMarrowHookSubcommand(canonical) || geminiMarrowHookEntrypoint(canonical) || BARE_MARROW_HOOK_RE.test(canonical));
+}
+
+function ownerPinReport(state, home, targetVersion) {
+  const scan = scanOwnerPins(ownerCommandsOf(state), { home });
+  return {
+    pins: scan.pins.map((pin) => ({ ...pin, target: targetVersion, current: pin.versions.every((version) => version === targetVersion) })),
+    not_scanned: scan.notScanned,
+  };
+}
+
+function ownerPinLines(report) {
+  const lines = [];
+  for (const pin of report.owner_pins || []) {
+    lines.push(`${pin.path}:${pin.line} pins MCP ${pin.versions.join(', ')}${pin.current ? ' (the version update installs)' : ` (update installs ${pin.target})`}`);
+  }
+  for (const entry of report.owner_pins_not_scanned || []) lines.push(`${entry.path} not scanned (${entry.reason})`);
+  return lines;
 }
 
 function assertContainedManagedTarget(root, targetPath) {
@@ -4768,6 +5025,10 @@ function pluginSuppliedHosts(report) {
 
 function printReport(report, sink) {
   const out = typeof sink === 'function' ? sink : (text) => process.stdout.write(text);
+  if (report.update_not_set_up) {
+    out(`${report.update_not_set_up.message}\nUpdate changes only hosts that already have Marrow; nothing was written.\n`);
+    return;
+  }
   out(`Marrow passive installer\n`);
   out(`Root: ${report.root}\n`);
   out(`Mode: ${report.mode}\n`);
@@ -4842,9 +5103,15 @@ function printReport(report, sink) {
   for (const skipped of missing.others) {
     out(`- left alone by update: ${skipped.label} (${skipped.path}) has no Marrow config; ${UPDATE_SKIPPED_FIX}\n`);
   }
+  for (const added of report.update_added || []) out(`- ${added.line}\n`);
   for (const skipped of report.skipped_hosts || []) {
     out(`- skipped: ${skipped.label} (${skipped.path}) [${skipped.reason}]\n`);
     out(`  ${skipped.message}\n`);
+  }
+  const ownerLines = ownerPinLines(report);
+  if (ownerLines.length) {
+    out('\nOwner scripts (update never edits them):\n');
+    for (const line of ownerLines) out(`- ${line}\n`);
   }
 
   if (report.mcp_runtime) {
@@ -5241,6 +5508,10 @@ async function install(options) {
     USERPROFILE: options.home || options.cwd,
   });
   if (options.repair || options.update) assertUpdateTargetsManagedRoot(detection);
+  // `update` on a machine where nothing carries Marrow: say so and stop, before any runtime, controller or file work.
+  if (plainUpdateRun(options) && !updateState(detection).setUp) {
+    return updateNotSetUpReport(detection, options);
+  }
   const client = detectedClient(detection);
   options.client = client;
   options.agentId = configuredAgentId;
@@ -5265,6 +5536,11 @@ async function install(options) {
   options.mcpRuntime = mcpRuntime.version && ['present', 'installed', 'verified'].includes(mcpRuntime.state) ? mcpRuntime : null;
   const plan = buildPlan(detection, options);
   const writeMode = options.doctor ? 'doctor' : options.dryRun ? 'dry-run' : options.repair ? 'repair' : options.yes ? 'write' : 'dry-run';
+  // `update` only: owner scripts that a set-up host file names and that still pin a Marrow version, read before the
+  // write (the files the owner set up) and never edited.
+  const ownerPins = plainUpdateRun(options)
+    ? ownerPinReport(updateState(detection), detection.home, mcpTarget.version)
+    : null;
   const changes = applyPlan(plan, options);
   let profile = activationProfile(detection, plan, changes, client);
   const localControl = localControlEvidence({
@@ -5566,6 +5842,9 @@ async function install(options) {
     mcp_runtime: mcpRuntimeReport(mcpRuntime, { legacyNpxHooks: legacyNpxHookFiles(detection), switchIgnored: options.localRuntimeSwitchIgnored === true }),
     changes,
     ...(plan.update_skipped ? { update_skipped: plan.update_skipped } : {}),
+    ...(plan.update_added ? { update_added: plan.update_added } : {}),
+    ...(ownerPins && ownerPins.pins.length ? { owner_pins: ownerPins.pins } : {}),
+    ...(ownerPins && ownerPins.not_scanned.length ? { owner_pins_not_scanned: ownerPins.not_scanned } : {}),
     ...(plan.skipped_hosts ? { skipped_hosts: plan.skipped_hosts } : {}),
     risk_warnings: riskList,
     doctor: {
@@ -5658,6 +5937,7 @@ function selfTestVerdict(selfTest = {}) {
 }
 
 function installSummaryLines(report, options) {
+  if (report.update_not_set_up) return { lines: [report.update_not_set_up.message], selfTestFailed: false };
   const selfTest = report.selfTest || {};
   const activation = report.activation || {};
   const lines = [];
@@ -5724,6 +6004,10 @@ function installSummaryLines(report, options) {
   for (const skipped of report.skipped_hosts || []) lines.push(`Skipped ${skipped.label}: ${skipped.message}`);
   const missingHosts = groupMissingHosts(report.update_skipped);
   for (const host of missingHosts.hosts.keys()) lines.push(missingHooksLine(host));
+  for (const added of report.update_added || []) lines.push(added.line);
+  const ownerLines = ownerPinLines(report);
+  for (const line of ownerLines.slice(0, 10)) lines.push(`Owner script, not changed: ${line}.`);
+  if (ownerLines.length > 10) lines.push(`${ownerLines.length - 10} more owner script lines are in the full report.`);
   if (missingHosts.others.length) {
     lines.push(`Update left ${missingHosts.others.length} file(s) alone that have no Marrow config (${missingHosts.others.map((skipped) => skipped.label).join(', ')}); ${UPDATE_SKIPPED_FIX}.`);
   }
@@ -5799,11 +6083,17 @@ async function runCli(argv) {
   if ((oneCommand || writeRun) && !options.apiKey) {
     // An update aimed at an unmanaged directory is refused first; it needs no key to answer.
     if (options.update) {
-      assertUpdateTargetsManagedRoot(detectEnvironment(options.cwd, {
+      const detection = detectEnvironment(options.cwd, {
         ...process.env,
         HOME: options.home || options.cwd,
         USERPROFILE: options.home || options.cwd,
-      }));
+      });
+      assertUpdateTargetsManagedRoot(detection);
+      // Nothing set up: the answer is the setup line, not a request for a key to update with.
+      if (plainUpdateRun(options) && !updateState(detection).setUp) {
+        printUpdateNotSetUp(updateNotSetUpReport(detection, options), options);
+        return;
+      }
     }
     process.stdout.write(`${missingKeyMessage(options)}\n`);
     process.exitCode = 2;
@@ -5817,6 +6107,10 @@ async function runCli(argv) {
     if (!oneCommand || options.json || !/^Marrow activation failed/.test(message)) throw error;
     process.stderr.write(`Marrow ${INSTALLER_ADAPTER_VERSION}: ${message}. Fix: ${activationFailureFix(message, String(options.agentId || '').trim())}\n`);
     process.exitCode = 1;
+    return;
+  }
+  if (report.update_not_set_up) {
+    printUpdateNotSetUp(report, options);
     return;
   }
   // Claude Code opened from the desktop app, an IDE or a new terminal has no MARROW_API_KEY.
