@@ -4,8 +4,8 @@
 // version, so the owner can change them by hand. The scripts looked at are only the absolute paths
 // that a set-up host file's own commands name (the caller passes those command strings); no
 // directory is listed and no other file is opened. A file is read in-process, never followed through a
-// symbolic link, opened without blocking, size-capped, and only `path:line` and the version are kept:
-// nothing else of its text leaves this module.
+// symbolic link, never read through a hard link, opened without blocking, size-capped, and only `path:line`
+// and the version are kept: nothing else of its text leaves this module.
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -23,7 +23,7 @@ const SYSTEM_PREFIXES = ['/bin/', '/sbin/', '/usr/bin/', '/usr/sbin/', '/usr/lib
 // Owner credential stores and key folders are never opened, whatever a command names: the pin report needs
 // only scripts, and a key must not be read even in-process for it.
 const CREDENTIAL_DIR_RE = /(?:^|\/)\.(?:marrow|hermes|ssh|aws|gnupg|docker|kube)(?:\/|$)|\/\.config\/(?:gh|gcloud)(?:\/|$)/;
-const CREDENTIAL_NAME_RE = /^(?:\.env(?:\..*)?|env|credentials|\.[a-z0-9_-]+rc|\.netrc|\.git-credentials|auth\.json|hosts\.yml|id_[a-z0-9]+|[^/]*\.(?:pem|key|p12|pfx))$/i;
+const CREDENTIAL_NAME_RE = /^(?:[^/]*\.env(?:\..*)?|env|credentials|\.[a-z0-9_-]+rc|\.netrc|\.git-credentials|auth\.json|hosts\.yml|\.claude\.json|settings\.local\.json|id_[a-z0-9]+|[^/]*\.(?:pem|key|p12|pfx))$/i;
 
 function isCredentialPath(target) {
   const normal = path.resolve(target);
@@ -55,11 +55,14 @@ function openCapped(file) {
   if (before.isSymbolicLink()) return { reason: 'a symbolic link' };
   if (before.isDirectory()) return { skip: true };
   if (!before.isFile()) return { reason: 'not a regular file' };
+  // A second name for a file may be a credential store's: it is never opened.
+  if (before.nlink > 1) return { reason: 'a hard link' };
   if (before.size > MAX_FILE_BYTES) return { reason: 'larger than the size limit' };
   let fd = null;
   try {
     fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOFOLLOW);
     const stat = fs.fstatSync(fd);
+    if (stat.isFile() && stat.nlink > 1) return { reason: 'a hard link' };
     if (!stat.isFile() || stat.size > MAX_FILE_BYTES) return { reason: stat.isFile() ? 'larger than the size limit' : 'not a regular file' };
     const buffer = Buffer.alloc(stat.size);
     let offset = 0;

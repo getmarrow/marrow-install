@@ -3651,13 +3651,13 @@ function hostFileCarriesMarrow(filePath, kind) {
   } catch {
     return MARROW_MANAGED_TEXT_RE.test(text);
   }
-  if (kind === 'mcp') {
-    const servers = config.mcpServers;
-    return Boolean(servers && typeof servers === 'object' && !Array.isArray(servers)
-      && Object.prototype.hasOwnProperty.call(servers, 'marrow') && marrowOwnMcpEntry(servers.marrow));
-  }
+  const servers = config.mcpServers;
+  const ownMcpEntry = Boolean(servers && typeof servers === 'object' && !Array.isArray(servers)
+    && Object.prototype.hasOwnProperty.call(servers, 'marrow') && marrowOwnMcpEntry(servers.marrow));
+  if (kind === 'mcp') return ownMcpEntry;
   const found = hookCommandStrings(config.hooks, { named: kind === 'gemini' });
-  return found.named || found.commands.some((command) => marrowOwnHookCommand(command));
+  // Gemini keeps its MCP servers in the same settings file as its hooks, so a Marrow entry there is a set-up host.
+  return (kind === 'gemini' && ownMcpEntry) || found.named || found.commands.some((command) => marrowOwnHookCommand(command));
 }
 
 function updateHostFileKinds(paths) {
