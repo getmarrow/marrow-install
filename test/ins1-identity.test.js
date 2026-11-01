@@ -366,7 +366,7 @@ test('T7b: a planted project id that fails SAFE_AGENT_ID is removed even when th
 
 // ---- T13: the flags ---------------------------------------------------------------------------------------------------
 
-test('T13: --agent-id repeated: the last wins; an empty or missing value is refused and never falls back to the env id; --fix-identity cannot be combined', () => {
+test('T13: --agent-id repeated: the last wins; an empty or missing value is refused and never falls back to the env id; --fix-identity is parsed only so that it can be refused', () => {
   const env = { HOME: '/nonexistent-home', MARROW_FLEET_AGENT_ID: RUNNER, MARROW_AGENT_ID: RUNNER };
   const parsed = parseArgs(['update', '--agent-id', 'a', '--agent-id', 'b'], env);
   assert.equal(parsed.agentId, 'b');
@@ -380,11 +380,10 @@ test('T13: --agent-id repeated: the last wins; an empty or missing value is refu
   ]) {
     assert.throws(() => parseArgs(argv, env), /--agent-id (?:needs|cannot)/, `refused: ${JSON.stringify(argv)}`);
   }
-  for (const argv of [['update', '--agent-id', 'x', '--fix-identity'], ['update', '--fix-identity', '--agent-id', 'x']]) {
-    assert.throws(() => parseArgs(argv, env), /--agent-id and --fix-identity cannot be combined/, JSON.stringify(argv));
+  // The flag parses everywhere and never sets an id; runCli refuses it before anything is read (test/ins1-cut.test.js).
+  for (const argv of [['update', '--fix-identity'], ['--fix-identity'], ['update', '--agent-id', 'x', '--fix-identity']]) {
+    assert.equal(parseArgs(argv, env).fixIdentity, true, JSON.stringify(argv));
   }
-  assert.throws(() => parseArgs(['--fix-identity'], env), /--fix-identity is an option of update/);
-  assert.equal(parseArgs(['update', '--fix-identity'], env).fixIdentity, true);
   assert.equal(parseArgs(['update', '--fix-identity'], env).agentId, '');
 });
 
