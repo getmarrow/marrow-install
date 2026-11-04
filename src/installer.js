@@ -4832,7 +4832,7 @@ function printKeylessDoctor(report) {
     ['SDK dependency', report.sdkDependency?.required],
     ['automatic controller', report.controller?.exact_fix],
     ['Hermes wiring', report.hermes?.exact_fix],
-    ['MCP clients or configuration out of date', doctor.mcp_update_required || doctor.mcpProcesses?.healthy === false || doctor.mcpConfigurations?.healthy === false],
+    ['MCP clients or configuration out of date', doctor.mcp_update_required || doctor.automatic_mcp_repair_suppressed || doctor.mcpProcesses?.healthy === false || doctor.mcpConfigurations?.healthy === false],
     ['loop guard not configured', !doctor.loop_guard_configured],
     ['loop guard self-test not passed', !doctor.loop_guard_self_tested],
     ['Marrow is installed for your user account', report.home_install],
