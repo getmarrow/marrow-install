@@ -4822,15 +4822,20 @@ function printKeylessDoctor(report) {
   const missing = doctor.missingHooks.filter((label) => !pluginLabels.has(label));
   const findings = [
     [`missing hooks/config: ${missing.join('; ')}`, missing.length],
+    [`possible env files: ${doctor.envHints.join(', ')}`, doctor.envHints.length],
+    ...(doctor.agent_plugins || []).map((plugin) => [`agent plugin not counted: ${plugin.host}`, !plugin.counted]),
     ['hooks missing for a host', (doctor.hooks_missing_hosts || []).length],
     ['MCP config for an unknown host', (doctor.mcp_config_host_unknown || []).length],
     ['host coverage not configured', (doctor.skipped_hosts || []).length],
     ['duplicate hooks', doctor.duplicate_hooks.length],
     ['stale hooks', doctor.stale_hooks.length],
     ['SDK dependency', report.sdkDependency?.required],
-    ['automatic controller', !report.controller?.active],
+    ['automatic controller', report.controller?.exact_fix],
+    ['Hermes wiring', report.hermes?.exact_fix],
     ['MCP clients or configuration out of date', doctor.mcp_update_required || doctor.mcpProcesses?.healthy === false || doctor.mcpConfigurations?.healthy === false],
     ['loop guard not configured', !doctor.loop_guard_configured],
+    ['loop guard self-test not passed', !doctor.loop_guard_self_tested],
+    ['Marrow is installed for your user account', report.home_install],
   ].filter(([, found]) => found);
   const why = seatbeltWhyLine(doctor.seatbelt);
   process.stdout.write([

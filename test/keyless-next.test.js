@@ -141,8 +141,7 @@ for (const [name, state] of Object.entries(STATES)) {
     if (/^A[123] /.test(name)) assert.ok(result.out.includes('- key problem:'), result.out);
   });
 }
-test('A12 a Marrow plugin that covers the key fix keeps its own fix, never activate', async (t) => {
-  const w = world(t);
+function claudePlugin(w) {
   const copy = path.join(w.home, '.claude', 'plugins', 'cache', 'getmarrow', 'marrow', '0.2.1');
   const put = (file, value) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, typeof value === 'string' ? value : JSON.stringify(value)); };
   const pre = 'node "${CLAUDE_PLUGIN_ROOT}/scripts/marrow-launch.cjs" claude-pre-action-hook';
@@ -151,10 +150,24 @@ test('A12 a Marrow plugin that covers the key fix keeps its own fix, never activ
   put(path.join(copy, 'hooks', 'hooks.json'), { hooks: Object.fromEntries(['UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop'].map((event) => [event, [{ hooks: [{ type: 'command', command: event === 'PreToolUse' ? pre : `${pre}-other` }] }]])) });
   put(path.join(w.home, '.claude', 'plugins', 'installed_plugins.json'), { version: 2, plugins: { 'marrow@getmarrow': [{ scope: 'user', installPath: copy, version: '0.2.1' }] } });
   put(path.join(w.home, '.claude', 'settings.json'), { enabledPlugins: { 'marrow@getmarrow': true } });
+}
+test('A12 a Marrow plugin that covers the key fix keeps its own fix, never activate', async (t) => {
+  const w = world(t);
+  claudePlugin(w);
   const result = await run(w, ['doctor']);
   assert.equal(result.code, 0, result.out);
   assert.ok(!result.out.includes(EARLY) && !result.out.includes(NEXT), result.out);
   assert.ok(result.out.includes('/reload-plugins') && result.out.includes('supplied by the Marrow plugin'), result.out);
+});
+test('S4 a local finding BASE prints is still named: a plugin that is not counted, a likely env file', async (t) => {
+  const w = world(t);
+  claudePlugin(w);
+  fs.chmodSync(w.home, 0o775);
+  fs.writeFileSync(path.join(w.proj, '.env'), `MARROW_API_KEY=${KEY}\n`);
+  const result = await run(w, ['doctor']);
+  assert.ok(result.out.includes(EARLY), result.out);
+  for (const named of ['agent plugin not counted: claude', 'possible env files: ', 'missing hooks/config: ']) assert.ok(result.out.includes(named), `${named} in:\n${result.out}`);
+  assert.equal(fixCommands(result.out), 1, result.out);
 });
 
 // S3/C18/C21: run, coverage, gate say the one next step.
@@ -183,7 +196,7 @@ test('A8-A9 run of a protected command with no key is blocked, the command never
     assert.ok(result.stderr.includes(`BLOCKED: ${NEXT}`), result.stderr);
     assert.equal(fs.existsSync(marker), false, `${args.join(' ')}: the stub ran`);
   }
-  assert.equal((await run(w, ['run', '--', 'wrangler', 'deploy'], { env: { MARROW_FAIL_OPEN: '1' } })).code, 13);
+  assert.equal((await run(w, ['run', '--', 'wrangler', 'deploy'], { env: { MARROW_FAIL_OPEN: 'true' } })).code, 13);
   assert.equal(fs.existsSync(marker), false);
 });
 test('A10-A11 gate of a protected action with no key never allows', async (t) => {
@@ -259,4 +272,31 @@ test('a key in the environment: fleet output is the table, never the keyless pan
   const server = await fake(t);
   const result = await run(world(t), ['fleet', '--no-interactive'], { env: { MARROW_API_KEY: KEY }, server });
   assert.ok(result.out.includes('Live agents: 3') && !result.out.includes(NEXT), result.out);
+});
+
+// KN6: the keyless paths open no credential store (spelled, symlinked or hard-linked); the fs trace is test/support/homeroot-preload.cjs.
+test('KN6 no keyless command opens a credential store', async (t) => {
+  const w = world(t);
+  const stores = ['.claude.json', '.claude/settings.local.json', '.npmrc', '.git-credentials', '.marrow/fleet.env', '.config/gh/hosts.yml', '.codex/auth.json', '.hermes/config.yaml'].map((name) => path.join(w.home, name));
+  const dummy = `store-dummy-${crypto.randomBytes(6).toString('hex')}`;
+  for (const store of stores) { fs.mkdirSync(path.dirname(store), { recursive: true }); fs.writeFileSync(store, `${dummy}\n`, { mode: 0o600 }); }
+  fs.linkSync(stores[2], path.join(w.proj, 'hardlink-of-store'));
+  fs.symlinkSync(stores[3], path.join(w.proj, 'symlink-of-store'));
+  const ids = new Set(stores.map((store) => { const stat = fs.statSync(store); return `${stat.dev}:${stat.ino}`; }));
+  const trace = path.join(w.root, 'trace.log');
+  const OPENS = /^(openSync|readFileSync|open|readFile|createReadStream) /;
+  const seen = {};
+  for (const args of [['doctor'], ['doctor', '--self-test'], ['fleet'], ['fleet', '--json'], ['run', '--', 'echo', 'hi'], ['coverage'], ['gate', 'echo hi'], ['status'], ['activate']]) {
+    fs.rmSync(trace, { force: true });
+    const result = await run(w, args, { env: { HOMEROOT_TRACE: trace } });
+    assert.ok(!result.out.includes(dummy), `${args.join(' ')}: no store text in the output`);
+    const lines = fs.existsSync(trace) ? fs.readFileSync(trace, 'utf8').split('\n').filter((line) => OPENS.test(line)) : [];
+    seen[args.join(' ')] = lines.filter((line) => { const [, file, id] = line.split(' '); return ids.has(id) || stores.includes(file) || file.endsWith('-of-store'); }).map((line) => path.relative(w.home, line.split(' ')[1]));
+  }
+  // Only the doctor's own host detection (BASE, unchanged here) reads these two; nothing else opens any store.
+  const allowed = new Set(['.claude.json', '.hermes/config.yaml']);
+  for (const [command, files] of Object.entries(seen)) {
+    const extra = files.filter((file) => !(command.startsWith('doctor') && allowed.has(file)));
+    assert.deepEqual(extra, [], `${command} opened a credential store`);
+  }
 });
