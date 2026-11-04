@@ -19,6 +19,7 @@ const SUPPORT = (name) => path.join(__dirname, 'support', name);
 const NEXT = 'No Marrow key was found on this machine. Create a key at https://getmarrow.ai/signup, save it in the owner-only file ~/.marrow/env (chmod 600), then run `npx -y @getmarrow/install@latest activate`.';
 const KEY = `keyless-dummy-${crypto.randomBytes(8).toString('hex')}`;
 assert.doesNotMatch(KEY, /^(?:sk|pk|rk)_|^ghp_|^xox/);
+const EARLY = 'No Marrow key is on this machine yet';
 const count = (text, needle) => text.split(needle).length - 1;
 const FIX_LINE = /\bnpx\b|npm install/;
 // Fix commands in the part of the doctor output before its warnings.
@@ -102,7 +103,7 @@ for (const args of [['doctor'], ['doctor', '--self-test']]) {
     assert.equal(result.code, 0, result.out);
     assert.equal(count(result.out, NEXT), 1, result.out);
     assert.equal(fixCommands(result.out), 1, `fix commands: ${fixCommands(result.out)}`);
-    for (const kept of ['Seatbelt:', 'Hooks that start without a key skip silently', 'after the key, run doctor again']) assert.ok(result.out.includes(kept), `${kept} in:\n${result.out}`);
+    for (const kept of [EARLY, 'Seatbelt:', 'Hooks that start without a key skip silently', 'after the key, run doctor again']) assert.ok(result.out.includes(kept), `${kept} in:\n${result.out}`);
     for (const gone of ['backend_projection_not_provided', 'exact fix:', 'recommended fix:', 'controller ensure', '@getmarrow/sdk@']) assert.ok(!result.out.includes(gone), `${gone} gone`);
     clean(result.out);
   });
@@ -111,7 +112,7 @@ test('S4 doctor with any other argument keeps the full report', async (t) => {
   const w = world(t);
   for (const args of [['doctor', '--json'], ['doctor', '--cwd', w.proj], ['doctor', '--agent-id', 'a1']]) {
     const result = await run(w, args);
-    assert.ok(!result.out.includes('after the key, run doctor again'), args.join(' '));
+    assert.ok(!result.out.includes(EARLY), args.join(' '));
     assert.ok(result.out.includes('backend_projection_not_provided'), args.join(' '));
   }
   const json = JSON.parse((await run(w, ['doctor', '--json'])).stdout);
@@ -135,7 +136,7 @@ for (const [name, state] of Object.entries(STATES)) {
     if (state.local) ownerFile(w, state.local, 'env.local');
     const result = await run(w, ['doctor'], { env: state.env });
     assert.equal(result.code, state.code ?? 0, result.out);
-    assert.ok(!result.out.includes('after the key, run doctor again') && !result.out.includes(NEXT), `${name}:\n${result.out}`);
+    assert.ok(!result.out.includes(EARLY) && !result.out.includes(NEXT), `${name}:\n${result.out}`);
     if (state.code === undefined) assert.ok(result.out.includes('\nDoctor:\n'), result.out);
     if (/^A[123] /.test(name)) assert.ok(result.out.includes('- key problem:'), result.out);
   });
@@ -152,7 +153,7 @@ test('A12 a Marrow plugin that covers the key fix keeps its own fix, never activ
   put(path.join(w.home, '.claude', 'settings.json'), { enabledPlugins: { 'marrow@getmarrow': true } });
   const result = await run(w, ['doctor']);
   assert.equal(result.code, 0, result.out);
-  assert.ok(!result.out.includes('after the key, run doctor again') && !result.out.includes(NEXT), result.out);
+  assert.ok(!result.out.includes(EARLY) && !result.out.includes(NEXT), result.out);
   assert.ok(result.out.includes('/reload-plugins') && result.out.includes('supplied by the Marrow plugin'), result.out);
 });
 

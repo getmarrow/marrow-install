@@ -14,7 +14,7 @@ const {
   verifyActionPermit,
 } = require('./enforcement-client');
 const { startGovernanceSidecar } = require('./governance-sidecar');
-const { readOwnerKeyDetail } = require('./owner-env');
+const { KEYLESS_NEXT_STEP, readOwnerKeyDetail } = require('./owner-env');
 const { assertSafeBaseUrl, emitNoticeOnce, ownerKeyBaseUrl } = require('./base-url-policy');
 const {
   controllerStatus,
@@ -1788,7 +1788,7 @@ function errorCode(json) {
 
 
 // Where a run that has no key points the person: one command, in a terminal on this machine.
-const NO_KEY_TEXT = 'Marrow can\'t find your key: run `npx @getmarrow/install` once in this machine\'s terminal.';
+const NO_KEY_TEXT = KEYLESS_NEXT_STEP;
 
 function ownerEnvKey() {
   try {
@@ -2948,7 +2948,8 @@ async function runGoverned(parsed, execution = {}) {
       actionPermit = null;
       permitVerified = false;
       degraded = true;
-      process.stderr.write(`Marrow degraded: ${error.message}. Continuing because this action is not protected${decisionId ? '' : '; its outcome will not be recorded'}.\n`);
+      const said = String(error.message);
+      process.stderr.write(`Marrow degraded: ${said}${said.endsWith('.') ? '' : '.'} Continuing because this action is not protected${decisionId ? '' : '; its outcome will not be recorded'}.\n`);
     } else {
       // A refusal spends the hold (a fresh gate is needed); a failure a later run may not meet
       // (Marrow unreachable or unavailable) keeps it, so the next run picks the approval up.
@@ -3614,7 +3615,7 @@ async function fleetSnapshot(options) {
         data: {
           enabled: false,
           missed_hooks: ['api_key'],
-          recommended_fix: 'Put MARROW_API_KEY=<your_key> in ~/.marrow/env (run chmod 700 ~/.marrow && chmod 600 ~/.marrow/env), then run npx @getmarrow/install fleet. Fallback: MARROW_API_KEY=<your_key> npx @getmarrow/install fleet',
+          recommended_fix: KEYLESS_NEXT_STEP,
         },
       },
       capacity: { ok: false, error: 'MARROW_API_KEY missing', data: {} },
@@ -4472,9 +4473,14 @@ async function runGovernInteractive(options, input = process.stdin, output = pro
   }
 }
 
-async function runFleetInteractive(options, input = process.stdin, output = process.stdout) {
+// `plain` is true only for the whole commands `fleet` and `fleet --no-interactive`.
+async function runFleetInteractive(options, input = process.stdin, output = process.stdout, plain = false) {
   const snapshot = await fleetSnapshot(options);
   if (options.json) return snapshot;
+  if (plain && !options.apiKey) {
+    output.write(`Marrow Fleet Operator\n\nNo Marrow key is on this machine yet, so there is no fleet to show.\n${KEYLESS_NEXT_STEP}\n`);
+    return snapshot;
+  }
   if (!canUseInteractive(options, input, output)) {
     output.write(`${fleetPanel(snapshot)}\n`);
     return snapshot;
@@ -4597,7 +4603,7 @@ async function runCli(argv) {
     await runGovernInteractive(parsed.options);
     return;
   } else if (parsed.command === 'fleet') {
-    result = await runFleetInteractive(parsed.options);
+    result = await runFleetInteractive(parsed.options, process.stdin, process.stdout, argv.length === 1 || (argv.length === 2 && argv[1] === '--no-interactive'));
   } else if (parsed.command === 'hermes') {
     result = await integrationOnly(parsed, 'hermes');
   } else if (parsed.command === 'openclaw') {

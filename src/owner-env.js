@@ -211,7 +211,12 @@ function ensureOwnerApiKey(home, apiKey) {
   return { state: 'written', path: filePath, written: true };
 }
 
+// The one next step for a person with no key: every command that finds none says exactly this (no key and no path
+// from the environment in it, and no NAME=value form for the redactor to scrub). activate keeps its own longer message.
+const KEYLESS_NEXT_STEP = 'No Marrow key was found on this machine. Create a key at https://getmarrow.ai/signup, save it in the owner-only file ~/.marrow/env (chmod 600), then run `npx -y @getmarrow/install@latest activate`.';
+
 module.exports = {
+  KEYLESS_NEXT_STEP,
   ensureOwnerApiKey,
   isPrivateOwnerFile,
   ownerKeyStoreState,

@@ -35,7 +35,7 @@ const {
   marrowEnvKeyNames: hermesMarrowEnvKeyNames,
   planHermesMcpConfig,
 } = require('./hermes-config');
-const { ensureOwnerApiKey, ownerKeyStoreState, readOwnerKeyDetail } = require('./owner-env');
+const { KEYLESS_NEXT_STEP, ensureOwnerApiKey, ownerKeyStoreState, readOwnerKeyDetail } = require('./owner-env');
 const { assertSafeBaseUrl, emitNoticeOnce, ownerKeyBaseUrl } = require('./base-url-policy');
 const { buildOwnToolMatchers } = require('./marrow-own-tools');
 const { detectAgentPlugins, describeAgentPlugin } = require('./agent-plugins');
@@ -4810,6 +4810,38 @@ function pluginSuppliedHosts(report) {
   return (report.doctor?.agent_plugins || []).filter((plugin) => plugin.counted && Object.prototype.hasOwnProperty.call(PLUGIN_SUPPLIED, plugin.host)).map((plugin) => PLUGIN_SUPPLIED[plugin.host]);
 }
 
+// Reports whose key state was "nothing stored anywhere" with no plugin supplying the key fix (an identity, never a field:
+// doctor --json and every other print stay as they were).
+const KEYLESS_DOCTOR_REPORTS = new WeakSet();
+
+// `marrow-install doctor` and `doctor --self-test`, no key stored: the way to a key first, then the local findings by name.
+// The seatbelt lines and every warning are the ones printReport prints; the fix commands wait for the key.
+function printKeylessDoctor(report) {
+  const doctor = report.doctor;
+  const pluginLabels = new Set(pluginSuppliedHosts(report).flatMap((entry) => entry.labels));
+  const missing = doctor.missingHooks.filter((label) => !pluginLabels.has(label));
+  const findings = [
+    [`missing hooks/config: ${missing.join('; ')}`, missing.length],
+    ['hooks missing for a host', (doctor.hooks_missing_hosts || []).length],
+    ['MCP config for an unknown host', (doctor.mcp_config_host_unknown || []).length],
+    ['host coverage not configured', (doctor.skipped_hosts || []).length],
+    ['duplicate hooks', doctor.duplicate_hooks.length],
+    ['stale hooks', doctor.stale_hooks.length],
+    ['SDK dependency', report.sdkDependency?.required],
+    ['automatic controller', !report.controller?.active],
+    ['MCP clients or configuration out of date', doctor.mcp_update_required || doctor.mcpProcesses?.healthy === false || doctor.mcpConfigurations?.healthy === false],
+    ['loop guard not configured', !doctor.loop_guard_configured],
+  ].filter(([, found]) => found);
+  const why = seatbeltWhyLine(doctor.seatbelt);
+  process.stdout.write([
+    `Marrow passive installer ${INSTALLER_ADAPTER_VERSION}`, `Root: ${report.root}${homeFolders().includes(realFolder(report.root)) ? ' (user-wide)' : ''}`, '',
+    'No Marrow key is on this machine yet.', seatbeltLine(doctor.seatbelt), ...(why ? [why] : []), '',
+    ...findings.map(([name]) => `- ${name} (after the key, run doctor again)`), ...(findings.length ? [''] : []),
+    `Next step: ${KEYLESS_NEXT_STEP}`,
+    ...(report.warnings.length ? ['', 'Warnings:', ...report.warnings.map((warning) => `- ${warning}`)] : []), '',
+  ].join('\n'));
+}
+
 function printReport(report, sink) {
   const out = typeof sink === 'function' ? sink : (text) => process.stdout.write(text);
   out(`Marrow passive installer\n`);
@@ -5426,6 +5458,8 @@ async function install(options) {
   const keyState = options.doctor && !options.apiKey ? ownerKeyStoreState(detection.home, process.env) : null;
   const keyProblems = keyState && keyState.state !== 'key' ? keyState.problems : [];
   const pluginCoversKeyFix = countedPlugins.length > 0 && !uncoveredHostWrites(changes, detection.paths, countedPlugins);
+  // The doctor that has nothing stored anywhere, and no plugin to supply the key fix, may print the short keyless report.
+  const keylessDoctor = keyState?.state === 'none' && !pluginCoversKeyFix;
   const keyFix = keyProblems.length ? keyProblemFix(keyProblems, keyState.homeWritable, pluginCoversKeyFix ? countedPlugins : null) : null;
   // The skipped self-test's own hint ends in `activate`, which would put the installer's hooks next to the plugin's.
   if (selfTest.skipped && selfTest.exact_fix && !options.apiKey && options.doctor && pluginCoversKeyFix) {
@@ -5571,7 +5605,7 @@ async function install(options) {
     selfTest,
     agentId: configuredAgentId,
   });
-  return {
+  const report = {
     root: detection.root,
     adapterProvenance: adapterProvenanceForMcpTarget(mcpTarget),
     mode: plan.mode,
@@ -5676,6 +5710,8 @@ async function install(options) {
         : []),
     ],
   };
+  if (keylessDoctor) KEYLESS_DOCTOR_REPORTS.add(report);
+  return report;
 }
 
 function activationFailureFix(message, configuredAgentId = '') {
@@ -5884,7 +5920,9 @@ async function runCli(argv) {
     return;
   }
   if (!oneCommand || options.verbose) {
-    printReport(report);
+    const plainDoctor = argv.length === 1 || (argv.length === 2 && argv[1] === '--self-test');
+    if (plainDoctor && argv[0] === 'doctor' && KEYLESS_DOCTOR_REPORTS.has(report)) printKeylessDoctor(report);
+    else printReport(report);
     return;
   }
   report.api_key = keyInfo;

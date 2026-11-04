@@ -1612,7 +1612,7 @@ test('runner CLI without MARROW_API_KEY: reads the owner-only ~/.marrow/env, and
       const none = await runCli(args, { PATH: process.env.PATH, HOME: dir, MARROW_BASE_URL: baseUrl }, dir);
       assert.notEqual(none.code, 0);
       assert.equal(fs.existsSync(marker), false);
-      assert.match(none.output, /Marrow can't find your key: run `npx @getmarrow\/install` once in this machine's terminal\./);
+      assert.match(none.output, /No Marrow key was found on this machine\. Create a key at https:\/\/getmarrow\.ai\/signup, save it in the owner-only file ~\/\.marrow\/env \(chmod 600\), then run `npx -y @getmarrow\/install@latest activate`\./);
       assert.equal(seen.length, 0, 'nothing is sent without a key');
 
       fs.mkdirSync(path.join(dir, '.marrow'), { mode: 0o700 });
