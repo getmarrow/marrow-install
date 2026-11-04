@@ -1625,7 +1625,8 @@ test('every by-hand key-file instruction carries the canonical chmod 700 ~/.marr
   const home = tempDir('marrow-0169-keyfile-');
   try {
     const env = { PATH: process.env.PATH, HOME: home };
-    const keyless = await runBin([], { cwd: home, env });
+    // cwd is the home folder, so the run is user-wide: --global is the consent that lets it reach the key message.
+    const keyless = await runBin(['--global'], { cwd: home, env });
     assert.ok(keyless.stdout.includes(canonical));
     const help = await runBin(['--help'], { cwd: home, env });
     assert.ok(help.stdout.includes(canonical), 'help text');

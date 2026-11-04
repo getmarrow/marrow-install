@@ -87,6 +87,7 @@ const MCP_REGISTRY_VERIFICATION_COMMAND = 'npm view @getmarrow/mcp@latest name v
 const INSTALLER_UPDATE_COMMAND = 'npx -y @getmarrow/install@latest update';
 const INSTALLER_DOCTOR_COMMAND = 'npx -y @getmarrow/install@latest doctor --self-test';
 const STALE_CODEX_HOOKS_FIX = 'npx @getmarrow/install@latest update';
+const printable = (text) => String(text).replace(/[\u0000-\u001f\u007f]/g, '?');
 const INSTALLER_RESTART_INSTRUCTION = 'After the update completes, restart the detected owning harnesses once. Running Marrow MCP processes remain unchanged until that restart.';
 const MCP_STABLE_VERSION_RE = /^(\d{1,6})\.(\d{1,6})\.(\d{1,9})$/;
 const SHA512_INTEGRITY_RE = /^sha512-[A-Za-z0-9+/]+={0,2}$/;
@@ -963,7 +964,8 @@ function parseArgs(argv, env = process.env) {
     else if (arg === '--no-controller') options.controller = false;
     else if (arg === '--no-local-runtime') options.localRuntimeSwitchIgnored = true;
     else if (arg === '--self-test') options.selfTest = true;
-    else if (arg === '--cwd') options.cwd = path.resolve(optionValue() || options.cwd);
+    else if (arg === '--global') options.global = true;
+    else if (arg === '--cwd') options.cwd = path.resolve((options.cwdFlag = optionValue()) || options.cwd);
     else if (arg === '--mode') {
       explicitOperation = true;
       options.mode = optionValue() || options.mode;
@@ -1036,6 +1038,8 @@ function parseArgs(argv, env = process.env) {
     throw new Error('activate cannot be combined with --dry-run; use --dry-run without activate to preview changes');
   }
   options.resolveMcpRegistry = Boolean(options.doctor || options.repair || options.update);
+  if (options.global && options.cwdFlag && realFolder(options.cwd) !== realFolder(options.home)) throw new Error('--global installs into your home folder; it cannot be combined with --cwd <another folder>');
+  if (options.global) options.cwd = path.resolve(options.home);
 
   return options;
 }
@@ -1063,6 +1067,7 @@ Options:
   --repair           Write missing hooks/config, then run self-test and status check
   update             Same as --repair: refresh exact MCP/SDK/install package pins after owner approval
   --yes, -y          Write detected config files (needs your API key; stops before writing without one)
+  --global           Install user-wide, into your home folder, for every project (a run from your home folder asks, or refuses without a terminal)
   --mode <mode>      auto, mcp, sdk, both, or md
   --base-url <url>   Marrow API base URL
   --agent-id <id>    Agent/fleet id for self-test headers
@@ -1250,9 +1255,10 @@ function grokSkipEntry(detection) {
   };
 }
 
-function findUp(startDir, names, maxDepth = 8) {
+function findUp(startDir, names, maxDepth = 8, stopAt = null) {
   let dir = path.resolve(startDir);
   for (let depth = 0; depth <= maxDepth; depth += 1) {
+    if (depth > 0 && stopAt && stopAt(dir)) return null;
     for (const name of names) {
       const candidate = path.join(dir, name);
       if (exists(candidate)) return candidate;
@@ -1264,15 +1270,29 @@ function findUp(startDir, names, maxDepth = 8) {
   return null;
 }
 
-function projectRoot(startDir) {
-  const marker = findUp(startDir, ['package.json', 'pyproject.toml', 'requirements.txt', '.git', 'AGENTS.md', 'CLAUDE.md']);
+function realFolder(folder) {
+  let real = path.resolve(folder);
+  try { real = fs.realpathSync.native(real); } catch { /* a missing folder compares by its text */ }
+  return process.platform === 'win32' || process.platform === 'darwin' ? real.toLowerCase() : real;
+}
+
+// The home folders, by real path (the one detectEnvironment reads as `home`, and the passwd one): projectRoot's walk stops at them.
+function homeFolders(env = process.env) {
+  const homes = [env.HOME || env.USERPROFILE || os.homedir()];
+  try { homes.push(os.userInfo().homedir); } catch { /* no passwd entry: the environment home only */ }
+  return homes.filter(Boolean).map(realFolder);
+}
+
+function projectRoot(startDir, env = process.env) {
+  const homes = homeFolders(env);
+  const marker = findUp(startDir, ['package.json', 'pyproject.toml', 'requirements.txt', '.git', 'AGENTS.md', 'CLAUDE.md'], 8, (dir) => homes.includes(realFolder(dir)));
   return marker ? path.dirname(marker) : path.resolve(startDir);
 }
 
 // `options.platform` is a test seam: it can only ADD the Grok skip on another platform (F-2G); the
 // real process.platform decides on a real host, whatever the environment or arguments say.
 function detectEnvironment(cwd = process.cwd(), env = process.env, options = {}) {
-  const root = projectRoot(cwd);
+  const root = projectRoot(cwd, env);
   const home = env.HOME || env.USERPROFILE || os.homedir();
   const paths = {
     root,
@@ -1386,6 +1406,28 @@ function assertUpdateTargetsManagedRoot(detection) {
     `Marrow-managed configuration was found at ${home}. To update it, run: ${INSTALLER_UPDATE_COMMAND} --cwd ${shellArgument(home)}`,
     `To install Marrow into ${root} deliberately, run the install command from that directory instead: npx -y @getmarrow/install@latest`,
   ].join('\n'));
+}
+
+// A home-folder root is a user-wide install (hooks for every project): it needs --global, --cwd <home> or a typed yes.
+async function confirmUserWide(options, { input = process.stdin, output = process.stdout, timeoutMs = 60_000 } = {}) {
+  const env = { HOME: options.home };
+  const root = projectRoot(options.cwd, env);
+  if (options.global || options.cwdFlag || !homeFolders(env).includes(realFolder(root))) return true;
+  const scope = printable(`Root: ${root} (user-wide: it writes ${path.join(root, '.claude', 'settings.json')} and ${path.join(root, '.mcp.json')}, which apply to every project)`);
+  if (input.isTTY !== true || output.isTTY !== true) {
+    output.write(`${scope}\nNot installed: a user-wide install has to be asked for, and this is not a terminal.\nTo install for your whole user account on purpose, run: npx -y @getmarrow/install@latest ${options.update ? 'update' : 'activate'} --global\nTo install into one project, run the command from that project's folder.\n`);
+    return false;
+  }
+  const lines = require('node:readline').createInterface({ input, signal: AbortSignal.timeout(timeoutMs) });
+  output.write(`${scope}\nInstall Marrow for your whole user account? [y/N] `);
+  for await (const line of lines) return ['y', 'yes'].includes(line.trim().toLowerCase());
+  return false;
+}
+
+// The walk no longer reaches a home-level install from a folder below it: name it and the exact command.
+function homeInstallNote(root, home, command) {
+  if (realFolder(root) === realFolder(home) || marrowManagedRootFiles(root).length > 0 || marrowManagedRootFiles(home).length === 0) return {};
+  return { home_install: `${printable(`Marrow is installed for your user account at ${home}. To use that install, run: ${command} --cwd ${shellArgument(home)}`)}\n` };
 }
 
 function findLikelyEnvFiles(detection, env = process.env) {
@@ -4012,6 +4054,7 @@ async function uninstall(options = {}) {
       applied: apply,
       dry_run: !apply,
       root,
+      ...homeInstallNote(root, home, 'npx -y @getmarrow/install@latest uninstall'),
       controller,
       changes,
       kept,
@@ -4042,6 +4085,7 @@ function printUninstallReport(report, sink = (text) => process.stdout.write(text
   if (result.runtime) sink(`- ${result.runtime.path}: ${result.applied ? 'removed' : 'would remove'} Marrow's local MCP runtime (Marrow hooks left in other projects install it again on their next start).\n`);
   else if (result.runtime_kept) sink(`- ${result.runtime_kept}: kept; other projects on this machine may use Marrow's local MCP runtime. Add --all to remove it too.\n`);
   if (result.controller?.stopped) sink(`Stopped ${result.controller.stopped} Marrow controller${result.controller.stopped === 1 ? '' : 's'} for this project.\n`);
+  if (result.home_install) sink(result.home_install);
   sink(`${result.next_step}\n`);
 }
 
@@ -4769,9 +4813,10 @@ function pluginSuppliedHosts(report) {
 function printReport(report, sink) {
   const out = typeof sink === 'function' ? sink : (text) => process.stdout.write(text);
   out(`Marrow passive installer\n`);
-  out(`Root: ${report.root}\n`);
+  out(`Root: ${report.root}${homeFolders().includes(realFolder(report.root)) ? ' (user-wide)' : ''}\n`);
   out(`Mode: ${report.mode}\n`);
   out(`Write mode: ${report.writeMode}\n\n`);
+  if (report.home_install) out(report.home_install);
 
   if (report.activation?.requested) {
     out('Activation:\n');
@@ -5531,6 +5576,7 @@ async function install(options) {
     adapterProvenance: adapterProvenanceForMcpTarget(mcpTarget),
     mode: plan.mode,
     writeMode,
+    ...(options.doctor ? homeInstallNote(detection.root, detection.home, INSTALLER_DOCTOR_COMMAND) : {}),
     toolProfile: selfTest.mcp_tool_profile || initialToolProfileReport(options.toolProfile),
     detected: {
       node: detection.node,
@@ -5780,6 +5826,7 @@ async function runCli(argv) {
     else printUninstallReport(report);
     return;
   }
+  if (options.yes && !options.dryRun && !options.doctor && !(await confirmUserWide(options))) { process.exitCode = 3; return; }
   // An empty or whitespace-only key from any source (environment, --key, owner file) is missing.
   options.apiKey = String(options.apiKey || '').trim();
   const stored = readOwnerKeyDetail(options.home);
@@ -5862,6 +5909,7 @@ module.exports = {
   maintenanceMcpRuntime,
   parseArgs,
   detectEnvironment,
+  confirmUserWide, findUp,
   buildPlan,
   applyPlan,
   install,

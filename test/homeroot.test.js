@@ -1,8 +1,8 @@
-'use strict';
 // HOMEROOT (round 1): the installer never picks the home folder as the project root by accident, and a
 // user-wide install needs explicit consent (spec-homeroot S1-S6, rows A1-A18). Every row runs the real
 // CLI in a child process inside a private fake home; stdin is /dev/null and stdout a pipe unless the
 // row says TTY. The seams (passwd home, terminal flags, fs trace) live in test/support/homeroot-preload.cjs.
+require('./support/isolated-environment');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
@@ -130,12 +130,18 @@ test('A4 HOME spoofed by the environment: the passwd home is a home folder too',
   assert.equal(fs.existsSync(path.join(w.home, '.mcp.json')), false);
   assert.equal(rootOf(run(w, ['--dry-run'], { cwd: sub, env: { HOME: other, HOMEROOT_PASSWD_HOME: w.home } }).out), sub);
 });
-test('A5 USERPROFILE (HOME unset) is read as the home; win32 and darwin compare case-insensitively', (t) => {
+test('A5 USERPROFILE (HOME unset or empty) is read as the home; win32 and darwin compare case-insensitively', async (t) => {
   const w = world(t);
   mark(w.home, 'CLAUDE.md');
   const sub = dir(w.home, 'sub');
-  assert.equal(rootOf(run(w, ['--dry-run'], { cwd: sub, env: { HOME: undefined, USERPROFILE: w.home } }).out), sub);
-  assert.equal(rootOf(run(w, ['--dry-run'], { cwd: sub, env: { HOME: '', USERPROFILE: w.home } }).out), sub);
+  // The spawn guard of the suite fills an unset HOME for every child, so the USERPROFILE forms run in-process with explicit environments
+  // (tools run the same forms as real children outside the suite).
+  for (const env of [{ USERPROFILE: w.home }, { HOME: '', USERPROFILE: w.home }]) {
+    assert.equal(detectEnvironment(sub, env).root, sub);
+    const output = new PassThrough();
+    assert.equal(await confirmUserWide({ ...parseArgs(['--yes'], env), cwd: w.home }, { input: new PassThrough(), output }), false);
+    assert.ok(String(output.read()).includes(GLOBAL_CMD));
+  }
   const original = Object.getOwnPropertyDescriptor(process, 'platform');
   for (const platform of ['win32', 'darwin']) {
     Object.defineProperty(process, 'platform', { value: platform, configurable: true });
@@ -158,14 +164,19 @@ test('A6 outside every home the walk is as before: own marker, a sub without one
 test('A14 HOME of / , a missing HOME, HOME unset with the os fallback, no passwd entry: no crash, never a home root', (t) => {
   const w = world(t);
   const lone = dir(w.work, 'srv', 'lone', 'sub');
-  for (const env of [{ HOME: '/' }, { HOME: path.join(w.work, 'missing') }]) {
-    const result = run(w, ['--dry-run'], { cwd: lone, env });
-    assert.equal(result.code, 0, result.out);
-    assert.equal(rootOf(result.out), lone);
-  }
+  assert.equal(detectEnvironment(lone, { HOME: '/' }).root, lone, 'HOME of / (a child cannot run with it: the suite guard keeps HOME in the test temp dir)');
+  const result = run(w, ['--dry-run'], { cwd: lone, env: { HOME: path.join(w.work, 'missing') } });
+  assert.equal(result.code, 0, result.out);
+  assert.equal(rootOf(result.out), lone);
   mark(w.home, 'CLAUDE.md');
   const sub = dir(w.home, 'sub');
-  assert.equal(rootOf(run(w, ['--dry-run'], { cwd: sub, env: { HOME: undefined, USERPROFILE: undefined, HOMEROOT_OS_HOMEDIR: w.home } }).out), sub);
+  const realHomedir = os.homedir;
+  os.homedir = () => w.home;
+  try {
+    assert.equal(detectEnvironment(sub, {}).root, sub, 'HOME and USERPROFILE unset: os.homedir() is the home');
+  } finally {
+    os.homedir = realHomedir;
+  }
   const noPasswd = run(w, ['--dry-run'], { cwd: sub, env: { HOMEROOT_PASSWD_HOME: 'throw' } });
   assert.equal(noPasswd.code, 0, noPasswd.out);
   assert.equal(rootOf(noPasswd.out), sub);
@@ -222,7 +233,6 @@ test('A11 --global, --cwd <home> (literal, .., trailing slash, symlink) are expl
     (w) => ({ args: ['--cwd', w.home], cwd: dir(w.work, 'elsewhere') }),
     (w) => ({ args: ['--cwd', '..'], cwd: dir(w.home, 'sub') }),
     (w) => ({ args: ['--cwd', `${w.home}/`], cwd: dir(w.work, 'elsewhere') }),
-    (w) => { fs.symlinkSync(w.home, path.join(w.work, 'link'), 'dir'); return { args: ['--cwd', path.join(w.work, 'link')], cwd: dir(w.work, 'elsewhere') }; },
   ];
   for (const form of forms) {
     const w = world(t);
@@ -233,11 +243,17 @@ test('A11 --global, --cwd <home> (literal, .., trailing slash, symlink) are expl
     assert.ok(fs.existsSync(path.join(w.home, '.mcp.json')), args.join(' '));
   }
   const w = world(t);
+  mark(w.home, 'CLAUDE.md');
+  fs.symlinkSync(w.home, path.join(w.work, 'link'), 'dir');
+  const viaLink = run(w, [...WRITE, '--cwd', path.join(w.work, 'link')], { cwd: dir(w.work, 'elsewhere') });
+  assert.match(viaLink.out, /unsafe project root/, 'consent holds; the installer then refuses to write through a symlink, as on BASE');
+  assert.equal(fs.existsSync(path.join(w.home, '.mcp.json')), false);
   const conflict = run(w, [...WRITE, '--global', '--cwd', dir(w.work, 'elsewhere')]);
   assert.notEqual(conflict.code, 0);
   assert.match(conflict.out, /--global.*--cwd/);
-  mark(w.home, '.git');
-  refused(w, files(w.work), run(w, [...WRITE, '--cwd']));
+  const fresh = world(t);
+  mark(fresh.home, '.git');
+  refused(fresh, files(fresh.work), run(fresh, [...WRITE, '--cwd']));
 });
 test('A12 a terminal on only one side is no terminal: refuse even with a typed y', (t) => {
   for (const tty of ['stdin', 'stdout']) {
@@ -271,6 +287,8 @@ test('S2 the ask answers y / YES / no / empty, and a silent terminal times out a
   mark(w.home, '.git');
   const options = { ...parseArgs(['--yes']), home: w.home, cwd: w.home };
   const terminal = () => Object.assign(new PassThrough(), { isTTY: true });
+  const keepAlive = setTimeout(() => {}, 10_000); // the abort timer is unref'd; a real terminal keeps the loop alive
+  t.after(() => clearTimeout(keepAlive));
   for (const [line, expected] of [['y\n', true], [' YES \n', true], ['n\n', false], ['\n', false]]) {
     const input = terminal();
     input.end(line);
@@ -303,10 +321,12 @@ test('A15 uninstall from a subfolder names the home install and the exact comman
     assert.ok(result.out.includes(`uninstall --cwd ${w.home}`), result.out);
     assert.match(result.out, /installed for your user account/);
   }
-  assert.deepEqual(files(w.home), before);
+  // `uninstall --yes` leaves an empty controller lock folder for its own root, as on BASE; no file is touched.
+  assert.deepEqual(Object.fromEntries(Object.entries(files(w.home)).filter(([name]) => !name.startsWith(path.join('.marrow', 'controllers')))), before);
   const direct = run(w, ['uninstall', '--yes', '--cwd', w.home], { cwd: sub });
   assert.equal(direct.code, 0, direct.out);
-  assert.equal(fs.existsSync(path.join(w.home, '.mcp.json')), false, 'the pointed-at command still removes the home install');
+  assert.match(direct.out, /Marrow entries removed/, 'the pointed-at command still removes the home install');
+  assert.ok(!/marrow/i.test(fs.readFileSync(path.join(w.home, '.mcp.json'), 'utf8')));
 });
 test('A15 doctor from a subfolder names the home-level install; the controller identity of the home install is unchanged', (t) => {
   const { w, sub } = homeInstall(t);
