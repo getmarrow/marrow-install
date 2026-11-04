@@ -166,7 +166,7 @@ test('S4 a local finding BASE prints is still named: a plugin that is not counte
   fs.writeFileSync(path.join(w.proj, '.env'), `MARROW_API_KEY=${KEY}\n`);
   const result = await run(w, ['doctor']);
   assert.ok(result.out.includes(EARLY), result.out);
-  for (const named of ['agent plugin not counted: claude', 'possible env files: ', 'missing hooks/config: ']) assert.ok(result.out.includes(named), `${named} in:\n${result.out}`);
+  for (const named of ['agent plugin not counted: claude', 'possible env files: ', 'missing hooks/config: ', 'MCP local runtime: absent', 'automatic controller', 'loop guard not configured']) assert.ok(result.out.includes(named), `${named} in:\n${result.out}`);
   assert.equal(fixCommands(result.out), 1, result.out);
 });
 
