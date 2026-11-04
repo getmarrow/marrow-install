@@ -110,7 +110,7 @@ for (const args of [['doctor'], ['doctor', '--self-test']]) {
 }
 test('S4 doctor with any other argument keeps the full report', async (t) => {
   const w = world(t);
-  for (const args of [['doctor', '--json'], ['doctor', '--cwd', w.proj], ['doctor', '--agent-id', 'a1']]) {
+  for (const args of [['doctor', '--json'], ['doctor', '--cwd', w.proj], ['doctor', '--agent-id', 'a1'], ['check'], ['--doctor']]) {
     const result = await run(w, args);
     assert.ok(!result.out.includes(EARLY), args.join(' '));
     assert.ok(result.out.includes('backend_projection_not_provided'), args.join(' '));
@@ -250,6 +250,12 @@ test('S5 fleet with a terminal and no key: the panel, raw mode never entered', a
   assert.equal(input.rawCalls, 0);
   assert.ok(written.includes(NEXT) && !written.includes('\x1b[?25l'), written);
   assert.equal(snapshot.fix_commands[0], NEXT);
+});
+test('S5 fleet with any other argument keeps the table', async (t) => {
+  const result = await run(world(t), ['fleet', '--agent-id', 'a1']);
+  assert.equal(result.code, 0, result.out);
+  for (const kept of ['Live agents:', 'Copy exact fix command', 'Partial data']) assert.ok(result.out.includes(kept), `${kept} in:\n${result.out}`);
+  assert.ok(!result.out.includes('[REDACTED'), result.out);
 });
 test('A13 fleet --json: same shape, the one next step, no placeholder', async (t) => {
   const w = world(t);
