@@ -4816,7 +4816,8 @@ const KEYLESS_DOCTOR_REPORTS = new WeakSet();
 
 // `marrow-install doctor` and `doctor --self-test`, no key stored: the way to a key first, then the local findings by name.
 // The seatbelt lines and every warning are the ones printReport prints; the fix commands wait for the key.
-function printKeylessDoctor(report) {
+function printKeylessDoctor(report, sink) {
+  const out = typeof sink === 'function' ? sink : (text) => process.stdout.write(text);
   const doctor = report.doctor;
   const pluginLabels = new Set(pluginSuppliedHosts(report).flatMap((entry) => entry.labels));
   const missing = doctor.missingHooks.filter((label) => !pluginLabels.has(label));
@@ -4840,7 +4841,7 @@ function printKeylessDoctor(report) {
     ['Marrow is installed for your user account', report.home_install],
   ].filter(([, found]) => found);
   const why = seatbeltWhyLine(doctor.seatbelt);
-  process.stdout.write([
+  out([
     `Marrow passive installer ${INSTALLER_ADAPTER_VERSION}`, `Root: ${report.root}${homeFolders().includes(realFolder(report.root)) ? ' (user-wide)' : ''}`, '',
     'No Marrow key is on this machine yet.', seatbeltLine(doctor.seatbelt), ...(why ? [why] : []), '',
     ...findings.map(([name]) => `- ${name} (after the key, run doctor again)`), ...(findings.length ? [''] : []),
@@ -5997,6 +5998,8 @@ module.exports = {
   CURSOR_NATIVE_HOOK_MATCHER,
   GEMINI_NATIVE_HOOK_MATCHER,
   printReport,
+  printKeylessDoctor,
+  KEYLESS_DOCTOR_REPORTS,
   installSummaryLines,
   buildMcpToolProfileReport,
   resolveMcpTargetVersion,

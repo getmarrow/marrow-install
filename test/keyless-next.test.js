@@ -141,6 +141,30 @@ for (const [name, state] of Object.entries(STATES)) {
     if (/^A[123] /.test(name)) assert.ok(result.out.includes('- key problem:'), result.out);
   });
 }
+// Windows forms: the platform seam of test/win-*.test.js (process.platform replaced for the call) in the process, where install() takes its options.
+test('S4 on a simulated win32 and on posix the keyless doctor keeps every warning printReport prints', async (t) => {
+  const { install, printReport, printKeylessDoctor, KEYLESS_DOCTOR_REPORTS } = require('../src/installer');
+  const seatbelt = JSON.stringify(`${JSON.stringify({ mode: 'seatbelt', reasons: [] })}\n`);
+  for (const platform of ['win32', process.platform]) {
+    const w = world(t);
+    const original = Object.getOwnPropertyDescriptor(process, 'platform');
+    Object.defineProperty(process, 'platform', { value: platform, configurable: true });
+    let report;
+    try {
+      report = await install({ cwd: w.proj, home: w.home, mode: 'mcp', selfTest: false, loopGuardSelfTest: false, apiKey: '', baseUrl: 'https://api.getmarrow.ai', agentId: 'keyless-fixture', controller: false, processCommands: [], mcpRegistryMetadata: null, yes: false, dryRun: false, doctor: true, seatbeltStatus: true, seatbeltStatusTimeoutMs: 4000, seatbeltStatusCommand: { command: process.execPath, args: ['-e', `process.stdout.write(${seatbelt})`] } });
+    } finally { Object.defineProperty(process, 'platform', original); }
+    assert.ok(KEYLESS_DOCTOR_REPORTS.has(report), `${platform}: nothing stored, no plugin: the keyless print`);
+    let full = '';
+    let short = '';
+    printReport(report, (text) => { full += text; });
+    printKeylessDoctor(report, (text) => { short += text; });
+    assert.ok(report.warnings.length > 0);
+    for (const line of full.split('\n').filter((entry) => entry.startsWith('- ') && report.warnings.includes(entry.slice(2)))) assert.ok(short.includes(line), `${platform}: ${line.slice(0, 60)} kept`);
+    assert.equal(count(short, NEXT), 1, short);
+    assert.ok(short.includes(EARLY) && short.includes('Seatbelt:') && fixCommands(short) === 1, short);
+    if (platform === 'win32') assert.ok(short.includes('host coverage not configured'), short);
+  }
+});
 function claudePlugin(w) {
   const copy = path.join(w.home, '.claude', 'plugins', 'cache', 'getmarrow', 'marrow', '0.2.1');
   const put = (file, value) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, typeof value === 'string' ? value : JSON.stringify(value)); };
