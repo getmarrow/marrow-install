@@ -58,7 +58,7 @@ function files(root, bytes = false) {
       const full = path.join(current, entry.name);
       const rel = path.relative(root, full);
       if (entry.isDirectory()) { found[`${rel}/`] = ''; walk(full); } else if (entry.isSymbolicLink()) found[rel] = fs.readlinkSync(full);
-      else if (isStore(rel)) { const stat = fs.lstatSync(full); found[rel] = `lstat ${stat.size} ${stat.mtimeMs}`; } // a dummy store is recorded by size and mtime, never read
+      else if (isStore(rel) && fs.lstatSync(full).size < KEY.length) { const stat = fs.lstatSync(full); found[rel] = `lstat ${stat.size} ${stat.mtimeMs}`; } // a store-named file below KEY.length bytes (the 19-byte dummies) is recorded by size and mtime, never read; one of KEY.length or more is scanned like any other
       else found[rel] = bytes ? fs.readFileSync(full, 'utf8') : `${crypto.createHash('sha256').update(fs.readFileSync(full)).digest('hex')} ${fs.lstatSync(full).mtimeMs}`;
     }
   };
