@@ -50,6 +50,7 @@ function dir(...parts) {
 function deep(base, levels) {
   return dir(base, ...Array.from({ length: levels }, (_, i) => `d${i + 1}`));
 }
+const isStore = (rel) => { const key = rel.split(path.sep).join('/'); return path.basename(key) === 'hardlink-of-store' || STORES.some((store) => key === store || key.endsWith(`/${store}`)); };
 function files(root, bytes = false) {
   const found = {};
   const walk = (current) => {
@@ -57,6 +58,7 @@ function files(root, bytes = false) {
       const full = path.join(current, entry.name);
       const rel = path.relative(root, full);
       if (entry.isDirectory()) { found[`${rel}/`] = ''; walk(full); } else if (entry.isSymbolicLink()) found[rel] = fs.readlinkSync(full);
+      else if (isStore(rel)) { const stat = fs.lstatSync(full); found[rel] = `lstat ${stat.size} ${stat.mtimeMs}`; } // a dummy store is recorded by size and mtime, never read
       else found[rel] = bytes ? fs.readFileSync(full, 'utf8') : `${crypto.createHash('sha256').update(fs.readFileSync(full)).digest('hex')} ${fs.lstatSync(full).mtimeMs}`;
     }
   };
@@ -362,9 +364,13 @@ test('A18/CREDENTIAL_STORES refused runs read no store; other runs read only wha
   fs.symlinkSync(path.join(w.home, '.npmrc'), path.join(sub, 'symlink-of-store'));
   const names = new Map([...STORES, 'hardlink-of-store'].map((store) => { const s = fs.statSync(path.join(w.home, store)); return [`${s.dev}:${s.ino}`, store]; }));
   const reads = new Set(['openSync', 'readFileSync', 'open', 'readFile', 'createReadStream']);
+  const stamps = () => Object.fromEntries(Object.entries(files(w.home)).filter(([name]) => isStore(name)));
+  const stamped = stamps();
+  assert.deepEqual(Object.keys(stamped).sort(), [...STORES, 'hardlink-of-store'].sort(), 'the scan skips exactly the stores and the hard link');
   const storeReads = (args, cwd, extra) => {
     put(w.trace, '');
     const { code } = run(w, args, { cwd, ...extra });
+    assert.deepEqual(stamps(), stamped, `STORES_UNCHANGED ${args.join(' ')}: a store or the hard link changed size or mtime`);
     const opened = fs.readFileSync(w.trace, 'utf8').split('\n').filter(Boolean).map((line) => line.split(' ')).filter(([op]) => reads.has(op));
     return { code, all: opened.length, stores: opened.filter(([, , id]) => names.has(id)).map(([, , id]) => names.get(id)) };
   };
