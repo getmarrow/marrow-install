@@ -18,7 +18,7 @@ Use `@getmarrow/install` as the default entry point. It detects supported agent 
    npx -y @getmarrow/install@latest activate
    ```
 
-   Fallback, only if you cannot write that file: `MARROW_API_KEY=<your_key> npx -y @getmarrow/install@latest activate`. A key typed on a command line lands in your shell history. The installer also accepts `--key`, which is visible in process listings; do not use it.
+   If you cannot write that file, load the key from your secret manager into the `MARROW_API_KEY` environment variable for this shell session (never type the key itself into a command or a prompt), then run the same `activate` command. Never put a key on a command line: it lands in your shell history. The installer also accepts `--key`, which is visible in process listings; do not use it.
 3. **Restart** the host the summary names (for example "Restart Claude Code").
 4. **Check.** `npx -y @getmarrow/install@latest doctor --self-test` (the same check as plain `doctor`, which also runs the server self-test)
 
@@ -29,7 +29,7 @@ On the 30-day evaluation and Business, deploys and publishes are held in hooks a
 ## Install
 
 ```bash
-npx @getmarrow/install
+npx -y @getmarrow/install@latest
 ```
 
 Required secret: `MARROW_API_KEY`, from `~/.marrow/env` (preferred, see [Get started](#get-started)) or the environment. The installer supports no hidden prompt and does not read the key from standard input.
@@ -43,10 +43,11 @@ Where the key comes from:
 - The installer reads `MARROW_API_KEY` (or `MARROW_KEY`). When those are unset it reads the owner-only `~/.marrow/env.local`, then `~/.marrow/env`, and names the file it used. It warns when those two files hold different keys.
 - With no key, `activate`, the bare command, `update`, `--repair` and every `--yes` run (including `--mcp --yes` and `--sdk --yes`) print what to do (create a key at https://getmarrow.ai/signup, save it in `~/.marrow/env`, run `activate`), exit 2 and write nothing. The message holds nothing from your environment, arguments or project. `--dry-run`, `doctor` and `uninstall` need no key.
 - On a first install whose key came from `MARROW_API_KEY`, once the self-test passes, the installer stores it in the owner-only `~/.marrow/env` (mode 600) when no key is stored there yet, and says so in one line, so Claude Code opened from the desktop app, an IDE or a new terminal finds it. This holds with `--json` and `--verbose` too. A key passed with `--key` is not stored, and a different stored key is left unchanged and named.
-- The governed runner and `controller` commands read the key from `MARROW_API_KEY` or `MARROW_KEY`, else from the same owner-only files (the runner also accepts `--key`, which is visible in process listings; prefer the variable). With no key the runner stops with: "Marrow can't find your key: run `npx @getmarrow/install` once in this machine's terminal."
+- The governed runner and `controller` commands read the key from `MARROW_API_KEY` or `MARROW_KEY`, else from the same owner-only files (the runner also accepts `--key`, which is visible in process listings; prefer the variable). With no key the runner stops with the same one next step as the other commands (below).
+- From v0.1.78, `doctor`, `fleet`, `run`, `gate`, `coverage` and `status` say the same single line when they find no key: "No Marrow key was found on this machine. Create a key at https://getmarrow.ai/signup, save it in the owner-only file ~/.marrow/env (chmod 600), then run `npx -y @getmarrow/install@latest activate`." Save it as `MARROW_API_KEY` in `~/.marrow/env` (`chmod 700 ~/.marrow && chmod 600 ~/.marrow/env`).
 - The key is never written to generated configuration, controller state or logs. It is written only to the owner-only `~/.marrow/env`: on a first install as above, and for Hermes wiring, described under Trust and Data Boundaries.
 
-Flags: `--dry-run` previews without writing, `doctor` is a read-only health check (it prints to the terminal and writes no log), `--no-controller` installs and self-tests without starting the controller, `--no-self-test` skips the API self-test, `--mode auto|mcp|sdk|both|md` limits what is written, `--no-local-runtime` (or `MARROW_LOCAL_RUNTIME=0`) keeps hooks on `npx`, and `--yes` writes detected configuration (it needs a key, as above). An option that takes a value (`--key`, `--cwd`, `--mode`, `--base-url`, `--agent-id`) never consumes a following word that starts with `-`; such a value is refused (for example `--agent-id -x`; use `MARROW_AGENT_ID` or `--cwd ./-dir`). `--key` also never takes a subcommand word (`activate`, `update`, `doctor` and so on) as the key, so an unset variable in `--key $VAR activate` counts as a missing key and exits 2 writing nothing. `MARROW_KEY` is read when `MARROW_API_KEY` is absent. A blank value in `~/.marrow/env.local` is ignored, not used over a valid key elsewhere. Run `npx @getmarrow/install --help` for the installer options and `npx @getmarrow/install run --help` for the runner.
+Flags: `--dry-run` previews without writing, `doctor` is a read-only health check (it prints to the terminal and writes no log), `--no-controller` installs and self-tests without starting the controller, `--no-self-test` skips the API self-test, `--mode auto|mcp|sdk|both|md` limits what is written, `--no-local-runtime` (or `MARROW_LOCAL_RUNTIME=0`) keeps hooks on `npx`, and `--yes` writes detected configuration (it needs a key, as above). An option that takes a value (`--key`, `--cwd`, `--mode`, `--base-url`, `--agent-id`) never consumes a following word that starts with `-`; such a value is refused (for example `--agent-id -x`; use `MARROW_AGENT_ID` or `--cwd ./-dir`). `--key` also never takes a subcommand word (`activate`, `update`, `doctor` and so on) as the key, so a `--key` whose value is missing (for example an empty variable) is a missing key: it exits 2 and writes nothing. `MARROW_KEY` is read when `MARROW_API_KEY` is absent. A blank value in `~/.marrow/env.local` is ignored, not used over a valid key elsewhere. Run `npx -y @getmarrow/install@latest --help` for the installer options and `npx -y @getmarrow/install@latest run --help` for the runner.
 
 ### MCP tool profiles
 
@@ -92,16 +93,16 @@ Hermes is detected from `~/.hermes/config.yaml` (or `$HERMES_HOME`) or `hermes` 
 On Linux, successful install, repair, and activation starts a loopback-only controller that survives individual agent sessions. It keeps the signed action-permit broker available, checks installer-managed hooks every five minutes, safely restores missing managed entries, and reports an exact fix when repair is not safe. It keeps each project's hooks in the form its install chose: on the verified local MCP runtime, or on `npx`. The API key remains process-only; private controller state is owner-only and contains no Marrow credential.
 
 ```bash
-npx @getmarrow/install controller status
-npx @getmarrow/install controller ensure
-npx @getmarrow/install controller stop
+npx -y @getmarrow/install@latest controller status
+npx -y @getmarrow/install@latest controller ensure
+npx -y @getmarrow/install@latest controller stop
 ```
 
 `controller start` is also accepted. Install and update restart a controller that a different installer version started, including one left under an earlier identity directory for the same project, and report the restart in one line. The replaced controller is identified by its private state and authenticated endpoint before it is stopped. Controllers for other projects are not touched, and the owner's local control setting is not changed. `controller stop` stops every Marrow controller for the current project. The five-minute pass re-applies the controller's own agent id and base URL; a different value found in managed MCP configuration is reset and reported as needing attention, unless the owner allowlisted it.
 
-Persistent controller lifecycle is currently Linux-only. On macOS or Windows, activation still writes supported configuration and verifies one server-side install self-test without certifying that hooks continuously ran; run `npx @getmarrow/install sidecar` under an owner-managed service and pass `--no-controller`. The controller does not silently upgrade packages, change governance policy, rotate credentials, or modify unrelated project configuration.
+Persistent controller lifecycle is currently Linux-only. On macOS or Windows, activation still writes supported configuration and verifies one server-side install self-test without certifying that hooks continuously ran; run `npx -y @getmarrow/install@latest sidecar` under an owner-managed service and pass `--no-controller`. The controller does not silently upgrade packages, change governance policy, rotate credentials, or modify unrelated project configuration.
 
-The controller is not a boot service. After a host restart, or any exit that skips its shutdown handler, doctor reports it as `stale` until the next install, update, or `controller ensure`. Local control can be inspected and changed with `npx @getmarrow/install control status`, `control disable --yes` and `control enable`. Turning control off while it is on is not done by `--yes` alone: `control disable` also needs you at your own terminal, where it shows a one-time code to type back (see [Update behavior](#update-behavior), v0.1.77). While local control is disabled, the controller is not started, and doctor reports a stopped or stale controller as not required instead of recommending `controller ensure`; missing state means enabled, and an explicit owner disable is preserved. Unsafe controller state or an unverified or unresponsive controller process keeps its exact fix.
+The controller is not a boot service. After a host restart, or any exit that skips its shutdown handler, doctor reports it as `stale` until the next install, update, or `controller ensure`. Local control can be inspected and changed with `npx -y @getmarrow/install@latest control status`, `control disable --yes` and `control enable`. Turning control off while it is on is not done by `--yes` alone: `control disable` also needs you at your own terminal, where it shows a one-time code to type back (see [Update behavior](#update-behavior), v0.1.77). While local control is disabled, the controller is not started, and doctor reports a stopped or stale controller as not required instead of recommending `controller ensure`; missing state means enabled, and an explicit owner disable is preserved. Unsafe controller state or an unverified or unresponsive controller process keeps its exact fix.
 
 ## Key handling at install
 
@@ -140,7 +141,7 @@ These behaviors shipped in v0.1.77 and still apply.
 
 - **`setup` and `doctor` warn about risky local configuration.** Each warning is one `Warning:` line (and one entry in `risk_warnings` with `--json`) with an id. It names a file, a variable or a count and never prints a rule, a value or any settings text. The ids are `control_off` (local control is off), `control_state_unsafe` (`~/.marrow/control.json` is unsafe or invalid), `keyless_hooks` (no Marrow API key in this shell or in `~/.marrow/env` or `~/.marrow/env.local`, so only the local seatbelt applies), `auto_hook_off` (`MARROW_AUTO_HOOK` is set to `false`, `0`, `off` or `no`, in any case, in this shell or in the env block of a Claude Code settings file), `blanket_bash_allow` (a Claude Code settings file allows every Bash command, so Marrow's holds on Bash can never be approved), `settings_unreadable` and `key_unbound` (the self-test got `409` with `key_binding` `unbound`: the key is not bound to this agent).
 - **A settings file Marrow cannot read is a warning, not silence (`settings_unreadable`).** Marrow checks the user, project and local Claude Code settings files for `blanket_bash_allow` and `auto_hook_off`. A file that is empty, is not a JSON object, is invalid, is over 1 MiB, is a folder, has a byte-order mark or cannot be read is named in this warning with its state, because Claude Code may still use it. A file that is not there is not a warning. `doctor` also lists the three files and what it found in a `Claude Code settings read:` line, and counts the Marrow hooks in the user-level file.
-- **`control disable` needs you at your own terminal.** While local control is on, `npx @getmarrow/install control disable --yes` stops, shows a random six-digit one-time code and waits two minutes for you to type it back. Standard input, output and error must all be a terminal; a pipe or a script is refused, a wrong code, a closed terminal or a timeout cancels, and nothing is changed. Turning off a control that is already off asks nothing, and `control enable` and `control status` are unchanged. This is a speed bump, not proof that a person typed the code: a program that opens its own pseudo-terminal can read the code and type it back, so it keeps an agent from switching Marrow off by accident, not on purpose. `--yes` alone is a typo guard and is not enough.
+- **`control disable` needs you at your own terminal.** While local control is on, `npx -y @getmarrow/install@latest control disable --yes` stops, shows a random six-digit one-time code and waits two minutes for you to type it back. Standard input, output and error must all be a terminal; a pipe or a script is refused, a wrong code, a closed terminal or a timeout cancels, and nothing is changed. Turning off a control that is already off asks nothing, and `control enable` and `control status` are unchanged. This is a speed bump, not proof that a person typed the code: a program that opens its own pseudo-terminal can read the code and type it back, so it keeps an agent from switching Marrow off by accident, not on purpose. `--yes` alone is a typo guard and is not enough.
 - **A damaged settings, hooks or MCP config file no longer echoes its text.** `setup` and `doctor` still stop with exit code 1 on a project settings file that is not valid JSON, and the message now names the file and the line and column only. A `--proof-file` that is not valid JSON is reported the same way. The old message carried about ten characters of the file, and these files can hold tokens.
 - **Windows: no change for you.** The decision for native Windows hooks is now a table that only a measured result can fill. No measurement is recorded, so no host gets native Windows hooks and `setup` writes none on Windows, as in v0.1.76.
 
@@ -243,7 +244,7 @@ Measured on Linux (Node 22, MCP 3.9.98, wall time per pre-action hook call, no n
 Open the interactive setup panel:
 
 ```bash
-npx @getmarrow/install govern
+npx -y @getmarrow/install@latest govern
 ```
 
 The TUI shows detected harnesses and project risks, recommends passive, pilot, or enforce mode with reasons, lets the owner accept or override the recommendation, runs the self-test, and confirms the active controls. Exit with `q`, `Esc` or `Ctrl+C`.
@@ -251,7 +252,7 @@ The TUI shows detected harnesses and project risks, recommends passive, pilot, o
 For non-interactive environments:
 
 ```bash
-npx @getmarrow/install govern --no-interactive
+npx -y @getmarrow/install@latest govern --no-interactive
 ```
 
 ## Governed Runner
@@ -259,7 +260,7 @@ npx @getmarrow/install govern --no-interactive
 Place Marrow around an existing command without replacing the agent harness:
 
 ```bash
-npx @getmarrow/install run \
+npx -y @getmarrow/install@latest run \
   --type deploy \
   --profile production \
   --policy enforce \
@@ -290,15 +291,15 @@ Runtime, think and commit calls retry HTTP 429/502/503/504, timed-out attempts a
 Useful commands:
 
 ```bash
-npx @getmarrow/install gate --type deploy --action "deploy production"
-npx @getmarrow/install permit --type deploy --action "deploy production"
-MARROW_ACTION_PERMIT=... npx @getmarrow/install verify-permit --type deploy --action "deploy production"
-npx @getmarrow/install proof --session <session> --decision-id <id> --gate-receipt <receipt> --success --summary "smoke passed"
-npx @getmarrow/install status
-npx @getmarrow/install coverage
-npx @getmarrow/install sidecar
-npx @getmarrow/install integrations --json
-npx @getmarrow/install --repair
+npx -y @getmarrow/install@latest gate --type deploy --action "deploy production"
+npx -y @getmarrow/install@latest permit --type deploy --action "deploy production"
+MARROW_ACTION_PERMIT=... npx -y @getmarrow/install@latest verify-permit --type deploy --action "deploy production"
+npx -y @getmarrow/install@latest proof --session <session> --decision-id <id> --gate-receipt <receipt> --success --summary "smoke passed"
+npx -y @getmarrow/install@latest status
+npx -y @getmarrow/install@latest coverage
+npx -y @getmarrow/install@latest sidecar
+npx -y @getmarrow/install@latest integrations --json
+npx -y @getmarrow/install@latest --repair
 ```
 
 `permit` and `verify-permit` are deterministic CI choke points. `coverage` reports permit closure, bypasses, stale sidecars and hook health with exact repair steps. The loopback `sidecar` keeps private state owner-only and reports hook and configuration drift.
@@ -348,7 +349,7 @@ For a held `run`:
 ## Fleet Operator TUI
 
 ```bash
-npx @getmarrow/install fleet
+npx -y @getmarrow/install@latest fleet
 ```
 
 The fleet view shows live agents, active workflows, agent disagreements and their latest arbitration receipt, risky actions waiting for proof, stale or failed outcomes, capture health, recent decisions, and exact repair commands. Press Enter on **Agent disagreements** to inspect the bound decision, the selected proposal, and whether Marrow selected a proposal, synthesized a safe sequence, held the action for owner review, or blocked the conflicting actions. Review-required work is approved in the host's prompt or by the owner's one-tap link, as described under [Approvals in Chat and Terminal](#approvals-in-chat-and-terminal); the TUI does not let an agent approve itself. It is an operator surface for the authenticated account, not a public status dashboard.
@@ -356,8 +357,8 @@ The fleet view shows live agents, active workflows, agent disagreements and thei
 ## Uninstall
 
 ```bash
-npx @getmarrow/install uninstall          # preview: lists what would be removed, changes nothing
-npx @getmarrow/install uninstall --yes    # removes Marrow's own entries
+npx -y @getmarrow/install@latest uninstall          # preview: lists what would be removed, changes nothing
+npx -y @getmarrow/install@latest uninstall --yes    # removes Marrow's own entries
 ```
 
 Uninstall removes only what Marrow wrote: Marrow's hook entries for every host (Claude Code, Codex, Cursor, Windsurf, Gemini CLI, Grok), the Marrow MCP server entry in `.mcp.json` and `.cursor/mcp.json`, and the Marrow block in `AGENTS.md`. The owner's own hooks, servers and settings in the same files are kept as they were. Files only Marrow writes (Cline hooks, the Cursor rule, Grok's `~/.grok/hooks/marrow.json`) are deleted only while they still hold exactly what Marrow wrote; an edited one is left in place and named. A `marrow` MCP server entry with a custom command is kept. Uninstall stops the project's Marrow controller first, because the controller restores missing managed hooks. It also removes the local MCP runtime in `~/.marrow/runtime` (hooks in other projects then start through `npx` until the next install there). It never edits the Hermes config, the SDK passive runtime or the env example; it names them with the step to take. Output lists paths and counts only. Restart the hosts afterwards.
@@ -376,7 +377,7 @@ These are integration surfaces for one Marrow product, not separate products.
 
 ## Exact Integration Coverage
 
-Run `npx @getmarrow/install integrations --json` for the machine-readable matrix. The table below distinguishes full automatic interception from MCP-routed, wrapper-bounded, and adapter-required coverage.
+Run `npx -y @getmarrow/install@latest integrations --json` for the machine-readable matrix. The table below distinguishes full automatic interception from MCP-routed, wrapper-bounded, and adapter-required coverage.
 
 | Harnesses | Prompt / pre-action / result | Closure and proof | Cached brief | Restart survival | Evidence adapter | Safe repair |
 | --- | --- | --- | --- | --- | --- | --- |
