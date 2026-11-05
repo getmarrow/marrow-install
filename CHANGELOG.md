@@ -2,7 +2,9 @@
 
 Release notes for `@getmarrow/install`, newest first. The README describes only the current version.
 
-## Unreleased
+## v0.1.78
+
+v0.1.78. Two installer fixes: a run from a folder inside your home folder never becomes a user-wide install by accident, and with no key every command gives the one next step. The pins are unchanged: v0.1.78 installs MCP `3.9.109` (source `990aaaa673a3d117599a33a8972dedc1398e240e`, packed integrity `sha512-tgGXtv7vTxhtD2/HRbAGBjPpZ3fQYWXPN6XkJhVx07YCvg2sGfhkFbD+QfP+c56FbeVa5Rwbe4B50kiRuM+rdQ==`) and SDK `3.7.67` (packed integrity `sha512-0Lwg4XLxm9eXxMgQtFAH1y4mXi9CXg3poQlGbeK0AW+EHP+yfUWQUH4d1XYO03QNzwHLAYKfARDmnl5GpBnKUw==`).
 
 - **The installer never installs for your whole user account by accident.** A run from a folder inside your home folder now installs in that folder, even when your home folder holds a `.git`, `package.json`, `CLAUDE.md` or `AGENTS.md`; before, it climbed up to the home folder and wrote user-wide hooks and MCP config (`~/.claude/settings.json`, `~/.mcp.json`) without asking. A run from the home folder itself is a user-wide install: `--global` (or `--cwd ~`) asks for it on purpose, a terminal run asks `[y/N]` (default no), and with no terminal the installer writes nothing, exits with code 3 and prints `npx -y @getmarrow/install@latest activate --global`. `--yes`, CI and environment variables are never consent. `--dry-run` and `doctor` print `Root: <home> (user-wide)` and never ask. From a folder under an existing home-level install, `update` refuses, `uninstall` and `doctor` name that install, and each prints the exact `--cwd <home>` command.
 
