@@ -52,8 +52,8 @@ for (const scope of ['user', 'project', 'local']) {
 }
 
 // A plugin enabled in the project's own settings file (project or local scope) with the exact setup copy in that same file.
-function projectDuplicate(scope) {
-  const fx = fixture({ scope });
+function projectDuplicate(scope, options = {}) {
+  const fx = fixture({ scope, ...options });
   const file = fx.scopeFile[scope];
   writeFile(file, json({ ...JSON.parse(fs.readFileSync(file, 'utf8')), hooks: duplicateHooks() }));
   return { fx, file };
@@ -654,5 +654,231 @@ test('R1-f through the CLI: `update --repair --remove-user-duplicate` is refused
     assert.deepEqual(fx.argv(), UPDATE_ARGV('user'));
     assert.deepEqual(exactCopies(fx.userSettings), []);
     assert.equal(`${child.stdout}${child.stderr}`.includes(fx.secret), false);
+  } finally { cleanup(fx); }
+});
+
+// R1 (removal guard): the same-scope copy goes only after the plugin hook is verified immediately before the write.
+const PRE = 'node "${CLAUDE_PLUGIN_ROOT}/scripts/marrow-launch.cjs" claude-pre-action-hook';
+const pluginFolder = (fx, version = '0.2.7', market = 'getmarrow') => path.join(fx.home, '.claude', 'plugins', 'cache', market, 'marrow', version);
+const hooksText = (pre) => json({ hooks: { PreToolUse: pre, PostToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/scripts/marrow-launch.cjs" claude-hook' }] }] } });
+const setHooks = (text) => (fx) => fs.writeFileSync(path.join(pluginFolder(fx), 'hooks', 'hooks.json'), text);
+const preWith = (command, matcher = '*') => hooksText([{ matcher, hooks: [{ type: 'command', command }] }]);
+const KEEP = [
+  ['A1', 'PreToolUse []', setHooks(hooksText([]))],
+  ['A2', 'a non-Marrow command', setHooks(preWith('true'))],
+  ['A3', 'the Marrow command with a word after it', setHooks(preWith(`${PRE} --off`))],
+  ['A3', 'the Marrow command with a prefix', setHooks(preWith(`x${PRE}`))],
+  ['A3', 'the Marrow command with a trailing space', setHooks(preWith(`${PRE} `))],
+  ['A3', 'the Marrow command with a trailing newline', setHooks(preWith(`${PRE}\n`))],
+  ['A3', 'a case-changed Marrow command', setHooks(preWith(PRE.replace('marrow-launch', 'Marrow-launch')))],
+  ['A4', 'the Marrow command chained with &&', setHooks(preWith(`true && ${PRE}`))],
+  ['A4', 'the Marrow command chained with ;', setHooks(preWith(`${PRE}; exit 0`))],
+  ['A4', 'the Marrow command chained with |', setHooks(preWith(`${PRE} | cat`))],
+  ['A4', 'the Marrow command chained with ||', setHooks(preWith(`false || ${PRE}`))],
+  ['A4', 'the Marrow command in a subshell', setHooks(preWith(`(${PRE})`))],
+  ['A4', 'the Marrow command wrapped in bash -c', setHooks(preWith(`bash -c '${PRE}'`))],
+  ['A5', 'a matcher narrower than the copy', setHooks(preWith(PRE, 'Bash'))],
+  ['A5', 'a matcher that is not a string', setHooks(hooksText([{ matcher: ['*'], hooks: [{ type: 'command', command: PRE }] }]))],
+  ['A6', 'the hooks file missing', (fx) => fs.rmSync(path.join(pluginFolder(fx), 'hooks', 'hooks.json'))],
+  ['A6', 'the hooks file a symlink', (fx) => { const file = path.join(pluginFolder(fx), 'hooks', 'hooks.json'); fs.renameSync(file, path.join(fx.root, 'real-hooks.json')); fs.symlinkSync(path.join(fx.root, 'real-hooks.json'), file); }],
+  ['A6', 'the hooks folder a symlink', (fx) => { const dir = path.join(pluginFolder(fx), 'hooks'); fs.renameSync(dir, path.join(fx.root, 'real-hooks')); fs.symlinkSync(path.join(fx.root, 'real-hooks'), dir); }],
+  ['A6', 'the hooks file malformed JSON', setHooks('{ "hooks": { "PreToolUse": [')],
+  ['A7', 'duplicate PreToolUse keys', setHooks(`{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"true"}]}],"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":${JSON.stringify(PRE)}}]}]}}\n`)],
+  ['A7', 'duplicate command keys in the entry', setHooks(`{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"true","command":${JSON.stringify(PRE)}}]}]}}\n`)],
+  ['A8', 'the launcher file missing', (fx) => fs.rmSync(path.join(pluginFolder(fx), 'scripts', 'marrow-launch.cjs'))],
+  ['A8', 'the launcher a symlink', (fx) => { const file = path.join(pluginFolder(fx), 'scripts', 'marrow-launch.cjs'); fs.renameSync(file, path.join(fx.root, 'launch.cjs')); fs.symlinkSync(path.join(fx.root, 'launch.cjs'), file); }],
+  ['A9', 'the plugin turned off during the update', null, { disableIn: true }],
+  ['A10', 'a record whose folder is under a look-alike marketplace getmarrow-x', (fx) => {
+    fs.mkdirSync(path.dirname(pluginFolder(fx, '0.2.7', 'getmarrow-x')), { recursive: true });
+    fs.renameSync(pluginFolder(fx), pluginFolder(fx, '0.2.7', 'getmarrow-x'));
+    RECORD(fx, (entries) => { entries[0].installPath = pluginFolder(fx, '0.2.7', 'getmarrow-x'); });
+  }],
+];
+for (const [id, label, edit, extra = {}] of KEEP) {
+  test(`${id} R1 a project-scope hook copy next to a plugin hook with ${label}: the copy is kept, the settings file byte-equal, the reason printed`, () => {
+    const { fx, file } = projectDuplicate('project');
+    try {
+      if (edit) edit(fx);
+      if (extra.disableIn) {
+        const config = JSON.parse(fs.readFileSync(path.join(fx.bin, 'fake.json'), 'utf8'));
+        fs.writeFileSync(path.join(fx.bin, 'fake.json'), json({ ...config, disableIn: file }));
+      }
+      const before = sha(file);
+      const user = sha(fx.userSettings);
+      const result = run(fx);
+      assert.deepEqual(fx.argv(), UPDATE_ARGV('project'), 'the update ran, so the removal step was reached');
+      assert.equal(result.exitCode, 0, result.text);
+      assert.match(result.text, /Updated the plugin: 0\.2\.7 -> 0\.2\.8/);
+      if (extra.disableIn) assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).enabledPlugins[PLUGIN_KEY], false);
+      else assert.equal(sha(file), before);
+      assert.equal(exactCopies(file).length, 4);
+      assert.equal(sha(fx.userSettings), user);
+      assert.match(result.text, /A Marrow hook copy in a settings file was kept: the plugin hook could not be verified for this scope \(.+\)/);
+      assert.doesNotMatch(result.text, /Removed the duplicate/);
+    } finally {
+      if (fs.existsSync(path.join(fx.root, 'real-hooks'))) fs.chmodSync(path.join(fx.root, 'real-hooks'), 0o755);
+      cleanup(fx);
+    }
+  });
+}
+
+test('A9 R1 the plugin installed but disabled in its scope: unknown state, the copy kept, 0 change, no claude call', () => {
+  const { fx, file } = projectDuplicate('project');
+  try {
+    writeFile(file, json({ ...JSON.parse(fs.readFileSync(file, 'utf8')), enabledPlugins: { [PLUGIN_KEY]: false } }));
+    const before = treeHashes(fx.root);
+    const result = run(fx);
+    assert.equal(result.exitCode, 1);
+    assert.deepEqual(fx.argv(), []);
+    assert.deepEqual(treeHashes(fx.root), before);
+    assert.match(result.text, /the plugin is not enabled/);
+  } finally { cleanup(fx); }
+});
+
+test('A10 R1 only a marrow@getmarrow-x record and a copy: not a plugin install, no claude call, the update path changes nothing', () => {
+  const fx = fixture({ records: { 'marrow@getmarrow-x': [{ scope: 'user', version: '0.2.7' }] }, duplicate: true });
+  try {
+    const before = treeHashes(fx.root);
+    const result = run(fx);
+    assert.equal(result.done, false);
+    assert.deepEqual(fx.argv(), []);
+    assert.deepEqual(treeHashes(fx.root), before);
+  } finally { cleanup(fx); }
+});
+
+for (const scope of ['project', 'local']) {
+  test(`A11 R1 a verified plugin hook (${scope} scope): the copy is removed and one Marrow pre-action hook is left, the plugin's`, () => {
+    const { fx, file } = projectDuplicate(scope);
+    try {
+      const original = JSON.parse(fs.readFileSync(file, 'utf8'));
+      const result = run(fx);
+      assert.equal(result.exitCode, 0, result.text);
+      assert.deepEqual(fx.argv(), UPDATE_ARGV(scope));
+      assert.equal(fs.readFileSync(file, 'utf8'), json(withoutCopy(original)));
+      assert.deepEqual(exactCopies(file), []);
+      assert.deepEqual(exactCopies(fx.userSettings), []);
+      const plugin = JSON.parse(fs.readFileSync(path.join(pluginFolder(fx, '0.2.8'), 'hooks', 'hooks.json'), 'utf8'));
+      assert.equal(plugin.hooks.PreToolUse.flatMap((group) => group.hooks).filter((hook) => hook.command === PRE).length, 1);
+      assert.match(result.text, /Removed the duplicate Marrow hook copy .*\(4 entries\); the plugin hook stays/);
+    } finally { cleanup(fx); }
+  });
+}
+
+test('A11 R1 user scope with --remove-user-duplicate and a verified plugin hook: the user copy is removed; with a narrower plugin matcher (A5) it is kept', () => {
+  for (const broken of [false, true]) {
+    const fx = fixture({ duplicate: true });
+    try {
+      if (broken) setHooks(preWith(PRE, 'Bash'))(fx);
+      const before = sha(fx.userSettings);
+      const result = run(fx, { removeUserDuplicate: true });
+      assert.equal(result.exitCode, 0, result.text);
+      assert.deepEqual(fx.argv(), UPDATE_ARGV('user'));
+      if (broken) { assert.equal(sha(fx.userSettings), before); assert.match(result.text, /could not be verified for this scope/); }
+      else assert.deepEqual(exactCopies(fx.userSettings), []);
+    } finally { cleanup(fx); }
+  }
+});
+
+// R2 (offered version): read from Claude Code's local getmarrow marketplace copy before any claude command.
+const updateCalls = (fx) => fx.argv().filter((argv) => argv[1] === 'update').length;
+const REFUSE = [
+  ['D1', 'an offered version lower than the installed one', { offered: '0.2.6' }, /offers 0\.2\.6, lower than the installed 0\.2\.7; an update never downgrades/],
+  ['D3', 'a malformed offered version (two parts)', { offered: '0.2' }, /not a plain X\.Y\.Z version/],
+  ['D3', 'a malformed offered version (1e3)', { offered: '1e3' }, /not a plain X\.Y\.Z version/],
+  ['D3', 'a malformed offered version (leading v)', { offered: 'v0.2.8' }, /not a plain X\.Y\.Z version/],
+  ['D3', 'an offered version that is a number', { offered: 0.28 }, /could not be read/],
+  ['D4', 'a prerelease offered version', { offered: '0.2.8-beta.1' }, /not a plain X\.Y\.Z version/],
+  ['D5', 'an offered version with build metadata', { offered: '0.2.8+build.1' }, /not a plain X\.Y\.Z version/],
+  ['D6', 'an offered version with leading zeros', { offered: '0.02.8' }, /not a plain X\.Y\.Z version/],
+  ['D6', 'an offered version with a leading zero major', { offered: '00.2.8' }, /not a plain X\.Y\.Z version/],
+  ['D7', 'no local marketplace copy', { offered: null }, /could not be read \(the getmarrow marketplace is not listed at its own folder\)/],
+  ['D7', 'a malformed marketplace.json', { edit: (fx) => fs.writeFileSync(path.join(fx.home, '.claude', 'plugins', 'marketplaces', 'getmarrow', '.claude-plugin', 'marketplace.json'), '{"name":') }, /could not be read/],
+  ['D7', 'a symlinked offered plugin.json', { edit: (fx) => { const file = path.join(fx.home, '.claude', 'plugins', 'marketplaces', 'getmarrow', 'plugins', 'marrow', '.claude-plugin', 'plugin.json'); fs.renameSync(file, path.join(fx.root, 'p.json')); fs.symlinkSync(path.join(fx.root, 'p.json'), file); } }, /could not be read/],
+  ['D7', 'duplicate version keys in the offered plugin.json', { edit: (fx) => fs.writeFileSync(path.join(fx.home, '.claude', 'plugins', 'marketplaces', 'getmarrow', 'plugins', 'marrow', '.claude-plugin', 'plugin.json'), '{"name":"marrow","version":"0.2.6","version":"0.2.8"}\n') }, /could not be read/],
+  ['D7', 'a marketplace source that leaves the marketplace folder', { edit: (fx) => { const file = path.join(fx.home, '.claude', 'plugins', 'marketplaces', 'getmarrow', '.claude-plugin', 'marketplace.json'); const data = JSON.parse(fs.readFileSync(file, 'utf8')); data.plugins[0].source = './../getmarrow-x/plugins/marrow'; fs.writeFileSync(file, json(data)); } }, /no local source folder/],
+  ['D8', 'only a look-alike marketplace getmarrow-x offering a higher version', { edit: (fx) => { const plugins = path.join(fx.home, '.claude', 'plugins'); fs.renameSync(path.join(plugins, 'marketplaces', 'getmarrow'), path.join(plugins, 'marketplaces', 'getmarrow-x')); fs.writeFileSync(path.join(plugins, 'known_marketplaces.json'), json({ 'getmarrow-x': { installLocation: path.join(plugins, 'marketplaces', 'getmarrow-x') } })); } }, /not listed at its own folder/],
+  ['D8', 'the getmarrow entry pointing at the getmarrow-x folder', { edit: (fx) => { const plugins = path.join(fx.home, '.claude', 'plugins'); fs.renameSync(path.join(plugins, 'marketplaces', 'getmarrow'), path.join(plugins, 'marketplaces', 'getmarrow-x')); fs.writeFileSync(path.join(plugins, 'known_marketplaces.json'), json({ getmarrow: { installLocation: path.join(plugins, 'marketplaces', 'getmarrow-x') } })); } }, /not listed at its own folder/],
+  ['D8', 'a marketplace.json named getmarrow-x', { edit: (fx) => { const file = path.join(fx.home, '.claude', 'plugins', 'marketplaces', 'getmarrow', '.claude-plugin', 'marketplace.json'); fs.writeFileSync(file, json({ ...JSON.parse(fs.readFileSync(file, 'utf8')), name: 'getmarrow-x' })); } }, /does not list marrow exactly once/],
+];
+for (const [id, label, options, pattern] of REFUSE) {
+  test(`${id} R2 ${label}: refused before any claude command, exit 1, 0 change, 0 claude calls`, () => {
+    const { fx, file } = projectDuplicate('project', { offered: options.offered === undefined ? '0.2.8' : options.offered, claude: { next: typeof options.offered === 'string' ? options.offered : '0.2.8' } });
+    try {
+      if (options.edit) options.edit(fx);
+      const before = treeHashes(fx.root);
+      const result = run(fx);
+      assert.equal(result.exitCode, 1, result.text);
+      assert.equal(fx.argv().length, 0);
+      assert.deepEqual(treeHashes(fx.root), before);
+      assert.equal(exactCopies(file).length, 4);
+      assert.match(result.text, pattern);
+      assert.match(result.text, /claude plugin update was not run/);
+    } finally { cleanup(fx); }
+  });
+}
+
+test('D2 R2 the offered version equals the installed one: no claude plugin update, "already current", 0 change', () => {
+  const fx = fixture({ duplicate: true, offered: '0.2.7', claude: { next: '0.2.7' } });
+  try {
+    const before = treeHashes(fx.root);
+    const result = run(fx);
+    assert.equal(result.exitCode, 0, result.text);
+    assert.deepEqual(fx.argv(), [UPDATE_ARGV('user')[0]]);
+    assert.equal(updateCalls(fx), 0);
+    assert.deepEqual(treeHashes(fx.root), before);
+    assert.match(result.text, /already current/);
+  } finally { cleanup(fx); }
+});
+
+test('D2 R2 already current with a project-scope copy next to a verified plugin hook: no claude plugin update, the copy goes under the R1 guard', () => {
+  const { fx, file } = projectDuplicate('project', { offered: '0.2.7' });
+  try {
+    const result = run(fx);
+    assert.equal(result.exitCode, 0, result.text);
+    assert.equal(updateCalls(fx), 0);
+    assert.match(result.text, /already current/);
+    assert.deepEqual(exactCopies(file), []);
+  } finally { cleanup(fx); }
+});
+
+test('D9 R2 a race: the marketplace refresh lowers the offered version: refused before claude plugin update, the copy kept', () => {
+  const { fx, file } = projectDuplicate('project', { claude: { offerAfter: '0.2.6', next: '0.2.6' } });
+  try {
+    const before = sha(file);
+    const record = sha(path.join(fx.home, '.claude', 'plugins', 'installed_plugins.json'));
+    const result = run(fx);
+    assert.equal(result.exitCode, 1, result.text);
+    assert.deepEqual(fx.argv(), [UPDATE_ARGV('project')[0]]);
+    assert.equal(updateCalls(fx), 0);
+    assert.equal(sha(file), before);
+    assert.equal(sha(path.join(fx.home, '.claude', 'plugins', 'installed_plugins.json')), record);
+    assert.match(result.text, /offers 0\.2\.6, lower than the installed 0\.2\.7/);
+  } finally { cleanup(fx); }
+});
+
+test('D9 R2 a race: the plugin record reads back lower after the update call: exit 1, the restore step named, no success claimed, the copy kept', () => {
+  const { fx, file } = projectDuplicate('project', { claude: { next: '0.2.6' } });
+  try {
+    const before = sha(file);
+    const result = run(fx);
+    assert.equal(result.exitCode, 1, result.text);
+    assert.equal(updateCalls(fx), 1);
+    assert.equal(sha(file), before);
+    assert.match(result.text, /Refused: the plugin version read back \(0\.2\.6\) is not 0\.2\.7 or newer/);
+    assert.match(result.text, /To restore 0\.2\.7 or newer, run once the getmarrow marketplace offers it:\n {2}claude plugin marketplace update getmarrow\n {2}claude plugin update marrow@getmarrow -s project -y/);
+    assert.doesNotMatch(result.text, /Updated the plugin/);
+  } finally { cleanup(fx); }
+});
+
+test('D10 R2 a higher plain offered version: exactly one claude plugin update call with the fixed argv, the record raised', () => {
+  const fx = fixture({ scope: 'project', offered: '0.2.10', claude: { next: '0.2.10' } });
+  try {
+    const result = run(fx);
+    assert.equal(result.exitCode, 0, result.text);
+    assert.deepEqual(fx.argv(), UPDATE_ARGV('project'));
+    assert.equal(updateCalls(fx), 1);
+    const record = JSON.parse(fs.readFileSync(path.join(fx.home, '.claude', 'plugins', 'installed_plugins.json'), 'utf8')).plugins[PLUGIN_KEY][0];
+    assert.equal(record.version, '0.2.10');
+    assert.match(result.text, /Updated the plugin: 0\.2\.7 -> 0\.2\.10/);
   } finally { cleanup(fx); }
 });

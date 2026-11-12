@@ -13,9 +13,13 @@ const { spawnSync } = require('node:child_process');
 const { PLUGIN_KEY, detectAgentPlugins } = require('./agent-plugins');
 const { MCP_ADAPTER_VERSION } = require('./pins');
 const { delocalizeHookCommand } = require('./mcp-runtime');
+const { PLUGIN_PRE_ACTION_LAUNCHERS } = require('./update-launchers');
 
 const SCOPES = ['user', 'project', 'local'];
+const MARKETPLACE = 'getmarrow';
 const VERSION = /^\d{1,4}\.\d{1,4}\.\d{1,4}$/;
+// A plain X.Y.Z with no leading zeros, no prerelease and no build metadata.
+const PLAIN = /^(0|[1-9]\d{0,3})\.(0|[1-9]\d{0,3})\.(0|[1-9]\d{0,3})$/;
 const MAX_BYTES = 1024 * 1024;
 const CLAUDE_TIMEOUT_MS = 120_000;
 // The exact Claude Code hook commands the installer and MCP setup write, by event (any plain pinned version); a local
@@ -54,6 +58,46 @@ function readJson(file) {
   } catch {
     return { file, bad: true };
   }
+}
+
+// True when a text JSON.parse accepted repeats a key inside one object (JSON.parse would keep only the last one).
+function duplicateKeys(text) {
+  const stack = [];
+  for (const [token] of text.matchAll(/"(?:[^"\\]|\\.)*"|[{}[\],]/g)) {
+    const top = stack[stack.length - 1];
+    if (token === '{') stack.push({ keys: new Set(), key: true });
+    else if (token === '[') stack.push(null);
+    else if (token === '}' || token === ']') stack.pop();
+    else if (token === ',') { if (top) top.key = true; } else if (top && top.key) {
+      const key = JSON.parse(token);
+      if (top.keys.has(key)) return true;
+      top.keys.add(key);
+      top.key = false;
+    }
+  }
+  return false;
+}
+
+// True when every entry from home down to file is there and none is a symbolic link; the last one is a regular file.
+function regularBelow(home, file) {
+  const parts = path.relative(home, file).split(path.sep);
+  if (parts[0] === '..' || path.isAbsolute(parts[0])) return false;
+  let current = home;
+  return parts.every((part, index) => {
+    current = path.join(current, part);
+    try {
+      const stat = fs.lstatSync(current);
+      return index === parts.length - 1 ? stat.isFile() : stat.isDirectory();
+    } catch {
+      return false;
+    }
+  });
+}
+
+// A JSON object from a regular file below home with no link on the way and no repeated key, else {}.
+function readStrict(home, file) {
+  const read = regularBelow(home, file) ? readJson(file) : {};
+  return read.value && !duplicateKeys(read.text) ? read : {};
 }
 
 // The pinned version when the hook is exactly a Marrow Claude Code hook for this event, else null.
@@ -107,7 +151,7 @@ function classifyInstall({ home, project }) {
   if (strange) return unknown('a settings hook names the Marrow MCP in a form this installer never writes');
   const marrow = copies.filter(({ hooks }) => hooks.some((hook) => hook.version));
   if (marrow.some(({ file }) => `${JSON.stringify(file.value, null, 2)}\n` !== file.text)) return unknown('a settings file with a Marrow hook copy is not in the form the installer writes');
-  return { kind: 'plugin', scope, version, copies: marrow, scopeFile: scopeFile.file, userFile: files[0].file };
+  return { kind: 'plugin', scope, version, installPath: own(entries[0], 'installPath'), copies: marrow, scopeFile: scopeFile.file, userFile: files[0].file };
 }
 
 function findClaude(env) {
@@ -134,28 +178,74 @@ function writeAtomic(file, text) {
   }
 }
 
-// Removes only the exact Marrow hooks; a group keeps its other hooks, an emptied group or event goes. All files or none.
-function removeCopies(copies) {
-  const written = [];
+// Removes only the exact Marrow hooks of one file; a group keeps its other hooks, an emptied group or event goes. The
+// temp-file-and-rename write leaves the previous file in place when it fails.
+function removeCopy({ file, hooks }) {
   try {
-    for (const { file, hooks } of copies) {
-      const value = JSON.parse(file.text);
-      for (const event of new Set(hooks.filter((hook) => hook.version).map((hook) => hook.event))) {
-        value.hooks[event] = value.hooks[event]
-          .map((group) => (Array.isArray(own(group, 'hooks')) ? { ...group, hooks: group.hooks.filter((hook) => !marrowHookVersion(event, hook)) } : group))
-          .filter((group) => !Array.isArray(own(group, 'hooks')) || group.hooks.length > 0);
-        if (value.hooks[event].length === 0) delete value.hooks[event];
-      }
-      writeAtomic(file.file, `${JSON.stringify(value, null, 2)}\n`);
-      written.push(file);
+    const value = JSON.parse(file.text);
+    for (const event of new Set(hooks.filter((hook) => hook.version).map((hook) => hook.event))) {
+      value.hooks[event] = value.hooks[event]
+        .map((group) => (Array.isArray(own(group, 'hooks')) ? { ...group, hooks: group.hooks.filter((hook) => !marrowHookVersion(event, hook)) } : group))
+        .filter((group) => !Array.isArray(own(group, 'hooks')) || group.hooks.length > 0);
+      if (value.hooks[event].length === 0) delete value.hooks[event];
     }
+    writeAtomic(file.file, `${JSON.stringify(value, null, 2)}\n`);
     return null;
   } catch {
-    const notRestored = written.filter((file) => {
-      try { writeAtomic(file.file, file.text); return false; } catch { return true; }
-    });
-    return notRestored.length ? `could not restore ${notRestored.map((file) => file.file).join(', ')}` : 'the previous files were restored';
+    return 'the previous files were restored';
   }
+}
+
+// R1: why the plugin hook in this scope cannot stand in for the hook copy, or null when (a) the plugin record for the
+// scope is installed and enabled, (b) its hooks file is a regular strict-JSON file with a PreToolUse entry whose matcher
+// covers each matcher of the copy, (c) that entry's command is byte-equal to a published launcher command and (d) the
+// launcher file it names is inside the installed plugin folder. Read again immediately before the write.
+function pluginHookProblem({ home, project }, scope, copy) {
+  const found = classifyInstall({ home, project });
+  if (found.kind !== 'plugin' || found.scope !== scope) return 'the plugin is not installed and enabled in this scope';
+  const folder = path.join(home, '.claude', 'plugins', 'cache', MARKETPLACE, 'marrow', found.version);
+  if (found.installPath !== folder) return 'the plugin record does not point to the getmarrow plugin folder';
+  const pre = own(own(readStrict(home, path.join(folder, 'hooks', 'hooks.json')).value, 'hooks'), 'PreToolUse');
+  const entries = (Array.isArray(pre) ? pre : []).flatMap((group) => (Array.isArray(own(group, 'hooks')) ? group.hooks.flatMap((hook) => (
+    PLUGIN_PRE_ACTION_LAUNCHERS.filter((item) => own(hook, 'type') === 'command' && own(hook, 'command') === item.command).map((item) => ({ matcher: own(group, 'matcher'), item }))
+  )) : []));
+  if (!entries.length) return 'the plugin hooks file has no Marrow pre-action launcher command';
+  const wanted = copy.hooks.filter((hook) => hook.version && hook.event === 'PreToolUse').map(({ group }) => own(group, 'matcher'));
+  const covers = (mine, theirs) => mine === undefined || mine === '' || mine === '*' || (typeof mine === 'string' && mine === theirs);
+  const covering = entries.filter(({ matcher }) => wanted.every((theirs) => covers(matcher, theirs)));
+  if (!covering.length) return 'the plugin pre-action matcher does not cover the matcher of the copy';
+  if (!covering.some(({ item }) => regularBelow(home, path.join(folder, ...item.launcher)))) return 'the plugin launcher file is missing';
+  return readJson(copy.file.file).text === copy.file.text ? null : 'the settings file changed during the update';
+}
+
+// The version the getmarrow marketplace offers for marrow, from Claude Code's local marketplace copy (read only):
+// known_marketplaces.json names its folder, its marketplace.json lists marrow once with a local source folder, and that
+// folder's plugin.json holds the version. { version } or { why }.
+function offeredVersion(home) {
+  const plugins = path.join(home, '.claude', 'plugins');
+  const folder = path.join(plugins, 'marketplaces', MARKETPLACE);
+  if (own(own(readStrict(home, path.join(plugins, 'known_marketplaces.json')).value, MARKETPLACE), 'installLocation') !== folder) return { why: 'the getmarrow marketplace is not listed at its own folder' };
+  const market = readStrict(home, path.join(folder, '.claude-plugin', 'marketplace.json')).value;
+  const listed = Array.isArray(own(market, 'plugins')) ? market.plugins.filter((entry) => own(entry, 'name') === 'marrow') : [];
+  if (own(market, 'name') !== MARKETPLACE || listed.length !== 1) return { why: 'the getmarrow marketplace does not list marrow exactly once' };
+  const source = own(listed[0], 'source');
+  if (typeof source !== 'string' || !/^\.\/[A-Za-z0-9._/-]{1,200}$/.test(source) || source.split('/').includes('..')) return { why: 'the marrow entry has no local source folder' };
+  const manifest = readStrict(home, path.join(folder, source, '.claude-plugin', 'plugin.json')).value;
+  const version = own(manifest, 'version');
+  if (own(manifest, 'name') !== 'marrow' || typeof version !== 'string') return { why: 'the offered plugin.json could not be read' };
+  if (own(listed[0], 'version') !== undefined && own(listed[0], 'version') !== version) return { why: 'the marketplace entry and plugin.json name different versions' };
+  return { version };
+}
+
+// R2: { refuse } | { current } | { higher }; the update is called only for a plain offered version above the plain
+// installed one.
+function offeredAnswer(home, installed) {
+  const offered = offeredVersion(home);
+  if (offered.why) return { refuse: `the offered version could not be read (${offered.why})` };
+  if (!PLAIN.test(offered.version) || !PLAIN.test(installed)) return { refuse: 'the offered or the installed version is not a plain X.Y.Z version' };
+  const order = compareVersions(offered.version, installed);
+  if (order < 0) return { refuse: `the getmarrow marketplace offers ${offered.version}, lower than the installed ${installed}; an update never downgrades` };
+  return order === 0 ? { current: true } : { higher: offered.version };
 }
 
 function pluginVersion(home, scope) {
@@ -177,35 +267,46 @@ function updatePlugin(found, { home, project, env, out, timeoutMs, removeUser })
     out(`The claude command was not found on PATH. Nothing was changed. Run these two commands, then /reload-plugins:\n  ${steps.join('\n  ')}`);
     return 1;
   }
-  for (const argv of [MARKETPLACE_ARGV, ['plugin', 'update', PLUGIN_KEY, '-s', found.scope, '-y']]) {
+  const call = (argv) => {
     const run = spawnSync(claude, argv, { shell: false, stdio: 'ignore', timeout: timeoutMs, cwd: project, env });
-    if (run.error || run.status !== 0) {
-      out(`claude ${argv.slice(0, 2).join(' ')} ${run.error ? 'did not finish in time' : `failed (exit ${run.status})`}. The plugin was not updated; the old plugin (${found.version}) stays enabled and its hooks stay in place. Nothing else was changed. To retry by hand:\n  ${steps.join('\n  ')}`);
-      return 1;
-    }
-  }
+    if (!run.error && run.status === 0) return true;
+    out(`claude ${argv.slice(0, 2).join(' ')} ${run.error ? 'did not finish in time' : `failed (exit ${run.status})`}. The plugin was not updated; the old plugin (${found.version}) stays enabled and its hooks stay in place. Nothing else was changed. To retry by hand:\n  ${steps.join('\n  ')}`);
+    return false;
+  };
+  // R2: the offered version is read before any claude command, and again after the marketplace refresh.
+  const refused = (answer) => {
+    out(`Refused: ${answer.refuse}. claude plugin update was not run; the plugin (${found.version}) and its hooks stay as they are, and nothing else was changed.`);
+    return 1;
+  };
+  const first = offeredAnswer(home, found.version);
+  if (first.refuse) return refused(first);
+  if (!call(MARKETPLACE_ARGV)) return 1;
+  const offered = offeredAnswer(home, found.version);
+  if (offered.refuse) return refused(offered);
+  if (offered.current) out(`The plugin is already current: the getmarrow marketplace offers ${found.version}, the installed version.`);
+  else if (!call(['plugin', 'update', PLUGIN_KEY, '-s', found.scope, '-y'])) return 1;
   const after = pluginVersion(home, found.scope);
   if (!after || compareVersions(after, found.version) < 0) {
-    out(`Refused: the plugin version read back (${after || 'not a plain version'}) is not ${found.version} or newer. An update never downgrades; no settings hook copy was removed.`);
+    out(`Refused: the plugin version read back (${after || 'not a plain version'}) is not ${found.version} or newer. An update never downgrades; no settings hook copy was removed. To restore ${found.version} or newer, run once the getmarrow marketplace offers it:\n  ${steps.join('\n  ')}\nthen /reload-plugins.`);
     return 1;
   }
   out(after === found.version ? `The plugin is already at the latest version (${after}).` : `Updated the plugin: ${found.version} -> ${after}.`);
   // R1: a copy goes on its own only in the file of the plugin's own project or local scope; a user-level copy only on the flag.
-  const remove = found.copies.filter(({ file }) => (removeUser ? file.file === found.userFile : file.file === found.scopeFile && file.file !== found.userFile));
+  const remove = found.copies.find(({ file }) => (removeUser ? file.file === found.userFile : file.file === found.scopeFile && file.file !== found.userFile));
   const pluginHooks = own(readJson(path.join(home, '.claude', 'plugins', 'cache', 'getmarrow', 'marrow', after, 'hooks', 'hooks.json')).value, 'hooks');
-  let left = found.copies.filter((copy) => !remove.includes(copy));
-  if (remove.length) {
-    const plugin = removeUser ? verified() : own(pluginHooks, 'PreToolUse');
-    if (!plugin) {
-      out('A Marrow hook copy in a settings file was kept: the plugin hook could not be verified for this scope. Remove it by hand after /reload-plugins.');
+  let left = found.copies.filter((copy) => copy !== remove);
+  if (remove) {
+    const problem = removeUser && !verified() ? 'the user-scope plugin is not counted' : pluginHookProblem({ home, project }, found.scope, remove);
+    if (problem) {
+      out(`A Marrow hook copy in a settings file was kept: the plugin hook could not be verified for this scope (${problem}). Nothing was changed in ${remove.file.file}. Remove it by hand after /reload-plugins.`);
       left = found.copies;
     } else {
-      const failed = removeCopies(remove);
+      const failed = removeCopy(remove);
       if (failed) {
         out(`Could not remove the duplicate Marrow hook copy from the settings file; ${failed}. Both copies stay until it is removed by hand.`);
         return 1;
       }
-      for (const { file, hooks } of remove) out(`Removed the duplicate Marrow hook copy from ${file.file} (${hooks.filter((hook) => hook.version).length} entries); the plugin hook stays.${removeUser ? ' The user-level copy was removed as asked: a project that turned the plugin off now has no Marrow hook.' : ''}`);
+      out(`Removed the duplicate Marrow hook copy from ${remove.file.file} (${remove.hooks.filter((hook) => hook.version).length} entries); the plugin hook stays.${removeUser ? ' The user-level copy was removed as asked: a project that turned the plugin off now has no Marrow hook.' : ''}`);
     }
   }
   for (const { file, hooks } of left) out(file.file === found.userFile ? `Kept the user-level Marrow hook copy in ${file.file} (${hooks.filter((hook) => hook.version).length} entries) next to the plugin, so a project that turns the plugin off keeps a Marrow hook. To remove it, run: ${REMOVE_USER}`

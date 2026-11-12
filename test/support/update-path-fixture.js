@@ -74,7 +74,16 @@ function chmodTree(dir) {
 }
 
 // A fixture HOME with a project folder, a fake `claude`, and optionally the plugin and settings-hook copies.
-function fixture({ scope = 'user', version = '0.2.7', records, plugin = true, duplicate = false, settings = {}, claude = {}, localSettings, projectSettings } = {}) {
+// Claude Code's local copy of the getmarrow marketplace offering marrow at `offered` (null: no marketplace copy).
+function marketplace(home, offered) {
+  const folder = path.join(home, '.claude', 'plugins', 'marketplaces', 'getmarrow');
+  writeFile(path.join(home, '.claude', 'plugins', 'known_marketplaces.json'), json({ getmarrow: { source: { source: 'github', repo: 'getmarrow/plugins' }, installLocation: folder, lastUpdated: '2026-11-01T00:00:00.000Z' } }));
+  writeFile(path.join(folder, '.claude-plugin', 'marketplace.json'), json({ name: 'getmarrow', owner: { name: 'getmarrow' }, plugins: [{ name: 'marrow', source: './plugins/marrow', description: 'Marrow' }] }));
+  writeFile(path.join(folder, 'plugins', 'marrow', '.claude-plugin', 'plugin.json'), json({ name: 'marrow', version: offered }));
+  return folder;
+}
+
+function fixture({ scope = 'user', version = '0.2.7', records, plugin = true, duplicate = false, settings = {}, claude = {}, localSettings, projectSettings, offered = '0.2.8' } = {}) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'marrow-upd-')));
   const home = path.join(root, 'home');
   const project = path.join(home, 'project');
@@ -88,6 +97,7 @@ function fixture({ scope = 'user', version = '0.2.7', records, plugin = true, du
     pluginCopy(home, version);
     const record = { scope, installPath: path.join(home, '.claude', 'plugins', 'cache', 'getmarrow', 'marrow', version), version, installedAt: '2026-11-01T00:00:00.000Z', ...(scope === 'user' ? {} : { projectPath: project }) };
     writeFile(path.join(home, '.claude', 'plugins', 'installed_plugins.json'), json({ version: 2, plugins: records || { [PLUGIN_KEY]: [record] } }));
+    if (offered !== null) marketplace(home, offered);
   }
   const user = { theme: 'dark', env: { OWNER_TOKEN: secret }, ...settings };
   if (plugin && scope === 'user') user.enabledPlugins = Object.fromEntries(Object.keys(records || { [PLUGIN_KEY]: [] }).map((key) => [key, true]));
@@ -104,6 +114,7 @@ const fs = require('node:fs'); const path = require('node:path');
 const config = JSON.parse(fs.readFileSync(path.join(__dirname, 'fake.json'), 'utf8'));
 const argv = process.argv.slice(2);
 fs.appendFileSync(config.log, JSON.stringify(argv) + '\\n');
+if (config.offerAfter && argv[1] === 'marketplace') fs.writeFileSync(path.join(config.home, '.claude', 'plugins', 'marketplaces', 'getmarrow', 'plugins', 'marrow', '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'marrow', version: config.offerAfter }, null, 2) + '\\n');
 if (config.hang && argv[1] === 'update') setTimeout(() => {}, 60000);
 else {
   if (config.print) process.stdout.write(config.print + '\\n');
@@ -121,6 +132,7 @@ else {
     fs.writeFileSync(manifest, JSON.stringify({ name: 'marrow', version: config.next }, null, 2) + '\\n');
     fs.writeFileSync(list, JSON.stringify(data, null, 2) + '\\n');
   }
+  if (config.disableIn && argv[1] === 'update') { const data = JSON.parse(fs.readFileSync(config.disableIn, 'utf8')); data.enabledPlugins['${PLUGIN_KEY}'] = false; fs.writeFileSync(config.disableIn, JSON.stringify(data, null, 2) + '\\n'); }
   process.exitCode = argv[1] === 'update' ? config.exit : 0;
 }
 `, 0o755);
@@ -131,4 +143,4 @@ else {
 
 const cleanup = (fx) => fs.rmSync(fx.root, { recursive: true, force: true });
 
-module.exports = { PLUGIN_KEY, PRE_ACTION, marrowCommand, dummy, sha, json, writeFile, treeHashes, duplicateHooks, fixture, cleanup };
+module.exports = { PLUGIN_KEY, PRE_ACTION, marrowCommand, dummy, sha, json, writeFile, treeHashes, duplicateHooks, marketplace, fixture, cleanup };
