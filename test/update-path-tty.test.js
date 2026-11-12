@@ -1,4 +1,4 @@
-'use strict';
+require('./support/isolated-environment');
 
 // R4 (owner terminal): `update --remove-user-duplicate` removes a Marrow control from the user settings, so it runs only
 // when stdin and stdout are both a TTY and the owner types the confirmation word the command prints. Any other run

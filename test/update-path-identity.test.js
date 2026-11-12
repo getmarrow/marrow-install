@@ -1,4 +1,4 @@
-'use strict';
+require('./support/isolated-environment');
 
 // R1 (file identity): the update decides whether a hook copy is in the user settings file by realpath and (st_dev, st_ino),
 // never by path text. A project or local settings path that reaches the user settings file counts as user-level: the

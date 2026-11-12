@@ -1,4 +1,4 @@
-'use strict';
+require('./support/isolated-environment');
 
 // R2 (pinned exact matchers): a hook copy next to a plugin is removed only when the copy's PreToolUse matcher is
 // byte-equal to a published installer matcher and the plugin hooks.json matcher is byte-equal to a published plugin
