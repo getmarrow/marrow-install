@@ -300,6 +300,75 @@ for (const [label, command] of LOOK_ALIKES) {
   });
 }
 
+// Setup for the removal rows: the look-alike sits in its own PreToolUse group in the file that also holds the genuine setup copy.
+function lookAlikeFixture(scope, command) {
+  const lookAlike = { type: 'command', command };
+  const lookAlikeGroup = { matcher: '*', hooks: [lookAlike] };
+  const fx = scope === 'user' ? fixture({ duplicate: true }) : fixture({ scope });
+  const file = fx.scopeFile[scope];
+  const base = scope === 'user' ? JSON.parse(fs.readFileSync(file, 'utf8')) : { ...JSON.parse(fs.readFileSync(file, 'utf8')), hooks: duplicateHooks() };
+  const original = { ...base, hooks: { ...base.hooks, PreToolUse: [...base.hooks.PreToolUse, lookAlikeGroup] } };
+  writeFile(file, json(original));
+  assert.equal(updatePath().marrowHookVersion('PreToolUse', lookAlike), null, 'the look-alike is not an exact Marrow hook');
+  assert.equal(exactCopies(file).length, 4, 'the genuine setup copy is in the file before the run');
+  return { fx, file, original, lookAlikeGroup };
+}
+// Every settings file and the key file by hash (the plugin record and cache change on a real update, so they are left out).
+const settingsHashes = (fx) => Object.fromEntries([...Object.values(fx.scopeFile), path.join(fx.home, '.marrow', 'env')].map((file) => [file, sha(file)]));
+
+// Look-alikes that do not name the Marrow MCP reach the removal step: the genuine copy in the same file IS removed in the same
+// run (so a run that removed nothing cannot pass) and the look-alike keeps its place and its bytes.
+const REACHING = [
+  ['marrow inside a longer word', 'npx -y --package=@getmarrowx/mcpx@3.9.109 marrowmcp claude-pre-action-hook'],
+  ['case changed throughout', marrowCommand('claude-pre-action-hook').toUpperCase()],
+  ['a unicode look-alike in both names', marrowCommand('claude-pre-action-hook').replace(/marrow/g, 'marr\u043ew')],
+  ['another package on another path', 'npx -y --package=@getmarrow-evil/mcp-x@3.9.109 /opt/evil/bin/tool claude-pre-action-hook'],
+];
+for (const scope of ['user', 'project']) {
+  for (const [label, command] of REACHING) {
+    test(`UP-10a ${scope} scope${scope === 'user' ? ' with --remove-user-duplicate' : ''}: a look-alike Marrow hook (${label}) is kept while the genuine copy in the same file is removed`, () => {
+      const { fx, file, original, lookAlikeGroup } = lookAlikeFixture(scope, command);
+      try {
+        const others = settingsHashes(fx);
+        delete others[file];
+        const before = sha(file);
+        const result = run(fx, scope === 'user' ? { removeUserDuplicate: true } : {});
+        assert.equal(result.exitCode, 0, result.text);
+        assert.deepEqual(fx.argv(), UPDATE_ARGV(scope), 'the update ran');
+        assert.match(result.text, /Removed the duplicate Marrow hook copy from .*settings\.json \(4 entries\)/, 'the removal step ran for the genuine copy only');
+        assert.notEqual(sha(file), before, 'the genuine copy was removed from the file');
+        assert.equal(exactCopies(file).length, 0);
+        const kept = withoutCopy(original);
+        kept.hooks.PreToolUse = [original.hooks.PreToolUse[0], lookAlikeGroup];
+        assert.equal(fs.readFileSync(file, 'utf8'), json(kept), 'the look-alike entry and every other hook keep their place and bytes');
+        const after = settingsHashes(fx);
+        delete after[file];
+        assert.deepEqual(after, others, 'no other settings file changed');
+      } finally { cleanup(fx); }
+    });
+  }
+}
+
+// Look-alikes that name the Marrow MCP stop the update before any removal (the classifier fails closed): user scope with the
+// flag and project scope, nothing is called, nothing changes. A look-alike treated as Marrow would remove the genuine copy
+// and the look-alike alike (plant PLI2), so these rows turn red.
+for (const scope of ['user', 'project']) {
+  for (const [label, command] of LOOK_ALIKES.filter(([, text]) => /marrow-mcp|@getmarrow\/mcp/.test(text))) {
+    test(`UP-10a ${scope} scope${scope === 'user' ? ' with --remove-user-duplicate' : ''}: a look-alike Marrow hook (${label}) next to the genuine copy stops the update, nothing removed or rewritten`, () => {
+      const { fx, original } = lookAlikeFixture(scope, command);
+      try {
+        const before = treeHashes(fx.root);
+        const result = run(fx, scope === 'user' ? { removeUserDuplicate: true } : {});
+        assert.equal(result.exitCode, 1, result.text);
+        assert.deepEqual(fx.argv(), [], 'no claude call');
+        assert.deepEqual(treeHashes(fx.root), before, 'no file written');
+        assert.deepEqual(JSON.parse(fs.readFileSync(fx.scopeFile[scope], 'utf8')).hooks, original.hooks);
+        assert.match(result.text, /Nothing was changed/);
+      } finally { cleanup(fx); }
+    });
+  }
+}
+
 for (const [label, key] of [['another marketplace', 'marrow@evil-market'], ['a trailing space', 'marrow@getmarrow '], ['a different case', 'Marrow@getmarrow'], ['a look-alike marketplace', 'marrow@getmarrow-x']]) {
   test(`UP-10b a marrow plugin from ${label} is not updated`, () => {
     const fx = fixture({ records: { [key]: [{ scope: 'user', version: '0.2.7' }] } });
