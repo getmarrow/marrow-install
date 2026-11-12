@@ -25,6 +25,9 @@ const ENTRYPOINTS = Object.freeze({ UserPromptSubmit: 'claude-context-hook', Pre
 const MARROW_COMMAND = /^npx -y --package=@getmarrow\/mcp@(\d{1,4}\.\d{1,4}\.\d{1,4}) marrow-mcp (claude-[a-z-]{1,40})$/;
 const MCP_PIN = /@getmarrow\/mcp@([^\s"']{0,64})/g;
 const MARKETPLACE_ARGV = Object.freeze(['plugin', 'marketplace', 'update', 'getmarrow']);
+// Fixed texts: no path and no user text.
+const CURSOR_STEPS = 'For the Marrow Cursor plugin: in Cursor, update Marrow from the plugin source you added it from, then restart Cursor. This command never changes a Cursor plugin.';
+const REMOVE_USER = 'npx @getmarrow/install@latest update --remove-user-duplicate';
 const manualSteps = (scope) => ['claude plugin marketplace update getmarrow', `claude plugin update ${PLUGIN_KEY} -s ${scope} -y`];
 
 const own = (object, key) => (object && typeof object === 'object' && Object.prototype.hasOwnProperty.call(object, key) ? object[key] : undefined);
@@ -104,7 +107,7 @@ function classifyInstall({ home, project }) {
   if (strange) return unknown('a settings hook names the Marrow MCP in a form this installer never writes');
   const marrow = copies.filter(({ hooks }) => hooks.some((hook) => hook.version));
   if (marrow.some(({ file }) => `${JSON.stringify(file.value, null, 2)}\n` !== file.text)) return unknown('a settings file with a Marrow hook copy is not in the form the installer writes');
-  return { kind: 'plugin', scope, version, copies: marrow };
+  return { kind: 'plugin', scope, version, copies: marrow, scopeFile: scopeFile.file, userFile: files[0].file };
 }
 
 function findClaude(env) {
@@ -161,9 +164,14 @@ function pluginVersion(home, scope) {
   return typeof entry === 'string' && VERSION.test(entry) ? entry : null;
 }
 
-function updatePlugin(found, { home, project, env, out, timeoutMs }) {
+function updatePlugin(found, { home, project, env, out, timeoutMs, removeUser }) {
   const steps = manualSteps(found.scope);
   out(`Marrow update: install kind Claude Code plugin (${PLUGIN_KEY}, scope ${found.scope}, version ${found.version}). No settings hook is written.`);
+  const verified = () => detectAgentPlugins({ home, project }).some((item) => item.host === 'claude-code' && item.counted);
+  if (removeUser && (found.scope !== 'user' || !verified())) {
+    out(`Refused: --remove-user-duplicate removes the user-level hook copy only when the plugin is installed and enabled at user scope (found: scope ${found.scope}). Nothing was changed.`);
+    return 1;
+  }
   const claude = findClaude(env);
   if (!claude) {
     out(`The claude command was not found on PATH. Nothing was changed. Run these two commands, then /reload-plugins:\n  ${steps.join('\n  ')}`);
@@ -182,24 +190,30 @@ function updatePlugin(found, { home, project, env, out, timeoutMs }) {
     return 1;
   }
   out(after === found.version ? `The plugin is already at the latest version (${after}).` : `Updated the plugin: ${found.version} -> ${after}.`);
-  let left = found.copies;
-  if (found.copies.length) {
-    const plugin = found.scope === 'user' ? detectAgentPlugins({ home, project }).find((item) => item.host === 'claude-code' && item.counted) : null;
+  // R1: a copy goes on its own only in the file of the plugin's own project or local scope; a user-level copy only on the flag.
+  const remove = found.copies.filter(({ file }) => (removeUser ? file.file === found.userFile : file.file === found.scopeFile && file.file !== found.userFile));
+  const pluginHooks = own(readJson(path.join(home, '.claude', 'plugins', 'cache', 'getmarrow', 'marrow', after, 'hooks', 'hooks.json')).value, 'hooks');
+  let left = found.copies.filter((copy) => !remove.includes(copy));
+  if (remove.length) {
+    const plugin = removeUser ? verified() : own(pluginHooks, 'PreToolUse');
     if (!plugin) {
       out('A Marrow hook copy in a settings file was kept: the plugin hook could not be verified for this scope. Remove it by hand after /reload-plugins.');
+      left = found.copies;
     } else {
-      const failed = removeCopies(found.copies);
+      const failed = removeCopies(remove);
       if (failed) {
         out(`Could not remove the duplicate Marrow hook copy from the settings file; ${failed}. Both copies stay until it is removed by hand.`);
         return 1;
       }
-      left = [];
-      for (const { file, hooks } of found.copies) out(`Removed the duplicate Marrow hook copy from ${file.file} (${hooks.filter((hook) => hook.version).length} entries); the plugin hook stays.`);
+      for (const { file, hooks } of remove) out(`Removed the duplicate Marrow hook copy from ${file.file} (${hooks.filter((hook) => hook.version).length} entries); the plugin hook stays.${removeUser ? ' The user-level copy was removed as asked: a project that turned the plugin off now has no Marrow hook.' : ''}`);
     }
   }
+  for (const { file, hooks } of left) out(file.file === found.userFile ? `Kept the user-level Marrow hook copy in ${file.file} (${hooks.filter((hook) => hook.version).length} entries) next to the plugin, so a project that turns the plugin off keeps a Marrow hook. To remove it, run: ${REMOVE_USER}`
+    : `Kept the Marrow hook copy in ${file.file}: it is not in the scope where the plugin is enabled. Remove it by hand if it is not wanted.`);
   const counts = {};
   for (const { hooks } of left) for (const hook of hooks) if (hook.version) counts[hook.event] = (counts[hook.event] || 0) + 1;
   out(`Install kind: Claude Code plugin. Version before: ${found.version}; after: ${after}. Marrow hook copies in settings files: ${Object.keys(counts).length ? Object.entries(counts).map(([event, count]) => `${event} ${count}`).join(', ') : 'none'} (the plugin's own hooks are its one copy).`);
+  if (left.length) out(`Marrow hook copies per event, the plugin included: ${Object.entries(Object.keys(pluginHooks || {}).reduce((all, event) => ({ ...all, [event]: (all[event] || 0) + 1 }), counts)).map(([event, count]) => `${event} ${count}`).join(', ')}.`);
   out('Run /reload-plugins (or restart Claude Code) to switch to the new version.');
   return 0;
 }
@@ -210,13 +224,14 @@ function runUpdatePath(options, { env = process.env, out = (line) => process.std
   const home = path.resolve(options.home || options.cwd);
   const project = path.resolve(options.cwd || home);
   const found = classifyInstall({ home, project });
+  if (options.removeUserDuplicate && found.kind !== 'plugin') Object.assign(found, { kind: 'settings', refuse: '--remove-user-duplicate works only next to a Claude Code plugin installed and enabled at user scope' });
   if (found.kind === 'settings' && !found.refuse) return { done: false, before: found.version, home, project };
   if (found.kind === 'settings') {
     out(`Marrow update refused: ${found.refuse}. Nothing was changed.`);
   } else if (found.kind === 'unknown') {
-    out(`Marrow update: the install kind could not be classified (${found.reason}). Nothing was changed. To update a Claude Code plugin by hand, run:\n  ${manualSteps('<scope>').join('\n  ')}\nthen /reload-plugins. For a settings-hook install without a plugin, remove the plugin records first, then run npx -y @getmarrow/install@latest update.`);
+    out(`Marrow update: the install kind could not be classified (${found.reason}). Nothing was changed. To update a Claude Code plugin by hand, run:\n  ${manualSteps('<scope>').join('\n  ')}\nthen /reload-plugins. For a settings-hook install without a plugin, remove the plugin records first, then run npx -y @getmarrow/install@latest update.\n${CURSOR_STEPS}`);
   }
-  process.exitCode = found.kind === 'plugin' ? updatePlugin(found, { home, project, env, out, timeoutMs }) : 1;
+  process.exitCode = found.kind === 'plugin' ? updatePlugin(found, { home, project, env, out, timeoutMs, removeUser: options.removeUserDuplicate === true }) : 1;
   return { done: true };
 }
 

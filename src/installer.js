@@ -940,6 +940,7 @@ function parseArgs(argv, env = process.env) {
       // surface as before (a repair word anywhere wins).
       options.updateOnly = (arg === 'update' || arg === '--update') && options.updateOnly !== false;
     }
+    else if (arg === '--remove-user-duplicate') options.removeUserDuplicate = options.removeUserDuplicate ? 'repeated' : true;
     else if (arg === '--dry-run') {
       explicitOperation = true;
       options.dryRun = true;
@@ -1022,6 +1023,9 @@ function parseArgs(argv, env = process.env) {
   }
   if (options.uninstall && (options.activate || options.repair || options.doctor)) {
     throw new Error('uninstall cannot be combined with activate, update, repair, or doctor');
+  }
+  if (options.removeUserDuplicate && (options.removeUserDuplicate !== true || options.updateOnly !== true || options.dryRun || options.doctor || options.activate || options.uninstall)) {
+    throw new Error('--remove-user-duplicate is only valid once, with update');
   }
   if (!['auto', 'mcp', 'sdk', 'both', 'md'].includes(options.mode)) {
     throw new Error('--mode must be one of auto, mcp, sdk, both, md');
