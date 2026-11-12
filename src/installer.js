@@ -28,6 +28,7 @@ const {
 const { evidence: localControlEvidence } = require('./control-state');
 const { claudeSettingsFacts, riskWarnings } = require('./risk-warnings');
 const { parseUserJson } = require('./user-json');
+const { runUpdatePath, settingsUpdateSummary } = require('./update-path');
 const {
   hermesEnvHasKey,
   hermesPaths,
@@ -5870,6 +5871,9 @@ async function runCli(argv) {
     else printUninstallReport(report);
     return;
   }
+  // `update` and `--repair` update the install kind that is there (a plugin through its host CLI) and never add a second copy.
+  const updatePath = options.update && !options.dryRun && !options.doctor ? runUpdatePath(options) : null;
+  if (updatePath?.done) return;
   if (options.yes && !options.dryRun && !options.doctor && !(await confirmUserWide(options))) { process.exitCode = 3; return; }
   // An empty or whitespace-only key from any source (environment, --key, owner file) is missing.
   options.apiKey = String(options.apiKey || '').trim();
@@ -5943,7 +5947,7 @@ async function runCli(argv) {
   } catch {
     logPath = null;
   }
-  process.stdout.write(`${lines.join('\n')}\n`);
+  process.stdout.write(`${[...lines, ...(updatePath ? settingsUpdateSummary(updatePath) : [])].join('\n')}\n`);
   if (logPath) process.stdout.write(`Full report: ${logPath}\n`);
   else process.stdout.write(`\n${full}`);
   if (selfTestFailed) process.exitCode = 1;

@@ -2,6 +2,10 @@
 
 Release notes for `@getmarrow/install`, newest first. The README describes only the current version.
 
+## Unreleased
+
+- **One update path: `update` and `--repair` update the Marrow install that is there and leave one hook copy.** On a Claude Code plugin install (`marrow@getmarrow`, any scope) they run `claude plugin marketplace update getmarrow` and `claude plugin update marrow@getmarrow -s <the installed scope> -y` (fixed arguments, no shell), read the new version back and tell you to run `/reload-plugins`; they write no hook into any settings file. A duplicate Marrow hook copy that an older `setup` wrote next to the plugin is removed (only its exact Marrow entries; other hooks and settings keep their bytes) once the plugin hook is verified. A settings-hook install is rewritten in place as before and now prints the install kind, the version before and after and the hook copies per event. If `claude` is not on your PATH, the two commands are printed and nothing changes. A failed plugin update keeps the old plugin enabled; a failed settings write restores the previous file. An update never downgrades, and an install it cannot classify is left unchanged with the manual steps printed.
+
 ## v0.1.78
 
 v0.1.78. Two installer fixes: a run from a folder inside your home folder never becomes a user-wide install by accident, and with no key every command gives the one next step. The pins are unchanged: v0.1.78 installs MCP `3.9.109` (source `990aaaa673a3d117599a33a8972dedc1398e240e`, packed integrity `sha512-tgGXtv7vTxhtD2/HRbAGBjPpZ3fQYWXPN6XkJhVx07YCvg2sGfhkFbD+QfP+c56FbeVa5Rwbe4B50kiRuM+rdQ==`) and SDK `3.7.67` (packed integrity `sha512-0Lwg4XLxm9eXxMgQtFAH1y4mXi9CXg3poQlGbeK0AW+EHP+yfUWQUH4d1XYO03QNzwHLAYKfARDmnl5GpBnKUw==`).
