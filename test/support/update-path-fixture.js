@@ -12,6 +12,13 @@ const path = require('node:path');
 const PINS = require('../../src/pins');
 const PLUGIN_KEY = 'marrow@getmarrow';
 const PRE_ACTION = 'node "${CLAUDE_PLUGIN_ROOT}/scripts/marrow-launch.cjs" claude-pre-action-hook';
+// The published Claude Code plugin hooks/hooks.json, byte for byte (getmarrow/plugins plugins/marrow/hooks/hooks.json at
+// 1df86a89c51cc706df437cb127b7dc9224f656a4, git blob 9e59521b7c859358e8ff8981f53c8e6419c66650; extracted from the plugin bundle, not retyped).
+const REAL_PLUGIN_HOOKS_BLOB = '9e59521b7c859358e8ff8981f53c8e6419c66650';
+const REAL_PLUGIN_HOOKS_JSON = "{\n  \"description\": \"Marrow hooks: the pinned @getmarrow/mcp Claude Code entrypoints that `npx @getmarrow/install` writes, in the same events. The tool matcher sends Marrow every tool call (built-in, MCP or future) and skips only this plugin's own 17 Marrow tools and the read-only LS and ListMcpResourcesTool, by exact name. Cooperative, client-reported control: they run only while this plugin is enabled and Claude Code runs them.\",\n  \"hooks\": {\n    \"SessionStart\": [\n      {\n        \"matcher\": \"startup|resume\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"node \\\"${CLAUDE_PLUGIN_ROOT}/scripts/marrow-session-check.cjs\\\"\",\n            \"timeout\": 5\n          }\n        ]\n      }\n    ],\n    \"UserPromptSubmit\": [\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"node \\\"${CLAUDE_PLUGIN_ROOT}/scripts/marrow-launch.cjs\\\" claude-context-hook\"\n          }\n        ]\n      }\n    ],\n    \"PreToolUse\": [\n      {\n        \"matcher\": \"^(?!(?:mcp__plugin_marrow_marrow__(?:marrow_agent_runtime|marrow_agent_status|marrow_arbitrate|marrow_buyer_proof|marrow_commit|marrow_completion_contracts|marrow_coordinate|marrow_decision_brief|marrow_decision_trace|marrow_evaluate_completion_contract|marrow_fleet_lessons|marrow_governance_timeline|marrow_model_usage|marrow_replay_compare|marrow_think|marrow_value_report|marrow_workflow_gate)|LS|ListMcpResourcesTool)$)[\\\\s\\\\S]*\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"node \\\"${CLAUDE_PLUGIN_ROOT}/scripts/marrow-launch.cjs\\\" claude-pre-action-hook\",\n            \"timeout\": 20\n          }\n        ]\n      }\n    ],\n    \"PostToolUse\": [\n      {\n        \"matcher\": \"^(?!(?:mcp__plugin_marrow_marrow__(?:marrow_agent_runtime|marrow_agent_status|marrow_arbitrate|marrow_buyer_proof|marrow_commit|marrow_completion_contracts|marrow_coordinate|marrow_decision_brief|marrow_decision_trace|marrow_evaluate_completion_contract|marrow_fleet_lessons|marrow_governance_timeline|marrow_model_usage|marrow_replay_compare|marrow_think|marrow_value_report|marrow_workflow_gate)|LS|ListMcpResourcesTool)$)[\\\\s\\\\S]*\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"node \\\"${CLAUDE_PLUGIN_ROOT}/scripts/marrow-launch.cjs\\\" claude-hook\"\n          }\n        ]\n      }\n    ],\n    \"PostToolUseFailure\": [\n      {\n        \"matcher\": \"^(?!(?:mcp__plugin_marrow_marrow__(?:marrow_agent_runtime|marrow_agent_status|marrow_arbitrate|marrow_buyer_proof|marrow_commit|marrow_completion_contracts|marrow_coordinate|marrow_decision_brief|marrow_decision_trace|marrow_evaluate_completion_contract|marrow_fleet_lessons|marrow_governance_timeline|marrow_model_usage|marrow_replay_compare|marrow_think|marrow_value_report|marrow_workflow_gate)|LS|ListMcpResourcesTool)$)[\\\\s\\\\S]*\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"node \\\"${CLAUDE_PLUGIN_ROOT}/scripts/marrow-launch.cjs\\\" claude-hook\"\n          }\n        ]\n      }\n    ],\n    \"Stop\": [\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"node \\\"${CLAUDE_PLUGIN_ROOT}/scripts/marrow-launch.cjs\\\" claude-session-hook\"\n          }\n        ]\n      }\n    ],\n    \"PermissionRequest\": [\n      {\n        \"matcher\": \"^(?!(?:mcp__plugin_marrow_marrow__(?:marrow_agent_runtime|marrow_agent_status|marrow_arbitrate|marrow_buyer_proof|marrow_commit|marrow_completion_contracts|marrow_coordinate|marrow_decision_brief|marrow_decision_trace|marrow_evaluate_completion_contract|marrow_fleet_lessons|marrow_governance_timeline|marrow_model_usage|marrow_replay_compare|marrow_think|marrow_value_report|marrow_workflow_gate)|LS|ListMcpResourcesTool)$)[\\\\s\\\\S]*\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"node \\\"${CLAUDE_PLUGIN_ROOT}/scripts/marrow-launch.cjs\\\" claude-permission-request-hook\",\n            \"async\": true\n          }\n        ]\n      }\n    ],\n    \"PostToolBatch\": [\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"node \\\"${CLAUDE_PLUGIN_ROOT}/scripts/marrow-launch.cjs\\\" claude-hook\",\n            \"async\": true\n          }\n        ]\n      }\n    ]\n  }\n}\n";
+// The PreToolUse matcher the installer and MCP setup write for a Claude Code hook copy.
+const COPY_MATCHER = require('../../src/marrow-own-tools').buildOwnToolMatchers().claude;
+const PLUGIN_MATCHER = JSON.parse(REAL_PLUGIN_HOOKS_JSON).hooks.PreToolUse[0].matcher;
 const marrowCommand = (entry, version = PINS.MCP_ADAPTER_VERSION) => `npx -y --package=@getmarrow/mcp@${version} marrow-mcp ${entry}`;
 
 function dummy(prefix) {
@@ -48,7 +55,7 @@ function duplicateHooks(version = PINS.MCP_ADAPTER_VERSION) {
     UserPromptSubmit: [{ hooks: [{ type: 'command', command: marrowCommand('claude-context-hook', version) }] }],
     PreToolUse: [
       { matcher: 'Bash', hooks: [{ type: 'command', command: 'owner-guard.sh --strict' }] },
-      { matcher: '*', hooks: [{ type: 'command', command: marrowCommand('claude-pre-action-hook', version), timeout: 30 }] },
+      { matcher: COPY_MATCHER, hooks: [{ type: 'command', command: marrowCommand('claude-pre-action-hook', version), timeout: 30 }] },
     ],
     PostToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: marrowCommand('claude-hook', version) }, { type: 'command', command: 'owner-audit.sh' }] }],
     Stop: [{ hooks: [{ type: 'command', command: marrowCommand('claude-session-hook', version) }] }],
@@ -59,10 +66,7 @@ function pluginCopy(home, version) {
   const copy = path.join(home, '.claude', 'plugins', 'cache', 'getmarrow', 'marrow', version);
   writeFile(path.join(copy, '.claude-plugin', 'plugin.json'), json({ name: 'marrow', version }));
   writeFile(path.join(copy, 'scripts', 'marrow-launch.cjs'), '// launcher\n');
-  writeFile(path.join(copy, 'hooks', 'hooks.json'), json({ hooks: {
-    PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: PRE_ACTION }] }],
-    PostToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/scripts/marrow-launch.cjs" claude-hook' }] }],
-  } }));
+  writeFile(path.join(copy, 'hooks', 'hooks.json'), REAL_PLUGIN_HOOKS_JSON);
   return copy;
 }
 
@@ -143,4 +147,4 @@ else {
 
 const cleanup = (fx) => fs.rmSync(fx.root, { recursive: true, force: true });
 
-module.exports = { PLUGIN_KEY, PRE_ACTION, marrowCommand, dummy, sha, json, writeFile, treeHashes, duplicateHooks, marketplace, fixture, cleanup };
+module.exports = { REAL_PLUGIN_HOOKS_BLOB, REAL_PLUGIN_HOOKS_JSON, COPY_MATCHER, PLUGIN_MATCHER, PLUGIN_KEY, PRE_ACTION, marrowCommand, dummy, sha, json, writeFile, treeHashes, duplicateHooks, marketplace, fixture, cleanup };

@@ -7,13 +7,15 @@
 // unless its hooks pin a newer or malformed version. Anything that cannot be classified changes nothing. Only the
 // `hooks` and `enabledPlugins` keys of a settings file are used, no other value is printed, and no key file is opened.
 
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const tty = require('node:tty');
 const { spawnSync } = require('node:child_process');
 const { PLUGIN_KEY, detectAgentPlugins } = require('./agent-plugins');
 const { MCP_ADAPTER_VERSION } = require('./pins');
 const { delocalizeHookCommand } = require('./mcp-runtime');
-const { PLUGIN_PRE_ACTION_LAUNCHERS } = require('./update-launchers');
+const { PLUGIN_PRE_ACTION_LAUNCHERS, PUBLISHED_COPY_MATCHERS, PUBLISHED_PLUGIN_MATCHERS } = require('./update-launchers');
 
 const SCOPES = ['user', 'project', 'local'];
 const MARKETPLACE = 'getmarrow';
@@ -116,9 +118,32 @@ function hooksOf(settings) {
   )));
 }
 
+// The file identity of a path: { real, dev, ino } (realpath and st_dev, st_ino), { missing } when nothing is there, or null
+// when it cannot be read (a dangling link, a permission error).
+function identity(file) {
+  try {
+    fs.lstatSync(file);
+  } catch (error) {
+    return error.code === 'ENOENT' || error.code === 'ENOTDIR' ? { missing: true } : null;
+  }
+  try {
+    const stat = fs.statSync(file);
+    return { real: fs.realpathSync(file), dev: stat.dev, ino: stat.ino };
+  } catch {
+    return null;
+  }
+}
+const sameFile = (a, b) => Boolean(a && b && a.real && b.real && (a.real === b.real || (a.dev === b.dev && a.ino === b.ino)));
+
+// The user, project and local settings files, user first, one entry per file identity: a path that reaches a file seen
+// before (same realpath or same st_dev and st_ino) is that file, so a project path to the user file counts as user-level.
 function settingsFiles(home, project) {
-  const files = [path.join(home, '.claude', 'settings.json'), path.join(project, '.claude', 'settings.json'), path.join(project, '.claude', 'settings.local.json')];
-  return [...new Set(files)].map(readJson);
+  const files = [];
+  for (const file of [path.join(home, '.claude', 'settings.json'), path.join(project, '.claude', 'settings.json'), path.join(project, '.claude', 'settings.local.json')]) {
+    const id = identity(file);
+    if (!files.some((seen) => seen.file === file || sameFile(seen.id, id))) files.push({ ...readJson(file), id });
+  }
+  return files;
 }
 
 const unknown = (reason) => ({ kind: 'unknown', reason });
@@ -143,8 +168,11 @@ function classifyInstall({ home, project }) {
   const version = own(entries[0], 'version');
   if (!scope || typeof version !== 'string' || !VERSION.test(version)) return unknown('the plugin record has no known scope or plain version');
   if (scope !== 'user' && own(entries[0], 'projectPath') !== project) return unknown(`the ${scope} plugin record belongs to another folder`);
+  if (files.some((file) => file.id === null)) return unknown('the file identity of a Claude Code settings file could not be read');
   if (files.some((file) => file.bad)) return unknown('a Claude Code settings file could not be read');
-  const scopeFile = scope === 'user' ? files[0] : files.find((file) => file.file === path.join(project, '.claude', scope === 'local' ? 'settings.local.json' : 'settings.json'));
+  const scopePath = path.join(project, '.claude', scope === 'local' ? 'settings.local.json' : 'settings.json');
+  const scopeId = identity(scopePath);
+  const scopeFile = scope === 'user' ? files[0] : files.find((file) => file.file === scopePath || sameFile(file.id, scopeId));
   if (enabled(scopeFile) !== true || files.some((file) => enabled(file) === false)) return unknown('the plugin is not enabled');
   const copies = files.map((file) => ({ file, hooks: file.value ? hooksOf(file) : [] }));
   const strange = copies.some(({ hooks }) => hooks.some(({ hook, version: pinned }) => pinned === null && /marrow-mcp|@getmarrow\/mcp/.test(String(own(hook, 'command')))));
@@ -198,9 +226,12 @@ function removeCopy({ file, hooks }) {
 
 // R1: why the plugin hook in this scope cannot stand in for the hook copy, or null when (a) the plugin record for the
 // scope is installed and enabled, (b) its hooks file is a regular strict-JSON file with a PreToolUse entry whose matcher
-// covers each matcher of the copy, (c) that entry's command is byte-equal to a published launcher command and (d) the
-// launcher file it names is inside the installed plugin folder. Read again immediately before the write.
-function pluginHookProblem({ home, project }, scope, copy) {
+// is byte-equal to a published plugin matcher while each PreToolUse matcher of the copy is byte-equal to a published copy
+// matcher, (c) that entry's command is byte-equal to a published launcher command, (d) the launcher file it names is
+// inside the installed plugin folder and (e) an automatic removal is not in the user settings file by file identity.
+// Read again immediately before the write.
+const publishedMatcher = (list, matcher) => list.some((item) => item.matcher === matcher);
+function pluginHookProblem({ home, project }, scope, copy, userLevel) {
   const found = classifyInstall({ home, project });
   if (found.kind !== 'plugin' || found.scope !== scope) return 'the plugin is not installed and enabled in this scope';
   const folder = path.join(home, '.claude', 'plugins', 'cache', MARKETPLACE, 'marrow', found.version);
@@ -211,10 +242,12 @@ function pluginHookProblem({ home, project }, scope, copy) {
   )) : []));
   if (!entries.length) return 'the plugin hooks file has no Marrow pre-action launcher command';
   const wanted = copy.hooks.filter((hook) => hook.version && hook.event === 'PreToolUse').map(({ group }) => own(group, 'matcher'));
-  const covers = (mine, theirs) => mine === undefined || mine === '' || mine === '*' || (typeof mine === 'string' && mine === theirs);
-  const covering = entries.filter(({ matcher }) => wanted.every((theirs) => covers(matcher, theirs)));
-  if (!covering.length) return 'the plugin pre-action matcher does not cover the matcher of the copy';
+  if (!wanted.every((matcher) => publishedMatcher(PUBLISHED_COPY_MATCHERS, matcher))) return 'the PreToolUse matcher of the copy is not a published installer matcher';
+  const covering = entries.filter(({ matcher }) => publishedMatcher(PUBLISHED_PLUGIN_MATCHERS, matcher));
+  if (!covering.length) return 'the plugin pre-action matcher is not a published plugin matcher';
   if (!covering.some(({ item }) => regularBelow(home, path.join(folder, ...item.launcher)))) return 'the plugin launcher file is missing';
+  const now = identity(copy.file.file);
+  if (!sameFile(now, copy.file.id) || (!userLevel && sameFile(now, identity(found.userFile)))) return 'the file identity of the settings file changed or is the user settings file';
   return readJson(copy.file.file).text === copy.file.text ? null : 'the settings file changed during the update';
 }
 
@@ -296,7 +329,7 @@ function updatePlugin(found, { home, project, env, out, timeoutMs, removeUser })
   const pluginHooks = own(readJson(path.join(home, '.claude', 'plugins', 'cache', 'getmarrow', 'marrow', after, 'hooks', 'hooks.json')).value, 'hooks');
   let left = found.copies.filter((copy) => copy !== remove);
   if (remove) {
-    const problem = removeUser && !verified() ? 'the user-scope plugin is not counted' : pluginHookProblem({ home, project }, found.scope, remove);
+    const problem = removeUser && !verified() ? 'the user-scope plugin is not counted' : pluginHookProblem({ home, project }, found.scope, remove, removeUser);
     if (problem) {
       out(`A Marrow hook copy in a settings file was kept: the plugin hook could not be verified for this scope (${problem}). Nothing was changed in ${remove.file.file}. Remove it by hand after /reload-plugins.`);
       left = found.copies;
@@ -319,9 +352,41 @@ function updatePlugin(found, { home, project, env, out, timeoutMs, removeUser })
   return 0;
 }
 
+// R4: --remove-user-duplicate is an owner-terminal action: stdin and stdout must both be a TTY and the owner must type
+// the confirmation word printed here (a new one each run). Anything else refuses before anything is read or run.
+function readTerminalLine() {
+  const byte = Buffer.alloc(1);
+  let line = '';
+  try {
+    while (line.length < 256) {
+      if (fs.readSync(0, byte, 0, 1, null) === 0) return null;
+      if (byte[0] === 10) return line.replace(/\r$/, '');
+      line += String.fromCharCode(byte[0]);
+    }
+  } catch { /* not readable: refused below */ }
+  return null;
+}
+const OWNER_TERMINAL = Object.freeze({ isTTY: (fd) => tty.isatty(fd), readLine: readTerminalLine });
+
+function confirmedByOwner(out, terminal) {
+  if (!terminal.isTTY(0) || !terminal.isTTY(1)) {
+    out('Refused: --remove-user-duplicate runs only in an owner terminal (stdin and stdout a TTY) with the typed confirmation word. Nothing was changed.');
+    return false;
+  }
+  const word = `remove-${crypto.randomBytes(3).toString('hex')}`;
+  out(`To remove the user-level Marrow hook copy, type the confirmation word ${word} and press Enter:`);
+  if (terminal.readLine() === word) return true;
+  out('Refused: the confirmation word was not typed. Nothing was changed.');
+  return false;
+}
+
 // Runs the update for the install kind found. { done: true } when this path finished the command (process.exitCode set),
 // else { done: false, before } and the existing settings-hook update goes on.
-function runUpdatePath(options, { env = process.env, out = (line) => process.stdout.write(`${line}\n`), timeoutMs = CLAUDE_TIMEOUT_MS } = {}) {
+function runUpdatePath(options, { env = process.env, out = (line) => process.stdout.write(`${line}\n`), timeoutMs = CLAUDE_TIMEOUT_MS, terminal = OWNER_TERMINAL } = {}) {
+  if (options.removeUserDuplicate && !confirmedByOwner(out, terminal)) {
+    process.exitCode = 1;
+    return { done: true };
+  }
   const home = path.resolve(options.home || options.cwd);
   const project = path.resolve(options.cwd || home);
   const found = classifyInstall({ home, project });
@@ -346,4 +411,4 @@ function settingsUpdateSummary({ before, home, project }) {
   return [`Install kind: settings hook. Version before: ${before}; after: ${after}. Marrow hook copies per event: ${Object.entries(counts).map(([event, count]) => `${event} ${count}`).join(', ')}.`];
 }
 
-module.exports = { classifyInstall, runUpdatePath, settingsUpdateSummary, marrowHookVersion };
+module.exports = { classifyInstall, runUpdatePath, settingsUpdateSummary, marrowHookVersion, settingsFiles, publishedMatcher };

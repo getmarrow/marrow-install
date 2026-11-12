@@ -13,14 +13,16 @@ const { spawnSync } = require('node:child_process');
 
 const ROOT = path.join(__dirname, '..');
 const PINS = require('../src/pins');
-const { PLUGIN_KEY, marrowCommand, dummy, sha, json, writeFile, treeHashes, duplicateHooks, fixture, cleanup } = require('./support/update-path-fixture');
+const { PLUGIN_MATCHER, PLUGIN_KEY, marrowCommand, dummy, sha, json, writeFile, treeHashes, duplicateHooks, fixture, cleanup } = require('./support/update-path-fixture');
 const OLD_PIN = '3.9.98';
 const updatePath = () => require('../src/update-path');
 
 function run(fx, { PATH = fx.bin, timeoutMs, cwd = fx.project, removeUserDuplicate } = {}) {
   const lines = [];
   const previous = process.exitCode;
-  const result = updatePath().runUpdatePath({ home: fx.home, cwd, ...(removeUserDuplicate ? { removeUserDuplicate } : {}) }, { env: { PATH, HOME: fx.home }, out: (line) => lines.push(line), ...(timeoutMs ? { timeoutMs } : {}) });
+  // The flag rows answer as an owner terminal would: both ends a TTY, the printed confirmation word typed back.
+  const terminal = { isTTY: () => true, readLine: () => /confirmation word (\S+) and/.exec(lines[lines.length - 1])[1] };
+  const result = updatePath().runUpdatePath({ home: fx.home, cwd, ...(removeUserDuplicate ? { removeUserDuplicate } : {}) }, { env: { PATH, HOME: fx.home }, out: (line) => lines.push(line), terminal, ...(timeoutMs ? { timeoutMs } : {}) });
   const exitCode = process.exitCode;
   process.exitCode = previous;
   return { ...result, exitCode, text: lines.join('\n') };
@@ -263,7 +265,7 @@ test('UP-9 / INST-2 through the CLI: `update` on a plugin install opens no key f
   const fx = fixture({ duplicate: true });
   try {
     const spy = path.join(fx.root, 'spy.log');
-    const env = { PATH: fx.bin, HOME: fx.home, MARROW_API_KEY: dummy('dummyupdcli'), UPDATE_PATH_SPY_LOG: spy, NODE_OPTIONS: `--require ${path.join(__dirname, 'support', 'fs-spy.cjs')}` };
+    const env = { PATH: fx.bin, HOME: fx.home, MARROW_API_KEY: dummy('dummyupdcli'), UPDATE_PATH_SPY_LOG: spy, ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}), NODE_OPTIONS: `${process.env.NODE_OPTIONS ? `${process.env.NODE_OPTIONS} ` : ''}--require ${path.join(__dirname, 'support', 'fs-spy.cjs')}` };
     const child = spawnSync(process.execPath, [path.join(ROOT, 'bin', 'marrow-install.js'), 'update'], { cwd: fx.project, env, encoding: 'utf8', timeout: 60000 });
     assert.equal(child.status, 0, child.stdout + child.stderr);
     assert.deepEqual(fx.argv(), UPDATE_ARGV('user'));
@@ -642,14 +644,16 @@ test('R1-f the flag has one exact form and only with update: --repair, odd forms
 test('R1-f through the CLI: `update --repair --remove-user-duplicate` is refused before anything runs; `update --remove-user-duplicate` removes the user-level copy', () => {
   const fx = fixture({ duplicate: true });
   try {
-    const env = { PATH: fx.bin, HOME: fx.home, MARROW_REMOVE_USER_DUPLICATE: '1' };
+    const env = { PATH: fx.bin, HOME: fx.home, MARROW_REMOVE_USER_DUPLICATE: '1', ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}), ...(process.env.NODE_OPTIONS ? { NODE_OPTIONS: process.env.NODE_OPTIONS } : {}) };
     const before = treeHashes(fx.root);
     const refused = spawnSync(process.execPath, [path.join(ROOT, 'bin', 'marrow-install.js'), 'update', '--repair', '--remove-user-duplicate'], { cwd: fx.project, env, encoding: 'utf8', timeout: 60000 });
     assert.equal(refused.status, 1);
     assert.match(refused.stderr, /--remove-user-duplicate is only valid once, with update/);
     assert.deepEqual(fx.argv(), []);
     assert.deepEqual(treeHashes(fx.root), before);
-    const child = spawnSync(process.execPath, [path.join(ROOT, 'bin', 'marrow-install.js'), 'update', '--remove-user-duplicate'], { cwd: fx.project, env, encoding: 'utf8', timeout: 60000 });
+    // The owner answers the confirmation word in a terminal (R4).
+    const python = String(process.env.PATH || '').split(path.delimiter).map((dir) => path.join(dir, 'python3')).find((file) => path.isAbsolute(file) && fs.existsSync(file));
+    const child = spawnSync(python, ['-I', path.join(__dirname, 'support', 'pty-run.py'), 'word', '--', process.execPath, path.join(ROOT, 'bin', 'marrow-install.js'), 'update', '--remove-user-duplicate'], { cwd: fx.project, env, encoding: 'utf8', timeout: 90000 });
     assert.equal(child.status, 0, child.stdout + child.stderr);
     assert.deepEqual(fx.argv(), UPDATE_ARGV('user'));
     assert.deepEqual(exactCopies(fx.userSettings), []);
@@ -662,7 +666,7 @@ const PRE = 'node "${CLAUDE_PLUGIN_ROOT}/scripts/marrow-launch.cjs" claude-pre-a
 const pluginFolder = (fx, version = '0.2.7', market = 'getmarrow') => path.join(fx.home, '.claude', 'plugins', 'cache', market, 'marrow', version);
 const hooksText = (pre) => json({ hooks: { PreToolUse: pre, PostToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: 'node "${CLAUDE_PLUGIN_ROOT}/scripts/marrow-launch.cjs" claude-hook' }] }] } });
 const setHooks = (text) => (fx) => fs.writeFileSync(path.join(pluginFolder(fx), 'hooks', 'hooks.json'), text);
-const preWith = (command, matcher = '*') => hooksText([{ matcher, hooks: [{ type: 'command', command }] }]);
+const preWith = (command, matcher = PLUGIN_MATCHER) => hooksText([{ matcher, hooks: [{ type: 'command', command }] }]);
 const KEEP = [
   ['A1', 'PreToolUse []', setHooks(hooksText([]))],
   ['A2', 'a non-Marrow command', setHooks(preWith('true'))],
