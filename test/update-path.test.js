@@ -239,7 +239,8 @@ test('UP-8 equal version: the plugin is already at the latest, nothing changed',
 });
 
 test('UP-9 key files and settings env values with dummy values: never opened, never in any output, log or written file', () => {
-  const fx = fixture({ scope: 'local', duplicate: true, claude: { print: 'MARROW_API_KEY=dummyprinted0 /home/x/.marrow/env' } });
+  const printed = dummy('dummyprinted');
+  const fx = fixture({ scope: 'local', duplicate: true, claude: { print: `MARROW_API_KEY=${printed} /home/x/.marrow/env` } });
   try {
     const keyValue = fs.readFileSync(path.join(fx.home, '.marrow', 'env'), 'utf8').trim().split('=')[1];
     const touched = [];
@@ -256,7 +257,7 @@ test('UP-9 key files and settings env values with dummy values: never opened, ne
     const everything = [result.text, fs.readFileSync(fx.log, 'utf8'), ...Object.keys(treeHashes(fx.root)).filter((file) => !file.includes('.marrow')).map((file) => fs.readFileSync(path.join(fx.root, file), 'utf8'))].join('\n');
     assert.equal(result.text.includes(fx.secret), false);
     assert.equal(result.text.includes(keyValue), false);
-    assert.equal(result.text.includes('dummyprinted0'), false);
+    assert.equal(result.text.includes(printed), false);
     assert.equal(everything.includes(keyValue), false);
   } finally { cleanup(fx); }
 });
