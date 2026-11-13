@@ -8,16 +8,16 @@ const test = require('node:test');
 const PINS = require('../src/pins');
 const installer = require('../src/installer');
 
-// The MCP pin is @getmarrow/mcp 3.9.109, packed from marrow-mcp 990aaaa6 (src/pins.js says how its
+// The MCP pin is @getmarrow/mcp 3.9.113, packed from marrow-mcp 12b766c5 (src/pins.js says how its
 // integrity was computed, and that the release chain must re-verify it against the published
 // tarball before this installer is published). The vendored dist/ the tests decide with is that
 // build's, and every command and MCP entry the installer writes names that version.
 
-const MCP_FIXTURES = path.join(__dirname, 'fixtures', 'mcp-3.9.109');
+const MCP_FIXTURES = path.join(__dirname, 'fixtures', 'mcp-3.9.113');
 const EXPECTED = {
-  version: '3.9.109',
-  sourceSha: '990aaaa673a3d117599a33a8972dedc1398e240e',
-  integrity: 'sha512-tgGXtv7vTxhtD2/HRbAGBjPpZ3fQYWXPN6XkJhVx07YCvg2sGfhkFbD+QfP+c56FbeVa5Rwbe4B50kiRuM+rdQ==',
+  version: '3.9.113',
+  sourceSha: '12b766c5ece1d2b8636db3dacecd5dd831a853a4',
+  integrity: 'sha512-SgKlbsCN6F2pQXCy2kq9Zjyp2no69vfVv+Ub1oALzDO/ft1OrBi8aOXOWtNO0aD610ZgPNwD6atjtBTeYYQ0fg==',
 };
 // The SDK the pinned MCP depends on exactly (its packed tarball). Written out here as well as in src/pins.js, like the MCP
 // values above, so that editing one of the two is caught: every other test reads this value back from the pins.
@@ -27,7 +27,7 @@ const EXPECTED_SDK = {
 };
 const PUBLISHED_0170_INTEGRITY = 'sha512-hTs4jTJmySLk8hHgsGIZksMo9+eO5kjQmU1EJyDX8Qqm9Z+V+yDkauop19roasVvOAFsK3dJjqLoIh7gRhoXJQ==';
 
-test('src/pins.js pins @getmarrow/mcp 3.9.109 from marrow-mcp 990aaaa6, not the 3.9.102 of the published 0.1.70', () => {
+test('src/pins.js pins @getmarrow/mcp 3.9.113 from marrow-mcp 12b766c5, not the 3.9.102 of the published 0.1.70', () => {
   assert.equal(PINS.MCP_ADAPTER_VERSION, EXPECTED.version);
   assert.equal(PINS.MCP_ADAPTER_SOURCE_SHA, EXPECTED.sourceSha);
   assert.equal(PINS.MCP_ADAPTER_INTEGRITY, EXPECTED.integrity);
@@ -40,10 +40,10 @@ test('src/pins.js pins @getmarrow/mcp 3.9.109 from marrow-mcp 990aaaa6, not the 
   assert.match(PINS.SDK_ADAPTER_INTEGRITY, /^sha512-[A-Za-z0-9+/]{86}==$/);
   // The note that tells the release chain what to verify is part of the pin.
   const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'pins.js'), 'utf8');
-  assert.match(source, /RE-VERIFY THIS PIN\s+\/\/ AGAINST THE PUBLISHED @getmarrow\/mcp@3\.9\.109 TARBALL BEFORE THIS INSTALLER IS PUBLISHED/);
+  assert.match(source, /RE-VERIFY THIS PIN\s+\/\/ AGAINST THE PUBLISHED @getmarrow\/mcp@3\.9\.113 TARBALL BEFORE THIS INSTALLER IS PUBLISHED/);
 });
 
-test('the vendored 3.9.109 dist/ is the pinned build: its manifest names the pin, and every file is its recorded sha256', () => {
+test('the vendored 3.9.113 dist/ is the pinned build: its manifest names the pin, and every file is its recorded sha256', () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(MCP_FIXTURES, 'MANIFEST.json'), 'utf8'));
   assert.equal(manifest.version, PINS.MCP_ADAPTER_VERSION);
   assert.equal(manifest.source_sha, PINS.MCP_ADAPTER_SOURCE_SHA);

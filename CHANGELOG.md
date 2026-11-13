@@ -2,7 +2,9 @@
 
 Release notes for `@getmarrow/install`, newest first. The README describes only the current version.
 
-## Unreleased
+## v0.1.79
+
+v0.1.79. One update path, and the MCP pin: v0.1.79 installs MCP `3.9.113` (source `12b766c5ece1d2b8636db3dacecd5dd831a853a4`, packed integrity `sha512-SgKlbsCN6F2pQXCy2kq9Zjyp2no69vfVv+Ub1oALzDO/ft1OrBi8aOXOWtNO0aD610ZgPNwD6atjtBTeYYQ0fg==`) and SDK `3.7.67` (packed integrity `sha512-0Lwg4XLxm9eXxMgQtFAH1y4mXi9CXg3poQlGbeK0AW+EHP+yfUWQUH4d1XYO03QNzwHLAYKfARDmnl5GpBnKUw==`).
 
 - **One update path: `update` and `--repair` update the Marrow install that is there and leave one hook copy.** On a Claude Code plugin install (`marrow@getmarrow`, any scope) they run `claude plugin marketplace update getmarrow` and `claude plugin update marrow@getmarrow -s <the installed scope> -y` (fixed arguments, no shell), read the new version back and tell you to run `/reload-plugins`; they write no hook into any settings file. A duplicate Marrow hook copy that an older `setup` wrote next to the plugin is removed on its own only when it sits in the same project or local settings file that enables the plugin (only its exact Marrow entries; other hooks and settings keep their bytes). A user-level copy (`~/.claude/settings.json`) is kept, so a project that turns the plugin off still has a Marrow hook; the update says so and prints `npx @getmarrow/install@latest update --remove-user-duplicate`, which removes it only when the plugin is installed and enabled at user scope. When the install kind cannot be classified, the printed steps also say how to update the Marrow Cursor plugin in Cursor. A settings-hook install is rewritten in place as before and now prints the install kind, the version before and after and the hook copies per event. If `claude` is not on your PATH, the two commands are printed and nothing changes. A failed plugin update keeps the old plugin enabled; a failed settings write restores the previous file. An update never downgrades, and an install it cannot classify is left unchanged with the manual steps printed.
 
