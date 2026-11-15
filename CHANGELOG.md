@@ -2,6 +2,13 @@
 
 Release notes for `@getmarrow/install`, newest first. The README describes only the current version.
 
+## v0.1.80
+
+v0.1.80. The MCP pin: v0.1.80 installs MCP `3.9.114` (source `48b1fbec80ab3f7243126536b2de18fc82c6f1b7`, packed integrity `sha512-pufn9UVwx3mw7Dh0NOc5Oaq0jX/Vd0otYR0x1HzAYM92am9fkaPBf44C5YQVCxgB8fqTn+ABcptSosibIRvMjQ==`) and SDK `3.7.67` (packed integrity `sha512-0Lwg4XLxm9eXxMgQtFAH1y4mXi9CXg3poQlGbeK0AW+EHP+yfUWQUH4d1XYO03QNzwHLAYKfARDmnl5GpBnKUw==`).
+
+- **MCP 3.9.114: Marrow judges what a Claude Code Bash call really does.** The hook this installer writes now sends the command text of Claude Code Bash calls, checked for secrets on your machine first; a command in which a secret is found is sent only as a hash, and Marrow does not store the text. Script text is not sent. With a Marrow key, a command that names the installer only as data (`echo`, `grep`, `git log`) is no longer held as a control-off route; any text the hook cannot prove to be data keeps the previous answer. When a Marrow call fails, the client says the latest version was not checked and no longer reports the install as current.
+- **No installer behaviour change.** `install`, `update`, `--repair` and `doctor` work as in v0.1.79. Only the pinned MCP moved; the nine MCP files the tests vendor are byte-equal to the 3.9.113 ones.
+
 ## v0.1.79
 
 v0.1.79. One update path, and the MCP pin: v0.1.79 installs MCP `3.9.113` (source `12b766c5ece1d2b8636db3dacecd5dd831a853a4`, packed integrity `sha512-SgKlbsCN6F2pQXCy2kq9Zjyp2no69vfVv+Ub1oALzDO/ft1OrBi8aOXOWtNO0aD610ZgPNwD6atjtBTeYYQ0fg==`) and SDK `3.7.67` (packed integrity `sha512-0Lwg4XLxm9eXxMgQtFAH1y4mXi9CXg3poQlGbeK0AW+EHP+yfUWQUH4d1XYO03QNzwHLAYKfARDmnl5GpBnKUw==`).
