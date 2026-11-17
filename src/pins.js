@@ -2,19 +2,19 @@
 // This is the only place they are set: a release changes the MCP version, source SHA and
 // integrity here together (and the SDK pair together), and the tests read them from here.
 //
-// The MCP pin is @getmarrow/mcp 3.9.114, the release commit marrow-mcp 48b1fbec. The integrity is the
+// The MCP pin is @getmarrow/mcp 3.9.115, the release commit marrow-mcp d3dea44c. The integrity is the
 // sha512 of that release's packed tarball (npm pack --ignore-scripts from a clean checkout, Node 22.23,
-// npm 10.9), and the source SHA is the release commit. The nine files in test/fixtures/mcp-3.9.114 are
+// npm 10.9), and the source SHA is the release commit. The nine files in test/fixtures/mcp-3.9.115 are
 // dist/ of the same tarball, byte for byte, and MANIFEST.json there records them. The SDK pin is
 // @getmarrow/sdk 3.7.67, whose packed tarball the MCP release's lockfile and exact dependency also name.
 // THE RELEASE CHAIN MUST RE-VERIFY THIS PIN
-// AGAINST THE PUBLISHED @getmarrow/mcp@3.9.114 TARBALL BEFORE THIS INSTALLER IS PUBLISHED, and
+// AGAINST THE PUBLISHED @getmarrow/mcp@3.9.115 TARBALL BEFORE THIS INSTALLER IS PUBLISHED, and
 // change the source SHA and integrity here if the published tarball differs. The same goes for the
 // published @getmarrow/sdk@3.7.67 tarball and SDK_ADAPTER_INTEGRITY.
 module.exports = Object.freeze({
-  MCP_ADAPTER_VERSION: '3.9.114',
-  MCP_ADAPTER_SOURCE_SHA: '48b1fbec80ab3f7243126536b2de18fc82c6f1b7',
-  MCP_ADAPTER_INTEGRITY: 'sha512-pufn9UVwx3mw7Dh0NOc5Oaq0jX/Vd0otYR0x1HzAYM92am9fkaPBf44C5YQVCxgB8fqTn+ABcptSosibIRvMjQ==',
+  MCP_ADAPTER_VERSION: '3.9.115',
+  MCP_ADAPTER_SOURCE_SHA: 'd3dea44c4b213975ceb71458a4951ed4d1fd3db3',
+  MCP_ADAPTER_INTEGRITY: 'sha512-42V7cmxSqY1/nZGWnjLWcHNqPMUgg4YXISmn0n7gPHec4SIB8UrF5X6OwZxhCHPPq6tXXoRq1lSFnofGuMwZBw==',
   // The first MCP version that ships the host-approval hook entrypoints
   // (claude-permission-request-hook, cursor-context-hook, gemini-context-hook) and reads Cursor's
   // shell/MCP execution events and Gemini's BeforeAgent prompt. The installer writes the

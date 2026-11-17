@@ -2,6 +2,13 @@
 
 Release notes for `@getmarrow/install`, newest first. The README describes only the current version.
 
+## v0.1.81
+
+v0.1.81. The MCP pin: v0.1.81 installs MCP `3.9.115` (source `d3dea44c4b213975ceb71458a4951ed4d1fd3db3`, packed integrity `sha512-42V7cmxSqY1/nZGWnjLWcHNqPMUgg4YXISmn0n7gPHec4SIB8UrF5X6OwZxhCHPPq6tXXoRq1lSFnofGuMwZBw==`) and SDK `3.7.67` (packed integrity `sha512-0Lwg4XLxm9eXxMgQtFAH1y4mXi9CXg3poQlGbeK0AW+EHP+yfUWQUH4d1XYO03QNzwHLAYKfARDmnl5GpBnKUw==`).
+
+- **MCP 3.9.115.** The hooks this installer writes come from `@getmarrow/mcp` 3.9.115. What changed in the hook is in the 3.9.115 entry of the [MCP CHANGELOG](https://github.com/getmarrow/marrow-mcp/blob/master/CHANGELOG.md).
+- **No installer behaviour change.** `install`, `update`, `--repair` and `doctor` work as in v0.1.80. Only the pinned MCP moved; the 9 MCP files the tests vendor are byte-equal to the 3.9.114 ones.
+
 ## v0.1.80
 
 v0.1.80. The MCP pin: v0.1.80 installs MCP `3.9.114` (source `48b1fbec80ab3f7243126536b2de18fc82c6f1b7`, packed integrity `sha512-pufn9UVwx3mw7Dh0NOc5Oaq0jX/Vd0otYR0x1HzAYM92am9fkaPBf44C5YQVCxgB8fqTn+ABcptSosibIRvMjQ==`) and SDK `3.7.67` (packed integrity `sha512-0Lwg4XLxm9eXxMgQtFAH1y4mXi9CXg3poQlGbeK0AW+EHP+yfUWQUH4d1XYO03QNzwHLAYKfARDmnl5GpBnKUw==`).
