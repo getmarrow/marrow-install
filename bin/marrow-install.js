@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+// Offline `verify` loads only its own two modules: no owner env, key, runtime, telemetry or network code.
+if (process.argv[2] === 'verify') return require('../src/verify-cli').main(process.argv.slice(3));
 const installer = require('../src/installer');
 const governedRunner = require('../src/governed-runner');
 const { runControlCli } = require('../src/control-state');
