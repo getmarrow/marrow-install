@@ -1066,8 +1066,8 @@ test('day one: Claude Code is found from the user\'s installation, gets project 
   assert.equal(none.instruction, 'Restart the app your agent runs in so it loads Marrow.');
 });
 
-test('day one: SDK files and advice only where the SDK is used, AGENTS.md only for hosts that read it, and the SDK pin is 3.7.67', async () => {
-  assert.equal(PINS.SDK_ADAPTER_VERSION, '3.7.67');
+test('day one: SDK files and advice only where the SDK is used, AGENTS.md only for hosts that read it, and the SDK pin is 3.8.0', async () => {
+  assert.equal(PINS.SDK_ADAPTER_VERSION, '3.8.0');
   const root = tempDir('marrow-day1-sdk-');
   const home = tempDir('marrow-day1-home-');
   try {
@@ -1096,12 +1096,12 @@ test('day one: SDK files and advice only where the SDK is used, AGENTS.md only f
     fs.writeFileSync(path.join(root, '.codex', 'config.toml'), '# owner\n');
     plan = buildPlan(detectEnvironment(root, { HOME: home, PATH: process.env.PATH }), { mode: 'auto' });
     assert.ok(plan.writes.some((write) => write.label === 'Agent instructions'));
-    // The SDK in use: the passive runtime and the advice, at the 3.7.67 pin.
+    // The SDK in use: the passive runtime and the advice, at the 3.8.0 pin.
     fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ dependencies: { '@getmarrow/sdk': '^3.7.0' } }));
     const sdkReport = await install({ cwd: root, home, mode: 'auto', yes: false, dryRun: true, selfTest: false, loopGuardSelfTest: false, controller: false, apiKey: '', baseUrl: 'https://api.getmarrow.ai', agentId: '' });
     assert.equal(sdkReport.mode, 'both');
     assert.equal(sdkReport.sdkDependency.required, true);
-    assert.equal(sdkReport.sdkDependency.install_command, 'npm install @getmarrow/sdk@3.7.67');
+    assert.equal(sdkReport.sdkDependency.install_command, 'npm install @getmarrow/sdk@3.8.0');
   } finally {
     for (const directory of [root, home]) fs.rmSync(directory, { recursive: true, force: true });
   }

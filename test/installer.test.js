@@ -1223,16 +1223,16 @@ test(`SDK detection accepts the exact npm-verified ${PINS.SDK_ADAPTER_VERSION} p
 test('SDK doctor preserves an installed stable version ahead of its sealed target', () => {
   const dir = tempDir();
   const moduleDir = path.join(dir, 'node_modules', '@getmarrow', 'sdk');
-  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ dependencies: { '@getmarrow/sdk': '3.8.0' } }));
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ dependencies: { '@getmarrow/sdk': '3.9.0' } }));
   fs.mkdirSync(moduleDir, { recursive: true });
-  fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({ name: '@getmarrow/sdk', version: '3.8.0' }));
+  fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({ name: '@getmarrow/sdk', version: '3.9.0' }));
   fs.writeFileSync(path.join(dir, 'package-lock.json'), JSON.stringify({
     lockfileVersion: 3,
     packages: {
-      '': { dependencies: { '@getmarrow/sdk': '3.8.0' } },
+      '': { dependencies: { '@getmarrow/sdk': '3.9.0' } },
       'node_modules/@getmarrow/sdk': {
-        version: '3.8.0',
-        resolved: 'https://registry.npmjs.org/@getmarrow/sdk/-/sdk-3.8.0.tgz',
+        version: '3.9.0',
+        resolved: 'https://registry.npmjs.org/@getmarrow/sdk/-/sdk-3.9.0.tgz',
         integrity: 'sha512-unverified',
       },
     },
@@ -1247,7 +1247,7 @@ test('SDK doctor preserves an installed stable version ahead of its sealed targe
 
 test('SDK doctor preserves newer stable declarations without an installed package or lockfile', () => {
   const dir = tempDir();
-  for (const spec of ['3.8.0', '^3.8.0', '~3.8.0', '>=3.8.0', `>${PINS.SDK_ADAPTER_VERSION}`, 'v3.8.0']) {
+  for (const spec of ['3.9.0', '^3.9.0', '~3.9.0', '>=3.9.0', `>${PINS.SDK_ADAPTER_VERSION}`, 'v3.9.0']) {
     fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ dependencies: { '@getmarrow/sdk': spec } }));
     const report = inspectSdkDependency(detectEnvironment(dir, {}));
     assert.equal(report.present, false, spec);
@@ -1262,7 +1262,7 @@ test('SDK doctor does not certify ambiguous or unsupported declarations as insta
   const moduleDir = path.join(dir, 'node_modules', '@getmarrow', 'sdk');
   fs.mkdirSync(moduleDir, { recursive: true });
   fs.writeFileSync(path.join(moduleDir, 'package.json'), JSON.stringify({ name: '@getmarrow/sdk', version: PINS.SDK_ADAPTER_VERSION }));
-  for (const spec of [`>=${PINS.SDK_ADAPTER_VERSION} <4.0.0`, '3.7.x', `${PINS.SDK_ADAPTER_VERSION} || 3.8.0`]) {
+  for (const spec of [`>=${PINS.SDK_ADAPTER_VERSION} <4.0.0`, '3.7.x', `${PINS.SDK_ADAPTER_VERSION} || 3.9.0`]) {
     fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ dependencies: { '@getmarrow/sdk': spec } }));
     writeSdkLock(dir, spec);
     const report = inspectSdkDependency(detectEnvironment(dir, {}));
@@ -1274,7 +1274,7 @@ test('SDK doctor does not certify ambiguous or unsupported declarations as insta
 test('SDK doctor does not recommend a downgrade for an unsupported newer range without a lockfile', () => {
   const dir = tempDir();
   fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
-    dependencies: { '@getmarrow/sdk': '>=3.8.0 <4.0.0' },
+    dependencies: { '@getmarrow/sdk': '>=3.9.0 <4.0.0' },
   }));
 
   const report = inspectSdkDependency(detectEnvironment(dir, {}));
@@ -2207,8 +2207,8 @@ test('self-test returns first five-minute value signal and proof', async () => {
       agentId: 'installer-test',
     });
     assert.equal(requestHeaders['x-marrow-package'], '@getmarrow/install');
-    assert.equal(requestHeaders['x-marrow-package-version'], '0.1.81');
-    assert.equal(requestHeaders['x-marrow-install-version'], '0.1.81');
+    assert.equal(requestHeaders['x-marrow-package-version'], '0.1.82');
+    assert.equal(requestHeaders['x-marrow-install-version'], '0.1.82');
     assert.equal(requestHeaders['x-marrow-sdk-version'], PINS.SDK_ADAPTER_VERSION);
     assert.equal(requestHeaders['x-marrow-mcp-version'], PINS.MCP_ADAPTER_VERSION);
     assert.equal(result.mcp_tool_profile.configured_profile, 'unset');

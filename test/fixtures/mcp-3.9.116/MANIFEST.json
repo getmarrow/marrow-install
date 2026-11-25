@@ -1,10 +1,10 @@
 {
   "package": "@getmarrow/mcp",
-  "version": "3.9.115",
+  "version": "3.9.116",
   "source": "marrow-mcp",
-  "source_sha": "d3dea44c4b213975ceb71458a4951ed4d1fd3db3",
-  "integrity": "sha512-42V7cmxSqY1/nZGWnjLWcHNqPMUgg4YXISmn0n7gPHec4SIB8UrF5X6OwZxhCHPPq6tXXoRq1lSFnofGuMwZBw==",
-  "note": "dist/ files of the 3.9.115 tarball packed from marrow-mcp d3dea44c (release candidate for 3.9.115), byte for byte. The release chain re-verifies the pin against the published tarball before the installer is published.",
+  "source_sha": "2606372056876e7a210cebad3e3698a3414fb250",
+  "integrity": "sha512-btIV6FJCR4lry+XEU08tNxYzqktCRXDobTGG9QSmE13HTSLMPIOzF1P8kC+2ogy6TkR9RpTgPfXzlQgA4pB36Q==",
+  "note": "dist/ files of the 3.9.116 tarball packed from marrow-mcp 26063720 (release candidate for 3.9.116), byte for byte. The release chain re-verifies the pin against the published tarball before the installer is published.",
   "files": {
     "own-tool.js": {
       "from": "dist/own-tool.js",
@@ -13,8 +13,8 @@
     },
     "tool-catalog.js": {
       "from": "dist/tool-catalog.js",
-      "sha256": "d413c2b7c46c7ed9c7a8b0694481c1f5afe850c3edc67cd28917dc1153b934cb",
-      "bytes": 55497
+      "sha256": "1f956dded82549889b3efd2643da784957dc29d33c0ede394b90eeb7f6f8036b",
+      "bytes": 56118
     },
     "model-usage.js": {
       "from": "dist/model-usage.js",

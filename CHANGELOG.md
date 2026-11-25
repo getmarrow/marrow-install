@@ -2,6 +2,14 @@
 
 Release notes for `@getmarrow/install`, newest first. The README describes only the current version.
 
+## v0.1.82
+
+v0.1.82. The MCP pin: v0.1.82 installs MCP `3.9.116` (source `2606372056876e7a210cebad3e3698a3414fb250`, packed integrity `sha512-btIV6FJCR4lry+XEU08tNxYzqktCRXDobTGG9QSmE13HTSLMPIOzF1P8kC+2ogy6TkR9RpTgPfXzlQgA4pB36Q==`) and SDK `3.8.0` (packed integrity `sha512-XsnHFZ8iXQl6ZdqLKZF+lKXkRQcdXXtNZD6lShnYsMwjJ6kvx+JN7lxxgipL1fRX8f4SeoYx6QDQGrl2m1XmhA==`).
+
+- **New: `verify`, an offline check of a signed export.** `npx @getmarrow/install verify <answer-file> --jwks <key-list-file> --account <account-id>` checks that a saved signed export answer was signed by a key in a saved key list, for the account you name. It makes no network request and reads no environment variable. The environment defaults to production (`--environment` sets staging, development or test); `--json` prints the result as JSON. Exit 0 verified, 1 not verified, 2 usage error, 3 unreadable input file. A record of an unknown type, an unknown key id or a revoked key id is not verified.
+- **MCP 3.9.116 and SDK 3.8.0.** The hooks this installer writes come from `@getmarrow/mcp` 3.9.116, which uses `@getmarrow/sdk` 3.8.0. What changed in the hook is in the 3.9.116 entry of the [MCP CHANGELOG](https://github.com/getmarrow/marrow-mcp/blob/master/CHANGELOG.md).
+- **No other installer behaviour change.** `install`, `update`, `--repair` and `doctor` work as in v0.1.81; the MCP files the tests vendor are refreshed byte for byte from the published 3.9.116 pack (tool-catalog.js changed).
+
 ## v0.1.81
 
 v0.1.81. The MCP pin: v0.1.81 installs MCP `3.9.115` (source `d3dea44c4b213975ceb71458a4951ed4d1fd3db3`, packed integrity `sha512-42V7cmxSqY1/nZGWnjLWcHNqPMUgg4YXISmn0n7gPHec4SIB8UrF5X6OwZxhCHPPq6tXXoRq1lSFnofGuMwZBw==`) and SDK `3.7.67` (packed integrity `sha512-0Lwg4XLxm9eXxMgQtFAH1y4mXi9CXg3poQlGbeK0AW+EHP+yfUWQUH4d1XYO03QNzwHLAYKfARDmnl5GpBnKUw==`).

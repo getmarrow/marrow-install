@@ -88,7 +88,7 @@ function codexSelects(matcher, tool) {
   return new RegExp(matcher).test(tool);
 }
 // The Codex matcher is `*`, so the hook alone decides what is skipped. That decision is the real
-// @getmarrow/mcp 3.9.115 one (marrow-mcp d3dea44c): test/fixtures/mcp-3.9.115/ holds dist/ of the pinned
+// @getmarrow/mcp 3.9.116 one (marrow-mcp 26063720): test/fixtures/mcp-3.9.116/ holds dist/ of the pinned
 // package, byte for byte (the checksum test below pins it), not a copy of its rules written here. A label
 // is skipped only when it is exactly `mcp__marrow__<own>` AND the host's own Codex configuration proves the
 // `marrow` server is the official one. PROVEN is a temporary CODEX_HOME whose config.toml is the README
@@ -218,14 +218,14 @@ function probes(key) {
 }
 
 // sha256 of each vendored file, written here as well as in MANIFEST.json so that editing one of
-// the two is caught. They are dist/ of @getmarrow/mcp 3.9.115 (marrow-mcp d3dea44c; all nine files are byte-equal to the 3.9.113 files; own-server-identity.js last changed in 3.9.113, and redact.js and key-class.js, which redact.js requires, are unchanged since 3.9.109; key-class.js was new then, and redact.js differed from the 3.9.108 files);
+// the two is caught. They are dist/ of @getmarrow/mcp 3.9.116 (marrow-mcp 26063720; all nine files are byte-equal to the 3.9.113 files; own-server-identity.js last changed in 3.9.113, and redact.js and key-class.js, which redact.js requires, are unchanged since 3.9.109; key-class.js was new then, and redact.js differed from the 3.9.108 files);
 // and only own-tool.js, which carries the Claude Code matcher, codex-plugin-pins.js and own-server-identity.js differ from the 3.9.103 files), and the 3.9.102
 // baseline (3a2bf85e) the published 0.1.70 pinned.
 const VENDORED_MCP = {
-  sourceSha: 'd3dea44c4b213975ceb71458a4951ed4d1fd3db3',
+  sourceSha: '2606372056876e7a210cebad3e3698a3414fb250',
   files: {
     'own-tool.js': '09e7b5b2c3bae1abe1955bf54bf1763f58bbacc4a4abb258633ab4a81d7a6e8b',
-    'tool-catalog.js': 'd413c2b7c46c7ed9c7a8b0694481c1f5afe850c3edc67cd28917dc1153b934cb',
+    'tool-catalog.js': '1f956dded82549889b3efd2643da784957dc29d33c0ede394b90eeb7f6f8036b',
     'model-usage.js': 'c7ddbc3482d5a7514453d0be38fa7c51e2f228a50039f3392544319b8defc577',
     'redact.js': 'e3b1410f17b9a6ae22f710a20ff7224cdd0678a6c4392b9274dc685432356de3',
     'own-server-identity.js': 'ecc6402423fd8df1779ebe608fa7e9b4e139eebf4994178fa021b1c84c4a8f93',
@@ -259,15 +259,15 @@ function checkVendored(directory, vendored, version) {
   return manifest;
 }
 
-test('the vendored MCP 3.9.115 files are byte for byte the pinned @getmarrow/mcp, and the real hook lists the registered names', () => {
-  const manifest = checkVendored(MCP_FIXTURES, VENDORED_MCP, '3.9.115');
+test('the vendored MCP 3.9.116 files are byte for byte the pinned @getmarrow/mcp, and the real hook lists the registered names', () => {
+  const manifest = checkVendored(MCP_FIXTURES, VENDORED_MCP, '3.9.116');
   assert.equal(manifest.source_sha, PINS.MCP_ADAPTER_SOURCE_SHA, 'the vendored files are for the pinned MCP source');
   assert.equal(manifest.version, PINS.MCP_ADAPTER_VERSION);
   assert.equal(manifest.integrity, PINS.MCP_ADAPTER_INTEGRITY);
-  // The pin itself: 3.9.115 from marrow-mcp d3dea44c. A pin left at 3.9.102 (or moved without the
+  // The pin itself: 3.9.116 from marrow-mcp 26063720. A pin left at 3.9.102 (or moved without the
   // vendored files) fails here and in the manifest checks above.
-  assert.equal(PINS.MCP_ADAPTER_VERSION, '3.9.115');
-  assert.equal(PINS.MCP_ADAPTER_SOURCE_SHA, 'd3dea44c4b213975ceb71458a4951ed4d1fd3db3');
+  assert.equal(PINS.MCP_ADAPTER_VERSION, '3.9.116');
+  assert.equal(PINS.MCP_ADAPTER_SOURCE_SHA, '2606372056876e7a210cebad3e3698a3414fb250');
   assert.match(PINS.MCP_ADAPTER_INTEGRITY, /^sha512-[A-Za-z0-9+/]{86}==$/);
   assert.notEqual(PINS.MCP_ADAPTER_INTEGRITY, 'sha512-hTs4jTJmySLk8hHgsGIZksMo9+eO5kjQmU1EJyDX8Qqm9Z+V+yDkauop19roasVvOAFsK3dJjqLoIh7gRhoXJQ==', 'not the 3.9.102 integrity');
   // The registered names the real module derives from its own catalog are the installer's 58.
